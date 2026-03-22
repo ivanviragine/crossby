@@ -128,14 +128,14 @@ Session IDs are extracted from transcripts automatically when `--transcript` is 
 | Premium requests | — | Yes | — | — |
 | Session ID extraction | Yes | Yes | Yes | Yes |
 
-### Library API (used by WADE, not crossby CLI)
+### Library API
 
 These methods are available on each adapter for programmatic use but are not exposed through the crossby CLI.
 
 | Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
 |---|---|---|---|---|---|---|
-| Plan mode | `--permission-mode plan` | — | `--approval-mode plan` | — | — | `--mode plan` |
-| Plan dir | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
+| Approval mode | `--permission-mode plan` | — | `--approval-mode plan` | — | — | `--mode plan` |
+| Trusted dirs | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
 | Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
 | Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
 
