@@ -72,7 +72,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 
 | Crossby Flag | Claude | Copilot | Gemini | Codex | OpenCode | Cursor | VS Code | Antigravity |
 |---|---|---|---|---|---|---|---|---|
-| `--tool` | `claude` | `copilot` | `gemini` | `codex` | `opencode` | `cursor` | `vscode` | `antigravity` |
+| Binary | `claude` | `copilot` | `gemini` | `codex` | `opencode` | `agent` | `code` | `antigravity` |
 | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | — | — |
 | `--yolo` | `--dangerously-skip-permissions` | `--yolo` | `--yolo` | `--yolo` | — | `--force` | — | — |
 | `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="…"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
