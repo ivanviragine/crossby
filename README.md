@@ -66,16 +66,16 @@ permissions:
 
 ## AI Tool Compatibility
 
-Crossby translates its unified CLI flags into each tool's native syntax. The table below shows what each `crossby launch` flag maps to.
+Crossby translates its unified CLI flags into each tool's native syntax. A dash (—) means the tool does not support that feature. Crossby raises an error if you pass an explicit flag that the selected tool doesn't support (e.g. `--yolo` with OpenCode).
 
-### Feature Support
+### Launch Flags
 
 | Crossby Flag | Claude | Copilot | Gemini | Codex | OpenCode | Cursor | VS Code | Antigravity |
 |---|---|---|---|---|---|---|---|---|
-| `--tool` | claude | copilot | gemini | codex | opencode | agent | code | antigravity |
+| `--tool` | `claude` | `copilot` | `gemini` | `codex` | `opencode` | `agent` | `code` | `antigravity` |
 | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | — | — |
 | `--yolo` | `--dangerously-skip-permissions` | `--yolo` | `--yolo` | `--yolo` | — | `--force` | — | — |
-| `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="<level>"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
+| `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="…"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
 | `--prompt` | positional arg | `-i <prompt>` | positional arg | positional arg | `--prompt <prompt>` | positional arg | — | — |
 | `--transcript` | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | — | — |
 
@@ -88,17 +88,56 @@ Crossby translates its unified CLI flags into each tool's native syntax. The tab
 | `high` | `high` | `high` | `high` | `<model>-thinking` |
 | `max` | `max` | `xhigh` | `high` | `<model>-thinking` |
 
+### Permission & Allowlist Configuration
+
+Crossby writes canonical command patterns (e.g. `myapp:*`) into each tool's native config format.
+
+| Feature | Claude | Copilot | Gemini | Cursor |
+|---|---|---|---|---|
+| Config file | `.claude/settings.json` | `.github/hooks/hooks.json` | `.gemini/settings.json` | `.cursor/cli.json` |
+| Allowlist format | `Bash(cmd:args)` | `shell(cmd:args)` | `shell(cmd:args)` | `Shell(cmd:args)` |
+| Launch flag | `--allowedTools` | `--allow-tool` | `--allowed-tools` | — (config-file only) |
+| Hook config | `hooks.PreToolUse` | `hooks.preToolUse` | `hooks.BeforeTool` | `preToolUse` in hooks.json |
+| Hook guard matcher | `Edit\|Write\|NotebookEdit` | `Write\|Delete` | file-write tools | `Write\|Delete` |
+
+Use `crossby convert` to translate patterns between formats:
+
+```bash
+crossby convert "Bash(myapp:*)" --from claude --to cursor
+crossby convert "myapp:*" --from canonical --to gemini
+```
+
+### Session Preservation & Resume
+
+| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
+|---|---|---|---|---|---|---|
+| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
+| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
+| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
+
+Session IDs are extracted from transcripts automatically when `--transcript` is used.
+
+### Transcript Parsing (`crossby stats`)
+
+| Feature | Claude | Copilot | Gemini | Codex |
+|---|---|---|---|---|
+| Total tokens | Yes | Yes | Yes | Yes |
+| Input / output breakdown | Yes | Yes | Yes | Yes |
+| Cached tokens | Yes | Yes | Yes | Yes |
+| Per-model breakdown | — | Yes | Yes | — |
+| Premium requests | — | Yes | — | — |
+| Session ID extraction | Yes | Yes | Yes | Yes |
+
 ### Library API (used by WADE, not crossby CLI)
+
+These methods are available on each adapter for programmatic use but are not exposed through the crossby CLI.
 
 | Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
 |---|---|---|---|---|---|---|
 | Plan mode | `--permission-mode plan` | — | `--approval-mode plan` | — | — | `--mode plan` |
 | Plan dir | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
-| Allowed commands | `--allowedTools Bash(cmd:args)` | `--allow-tool shell(cmd:args)` | `--allowed-tools shell(cmd:args)` | — | — | — |
-| Resume | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
-| Structured output | `--output-format json --json-schema <schema>` | — | `--output-format json` | — | — | — |
-
-A dash (—) means the tool does not support that feature. Crossby will raise an error if you pass an explicit flag that the selected tool doesn't support (e.g. `--yolo` with OpenCode).
+| Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
+| Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
 
 ## Development
 
