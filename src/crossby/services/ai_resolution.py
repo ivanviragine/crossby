@@ -63,10 +63,11 @@ def resolve_model(
       4. Global default (``ai.default_model``)
 
     When *tool* is provided, the resolved model is checked for compatibility
-    with that tool.  Incompatible models are dropped (returns ``None``).
+    with that tool. Incompatible models are dropped (returns ``None``).
 
     When *strict* is True, incompatibility raises ``ValueError`` instead of
-    returning ``None``.  Use strict mode for user-explicit CLI flags.
+    returning ``None``. Explicit models are also rejected for tools that do
+    not support model selection.
     """
     resolved: str | None = model
 
@@ -87,7 +88,7 @@ def resolve_model(
     # Compatibility gate
     if resolved and tool:
         try:
-            adapter = AbstractAITool.get(tool)
+            adapter = AbstractAITool.get(AIToolID(tool))
         except (ValueError, KeyError):
             if strict:
                 raise
@@ -126,10 +127,8 @@ def resolve_effort(
       4. Global config (``ai.effort``)
 
     When *tool* is provided and the tool does not support effort, a warning
-    is logged and ``None`` is returned.
-
-    When *strict* is True, invalid levels or unsupported tools raise
-    ``ValueError``.  Use strict mode for user-explicit CLI flags.
+    is logged and ``None`` is returned unless *strict* is True, in which case
+    a ``ValueError`` is raised.
     """
     resolved: str | None = effort
 
@@ -154,7 +153,7 @@ def resolve_effort(
     # Check tool support
     if tool:
         try:
-            adapter = AbstractAITool.get(tool)
+            adapter = AbstractAITool.get(AIToolID(tool))
         except (ValueError, KeyError):
             if strict:
                 raise
@@ -184,10 +183,8 @@ def resolve_yolo(
       3. Global config (``ai.yolo``)
 
     When *tool* is provided and the tool does not support YOLO, a warning
-    is logged and ``False`` is returned.
-
-    When *strict* is True, unsupported tools raise ``ValueError``.
-    Use strict mode for user-explicit CLI flags.
+    is logged and ``False`` is returned unless *strict* is True, in which case
+    a ``ValueError`` is raised.
     """
     resolved: bool | None = yolo
 
@@ -200,7 +197,7 @@ def resolve_yolo(
     # Check tool support
     if tool:
         try:
-            adapter = AbstractAITool.get(tool)
+            adapter = AbstractAITool.get(AIToolID(tool))
         except (ValueError, KeyError):
             if strict:
                 raise

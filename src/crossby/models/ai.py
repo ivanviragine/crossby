@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EffortLevel(StrEnum):
@@ -48,8 +48,8 @@ class ModelTier(StrEnum):
 class AIModel(BaseModel, frozen=True):
     """A concrete model available through an AI tool.
 
-    Models come from a bundled static registry (``data/models.json``).
-    The model ID format matches what each tool's CLI accepts.
+    Models come from the bundled static registry in ``data/models.json``.
+    The stored model ID format matches what each tool's CLI accepts.
     """
 
     id: str
@@ -87,7 +87,7 @@ class TokenUsage(BaseModel):
     output_tokens: int | None = None
     cached_tokens: int | None = None
     premium_requests: int | None = None
-    model_breakdown: list[ModelBreakdown] = []
+    model_breakdown: list[ModelBreakdown] = Field(default_factory=list)
     raw_transcript_path: Path | None = None
     session_id: str | None = None  # full resume command or session ID as printed by the tool
 

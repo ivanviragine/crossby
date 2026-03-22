@@ -131,13 +131,14 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError("'models' must be a mapping")
     models: dict[str, ComplexityModelMapping] = {}
     for tool_name, mapping_raw in models_raw.items():
-        if isinstance(mapping_raw, dict):
-            models[tool_name] = ComplexityModelMapping(
-                easy=mapping_raw.get("easy"),
-                medium=mapping_raw.get("medium"),
-                complex=mapping_raw.get("complex"),
-                very_complex=mapping_raw.get("very_complex"),
-            )
+        if not isinstance(mapping_raw, dict):
+            raise ConfigError(f"'models.{tool_name}' must be a mapping")
+        models[tool_name] = ComplexityModelMapping(
+            easy=mapping_raw.get("easy"),
+            medium=mapping_raw.get("medium"),
+            complex=mapping_raw.get("complex"),
+            very_complex=mapping_raw.get("very_complex"),
+        )
 
     # Parse permissions section
     permissions_raw = raw.get("permissions")
@@ -275,10 +276,12 @@ def _parse_rules_config(raw: dict[str, Any]) -> RulesConfig:
     )
 
 
-def _parse_command_config(raw: dict[str, Any] | None) -> CommandConfig:
+def _parse_command_config(raw: Any) -> CommandConfig:
     """Parse a per-command AI config section."""
-    if not raw or not isinstance(raw, dict):
+    if raw is None:
         return CommandConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("Command overrides must be mappings")
     return CommandConfig(
         tool=raw.get("tool"),
         model=raw.get("model") or None,  # Treat empty string as None

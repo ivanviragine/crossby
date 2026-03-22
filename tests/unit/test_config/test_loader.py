@@ -124,3 +124,8 @@ class TestLoadConfig:
         (tmp_path / ".crossby.yml").write_text("models: 0\n")
         with pytest.raises(ConfigError, match="'models' must be a mapping"):
             load_config(tmp_path)
+
+    def test_command_override_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("ai:\n  commands:\n    plan:\n      - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)

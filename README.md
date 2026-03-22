@@ -188,10 +188,19 @@ These methods are available on each adapter for programmatic use but are not exp
 
 ```bash
 pip install -e ".[dev]"
-./scripts/test.sh       # Run tests
+./scripts/test.sh       # Unit + deterministic contract tests
+./scripts/test-e2e.sh   # Deterministic subprocess workflow tests
+./scripts/test-live-ai.sh  # Opt-in real AI tool smoke tests
 ./scripts/check.sh      # Lint + type check
 ./scripts/fmt.sh        # Auto-format
+./scripts/probe_models.sh  # Probe installed AI CLIs and model registry drift
 ```
+
+Live AI tests are opt-in and env-gated. The default `./scripts/test.sh` lane excludes
+`live_ai` and `live_probe` markers so CI and local fast paths stay deterministic.
+When running `./scripts/test-live-ai.sh`, set `CROSSBY_LIVE_MODEL_<TOOL>` for each
+selected tool and expect the smoke run to use an isolated temp working directory rather
+than the current repo checkout.
 
 ## License
 

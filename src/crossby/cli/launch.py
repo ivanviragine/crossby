@@ -88,9 +88,9 @@ def launch(
             tool=resolved_tool,
             strict=yolo is not None,
         )
-    except ValueError as e:
-        console.error(str(e))
-        raise typer.Exit(1) from e
+    except ValueError as err:
+        console.error(str(err))
+        raise typer.Exit(1) from err
 
     # Interactive confirmation
     resolved_tool, resolved_model, resolved_effort, resolved_yolo = confirm_ai_selection(
@@ -134,13 +134,12 @@ def launch(
         config.permissions.allowed_commands if config.permissions.allowed_commands else None
     )
 
-    # Ensure transcript parent directory exists
     if transcript:
         try:
             transcript.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            console.error(f"Cannot create transcript directory: {e}")
-            raise typer.Exit(1) from e
+        except OSError as err:
+            console.error(f"Cannot create transcript directory: {err}")
+            raise typer.Exit(1) from err
 
     # Launch
     exit_code = adapter.launch(

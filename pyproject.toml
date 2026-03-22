@@ -90,7 +90,13 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "contract: high-signal behavior/contract tests",
+    "e2e_deterministic: deterministic subprocess workflow tests",
+    "live_ai: opt-in real AI tool smoke tests",
+    "live_probe: reserved marker for future live probe/model-discovery tests",
+]
 
 [tool.coverage.run]
 source = ["crossby"]

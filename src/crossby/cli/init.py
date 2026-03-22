@@ -8,7 +8,7 @@ import typer
 import yaml
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.models.config import ComplexityModelMapping, CrossbyConfig
+from crossby.models.config import AIConfig, ComplexityModelMapping, CrossbyConfig
 from crossby.ui.console import console
 
 
@@ -17,8 +17,8 @@ def init(
 ) -> None:
     """Initialize CROSSBY config in a project.
 
-    Detects installed AI tools, reads their known models from the
-    bundled registry, and generates a .crossby.yml config file.
+    Detects installed AI tools, reads their known models from the bundled
+    registry, and generates a .crossby.yml config file.
     """
     project_root = path.resolve()
     config_path = project_root / ".crossby.yml"
@@ -59,9 +59,7 @@ def init(
 
     # Build config
     config = CrossbyConfig(
-        ai=CrossbyConfig.model_fields["ai"].default.__class__(
-            default_tool=default_tool,
-        ),
+        ai=AIConfig(default_tool=default_tool),
         models=models,
     )
 
@@ -115,7 +113,7 @@ def init(
         config_dict["rules"] = rules_dict
 
     config_path.write_text(
-        yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+        yaml.safe_dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
     )
 
