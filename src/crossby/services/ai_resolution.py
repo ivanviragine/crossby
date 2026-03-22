@@ -52,6 +52,7 @@ def resolve_model(
     *,
     tool: str | None = None,
     complexity: str | None = None,
+    strict: bool = False,
 ) -> str | None:
     """Resolve model from args -> config -> complexity -> default.
 
@@ -85,6 +86,8 @@ def resolve_model(
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
             if not adapter.is_model_compatible(resolved):
+                if strict:
+                    raise ValueError(f"Model '{resolved}' is not compatible with {tool}")
                 logger.info(
                     "model.incompatible",
                     model=resolved,
@@ -92,7 +95,8 @@ def resolve_model(
                 )
                 return None
         except (ValueError, KeyError):
-            pass
+            if strict:
+                raise
 
     return resolved
 
@@ -103,6 +107,7 @@ def resolve_effort(
     command: str = "plan",
     *,
     tool: str | None = None,
+    strict: bool = False,
 ) -> EffortLevel | None:
     """Resolve effort level from args -> env var -> config -> None.
 
@@ -129,7 +134,9 @@ def resolve_effort(
     # Validate
     try:
         level = EffortLevel(resolved)
-    except ValueError:
+    except ValueError as exc:
+        if strict:
+            raise ValueError(f"Invalid effort level: '{resolved}'") from exc
         logger.warning("effort.invalid_level", effort=resolved)
         return None
 
@@ -138,10 +145,13 @@ def resolve_effort(
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
             if not adapter.capabilities().supports_effort:
+                if strict:
+                    raise ValueError(f"{tool} does not support effort levels")
                 logger.info("effort.unsupported_tool", tool=tool, effort=resolved)
                 return None
         except (ValueError, KeyError):
-            pass
+            if strict:
+                raise
 
     return level
 
@@ -152,6 +162,7 @@ def resolve_yolo(
     command: str = "plan",
     *,
     tool: str | None = None,
+    strict: bool = False,
 ) -> bool:
     """Resolve YOLO mode from args -> config -> False.
 
@@ -176,10 +187,13 @@ def resolve_yolo(
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
             if not adapter.capabilities().supports_yolo:
+                if strict:
+                    raise ValueError(f"{tool} does not support YOLO mode")
                 logger.warning("yolo.unsupported_tool", tool=tool)
                 return False
         except (ValueError, KeyError):
-            pass
+            if strict:
+                raise
 
     return True
 

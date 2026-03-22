@@ -15,16 +15,16 @@ class TestClaudeAllowedCommands:
 
     def test_single_pattern(self) -> None:
         adapter = ClaudeAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
-        assert result == ["--allowedTools", "Bash(crossby *)"]
+        result = adapter.allowed_commands_args(["crossby:*"])
+        assert result == ["--allowedTools", "Bash(crossby:*)"]
 
     def test_multiple_patterns(self) -> None:
         adapter = ClaudeAdapter()
-        result = adapter.allowed_commands_args(["crossby *", "./scripts/check.sh *"])
+        result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
         assert result == [
             "--allowedTools",
-            "Bash(crossby *)",
-            "Bash(./scripts/check.sh *)",
+            "Bash(crossby:*)",
+            "Bash(./scripts/check.sh:*)",
         ]
 
     def test_pattern_without_args(self) -> None:
@@ -43,12 +43,12 @@ class TestCopilotAllowedCommands:
 
     def test_single_pattern(self) -> None:
         adapter = CopilotAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
+        result = adapter.allowed_commands_args(["crossby:*"])
         assert result == ["--allow-tool", "shell(crossby:*)"]
 
     def test_multiple_patterns(self) -> None:
         adapter = CopilotAdapter()
-        result = adapter.allowed_commands_args(["crossby *", "./scripts/check.sh *"])
+        result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
         assert result == [
             "--allow-tool",
             "shell(crossby:*)",
@@ -67,12 +67,12 @@ class TestGeminiAllowedCommands:
 
     def test_single_pattern(self) -> None:
         adapter = GeminiAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
+        result = adapter.allowed_commands_args(["crossby:*"])
         assert result == ["--allowed-tools", "shell(crossby:*)"]
 
     def test_multiple_patterns(self) -> None:
         adapter = GeminiAdapter()
-        result = adapter.allowed_commands_args(["crossby *", "./scripts/check.sh *"])
+        result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
         assert result == [
             "--allowed-tools",
             "shell(crossby:*)",
@@ -86,12 +86,12 @@ class TestCursorAllowedCommands:
 
     def test_returns_empty(self) -> None:
         adapter = CursorAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
+        result = adapter.allowed_commands_args(["crossby:*"])
         assert result == []
 
     def test_returns_empty_with_multiple_patterns(self) -> None:
         adapter = CursorAdapter()
-        result = adapter.allowed_commands_args(["crossby *", "./scripts/check.sh *"])
+        result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
         assert result == []
 
 
@@ -100,7 +100,7 @@ class TestCodexAllowedCommands:
 
     def test_returns_empty(self) -> None:
         adapter = CodexAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
+        result = adapter.allowed_commands_args(["crossby:*"])
         assert result == []
 
 
@@ -109,7 +109,7 @@ class TestOpenCodeAllowedCommands:
 
     def test_returns_empty(self) -> None:
         adapter = OpenCodeAdapter()
-        result = adapter.allowed_commands_args(["crossby *"])
+        result = adapter.allowed_commands_args(["crossby:*"])
         assert result == []
 
 
@@ -119,11 +119,11 @@ class TestBuildLaunchCommandWithAllowedCommands:
     def test_claude_includes_allowed_commands_in_command(self) -> None:
         adapter = ClaudeAdapter()
         cmd = adapter.build_launch_command(
-            allowed_commands=["crossby *", "./scripts/test.sh *"],
+            allowed_commands=["crossby:*", "./scripts/test.sh:*"],
         )
         assert "--allowedTools" in cmd
-        assert "Bash(crossby *)" in cmd
-        assert "Bash(./scripts/test.sh *)" in cmd
+        assert "Bash(crossby:*)" in cmd
+        assert "Bash(./scripts/test.sh:*)" in cmd
 
     def test_no_allowed_commands_omits_flags(self) -> None:
         adapter = ClaudeAdapter()
@@ -133,7 +133,7 @@ class TestBuildLaunchCommandWithAllowedCommands:
     def test_copilot_includes_allow_tool_flags(self) -> None:
         adapter = CopilotAdapter()
         cmd = adapter.build_launch_command(
-            allowed_commands=["crossby *"],
+            allowed_commands=["crossby:*"],
         )
         assert "--allow-tool" in cmd
         assert "shell(crossby:*)" in cmd

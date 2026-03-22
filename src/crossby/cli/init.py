@@ -17,8 +17,8 @@ def init(
 ) -> None:
     """Initialize CROSSBY config in a project.
 
-    Detects installed AI tools, queries their available models,
-    and generates a .crossby.yml config file.
+    Detects installed AI tools, reads their known models from the
+    bundled registry, and generates a .crossby.yml config file.
     """
     project_root = path.resolve()
     config_path = project_root / ".crossby.yml"

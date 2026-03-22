@@ -52,11 +52,32 @@ def launch(
         console.hint("Install an AI tool or specify --tool")
         raise typer.Exit(1)
 
-    resolved_model = resolve_model(
-        model, config, command or "default", tool=resolved_tool, complexity=complexity
-    )
-    resolved_effort = resolve_effort(effort, config, command or "default", tool=resolved_tool)
-    resolved_yolo = resolve_yolo(yolo, config, command or "default", tool=resolved_tool)
+    try:
+        resolved_model = resolve_model(
+            model,
+            config,
+            command or "default",
+            tool=resolved_tool,
+            complexity=complexity,
+            strict=model is not None,
+        )
+        resolved_effort = resolve_effort(
+            effort,
+            config,
+            command or "default",
+            tool=resolved_tool,
+            strict=effort is not None,
+        )
+        resolved_yolo = resolve_yolo(
+            yolo,
+            config,
+            command or "default",
+            tool=resolved_tool,
+            strict=yolo is not None,
+        )
+    except ValueError as e:
+        console.error(str(e))
+        raise typer.Exit(1) from e
 
     # Interactive confirmation
     resolved_tool, resolved_model, resolved_effort, resolved_yolo = confirm_ai_selection(
@@ -95,6 +116,10 @@ def launch(
     allowed_commands = (
         config.permissions.allowed_commands if config.permissions.allowed_commands else None
     )
+
+    # Ensure transcript parent directory exists
+    if transcript:
+        transcript.parent.mkdir(parents=True, exist_ok=True)
 
     # Launch
     exit_code = adapter.launch(

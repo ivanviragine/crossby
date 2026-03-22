@@ -1,4 +1,4 @@
-"""Model registry — reads models.json, source of truth for known model IDs."""
+"""Bundled model registry — reads models.json, the static list of known model IDs."""
 
 from __future__ import annotations
 

@@ -97,3 +97,18 @@ class TestLoadConfig:
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         config = load_config(tmp_path)
         assert config.ai.commands == {}
+
+    def test_models_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("models:\n  - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)
+
+    def test_commands_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("ai:\n  commands:\n    - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)
+
+    def test_ai_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("ai:\n  - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)

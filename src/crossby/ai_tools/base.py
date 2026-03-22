@@ -195,6 +195,10 @@ class AbstractAITool(ABC):
         """
         return []
 
+    # ------------------------------------------------------------------
+    # Library API — used by consumers (e.g. WADE), not by crossby's CLI
+    # ------------------------------------------------------------------
+
     def plan_mode_args(self) -> list[str]:
         """Get extra CLI args for native plan/approval mode."""
         return []  # Default: no plan mode support

@@ -86,7 +86,7 @@ def parse_config_file(config_path: Path) -> CrossbyConfig:
 
     try:
         return _build_config(validated, config_path)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
         raise ConfigError(f"Invalid config structure in {config_path}: {e}") from e
 
 
@@ -96,8 +96,14 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
 
     # Parse ai section
     ai_raw = raw.get("ai", {}) or {}
+    if not isinstance(ai_raw, dict):
+        raise ConfigError("'ai' must be a mapping")
+
     commands: dict[str, CommandConfig] = {}
-    for cmd_name, cmd_raw in (ai_raw.get("commands", {}) or {}).items():
+    commands_raw = ai_raw.get("commands", {}) or {}
+    if not isinstance(commands_raw, dict):
+        raise ConfigError("'ai.commands' must be a mapping")
+    for cmd_name, cmd_raw in commands_raw.items():
         commands[cmd_name] = _parse_command_config(cmd_raw)
     ai = AIConfig(
         default_tool=ai_raw.get("default_tool"),
@@ -109,6 +115,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
 
     # Parse models section (nested: tool -> complexity -> model)
     models_raw = raw.get("models", {}) or {}
+    if not isinstance(models_raw, dict):
+        raise ConfigError("'models' must be a mapping")
     models: dict[str, ComplexityModelMapping] = {}
     for tool_name, mapping_raw in models_raw.items():
         if isinstance(mapping_raw, dict):
@@ -142,8 +150,6 @@ def _parse_command_config(raw: dict[str, Any] | None) -> CommandConfig:
     return CommandConfig(
         tool=raw.get("tool"),
         model=raw.get("model") or None,  # Treat empty string as None
-        mode=raw.get("mode"),
         effort=raw.get("effort"),
         yolo=raw.get("yolo"),
-        enabled=raw.get("enabled"),
     )
