@@ -196,7 +196,7 @@ class AbstractAITool(ABC):
         return []
 
     # ------------------------------------------------------------------
-    # Library API — used by consumers (e.g. WADE), not by crossby's CLI
+    # Extended API — used by build_launch_command() and library consumers
     # ------------------------------------------------------------------
 
     def plan_mode_args(self) -> list[str]:

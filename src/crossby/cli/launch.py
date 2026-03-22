@@ -95,7 +95,11 @@ def launch(
         console.error("No AI tool selected.")
         raise typer.Exit(1)
 
-    adapter = AbstractAITool.get(resolved_tool)
+    try:
+        adapter = AbstractAITool.get(resolved_tool)
+    except (ValueError, KeyError) as e:
+        console.error(str(e))
+        raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
     # Display selection
