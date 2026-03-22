@@ -196,6 +196,7 @@ def _scrape_models(tool: str) -> set[str]:
             capture_output=True,
             text=True,
             timeout=15,
+            env=_clean_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return set()
@@ -322,7 +323,7 @@ def _probe_codex_models() -> set[str]:
 
 
 def _probe_cursor_models() -> set[str]:
-    result = _run(["agent", "--list-models"])
+    result = _run(["agent", "--list-models"], timeout=_MODEL_PROBE_TIMEOUTS["cursor"])
     if result.returncode != 0:
         raise ProbeFailure(f"agent --list-models exited with code {result.returncode}")
     models: set[str] = set()

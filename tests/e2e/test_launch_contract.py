@@ -116,6 +116,18 @@ def test_launch_fails_fast_for_explicit_unsupported_effort(e2e_context) -> None:
     assert read_mock_log(e2e_context.log_file) == []
 
 
+def test_launch_fails_fast_for_invalid_explicit_effort(e2e_context) -> None:
+    result = run_crossby(
+        ["launch", str(e2e_context.project), "--tool", "claude", "--effort", "ultra"],
+        cwd=e2e_context.project,
+        env=e2e_context.env,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid effort level: 'ultra'" in result.stderr
+    assert read_mock_log(e2e_context.log_file) == []
+
+
 def test_launch_fails_fast_for_explicit_unsupported_yolo(e2e_context) -> None:
     result = run_crossby(
         ["launch", str(e2e_context.project), "--tool", "opencode", "--yolo"],
@@ -125,4 +137,16 @@ def test_launch_fails_fast_for_explicit_unsupported_yolo(e2e_context) -> None:
 
     assert result.returncode == 1
     assert "opencode does not support YOLO mode" in result.stderr
+    assert read_mock_log(e2e_context.log_file) == []
+
+
+def test_launch_fails_fast_for_explicit_model_on_tool_without_model_flag(e2e_context) -> None:
+    result = run_crossby(
+        ["launch", str(e2e_context.project), "--tool", "vscode", "--model", "gpt-5"],
+        cwd=e2e_context.project,
+        env=e2e_context.env,
+    )
+
+    assert result.returncode == 1
+    assert "Tool 'vscode' does not support explicit model selection" in result.stderr
     assert read_mock_log(e2e_context.log_file) == []

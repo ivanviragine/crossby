@@ -191,6 +191,7 @@ pip install -e ".[dev]"
 ./scripts/test.sh       # Unit + non-E2E deterministic tests
 ./scripts/test-e2e.sh   # Deterministic subprocess workflow tests
 ./scripts/test-live-ai.sh  # Opt-in real AI tool smoke tests
+./scripts/test-live-probe.sh  # Opt-in installed CLI probe lane
 ./scripts/check.sh      # Lint + type check
 ./scripts/fmt.sh        # Auto-format
 ./scripts/probe_models.sh  # Probe installed AI CLIs and model registry drift
@@ -202,7 +203,9 @@ deterministic, while `./scripts/test-e2e.sh` runs the subprocess contract lane s
 When running `./scripts/test-live-ai.sh`, either set `CROSSBY_LIVE_AI_TOOLS` explicitly
 or export one or more `CROSSBY_LIVE_MODEL_<TOOL>` variables so the runner can infer the
 selected tools. The smoke run uses an isolated temporary Git working directory rather
-than the current repo checkout.
+than the current repo checkout. `./scripts/test-live-probe.sh` is a separate manual lane
+for probing installed CLIs against CROSSBY's bundled model registry and expected help
+flags, with optional selection via `CROSSBY_LIVE_PROBE_TOOLS`.
 
 ## License
 

@@ -9,11 +9,11 @@ Policy:
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 
 import pytest
+from tests.live_support import is_prerequisite_failure, parse_selected_tools
 
 import crossby.ai_tools  # noqa: F401 - register adapters
 from crossby.ai_tools.base import AbstractAITool
@@ -32,10 +32,11 @@ pytestmark = [
 
 
 def _selected_tools() -> set[str]:
-    raw = os.environ.get("CROSSBY_LIVE_AI_TOOLS")
-    if raw:
-        return {item.strip() for item in raw.split(",") if item.strip()}
-    return {tool for tool in _SCRIPTABLE_TOOLS if _configured_model(tool)}
+    return parse_selected_tools(
+        os.environ.get("CROSSBY_LIVE_AI_TOOLS"),
+        _SCRIPTABLE_TOOLS,
+        fallback=(tool for tool in _SCRIPTABLE_TOOLS if _configured_model(tool)),
+    )
 
 
 def _timeout() -> int:
@@ -55,28 +56,13 @@ def _configured_model(tool: str) -> str | None:
     return value or None
 
 
-def _prerequisite_failure(output: str) -> bool:
-    lowered = output.lower()
-    patterns = (
-        r"\bnot logged in\b",
-        r"\blog in\b",
-        r"\bsign in\b",
-        r"\bauthentication required\b",
-        r"\bplease authenticate\b",
-        r"\bmissing api key\b",
-        r"\binvalid api key\b",
-        r"\bno api key\b",
-        r"\bcredential(s)? missing\b",
-        r"\bworkspace trust\b",
-        r"\btrust this workspace\b",
-        r"\bauth\b",
-    )
-    return any(re.search(pattern, lowered) for pattern in patterns)
-
-
 @pytest.mark.parametrize("tool", _SCRIPTABLE_TOOLS)
 def test_headless_smoke(tool: str, tmp_path) -> None:
-    selected_tools = _selected_tools()
+    try:
+        selected_tools = _selected_tools()
+    except ValueError as err:
+        pytest.fail(str(err))
+
     if not selected_tools:
         pytest.skip(
             "No live AI tools configured. Set CROSSBY_LIVE_MODEL_<TOOL> or CROSSBY_LIVE_AI_TOOLS."
@@ -121,7 +107,7 @@ def test_headless_smoke(tool: str, tmp_path) -> None:
     )
 
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    if result.returncode != 0 and _prerequisite_failure(combined):
+    if result.returncode != 0 and is_prerequisite_failure(combined):
         pytest.skip(f"{tool} auth/session/workspace prerequisites missing")
 
     assert result.returncode == 0, (

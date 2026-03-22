@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 _RUN_ENV_ALLOWLIST = (
     "HOME",
     "LANG",
@@ -101,12 +100,6 @@ def run_crossby(
     run_env.setdefault("PYTHONIOENCODING", "utf-8")
     run_env.setdefault("PYTHONUTF8", "1")
     run_env.setdefault("TERM", "dumb")
-
-    pythonpath = str(REPO_ROOT / "src")
-    existing_pythonpath = env.get("PYTHONPATH") if env else run_env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath = os.pathsep.join([pythonpath, existing_pythonpath])
-    run_env["PYTHONPATH"] = pythonpath
 
     if env:
         run_env.update(env)

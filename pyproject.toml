@@ -95,7 +95,7 @@ markers = [
     "contract: high-signal behavior/contract tests",
     "e2e_deterministic: deterministic subprocess workflow tests",
     "live_ai: opt-in real AI tool smoke tests",
-    "live_probe: reserved marker for future live probe/model-discovery tests",
+    "live_probe: opt-in installed CLI probe tests for registry/help drift",
 ]
 
 [tool.coverage.run]
