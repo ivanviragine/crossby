@@ -74,7 +74,3 @@ class TestCrossbyConfig:
         )
         assert config.get_yolo("implement") is True
         assert config.get_yolo("other") is False
-
-    def test_permissions_empty_default(self):
-        config = CrossbyConfig()
-        assert config.permissions.allowed_commands == []

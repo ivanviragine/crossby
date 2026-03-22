@@ -36,6 +36,32 @@ from crossby.models.ai import AIToolID
 
 MODELS_JSON = SRC_ROOT / "crossby" / "data" / "models.json"
 SUPPORTED_TOOLS = ("claude", "copilot", "gemini", "codex", "cursor", "opencode")
+_MODEL_PROBE_TIMEOUTS = {
+    "claude": 30,
+    "copilot": 20,
+    "gemini": 20,
+    "codex": 20,
+    "cursor": 20,
+    "opencode": 20,
+}
+_DOCS_URLS: dict[str, str] = {
+    "claude": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
+    "gemini": "https://geminicli.com/docs/cli/model/",
+    "codex": "https://developers.openai.com/codex/models",
+}
+_SCRAPE_PATTERNS: dict[str, str] = {
+    "claude": r"claude-[a-z]+-[0-9]+[-\.][0-9]+[a-zA-Z0-9._-]*",
+    "gemini": r"gemini-[0-9][.0-9]*-(?:flash|pro|ultra)[a-z0-9._-]*",
+    "codex": r"gpt-[0-9][.0-9]*[a-zA-Z0-9._-]*",
+}
+_HELP_COMMANDS: dict[str, list[list[str]]] = {
+    "claude": [["claude", "--help"]],
+    "copilot": [["copilot", "--help"]],
+    "gemini": [["gemini", "--help"]],
+    "codex": [["codex", "--help"], ["codex", "exec", "--help"]],
+    "cursor": [["agent", "--help"]],
+    "opencode": [["opencode", "--help"], ["opencode", "run", "--help"]],
+}
 
 _ENV_ALLOWLIST = (
     "HOME",
@@ -81,16 +107,15 @@ _EXPECTED_FLAGS: dict[str, dict[str, str]] = {
     "codex": {
         "headless": "exec",
         "sandbox": "--sandbox",
-        "approval": "--ask-for-approval",
-        "full_auto": "--full-auto",
-        "json": "--json",
+        "resume": "resume",
+        "yolo": "--dangerously-bypass-approvals-and-sandbox",
+        "effort": "model_reasoning_effort",
         "cd": "--cd",
         "add_dir": "--add-dir",
         "model": "--model",
     },
     "cursor": {
         "headless": "--print",
-        "resume": "--resume",
         "model": "--model",
         "force": "--force",
         "list_models": "--list-models",
@@ -116,11 +141,16 @@ class ToolReport:
     models_new: set[str] = field(default_factory=set)
     help_missing: list[str] = field(default_factory=list)
     help_matched: list[str] = field(default_factory=list)
+    probe_failures: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
     def has_diff(self) -> bool:
-        return bool(self.models_missing or self.models_new or self.help_missing)
+        return bool(self.models_missing or self.models_new or self.help_missing or self.probe_failures)
+
+
+class ProbeFailure(RuntimeError):
+    """Raised when a probe could not determine the requested information."""
 
 
 def _read_registry() -> dict[str, set[str]]:
@@ -155,6 +185,33 @@ def _run(
     )
 
 
+def _scrape_models(tool: str) -> set[str]:
+    """Best-effort fallback for tools with official model docs."""
+    if tool not in _DOCS_URLS or not shutil.which("curl"):
+        return set()
+
+    try:
+        result = subprocess.run(
+            ["curl", "-fsSL", "--max-time", "10", _DOCS_URLS[tool]],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+
+    if result.returncode != 0:
+        return set()
+
+    if tool == "codex":
+        codex_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", result.stdout)
+        if codex_matches:
+            return set(codex_matches)
+
+    matches = re.findall(_SCRAPE_PATTERNS[tool], result.stdout)
+    return {m if isinstance(m, str) else m[0] for m in matches}
+
+
 def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
 
@@ -186,60 +243,88 @@ def _parse_choice_list(text: str) -> set[str]:
 
 
 def _probe_claude_models() -> set[str]:
-    result = _run(["claude", "models"])
-    if result.returncode != 0:
-        return set()
-    models: set[str] = set()
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("#", "-")):
-            continue
-        parts = stripped.split()
-        if parts and parts[0].lower() not in {"model", "name", "id"}:
-            models.add(parts[0])
-    return models
+    try:
+        result = _run(["claude", "models"], timeout=_MODEL_PROBE_TIMEOUTS["claude"])
+    except subprocess.TimeoutExpired as exc:
+        fallback_reason = f"claude models timed out: {exc}"
+    else:
+        models: set[str] = set()
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith(("#", "-")):
+                    continue
+                parts = stripped.split()
+                if parts and parts[0].lower() not in {"model", "name", "id"}:
+                    models.add(parts[0])
+        if models:
+            return models
+        fallback_reason = (
+            "claude models returned no models"
+            if result.returncode == 0
+            else f"claude models exited with code {result.returncode}"
+        )
+
+    fallback = _scrape_models("claude")
+    if fallback:
+        return fallback
+    raise ProbeFailure(fallback_reason)
 
 
 def _probe_copilot_models() -> set[str]:
-    result = _run(["copilot", "--model", "nope"])
-    return _parse_choice_list(result.stdout + result.stderr)
+    result = _run(["copilot", "--model", "nope"], timeout=_MODEL_PROBE_TIMEOUTS["copilot"])
+    models = _parse_choice_list(result.stdout + result.stderr)
+    if models:
+        return models
+    raise ProbeFailure("copilot --model probe returned no model choices")
 
 
 def _probe_gemini_models() -> set[str]:
-    result = _run(["gemini", "--list-models"])
-    if result.returncode != 0:
-        return set()
+    result = _run(["gemini", "--list-models"], timeout=_MODEL_PROBE_TIMEOUTS["gemini"])
     models: set[str] = set()
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("#", "-")):
-            continue
-        parts = stripped.split()
-        if parts and parts[0].lower() not in {"model", "name", "id"}:
-            models.add(parts[0])
-    return models
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("#", "-")):
+                continue
+            parts = stripped.split()
+            if parts and parts[0].lower() not in {"model", "name", "id"}:
+                models.add(parts[0])
+        if models:
+            return models
+
+    fallback = _scrape_models("gemini")
+    if fallback:
+        return fallback
+    raise ProbeFailure(f"gemini --list-models exited with code {result.returncode}")
 
 
 def _probe_codex_models() -> set[str]:
     cache = Path.home() / ".codex" / "models_cache.json"
-    if not cache.exists():
-        return set()
-    try:
-        data = json.loads(cache.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    models = {
-        model["slug"]
-        for model in data.get("models", [])
-        if isinstance(model, dict) and model.get("visibility") == "list" and model.get("slug")
-    }
-    return {m for m in models if isinstance(m, str)}
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        models = {
+            model["slug"]
+            for model in data.get("models", [])
+            if isinstance(model, dict) and model.get("visibility") == "list" and model.get("slug")
+        }
+        normalized = {m for m in models if isinstance(m, str)}
+        if normalized:
+            return normalized
+
+    fallback = _scrape_models("codex")
+    if fallback:
+        return fallback
+    raise ProbeFailure("codex model cache missing/empty and docs scrape returned no models")
 
 
 def _probe_cursor_models() -> set[str]:
     result = _run(["agent", "--list-models"])
     if result.returncode != 0:
-        return set()
+        raise ProbeFailure(f"agent --list-models exited with code {result.returncode}")
     models: set[str] = set()
     for line in result.stdout.splitlines():
         stripped = line.strip()
@@ -248,20 +333,24 @@ def _probe_cursor_models() -> set[str]:
         model_id = stripped.split(" - ", 1)[0].strip()
         if model_id and not model_id.startswith(("Available", "Tip:")):
             models.add(model_id)
-    return models
+    if models:
+        return models
+    raise ProbeFailure("agent --list-models returned no models")
 
 
 def _probe_opencode_models() -> set[str]:
-    result = _run(["opencode", "models"])
+    result = _run(["opencode", "models"], timeout=_MODEL_PROBE_TIMEOUTS["opencode"])
     if result.returncode != 0:
-        return set()
+        raise ProbeFailure(f"opencode models exited with code {result.returncode}")
     models: set[str] = set()
     for line in _strip_ansi(result.stdout).splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "-")):
             continue
         models.add(stripped.split()[0])
-    return models
+    if models:
+        return models
+    raise ProbeFailure("opencode models returned no models")
 
 
 _MODEL_PROBES = {
@@ -278,19 +367,22 @@ def _probe_models(tool: str) -> set[str]:
     return _MODEL_PROBES[tool]()
 
 
-def _probe_help_output(binary: str) -> str:
+def _probe_help_output(tool: str, binary: str) -> str:
     combined = []
-    for flag in ("--help", "-h"):
-        result = _run([binary, flag])
+    commands = _HELP_COMMANDS.get(tool, [[binary, "--help"]])
+    for command in commands:
+        result = _run(command)
         combined.append(result.stdout)
         combined.append(result.stderr)
-    return "\n".join(combined)
+    return _strip_ansi("\n".join(combined))
 
 
 def _probe_cli_flags(tool: str) -> tuple[list[str], list[str]]:
     adapter = _get_adapter(tool)
     caps = adapter.capabilities()
-    help_text = _probe_help_output(caps.binary)
+    help_text = _probe_help_output(tool, caps.binary)
+    if not help_text.strip():
+        raise ProbeFailure("no CLI help output returned")
     expected = _EXPECTED_FLAGS.get(tool, {})
     matched: list[str] = []
     missing: list[str] = []
@@ -321,22 +413,18 @@ def _build_report(tool: str, registry: dict[str, set[str]]) -> ToolReport:
     try:
         raw_models = _probe_models(tool)
     except Exception as exc:  # pragma: no cover - best-effort probe
-        report.notes.append(f"model probe failed: {exc}")
-        raw_models = set()
-
-    if raw_models:
+        report.probe_failures.append(f"model probe failed: {exc}")
+    else:
         normalized = _normalize_models(tool, raw_models)
         report.models_found = normalized
         expected = registry.get(tool, set())
         report.models_missing = expected - normalized
         report.models_new = normalized - expected
-    else:
-        report.notes.append("no model list returned")
 
     try:
         report.help_matched, report.help_missing = _probe_cli_flags(tool)
     except Exception as exc:  # pragma: no cover - best-effort probe
-        report.notes.append(f"help probe failed: {exc}")
+        report.probe_failures.append(f"help probe failed: {exc}")
 
     return report
 
@@ -365,6 +453,8 @@ def _print_report(report: ToolReport) -> None:
         print(f"  missing flags: {', '.join(report.help_missing)}")
     if report.help_matched:
         print(f"  matched flags: {', '.join(report.help_matched)}")
+    for failure in report.probe_failures:
+        print(f"  probe failure: {failure}")
     for note in report.notes:
         print(f"  note: {note}")
 
@@ -379,6 +469,7 @@ def _json_ready(report: ToolReport) -> dict[str, Any]:
         "models_new": sorted(report.models_new),
         "help_missing": report.help_missing,
         "help_matched": report.help_matched,
+        "probe_failures": report.probe_failures,
         "notes": report.notes,
     }
 

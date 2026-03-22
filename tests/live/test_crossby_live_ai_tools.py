@@ -9,6 +9,7 @@ Policy:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -32,9 +33,9 @@ pytestmark = [
 
 def _selected_tools() -> set[str]:
     raw = os.environ.get("CROSSBY_LIVE_AI_TOOLS")
-    if not raw:
-        return set(_SCRIPTABLE_TOOLS)
-    return {item.strip() for item in raw.split(",") if item.strip()}
+    if raw:
+        return {item.strip() for item in raw.split(",") if item.strip()}
+    return {tool for tool in _SCRIPTABLE_TOOLS if _configured_model(tool)}
 
 
 def _timeout() -> int:
@@ -48,37 +49,39 @@ def _timeout() -> int:
     return parsed if parsed > 0 else _DEFAULT_TIMEOUT
 
 
-def _configured_model(tool: str) -> str:
+def _configured_model(tool: str) -> str | None:
     env_key = f"CROSSBY_LIVE_MODEL_{tool.upper()}"
     value = os.environ.get(env_key, "").strip()
-    if value:
-        return value
-    pytest.fail(
-        f"Missing {env_key} for selected live AI tool {tool!r}. "
-        "Set an explicit model instead of relying on the static registry."
-    )
+    return value or None
 
 
-def _auth_failure(output: str) -> bool:
+def _prerequisite_failure(output: str) -> bool:
     lowered = output.lower()
-    needles = (
-        "not logged in",
-        "login",
-        "log in",
-        "sign in",
-        "authenticate",
-        "authentication",
-        "api key",
-        "token",
-        "credential",
-        "authorization",
+    patterns = (
+        r"\bnot logged in\b",
+        r"\blog in\b",
+        r"\bsign in\b",
+        r"\bauthentication required\b",
+        r"\bplease authenticate\b",
+        r"\bmissing api key\b",
+        r"\binvalid api key\b",
+        r"\bno api key\b",
+        r"\bcredential(s)? missing\b",
+        r"\bworkspace trust\b",
+        r"\btrust this workspace\b",
+        r"\bauth\b",
     )
-    return any(needle in lowered for needle in needles)
+    return any(re.search(pattern, lowered) for pattern in patterns)
 
 
 @pytest.mark.parametrize("tool", _SCRIPTABLE_TOOLS)
 def test_headless_smoke(tool: str, tmp_path) -> None:
-    if tool not in _selected_tools():
+    selected_tools = _selected_tools()
+    if not selected_tools:
+        pytest.skip(
+            "No live AI tools configured. Set CROSSBY_LIVE_MODEL_<TOOL> or CROSSBY_LIVE_AI_TOOLS."
+        )
+    if tool not in selected_tools:
         pytest.skip(f"{tool} not selected by CROSSBY_LIVE_AI_TOOLS")
 
     adapter = AbstractAITool.get(tool)
@@ -87,8 +90,16 @@ def test_headless_smoke(tool: str, tmp_path) -> None:
         pytest.skip(f"{tool} does not support headless execution")
     if not shutil.which(caps.binary):
         pytest.skip(f"{caps.binary} not found in PATH")
+    if not shutil.which("git"):
+        pytest.skip("git not found in PATH")
 
     model = _configured_model(tool)
+    if model is None:
+        pytest.fail(
+            "Missing "
+            f"CROSSBY_LIVE_MODEL_{tool.upper()} "
+            f"for explicitly selected live AI tool {tool!r}."
+        )
     prompt = (
         "You are running a smoke test.\n"
         f"Reply with exactly this token and nothing else: {_SENTINEL}"
@@ -98,6 +109,7 @@ def test_headless_smoke(tool: str, tmp_path) -> None:
     env.pop("CLAUDECODE", None)
     work_dir = tmp_path / tool
     work_dir.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=work_dir, check=False, capture_output=True)
 
     result = subprocess.run(
         command,
@@ -109,8 +121,8 @@ def test_headless_smoke(tool: str, tmp_path) -> None:
     )
 
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    if result.returncode != 0 and _auth_failure(combined):
-        pytest.skip(f"{tool} auth/session prerequisites missing")
+    if result.returncode != 0 and _prerequisite_failure(combined):
+        pytest.skip(f"{tool} auth/session/workspace prerequisites missing")
 
     assert result.returncode == 0, (
         f"{tool} headless execution failed.\n"

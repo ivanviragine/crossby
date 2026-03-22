@@ -196,6 +196,11 @@ class TestBuildLaunchCommand:
             "Review code",
         ]
 
+    def test_codex_yolo_uses_dangerous_bypass_flag(self) -> None:
+        adapter = AbstractAITool.get("codex")
+        cmd = adapter.build_launch_command(yolo=True)
+        assert cmd == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+
     def test_cursor_basic_launch(self) -> None:
         adapter = AbstractAITool.get("cursor")
         cmd = adapter.build_launch_command(model="opus-4.6")
@@ -331,6 +336,28 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("claude")
         cmd = adapter.build_launch_command(plan_mode=False)
         assert "--approval-mode" not in cmd
+
+
+class TestYoloArgs:
+    def test_claude_yolo_args(self) -> None:
+        adapter = AbstractAITool.get("claude")
+        assert adapter.yolo_args() == ["--dangerously-skip-permissions"]
+
+    def test_copilot_yolo_args(self) -> None:
+        adapter = AbstractAITool.get("copilot")
+        assert adapter.yolo_args() == ["--yolo"]
+
+    def test_gemini_yolo_args(self) -> None:
+        adapter = AbstractAITool.get("gemini")
+        assert adapter.yolo_args() == ["--yolo"]
+
+    def test_codex_yolo_args(self) -> None:
+        adapter = AbstractAITool.get("codex")
+        assert adapter.yolo_args() == ["--dangerously-bypass-approvals-and-sandbox"]
+
+    def test_cursor_yolo_args(self) -> None:
+        adapter = AbstractAITool.get("cursor")
+        assert adapter.yolo_args() == ["--force"]
 
 
 class TestNormalizeModelFormat:

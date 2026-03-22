@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,25 @@ _RUN_ENV_ALLOWLIST = (
     "TMPDIR",
     "USER",
 )
+
+
+def _crossby_entrypoint() -> str:
+    """Return the installed `crossby` console script path for E2E coverage."""
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    candidates = [
+        scripts_dir / "crossby",
+        scripts_dir / "crossby.exe",
+        scripts_dir / "crossby-script.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    fallback = shutil.which("crossby")
+    if fallback:
+        return fallback
+
+    raise RuntimeError("Could not locate the installed 'crossby' console script")
 
 
 @dataclass
@@ -91,7 +112,7 @@ def run_crossby(
         run_env.update(env)
 
     return subprocess.run(
-        [sys.executable, "-c", "from crossby.cli.main import cli_main; cli_main()", *args],
+        [_crossby_entrypoint(), *args],
         cwd=cwd,
         capture_output=True,
         text=True,

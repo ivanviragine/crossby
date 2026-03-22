@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.config.patterns import canonical_to_shell
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -60,11 +61,7 @@ class CopilotAdapter(AbstractAITool):
         """
         result: list[str] = []
         for cmd in commands:
-            parts = cmd.split(":", 1)
-            binary = parts[0]
-            args = parts[1] if len(parts) > 1 else ""
-            pattern = f"shell({binary}:{args})" if args else f"shell({binary})"
-            result.extend(["--allow-tool", pattern])
+            result.extend(["--allow-tool", canonical_to_shell(cmd)])
         return result
 
     def yolo_args(self) -> list[str]:

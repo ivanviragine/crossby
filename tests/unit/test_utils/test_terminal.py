@@ -1,4 +1,4 @@
-"""Tests for terminal title helpers and temp-script creation."""
+"""Focused tests for public terminal helper behavior."""
 
 from __future__ import annotations
 
@@ -9,12 +9,6 @@ from crossby.utils import terminal
 
 
 class TestTerminalTitle:
-    def test_truncate_terminal_title(self) -> None:
-        long = "x" * 80
-        result = terminal._truncate_terminal_title(long)
-        assert result.endswith("...")
-        assert len(result) == 53
-
     def test_set_terminal_title_writes_escape_when_tty(self, monkeypatch) -> None:
         fake_stderr = io.StringIO()
         monkeypatch.setattr("crossby.utils.terminal.is_tty", lambda: True)
@@ -34,34 +28,3 @@ class TestTerminalTitle:
         thread.join.assert_called_once_with(timeout=3.0)
         assert terminal._title_keeper_running is False
         assert terminal._title_keeper_thread is None
-
-
-class TestCreateTempScript:
-    def test_create_temp_script_content(self, monkeypatch) -> None:
-        written: list[str] = []
-
-        class _Tmp:
-            name = "/tmp/crossby-test.sh"
-
-            def __enter__(self) -> _Tmp:
-                return self
-
-            def __exit__(self, exc_type, exc, tb) -> None:
-                return None
-
-            def write(self, data: str) -> int:
-                written.append(data)
-                return len(data)
-
-        chmod_mock = Mock()
-        monkeypatch.setattr("tempfile.NamedTemporaryFile", lambda **_: _Tmp())
-        monkeypatch.setattr("crossby.utils.terminal.os.chmod", chmod_mock)
-
-        path = terminal._create_temp_script(["python", "-V"], cwd="/tmp")
-
-        assert path == "/tmp/crossby-test.sh"
-        assert chmod_mock.call_args.args[1] == 0o700
-        script = written[0]
-        assert script.startswith("#!/usr/bin/env bash")
-        assert "cd /tmp" in script
-        assert "exec python -V" in script

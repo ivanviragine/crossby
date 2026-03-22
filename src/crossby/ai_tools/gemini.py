@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.config.patterns import canonical_to_shell
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -68,9 +69,5 @@ class GeminiAdapter(AbstractAITool):
         """
         result: list[str] = []
         for cmd in commands:
-            parts = cmd.split(":", 1)
-            binary = parts[0]
-            args = parts[1] if len(parts) > 1 else ""
-            pattern = f"shell({binary}:{args})" if args else f"shell({binary})"
-            result.extend(["--allowed-tools", pattern])
+            result.extend(["--allowed-tools", canonical_to_shell(cmd)])
         return result

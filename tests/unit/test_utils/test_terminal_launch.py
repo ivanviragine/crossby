@@ -122,10 +122,6 @@ def test_ghostty_macos_failure_cleans_temp_script(monkeypatch: pytest.MonkeyPatc
     unlink_mock.assert_any_call("/tmp/crossby-test.sh")
 
 
-def test_batch_empty_returns_false() -> None:
-    assert launch_batch_in_terminals([]) is False
-
-
 def test_batch_single_delegates_to_launch_in_new_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

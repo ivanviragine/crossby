@@ -74,5 +74,5 @@ class CodexAdapter(AbstractAITool):
         return ["-c", f'model_reasoning_effort="{mapped}"']
 
     def yolo_args(self) -> list[str]:
-        """Codex uses ``--yolo``."""
-        return ["--yolo"]
+        """Codex uses ``--dangerously-bypass-approvals-and-sandbox``."""
+        return ["--dangerously-bypass-approvals-and-sandbox"]

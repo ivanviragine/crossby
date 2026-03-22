@@ -94,9 +94,7 @@ def resolve_model(
                 raise
         else:
             if strict and not adapter.capabilities().supports_model_flag:
-                raise ValueError(
-                    f"Tool '{tool}' does not support explicit model selection"
-                )
+                raise ValueError(f"Tool '{tool}' does not support explicit model selection")
             if not adapter.is_model_compatible(resolved):
                 if strict:
                     raise ValueError(f"Model '{resolved}' is not compatible with {tool}")

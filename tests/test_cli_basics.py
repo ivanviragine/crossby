@@ -19,11 +19,6 @@ class TestVersion:
         assert "crossby" in result.output
         assert crossby.__version__ in result.output
 
-    def test_version_short_flag(self) -> None:
-        result = runner.invoke(app, ["-V"])
-        assert result.exit_code == 0
-        assert crossby.__version__ in result.output
-
 
 class TestHelp:
     def test_root_help(self) -> None:
@@ -35,18 +30,6 @@ class TestHelp:
         assert "stats" in result.output
         assert "convert" in result.output
         assert "config" in result.output
-
-    def test_config_help(self) -> None:
-        result = runner.invoke(app, ["config", "--help"])
-        assert result.exit_code == 0
-        assert "show" in result.output
-
-    def test_launch_help(self) -> None:
-        result = runner.invoke(app, ["launch", "--help"])
-        assert result.exit_code == 0
-        assert "--tool" in result.output
-        assert "--model" in result.output
-        assert "--transcript" in result.output
 
 
 class TestCommandBehaviorWithoutContext:

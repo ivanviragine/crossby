@@ -55,7 +55,6 @@ def read_allowlist(project_root: Path) -> list[str]:
                 ]
     return []
 
-
 def is_allowlist_configured(project_root: Path, patterns: list[str]) -> bool:
     """Return True if ALL given patterns are present in the allowlist at project_root.
 

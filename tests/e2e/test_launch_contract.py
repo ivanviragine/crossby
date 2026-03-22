@@ -102,3 +102,27 @@ def test_launch_fails_fast_for_explicit_incompatible_model(e2e_context) -> None:
     assert result.returncode == 1
     assert "Model 'gpt-4o' is not compatible with claude" in result.stderr
     assert read_mock_log(e2e_context.log_file) == []
+
+
+def test_launch_fails_fast_for_explicit_unsupported_effort(e2e_context) -> None:
+    result = run_crossby(
+        ["launch", str(e2e_context.project), "--tool", "copilot", "--effort", "high"],
+        cwd=e2e_context.project,
+        env=e2e_context.env,
+    )
+
+    assert result.returncode == 1
+    assert "copilot does not support effort levels" in result.stderr
+    assert read_mock_log(e2e_context.log_file) == []
+
+
+def test_launch_fails_fast_for_explicit_unsupported_yolo(e2e_context) -> None:
+    result = run_crossby(
+        ["launch", str(e2e_context.project), "--tool", "opencode", "--yolo"],
+        cwd=e2e_context.project,
+        env=e2e_context.env,
+    )
+
+    assert result.returncode == 1
+    assert "opencode does not support YOLO mode" in result.stderr
+    assert read_mock_log(e2e_context.log_file) == []

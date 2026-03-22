@@ -108,7 +108,7 @@ class AIConfig(BaseModel):
     default_model: str | None = None
     effort: str | None = None
     yolo: bool | None = None
-    commands: dict[str, CommandConfig] = {}
+    commands: dict[str, CommandConfig] = Field(default_factory=dict)
 
 
 class PermissionsConfig(BaseModel):
@@ -118,7 +118,7 @@ class PermissionsConfig(BaseModel):
     tool-specific allowlist flags at launch time.
     """
 
-    allowed_commands: list[str] = []
+    allowed_commands: list[str] = Field(default_factory=list)
 
 
 class SyncConfig(BaseModel):
@@ -129,7 +129,7 @@ class SyncConfig(BaseModel):
     """
 
     auto: bool = True
-    tools: list[str] = []
+    tools: list[str] = Field(default_factory=list)
 
 
 class RulesTargetsConfig(BaseModel):
@@ -149,7 +149,7 @@ class RulesConfig(BaseModel):
     source: str = "AGENTS.md"
     strategy: Literal["symlink", "copy"] = "symlink"
     gitignore: bool = True
-    targets: RulesTargetsConfig = RulesTargetsConfig()
+    targets: RulesTargetsConfig = Field(default_factory=RulesTargetsConfig)
 
 
 class AgentsConfig(BaseModel):
@@ -167,7 +167,7 @@ class AgentsConfig(BaseModel):
     source: str = ".crossby/agents"
     strategy: str = "symlink"
     gitignore: bool = True
-    targets: dict[str, bool] = {}
+    targets: dict[str, bool] = Field(default_factory=dict)
 
 
 class CrossbyConfig(BaseModel):
@@ -179,13 +179,13 @@ class CrossbyConfig(BaseModel):
 
     version: int = 1
 
-    ai: AIConfig = AIConfig()
-    models: dict[str, ComplexityModelMapping] = {}
-    permissions: PermissionsConfig = PermissionsConfig()
+    ai: AIConfig = Field(default_factory=AIConfig)
+    models: dict[str, ComplexityModelMapping] = Field(default_factory=dict)
+    permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-    rules: RulesConfig = RulesConfig()
-    sync: SyncConfig = SyncConfig()
-    agents: AgentsConfig = AgentsConfig()
+    rules: RulesConfig = Field(default_factory=RulesConfig)
+    sync: SyncConfig = Field(default_factory=SyncConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)
