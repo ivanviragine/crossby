@@ -64,6 +64,9 @@ def resolve_model(
 
     When *tool* is provided, the resolved model is checked for compatibility
     with that tool.  Incompatible models are dropped (returns ``None``).
+
+    When *strict* is True, incompatibility raises ``ValueError`` instead of
+    returning ``None``.  Use strict mode for user-explicit CLI flags.
     """
     resolved: str | None = model
 
@@ -85,6 +88,10 @@ def resolve_model(
     if resolved and tool:
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
+        except (ValueError, KeyError):
+            if strict:
+                raise
+        else:
             if not adapter.is_model_compatible(resolved):
                 if strict:
                     raise ValueError(f"Model '{resolved}' is not compatible with {tool}")
@@ -94,9 +101,6 @@ def resolve_model(
                     tool=tool,
                 )
                 return None
-        except (ValueError, KeyError):
-            if strict:
-                raise
 
     return resolved
 
@@ -119,6 +123,9 @@ def resolve_effort(
 
     When *tool* is provided and the tool does not support effort, a warning
     is logged and ``None`` is returned.
+
+    When *strict* is True, invalid levels or unsupported tools raise
+    ``ValueError``.  Use strict mode for user-explicit CLI flags.
     """
     resolved: str | None = effort
 
@@ -144,14 +151,15 @@ def resolve_effort(
     if tool:
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
+        except (ValueError, KeyError):
+            if strict:
+                raise
+        else:
             if not adapter.capabilities().supports_effort:
                 if strict:
                     raise ValueError(f"{tool} does not support effort levels")
                 logger.info("effort.unsupported_tool", tool=tool, effort=resolved)
                 return None
-        except (ValueError, KeyError):
-            if strict:
-                raise
 
     return level
 
@@ -173,6 +181,9 @@ def resolve_yolo(
 
     When *tool* is provided and the tool does not support YOLO, a warning
     is logged and ``False`` is returned.
+
+    When *strict* is True, unsupported tools raise ``ValueError``.
+    Use strict mode for user-explicit CLI flags.
     """
     resolved: bool | None = yolo
 
@@ -186,14 +197,15 @@ def resolve_yolo(
     if tool:
         try:
             adapter = AbstractAITool.get(AIToolID(tool))
+        except (ValueError, KeyError):
+            if strict:
+                raise
+        else:
             if not adapter.capabilities().supports_yolo:
                 if strict:
                     raise ValueError(f"{tool} does not support YOLO mode")
                 logger.warning("yolo.unsupported_tool", tool=tool)
                 return False
-        except (ValueError, KeyError):
-            if strict:
-                raise
 
     return True
 

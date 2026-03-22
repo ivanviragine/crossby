@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from crossby.models.ai import EffortLevel
 from crossby.models.config import CrossbyConfig
 from crossby.services.ai_resolution import (
     resolve_effort,
@@ -49,6 +50,11 @@ class TestResolveEffortStrict:
         result = resolve_effort("ultra", config, strict=False)
         assert result is None
 
+    def test_strict_supported_tool_returns_level(self) -> None:
+        config = CrossbyConfig()
+        result = resolve_effort("high", config, tool="claude", strict=True)
+        assert result == EffortLevel.HIGH
+
 
 class TestResolveYoloStrict:
     """Tests for resolve_yolo() strict mode."""
@@ -62,3 +68,8 @@ class TestResolveYoloStrict:
         config = CrossbyConfig()
         result = resolve_yolo(True, config, tool="opencode", strict=False)
         assert result is False
+
+    def test_strict_supported_tool_returns_true(self) -> None:
+        config = CrossbyConfig()
+        result = resolve_yolo(True, config, tool="claude", strict=True)
+        assert result is True
