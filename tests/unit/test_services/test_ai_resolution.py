@@ -31,6 +31,18 @@ class TestResolveModelStrict:
         result = resolve_model("claude-sonnet-4.6", config, tool="claude", strict=True)
         assert result == "claude-sonnet-4.6"
 
+    def test_strict_unsupported_model_flag_raises(self) -> None:
+        """Tools that don't support --model should reject explicit model in strict mode."""
+        config = CrossbyConfig()
+        with pytest.raises(ValueError, match="does not support explicit model"):
+            resolve_model("some-model", config, tool="vscode", strict=True)
+
+    def test_nonstrict_unsupported_model_flag_returns_model(self) -> None:
+        """Non-strict mode still returns the model even if tool doesn't support --model."""
+        config = CrossbyConfig()
+        result = resolve_model("some-model", config, tool="vscode", strict=False)
+        assert result == "some-model"
+
 
 class TestResolveEffortStrict:
     """Tests for resolve_effort() strict mode."""
