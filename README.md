@@ -64,6 +64,42 @@ permissions:
     - "./scripts/check.sh:*"
 ```
 
+## AI Tool Compatibility
+
+Crossby translates its unified CLI flags into each tool's native syntax. The table below shows what each `crossby launch` flag maps to.
+
+### Feature Support
+
+| Crossby Flag | Claude | Copilot | Gemini | Codex | OpenCode | Cursor | VS Code | Antigravity |
+|---|---|---|---|---|---|---|---|---|
+| `--tool` | claude | copilot | gemini | codex | opencode | agent | code | antigravity |
+| `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | — | — |
+| `--yolo` | `--dangerously-skip-permissions` | `--yolo` | `--yolo` | `--yolo` | — | `--force` | — | — |
+| `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="<level>"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
+| `--prompt` | positional arg | `-i <prompt>` | positional arg | positional arg | `--prompt <prompt>` | positional arg | — | — |
+| `--transcript` | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | — | — |
+
+### Effort Level Mapping
+
+| Crossby Level | Claude | Codex | OpenCode | Cursor |
+|---|---|---|---|---|
+| `low` | `low` | `low` | `low` | — |
+| `medium` | `medium` | `medium` | `medium` | — |
+| `high` | `high` | `high` | `high` | `<model>-thinking` |
+| `max` | `max` | `xhigh` | `high` | `<model>-thinking` |
+
+### Library API (used by WADE, not crossby CLI)
+
+| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
+|---|---|---|---|---|---|---|
+| Plan mode | `--permission-mode plan` | — | `--approval-mode plan` | — | — | `--mode plan` |
+| Plan dir | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
+| Allowed commands | `--allowedTools Bash(cmd:args)` | `--allow-tool shell(cmd:args)` | `--allowed-tools shell(cmd:args)` | — | — | — |
+| Resume | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
+| Structured output | `--output-format json --json-schema <schema>` | — | `--output-format json` | — | — | — |
+
+A dash (—) means the tool does not support that feature. Crossby will raise an error if you pass an explicit flag that the selected tool doesn't support (e.g. `--yolo` with OpenCode).
+
 ## Development
 
 ```bash
