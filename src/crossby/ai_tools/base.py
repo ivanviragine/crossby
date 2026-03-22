@@ -195,6 +195,10 @@ class AbstractAITool(ABC):
         """
         return []
 
+    # ------------------------------------------------------------------
+    # Extended API — used by build_launch_command() and library consumers
+    # ------------------------------------------------------------------
+
     def plan_mode_args(self) -> list[str]:
         """Get extra CLI args for native plan/approval mode."""
         return []  # Default: no plan mode support

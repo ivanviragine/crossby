@@ -64,11 +64,11 @@ class GeminiAdapter(AbstractAITool):
     def allowed_commands_args(self, commands: list[str]) -> list[str]:
         """Translate canonical patterns to Gemini --allowed-tools flags.
 
-        Canonical ``"cmd args"`` becomes ``"shell(cmd:args)"``.
+        Canonical ``"cmd:args"`` becomes ``"shell(cmd:args)"``.
         """
         result: list[str] = []
         for cmd in commands:
-            parts = cmd.split(None, 1)
+            parts = cmd.split(":", 1)
             binary = parts[0]
             args = parts[1] if len(parts) > 1 else ""
             pattern = f"shell({binary}:{args})" if args else f"shell({binary})"

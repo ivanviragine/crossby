@@ -97,3 +97,30 @@ class TestLoadConfig:
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         config = load_config(tmp_path)
         assert config.ai.commands == {}
+
+    def test_models_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("models:\n  - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)
+
+    def test_commands_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("ai:\n  commands:\n    - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)
+
+    def test_ai_as_list_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("ai:\n  - bad\n")
+        with pytest.raises(ConfigError):
+            load_config(tmp_path)
+
+    def test_ai_as_empty_string_raises(self, tmp_path):
+        """Falsy scalars like '' must not be silently coerced to {}."""
+        (tmp_path / ".crossby.yml").write_text('ai: ""\n')
+        with pytest.raises(ConfigError, match="'ai' must be a mapping"):
+            load_config(tmp_path)
+
+    def test_models_as_zero_raises(self, tmp_path):
+        """Falsy scalars like 0 must not be silently coerced to {}."""
+        (tmp_path / ".crossby.yml").write_text("models: 0\n")
+        with pytest.raises(ConfigError, match="'models' must be a mapping"):
+            load_config(tmp_path)

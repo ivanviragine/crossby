@@ -49,9 +49,7 @@ class CommandConfig(BaseModel):
     tool: str | None = None
     model: str | None = None
     effort: str | None = None
-    mode: str | None = None
     yolo: bool | None = None
-    enabled: bool | None = None
 
 
 class AIConfig(BaseModel):
