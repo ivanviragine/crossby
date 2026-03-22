@@ -87,7 +87,7 @@ def resolve_model(
     # Compatibility gate
     if resolved and tool:
         try:
-            adapter = AbstractAITool.get(AIToolID(tool))
+            adapter = AbstractAITool.get(tool)
         except (ValueError, KeyError):
             if strict:
                 raise
@@ -154,7 +154,7 @@ def resolve_effort(
     # Check tool support
     if tool:
         try:
-            adapter = AbstractAITool.get(AIToolID(tool))
+            adapter = AbstractAITool.get(tool)
         except (ValueError, KeyError):
             if strict:
                 raise
@@ -200,7 +200,7 @@ def resolve_yolo(
     # Check tool support
     if tool:
         try:
-            adapter = AbstractAITool.get(AIToolID(tool))
+            adapter = AbstractAITool.get(tool)
         except (ValueError, KeyError):
             if strict:
                 raise

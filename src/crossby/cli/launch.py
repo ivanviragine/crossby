@@ -123,7 +123,11 @@ def launch(
 
     # Ensure transcript parent directory exists
     if transcript:
-        transcript.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            console.error(f"Cannot create transcript directory: {e}")
+            raise typer.Exit(1) from e
 
     # Launch
     exit_code = adapter.launch(
