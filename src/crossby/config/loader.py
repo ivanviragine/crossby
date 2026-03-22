@@ -95,12 +95,16 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     version = raw.get("version", 1)
 
     # Parse ai section
-    ai_raw = raw.get("ai", {}) or {}
+    ai_raw = raw.get("ai")
+    if ai_raw is None:
+        ai_raw = {}
     if not isinstance(ai_raw, dict):
         raise ConfigError("'ai' must be a mapping")
 
     commands: dict[str, CommandConfig] = {}
-    commands_raw = ai_raw.get("commands", {}) or {}
+    commands_raw = ai_raw.get("commands")
+    if commands_raw is None:
+        commands_raw = {}
     if not isinstance(commands_raw, dict):
         raise ConfigError("'ai.commands' must be a mapping")
     for cmd_name, cmd_raw in commands_raw.items():
@@ -114,7 +118,9 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     )
 
     # Parse models section (nested: tool -> complexity -> model)
-    models_raw = raw.get("models", {}) or {}
+    models_raw = raw.get("models")
+    if models_raw is None:
+        models_raw = {}
     if not isinstance(models_raw, dict):
         raise ConfigError("'models' must be a mapping")
     models: dict[str, ComplexityModelMapping] = {}
@@ -128,7 +134,11 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             )
 
     # Parse permissions section
-    permissions_raw = raw.get("permissions", {}) or {}
+    permissions_raw = raw.get("permissions")
+    if permissions_raw is None:
+        permissions_raw = {}
+    if not isinstance(permissions_raw, dict):
+        raise ConfigError("'permissions' must be a mapping")
     permissions = PermissionsConfig(
         allowed_commands=permissions_raw.get("allowed_commands", []),
     )
