@@ -135,24 +135,50 @@ def _wizard(root: Path, sync_instr: bool, sync_sk: bool, sync_al: bool) -> None:
         console.info("Nothing to sync.")
         raise typer.Exit(0)
 
+    # Identify overwrite conflicts and prompt per path.
+    conflicts = [
+        a
+        for a in result.actions
+        if a.strategy == SyncStrategy.WARN
+        and a.target_path is not None
+        and "use force to overwrite" in a.message
+    ]
+    approved_paths: set[Path] = set()
+    if conflicts:
+        console.empty()
+        for action in conflicts:
+            assert action.target_path is not None
+            rel = action.target_path.relative_to(root)
+            if prompts.confirm(f"Overwrite {rel}?"):
+                approved_paths.add(action.target_path)
+
     # Confirm.
     console.empty()
     if not prompts.confirm("Apply sync plan?"):
         console.info("Cancelled.")
         raise typer.Exit(0)
 
-    # Execute with force=True — user has reviewed the plan and confirmed.
+    # Execute without force (creates non-conflicting links).
     console.empty()
     _run_sync(
         source,
         targets,
         root,
         dry_run=False,
-        force=True,
+        force=False,
         sync_instructions=sync_instr,
         sync_skills=sync_sk,
         sync_allowlist=sync_al,
     )
+
+    # Force-create approved overwrites.
+    if approved_paths:
+        from crossby.config.linker import create_symlink
+
+        for action in conflicts:
+            assert action.target_path is not None
+            if action.target_path in approved_paths and action.source_path is not None:
+                create_symlink(action.source_path, action.target_path, force=True)
 
 
 def _run_sync(
