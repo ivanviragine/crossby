@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
@@ -30,10 +31,32 @@ def detect_skills_source(root: Path) -> Path | None:
     in order.  Returns None if no real skills directory exists.
     """
     for tool_id in _SCAN_ORDER:
-        rel = SKILLS_DIR[tool_id]
-        candidate = root / rel
-        if candidate.is_dir() and not candidate.is_symlink():
-            return candidate
+        source = get_skills_source(tool_id, root)
+        if source is not None:
+            return source
+    return None
+
+
+def get_skills_source(tool_id: AIToolID, root: Path) -> Path | None:
+    """Return the real skills directory for *tool_id*.
+
+    If the tool's skills path is a symlink, this returns its resolved target
+    when that target exists and is a directory.
+    """
+    rel = SKILLS_DIR.get(tool_id)
+    if rel is None:
+        return None
+
+    candidate = root / rel
+    if candidate.is_dir() and not candidate.is_symlink():
+        return candidate
+
+    if candidate.is_symlink():
+        with contextlib.suppress(OSError):
+            resolved = candidate.resolve(strict=True)
+            if resolved.is_dir():
+                return resolved
+
     return None
 
 

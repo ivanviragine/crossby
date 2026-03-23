@@ -16,7 +16,7 @@ from crossby.models.ai import AIToolID
 class DetectedConfig:
     """A single detected configuration item in a project."""
 
-    config_type: str  # "instructions", "skills", "allowlist", "hooks", "mcp_servers", "custom_commands"
+    config_type: str  # instructions, skills, allowlist, hooks, mcp_servers, custom_commands
     detail: str  # human-readable summary, e.g. "CLAUDE.md", "4 skills"
     portable: bool  # whether crossby can sync this today
     reason: str = ""  # why it can't be synced (empty if portable)
@@ -42,24 +42,22 @@ def detect_source_configs(tool_id: AIToolID, root: Path) -> list[DetectedConfig]
 # ------------------------------------------------------------------
 
 
-def _detect_instructions(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_instructions(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     rel = INSTRUCTIONS_FILE.get(tool_id)
     if rel is None:
         return
     path = root / rel
     if path.is_file() or (path.is_symlink() and path.exists()):
-        items.append(DetectedConfig(
-            config_type="instructions",
-            detail=rel,
-            portable=True,
-        ))
+        items.append(
+            DetectedConfig(
+                config_type="instructions",
+                detail=rel,
+                portable=True,
+            )
+        )
 
 
-def _detect_skills(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_skills(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     rel = SKILLS_DIR.get(tool_id)
     if rel is None:
         return
@@ -71,16 +69,16 @@ def _detect_skills(
     with contextlib.suppress(OSError):
         count = sum(1 for d in resolved.iterdir() if d.is_dir() and (d / "SKILL.md").is_file())
     label = "1 skill" if count == 1 else f"{count} skills"
-    items.append(DetectedConfig(
-        config_type="skills",
-        detail=f"{rel} ({label})",
-        portable=True,
-    ))
+    items.append(
+        DetectedConfig(
+            config_type="skills",
+            detail=f"{rel} ({label})",
+            portable=True,
+        )
+    )
 
 
-def _detect_allowlist(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_allowlist(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     patterns: list[str] = []
 
     if tool_id == AIToolID.CLAUDE:
@@ -101,16 +99,16 @@ def _detect_allowlist(
 
     n = len(patterns)
     label = "1 pattern" if n == 1 else f"{n} patterns"
-    items.append(DetectedConfig(
-        config_type="allowlist",
-        detail=label,
-        portable=True,
-    ))
+    items.append(
+        DetectedConfig(
+            config_type="allowlist",
+            detail=label,
+            portable=True,
+        )
+    )
 
 
-def _detect_hooks(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_hooks(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     count = 0
 
     if tool_id == AIToolID.CLAUDE:
@@ -141,17 +139,17 @@ def _detect_hooks(
         return
 
     label = "1 hook" if count == 1 else f"{count} hooks"
-    items.append(DetectedConfig(
-        config_type="hooks",
-        detail=label,
-        portable=False,
-        reason="not yet supported — different formats per tool",
-    ))
+    items.append(
+        DetectedConfig(
+            config_type="hooks",
+            detail=label,
+            portable=False,
+            reason="not yet supported — different formats per tool",
+        )
+    )
 
 
-def _detect_mcp_servers(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_mcp_servers(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     if tool_id != AIToolID.CLAUDE:
         return
     servers = _read_json_key(root / ".claude" / "settings.json", "mcpServers")
@@ -159,17 +157,17 @@ def _detect_mcp_servers(
         return
     n = len(servers)
     label = "1 MCP server" if n == 1 else f"{n} MCP servers"
-    items.append(DetectedConfig(
-        config_type="mcp_servers",
-        detail=label,
-        portable=False,
-        reason="tool-specific, no cross-tool equivalent yet",
-    ))
+    items.append(
+        DetectedConfig(
+            config_type="mcp_servers",
+            detail=label,
+            portable=False,
+            reason="tool-specific, no cross-tool equivalent yet",
+        )
+    )
 
 
-def _detect_custom_commands(
-    tool_id: AIToolID, root: Path, items: list[DetectedConfig]
-) -> None:
+def _detect_custom_commands(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
     if tool_id != AIToolID.CLAUDE:
         return
     cmds_dir = root / ".claude" / "commands"
@@ -179,12 +177,14 @@ def _detect_custom_commands(
     if count == 0:
         return
     label = "1 custom command" if count == 1 else f"{count} custom commands"
-    items.append(DetectedConfig(
-        config_type="custom_commands",
-        detail=label,
-        portable=False,
-        reason="tool-specific, no cross-tool equivalent yet",
-    ))
+    items.append(
+        DetectedConfig(
+            config_type="custom_commands",
+            detail=label,
+            portable=False,
+            reason="tool-specific, no cross-tool equivalent yet",
+        )
+    )
 
 
 # ------------------------------------------------------------------

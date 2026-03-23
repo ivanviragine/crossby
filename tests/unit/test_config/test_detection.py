@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from crossby.config.detection import DetectedConfig, detect_source_configs
+from crossby.config.detection import detect_source_configs
 from crossby.models.ai import AIToolID
 
 
@@ -87,7 +87,9 @@ class TestDetectHooks:
         claude_dir.mkdir()
         settings = {
             "hooks": {
-                "PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "echo"}]}]
+                "PreToolUse": [
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": "echo"}]}
+                ]
             }
         }
         (claude_dir / "settings.json").write_text(json.dumps(settings))
@@ -172,7 +174,14 @@ class TestDetectFull:
 
         items = detect_source_configs(AIToolID.CLAUDE, tmp_path)
         types = {i.config_type for i in items}
-        assert types == {"instructions", "skills", "allowlist", "hooks", "mcp_servers", "custom_commands"}
+        assert types == {
+            "instructions",
+            "skills",
+            "allowlist",
+            "hooks",
+            "mcp_servers",
+            "custom_commands",
+        }
 
         portable = [i for i in items if i.portable]
         not_portable = [i for i in items if not i.portable]

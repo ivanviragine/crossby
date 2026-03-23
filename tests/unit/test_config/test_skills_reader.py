@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from crossby.config.skills import detect_skills_source, get_skills_target
+from crossby.config.skills import detect_skills_source, get_skills_source, get_skills_target
 from crossby.models.ai import AIToolID
 
 
@@ -74,3 +74,23 @@ class TestGetSkillsTarget:
 
     def test_returns_none_for_unknown_tool(self, tmp_path: Path) -> None:
         assert get_skills_target(AIToolID.VSCODE, tmp_path) is None
+
+
+class TestGetSkillsSource:
+    def test_returns_real_cursor_skills_dir(self, tmp_path: Path) -> None:
+        skills = tmp_path / ".cursor" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text("skill")
+
+        assert get_skills_source(AIToolID.CURSOR, tmp_path) == skills
+
+    def test_resolves_symlinked_cursor_skills_dir(self, tmp_path: Path) -> None:
+        real_skills = tmp_path / ".claude" / "skills"
+        real_skills.mkdir(parents=True)
+        (real_skills / "SKILL.md").write_text("skill")
+
+        cursor_skills = tmp_path / ".cursor" / "skills"
+        cursor_skills.parent.mkdir(parents=True)
+        os.symlink(str(real_skills), str(cursor_skills))
+
+        assert get_skills_source(AIToolID.CURSOR, tmp_path) == real_skills

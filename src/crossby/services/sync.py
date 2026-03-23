@@ -11,7 +11,7 @@ from crossby.config.instructions import (
     get_instructions_target,
 )
 from crossby.config.linker import create_symlink
-from crossby.config.skills import detect_skills_source, get_skills_target
+from crossby.config.skills import get_skills_source, get_skills_target
 from crossby.models.ai import AIToolID
 from crossby.models.sync import SyncAction, SyncResult, SyncStrategy
 
@@ -55,7 +55,7 @@ def sync_configs(
 
     # Pre-detect sources once to avoid duplicate warnings.
     instr_source = get_instructions_source(from_tool, root) if sync_instructions else None
-    skills_source = detect_skills_source(root) if sync_skills else None
+    skills_source = get_skills_source(from_tool, root) if sync_skills else None
     source_patterns: list[str] | None = None
     if sync_allowlist and from_tool in _ALLOWLIST_TOOLS:
         source_patterns = _read_source_allowlist(from_tool, root)
@@ -249,6 +249,21 @@ def _convert_allowlist(
     if target not in _ALLOWLIST_TOOLS:
         return
 
+    target_file = _allowlist_file(target, root)
+    if _is_target_allowlist_configured(target, root, patterns):
+        result.actions.append(
+            SyncAction(
+                config_type="allowlist",
+                strategy=SyncStrategy.CONVERT,
+                source_path=_allowlist_file(from_tool, root),
+                target_path=target_file,
+                message=(
+                    f"{target_file.relative_to(root)} already contains {len(patterns)} pattern(s)"
+                ),
+            )
+        )
+        return
+
     if not dry_run:
         try:
             _write_target_allowlist(target, root, patterns)
@@ -257,7 +272,6 @@ def _convert_allowlist(
             return
 
     result.converted += 1
-    target_file = _allowlist_file(target, root)
     result.actions.append(
         SyncAction(
             config_type="allowlist",
@@ -290,6 +304,18 @@ def _write_target_allowlist(tool: AIToolID, root: Path, patterns: list[str]) -> 
         from crossby.config.cursor_allowlist import configure_allowlist
 
         configure_allowlist(root, patterns)
+
+
+def _is_target_allowlist_configured(tool: AIToolID, root: Path, patterns: list[str]) -> bool:
+    if tool == AIToolID.CLAUDE:
+        from crossby.config.claude_allowlist import is_allowlist_configured
+
+        return is_allowlist_configured(root, patterns)
+    if tool == AIToolID.CURSOR:
+        from crossby.config.cursor_allowlist import is_allowlist_configured
+
+        return is_allowlist_configured(root, patterns=patterns)
+    return False
 
 
 def _allowlist_file(tool: AIToolID, root: Path) -> Path:

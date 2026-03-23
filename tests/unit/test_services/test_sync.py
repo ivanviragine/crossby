@@ -18,9 +18,7 @@ def _setup_claude_source(root: Path) -> None:
     skills.mkdir(parents=True)
     (skills / "SKILL.md").write_text("# Skill")
     settings = {"permissions": {"allow": ["Bash(myapp:*)", "Bash(npm:*)"]}}
-    (root / ".claude" / "settings.json").write_text(
-        json.dumps(settings), encoding="utf-8"
-    )
+    (root / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
 
 
 class TestSyncInstructions:
@@ -159,6 +157,25 @@ class TestSyncSkills:
         assert result.linked == 0
         assert any("skills" in w.lower() for w in result.warnings)
 
+    def test_uses_selected_tool_skills_source_when_cursor_is_real_source(
+        self, tmp_path: Path
+    ) -> None:
+        skills = tmp_path / ".cursor" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text("# Cursor skill")
+
+        result = sync_configs(
+            AIToolID.CURSOR,
+            [AIToolID.GEMINI],
+            tmp_path,
+            force=True,
+            sync_instructions=False,
+            sync_allowlist=False,
+        )
+
+        assert (tmp_path / ".gemini" / "skills").is_symlink()
+        assert result.linked == 1
+
 
 class TestSyncAllowlist:
     def test_converts_claude_to_cursor(self, tmp_path: Path) -> None:
@@ -255,6 +272,27 @@ class TestSyncAllowlist:
         )
         assert result.converted == 0
         assert any("allowlist" in w.lower() for w in result.warnings)
+
+    def test_second_allowlist_sync_is_idempotent(self, tmp_path: Path) -> None:
+        _setup_claude_source(tmp_path)
+        sync_configs(
+            AIToolID.CLAUDE,
+            [AIToolID.CURSOR],
+            tmp_path,
+            sync_instructions=False,
+            sync_skills=False,
+        )
+
+        result = sync_configs(
+            AIToolID.CLAUDE,
+            [AIToolID.CURSOR],
+            tmp_path,
+            sync_instructions=False,
+            sync_skills=False,
+        )
+
+        assert result.converted == 0
+        assert any("already contains" in action.message for action in result.actions)
 
 
 class TestSyncUnsupported:

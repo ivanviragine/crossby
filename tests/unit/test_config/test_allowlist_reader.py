@@ -22,7 +22,9 @@ class TestClaudeReadAllowlist:
     def test_filters_non_bash_patterns(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
-        settings = {"permissions": {"allow": ["Bash(myapp:*)", "Read(**)", "Edit(***)", "Bash(npm:*)"]}}
+        settings = {
+            "permissions": {"allow": ["Bash(myapp:*)", "Read(**)", "Edit(***)", "Bash(npm:*)"]}
+        }
         (claude_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
 
         result = claude_read(tmp_path)

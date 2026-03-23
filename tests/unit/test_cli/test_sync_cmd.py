@@ -63,6 +63,7 @@ class TestSyncCommandPermissions:
         assert settings.exists()
         data = json.loads(settings.read_text())
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        assert ".claude/settings.json" in result.output
 
     def test_sync_all_creates_files_for_all_installed(
         self, project_with_config: Path
@@ -84,6 +85,8 @@ class TestSyncCommandPermissions:
         cursor_config = project_with_config / ".cursor" / "cli.json"
         assert claude_settings.exists()
         assert cursor_config.exists()
+        assert ".claude/settings.json" in result.output
+        assert ".cursor/cli.json" in result.output
 
     def test_sync_unknown_concern_exits_1(self, project_with_config: Path) -> None:
         result = runner.invoke(
@@ -114,19 +117,24 @@ class TestSyncCommandPermissions:
             )
 
         assert result.exit_code == 0, result.output
+        assert "Dry-run mode" in result.output
+        assert ".claude/settings.json" in result.output
         assert not (project_with_config / ".claude" / "settings.json").exists()
 
-    def test_sync_tool_filter_claude(self, project_with_config: Path) -> None:
-        """--tool claude only runs Claude writer."""
+    def test_sync_tool_and_concern_are_case_insensitive(
+        self, project_with_config: Path
+    ) -> None:
+        """CLI filters should accept common mixed-case input."""
         result = runner.invoke(
             app,
-            ["sync", "--tool", "claude", "--path", str(project_with_config)],
+            ["sync", "Permissions", "--tool", "Claude", "--path", str(project_with_config)],
         )
         assert result.exit_code == 0, result.output
         settings = project_with_config / ".claude" / "settings.json"
         assert settings.exists()
         data = json.loads(settings.read_text())
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        assert ".claude/settings.json" in result.output
 
     def test_sync_idempotent(self, project_with_config: Path) -> None:
         """Running sync twice leaves files in the expected state."""
@@ -138,3 +146,25 @@ class TestSyncCommandPermissions:
         settings = project_with_config / ".claude" / "settings.json"
         data = json.loads(settings.read_text())
         assert data["permissions"]["allow"].count("Bash(myapp:*)") == 1
+
+    def test_sync_invalid_sync_tools_config_exits_1(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\n"
+            "permissions:\n"
+            "  allowed_commands:\n"
+            "    - 'myapp:*'\n"
+            "sync:\n"
+            "  tools:\n"
+            "    - not-a-tool\n",
+            encoding="utf-8",
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude"],
+            )
+            result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert "Invalid tool ID in config.sync.tools" in result.output

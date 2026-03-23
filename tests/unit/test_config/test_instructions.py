@@ -59,7 +59,13 @@ class TestGetInstructionsTarget:
 
 class TestIsInstructionsSupported:
     def test_supported_tools(self) -> None:
-        for tool in [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.GEMINI, AIToolID.CODEX]:
+        for tool in [
+            AIToolID.CLAUDE,
+            AIToolID.CURSOR,
+            AIToolID.COPILOT,
+            AIToolID.GEMINI,
+            AIToolID.CODEX,
+        ]:
             assert is_instructions_supported(tool) is True
 
     def test_unsupported_tools(self) -> None:
