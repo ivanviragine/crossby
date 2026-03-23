@@ -26,7 +26,9 @@ models:
 provider:
   name: github
 hooks:
+  post_worktree_create: scripts/setup-worktree.sh
   copy_to_worktree:
+  - .env
   - KNOWLEDGE.md
   - .wade.yml
 knowledge:
