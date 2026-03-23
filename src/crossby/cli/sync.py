@@ -82,6 +82,8 @@ def sync(
         console.error("No targets specified. Use --to or --all.")
         raise typer.Exit(1)
 
+    _show_inventory(source, root)
+
     _run_sync(
         source,
         targets,
@@ -108,6 +110,9 @@ def _wizard(root: Path, sync_instr: bool, sync_sk: bool, sync_al: bool) -> None:
     labels = [_DISPLAY_NAMES[t] for t in _SYNCABLE_TOOLS]
     idx = prompts.select("Source tool:", labels)
     source = _SYNCABLE_TOOLS[idx]
+
+    # Show inventory before target selection.
+    _show_inventory(source, root)
 
     # Select target tools.
     remaining = [t for t in _SYNCABLE_TOOLS if t != source]
@@ -246,6 +251,29 @@ def _display_actions(result: SyncResult, dry_run: bool) -> None:
             console.success(", ".join(counts))
         elif not result.warnings:
             console.info("Everything already in sync.")
+
+
+def _show_inventory(source: AIToolID, root: Path) -> None:
+    """Detect and display all configs found for the source tool."""
+    from crossby.config.detection import detect_source_configs
+
+    items = detect_source_configs(source, root)
+    if not items:
+        console.info(f"No configs detected for {_DISPLAY_NAMES.get(source, source.value)}.")
+        return
+
+    console.step(f"Detected in {_DISPLAY_NAMES.get(source, source.value)}:")
+    portable = [i for i in items if i.portable]
+    not_portable = [i for i in items if not i.portable]
+
+    for item in portable:
+        console.out.print(f"    [success]{console.OK}[/]  {item.config_type:<18} {item.detail}")
+    for item in not_portable:
+        console.out.print(
+            f"    [warning]{console.WARN}[/]  {item.config_type:<18} {item.detail}"
+            f"  [dim]({item.reason})[/]"
+        )
+    console.empty()
 
 
 def _parse_tool_id(name: str) -> AIToolID | None:
