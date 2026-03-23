@@ -24,3 +24,20 @@ def test_convert_rejects_unknown_target_tool() -> None:
 
     assert result.exit_code == 1
     assert "Unknown target tool" in result.output
+
+
+def test_convert_canonical_to_cursor_wrapper() -> None:
+    result = runner.invoke(
+        app,
+        ["convert", "./scripts/check.sh:*", "--from", "canonical", "--to", "cursor"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "Shell(./scripts/check.sh:*)"
+
+
+def test_convert_rejects_unknown_source_tool() -> None:
+    result = runner.invoke(app, ["convert", "crossby:*", "--from", "unknown", "--to", "claude"])
+
+    assert result.exit_code == 1
+    assert "Unknown source tool" in result.output

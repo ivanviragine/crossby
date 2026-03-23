@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
@@ -110,3 +111,31 @@ def test_json_ready_includes_probe_failures() -> None:
     payload = probe_models._json_ready(report)
 
     assert payload["probe_failures"] == ["model probe failed: timed out"]
+
+
+def test_main_json_emits_public_report_contract(capsys) -> None:
+    report = probe_models.ToolReport(tool="claude", installed=True, binary="claude")
+
+    with (
+        patch("probe_models._read_registry", return_value={"claude": set()}),
+        patch("probe_models._build_report", return_value=report),
+    ):
+        exit_code = probe_models.main(["--tool", "claude", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["has_diff"] is False
+    assert payload["tools"] == [
+        {
+            "binary": "claude",
+            "help_matched": [],
+            "help_missing": [],
+            "installed": True,
+            "models_found": [],
+            "models_missing": [],
+            "models_new": [],
+            "notes": [],
+            "probe_failures": [],
+            "tool": "claude",
+        }
+    ]

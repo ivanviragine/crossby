@@ -8,6 +8,7 @@ from tests.e2e._support import (
     assert_ordered_subsequence,
     find_invocation,
     install_mock_binary,
+    install_mock_script,
     read_mock_log,
     run_crossby,
 )
@@ -16,7 +17,13 @@ pytestmark = [pytest.mark.contract, pytest.mark.e2e_deterministic]
 
 
 def test_launch_uses_resolved_config_and_creates_transcript_parent(e2e_context) -> None:
-    install_mock_binary(e2e_context.bin_dir, "claude")
+    session_id = "11111111-1111-1111-1111-111111111111"
+    install_mock_binary(
+        e2e_context.bin_dir,
+        "claude",
+        stdout=f"Total tokens: 123\nclaude --resume {session_id}\n",
+    )
+    install_mock_script(e2e_context.bin_dir)
     transcript = e2e_context.project / "artifacts" / "sessions" / "launch.txt"
     config = {
         "version": 1,
@@ -45,7 +52,13 @@ def test_launch_uses_resolved_config_and_creates_transcript_parent(e2e_context) 
     )
 
     assert result.returncode == 0, result.stderr
-    assert transcript.parent.exists()
+    assert transcript.exists()
+    transcript_text = transcript.read_text(encoding="utf-8")
+    assert "Total tokens: 123" in transcript_text
+    assert session_id in transcript_text
+    assert "Tokens" in result.stdout
+    assert "123" in result.stdout
+    assert session_id in result.stdout
     invocation = find_invocation(e2e_context.log_file, "claude")
     assert invocation["cwd"] == str(e2e_context.project)
     assert_ordered_subsequence(

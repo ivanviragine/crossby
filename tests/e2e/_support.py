@@ -149,6 +149,39 @@ raise SystemExit({exit_code})
     return path
 
 
+def install_mock_script(bin_dir: Path) -> Path:
+    """Install a tiny BSD-style `script` wrapper for deterministic transcript tests."""
+    path = bin_dir / "script"
+    script = f"""#!{sys.executable}
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    raise SystemExit(1)
+if args[:1] == ["-q"]:
+    args = args[1:]
+if len(args) < 2:
+    sys.stderr.write("usage: script [-q] file command ...\\n")
+    raise SystemExit(2)
+
+transcript = Path(args[0])
+command = args[1:]
+result = subprocess.run(command, capture_output=True, text=True)
+content = (result.stdout or "") + (result.stderr or "")
+transcript.write_text(content, encoding="utf-8")
+if result.stdout:
+    sys.stdout.write(result.stdout)
+if result.stderr:
+    sys.stderr.write(result.stderr)
+raise SystemExit(result.returncode)
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def read_mock_log(log_file: Path) -> list[dict[str, Any]]:
     """Read the fake CLI JSONL log."""
     if not log_file.exists():
