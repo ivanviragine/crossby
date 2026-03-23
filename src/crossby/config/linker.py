@@ -35,6 +35,14 @@ def create_symlink(
         existing = os.readlink(link)
         if existing == rel_target:
             return False
+        # Resolve both paths to catch equivalent but differently-expressed targets
+        try:
+            existing_target = (link.parent / existing).resolve(strict=False)
+            resolved_source = source.resolve(strict=False)
+            if existing_target == resolved_source:
+                return False
+        except (OSError, RuntimeError):
+            pass
         if not force:
             return False
         if not dry_run:

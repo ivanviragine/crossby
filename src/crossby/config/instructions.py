@@ -24,8 +24,16 @@ def get_instructions_source(tool_id: AIToolID, root: Path) -> Path | None:
     if rel is None:
         return None
     path = root / rel
-    if path.is_file() or path.is_symlink():
+    if path.is_file():
         return path
+    if path.is_symlink():
+        # Only accept symlinks that resolve to an existing file.
+        try:
+            target = path.resolve(strict=True)
+        except FileNotFoundError:
+            return None
+        if target.is_file():
+            return path
     return None
 
 

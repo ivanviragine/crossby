@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import structlog
-
 from crossby.config.instructions import (
     INSTRUCTIONS_FILE,
     UNSUPPORTED_TOOLS,
@@ -16,8 +14,6 @@ from crossby.config.linker import create_symlink
 from crossby.config.skills import detect_skills_source, get_skills_target
 from crossby.models.ai import AIToolID
 from crossby.models.sync import SyncAction, SyncResult, SyncStrategy
-
-logger = structlog.get_logger()
 
 # Tools that support persistent allowlist config files.
 _ALLOWLIST_TOOLS = frozenset({AIToolID.CLAUDE, AIToolID.CURSOR})
@@ -209,8 +205,12 @@ def _link_skills(
             msg = f"{tgt_rel} broken symlink, use force to overwrite"
             strategy = SyncStrategy.WARN
             result.warnings.append(msg)
-    elif target_path.exists():
+    elif target_path.is_dir():
         msg = f"{tgt_rel} is a real directory, skipping"
+        strategy = SyncStrategy.WARN
+        result.warnings.append(msg)
+    elif target_path.is_file():
+        msg = f"{tgt_rel} is a regular file, use force to overwrite"
         strategy = SyncStrategy.WARN
         result.warnings.append(msg)
     else:

@@ -37,7 +37,7 @@ _STRATEGY_STYLE: dict[SyncStrategy, str] = {
 
 def sync(
     from_tool: str | None = typer.Option(None, "--from", help="Source tool."),
-    to: list[str] = typer.Option([], "--to", help="Target tool(s). Repeat for multiple."),
+    to: list[str] | None = typer.Option(None, "--to", help="Target tool(s). Repeat for multiple."),
     all_tools: bool = typer.Option(False, "--all", help="Sync to all installed tools."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview sync plan without applying."),
     instructions: bool = typer.Option(False, "--instructions", help="Sync instructions only."),
@@ -60,6 +60,8 @@ def sync(
     # Determine config types to sync.
     if not any([instructions, skills, allowlist]):
         instructions = skills = allowlist = True
+
+    to = to or []
 
     if from_tool is None and not to and not all_tools:
         _wizard(root, instructions, skills, allowlist)
@@ -116,20 +118,20 @@ def _wizard(root: Path, sync_instr: bool, sync_sk: bool, sync_al: bool) -> None:
         raise typer.Exit(0)
     targets = [remaining[i] for i in selected_indices]
 
-    # Preview (dry run).
+    # Preview (dry run, force=False to surface conflicts as warnings).
     console.empty()
     result = _run_sync(
         source,
         targets,
         root,
         dry_run=True,
-        force=True,
+        force=False,
         sync_instructions=sync_instr,
         sync_skills=sync_sk,
         sync_allowlist=sync_al,
     )
 
-    if result.linked == 0 and result.converted == 0:
+    if result.linked == 0 and result.converted == 0 and not result.warnings:
         console.info("Nothing to sync.")
         raise typer.Exit(0)
 
@@ -139,7 +141,7 @@ def _wizard(root: Path, sync_instr: bool, sync_sk: bool, sync_al: bool) -> None:
         console.info("Cancelled.")
         raise typer.Exit(0)
 
-    # Execute.
+    # Execute with force=True — user has reviewed the plan and confirmed.
     console.empty()
     _run_sync(
         source,
