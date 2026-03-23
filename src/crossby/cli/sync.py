@@ -129,7 +129,7 @@ def _wizard(root: Path, sync_instr: bool, sync_sk: bool, sync_al: bool) -> None:
         sync_allowlist=sync_al,
     )
 
-    if not result.actions:
+    if result.linked == 0 and result.converted == 0:
         console.info("Nothing to sync.")
         raise typer.Exit(0)
 

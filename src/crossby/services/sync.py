@@ -8,6 +8,7 @@ import structlog
 
 from crossby.config.instructions import (
     INSTRUCTIONS_FILE,
+    UNSUPPORTED_TOOLS,
     get_instructions_source,
     get_instructions_target,
 )
@@ -20,9 +21,6 @@ logger = structlog.get_logger()
 
 # Tools that support persistent allowlist config files.
 _ALLOWLIST_TOOLS = frozenset({AIToolID.CLAUDE, AIToolID.CURSOR})
-
-# Tools with no instruction/skills/allowlist config at all.
-_UNSUPPORTED_TOOLS = frozenset({AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY})
 
 _ALLOWLIST_HINTS: dict[AIToolID, str] = {
     AIToolID.COPILOT: "Copilot uses --allow-tool flags, no persistent config",
@@ -84,7 +82,7 @@ def sync_configs(
         if target == from_tool:
             continue
 
-        if target in _UNSUPPORTED_TOOLS:
+        if target in UNSUPPORTED_TOOLS:
             msg = f"{target.value} has no instruction/skills/allowlist config"
             result.actions.append(
                 SyncAction(config_type="all", strategy=SyncStrategy.UNSUPPORTED, message=msg)
@@ -100,7 +98,6 @@ def sync_configs(
 
         if sync_allowlist and source_patterns:
             _convert_allowlist(source_patterns, from_tool, target, root, result, dry_run=dry_run)
-
 
     return result
 
@@ -156,8 +153,9 @@ def _link_instructions(
         strategy = SyncStrategy.WARN
         result.warnings.append(msg)
     else:
-        msg = f"{tgt_rel} -> {src_rel}"
-        strategy = SyncStrategy.LINK
+        msg = f"{tgt_rel} skipped (circular link guard)"
+        strategy = SyncStrategy.WARN
+        result.warnings.append(msg)
 
     result.actions.append(
         SyncAction(
@@ -216,8 +214,9 @@ def _link_skills(
         strategy = SyncStrategy.WARN
         result.warnings.append(msg)
     else:
-        msg = f"{tgt_rel} -> {src_rel}"
-        strategy = SyncStrategy.LINK
+        msg = f"{tgt_rel} skipped (circular link guard)"
+        strategy = SyncStrategy.WARN
+        result.warnings.append(msg)
 
     result.actions.append(
         SyncAction(
@@ -251,7 +250,11 @@ def _convert_allowlist(
         return
 
     if not dry_run:
-        _write_target_allowlist(target, root, patterns)
+        try:
+            _write_target_allowlist(target, root, patterns)
+        except OSError as exc:
+            _add_warn(result, "allowlist", f"Failed to write {target.value} allowlist: {exc}")
+            return
 
     result.converted += 1
     target_file = _allowlist_file(target, root)
@@ -294,4 +297,5 @@ def _allowlist_file(tool: AIToolID, root: Path) -> Path:
         return root / ".claude" / "settings.json"
     if tool == AIToolID.CURSOR:
         return root / ".cursor" / "cli.json"
-    return root / f".{tool.value}" / "settings.json"
+    msg = f"No allowlist file mapping for {tool.value}"
+    raise NotImplementedError(msg)

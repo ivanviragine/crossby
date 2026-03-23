@@ -15,7 +15,7 @@ INSTRUCTIONS_FILE: dict[AIToolID, str] = {
     AIToolID.CODEX: "AGENTS.md",
 }
 
-_UNSUPPORTED_TOOLS = {AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY}
+UNSUPPORTED_TOOLS = {AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY}
 
 
 def get_instructions_source(tool_id: AIToolID, root: Path) -> Path | None:
@@ -31,7 +31,7 @@ def get_instructions_source(tool_id: AIToolID, root: Path) -> Path | None:
 
 def get_instructions_target(tool_id: AIToolID, root: Path) -> Path | None:
     """Return where the instruction symlink should be placed for *tool_id*."""
-    if tool_id in _UNSUPPORTED_TOOLS:
+    if tool_id in UNSUPPORTED_TOOLS:
         return None
     rel = INSTRUCTIONS_FILE.get(tool_id)
     if rel is None:
@@ -41,4 +41,4 @@ def get_instructions_target(tool_id: AIToolID, root: Path) -> Path | None:
 
 def is_instructions_supported(tool_id: AIToolID) -> bool:
     """Return True if *tool_id* supports instruction files."""
-    return tool_id not in _UNSUPPORTED_TOOLS and tool_id in INSTRUCTIONS_FILE
+    return tool_id not in UNSUPPORTED_TOOLS and tool_id in INSTRUCTIONS_FILE
