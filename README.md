@@ -19,6 +19,12 @@ pip install crossby
 ## Quick Start
 
 ```bash
+# Sync configs from Claude to all other installed tools
+crossby sync --from claude --all
+
+# Sync configs interactively (wizard mode)
+crossby sync
+
 # Initialize config in your project
 crossby init
 
@@ -116,6 +122,45 @@ crossby convert "myapp:*" --from canonical --to gemini
 | Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
 
 Session IDs are extracted from transcripts automatically when `--transcript` is used.
+
+### Config Sync (`crossby sync`)
+
+Sync portable configs between AI tools — no `crossby init` required. Reads files directly from their standard locations.
+
+```bash
+# Interactive wizard — select source, targets, review plan, approve
+crossby sync
+
+# Direct mode — Claude to Cursor
+crossby sync --from claude --to cursor
+
+# Claude to all installed tools
+crossby sync --from claude --all
+
+# Preview without applying
+crossby sync --from claude --to cursor --dry-run
+
+# Sync only specific config types
+crossby sync --from claude --to cursor --instructions --skills
+```
+
+**What gets synced:**
+
+| Config Type | Strategy | Details |
+|---|---|---|
+| Instructions | Symlink | `CLAUDE.md` / `.cursorrules` / `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` |
+| Skills | Symlink | `.claude/skills/` / `.cursor/skills/` / `.gemini/skills/` / `.agents/skills/` / `.github/skills/` |
+| Allowlist | Convert | Claude `Bash()` <-> Cursor `Shell()` format translation |
+
+**What gets detected but can't be synced yet:**
+
+| Config Type | Reason |
+|---|---|
+| Hooks | Different schema per tool — not yet supported |
+| MCP servers | Claude-specific, no cross-tool equivalent |
+| Custom commands | Claude-specific slash commands |
+
+Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
 
 ### Transcript Parsing (`crossby stats`)
 

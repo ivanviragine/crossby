@@ -15,6 +15,29 @@ import structlog
 logger = structlog.get_logger()
 
 
+def read_allowlist(project_root: Path) -> list[str]:
+    """Read Claude allowlist and return canonical command patterns.
+
+    Only extracts ``Bash(…)`` entries — other permission patterns
+    (``Read``, ``Edit``, …) are tool-specific and not portable.
+    Returns ``[]`` if the file is missing or malformed.
+    """
+    settings_path = project_root / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return []
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            allow = raw.get("permissions", {}).get("allow", [])
+            if isinstance(allow, list):
+                return [
+                    p[5:-1]
+                    for p in allow
+                    if isinstance(p, str) and p.startswith("Bash(") and p.endswith(")")
+                ]
+    return []
+
+
 def canonical_to_claude(pattern: str) -> str:
     """Convert a canonical command pattern to Claude Code allowlist syntax.
 

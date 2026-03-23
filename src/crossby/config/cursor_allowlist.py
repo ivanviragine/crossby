@@ -36,6 +36,28 @@ def _config_path(project_root: Path | None) -> Path:
     return _GLOBAL_CONFIG_PATH
 
 
+def read_allowlist(project_root: Path) -> list[str]:
+    """Read Cursor allowlist and return canonical command patterns.
+
+    Only extracts ``Shell(…)`` entries.
+    Returns ``[]`` if the file is missing or malformed.
+    """
+    config_file = _config_path(project_root)
+    if not config_file.is_file():
+        return []
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            allow = raw.get("permissions", {}).get("allow", [])
+            if isinstance(allow, list):
+                return [
+                    p[6:-1]
+                    for p in allow
+                    if isinstance(p, str) and p.startswith("Shell(") and p.endswith(")")
+                ]
+    return []
+
+
 def canonical_to_cursor(pattern: str) -> str:
     """Convert a canonical command pattern to Cursor CLI allowlist syntax.
 
