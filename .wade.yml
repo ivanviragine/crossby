@@ -1,0 +1,34 @@
+version: 2
+project:
+  main_branch: main
+  issue_label: feature-plan
+  worktrees_dir: ../.worktrees
+  branch_prefix: feat
+  merge_strategy: PR
+ai:
+  default_tool: claude
+  default_model: claude-sonnet-4.6
+  effort: max
+  deps:
+    mode: headless
+  review_plan:
+    mode: headless
+    enabled: true
+  review_implementation:
+    mode: headless
+    enabled: true
+models:
+  claude:
+    easy: claude-haiku-4.5
+    medium: claude-sonnet-4.6
+    complex: claude-sonnet-4.6
+    very_complex: claude-opus-4.6
+provider:
+  name: github
+hooks:
+  copy_to_worktree:
+  - KNOWLEDGE.md
+  - .wade.yml
+knowledge:
+  enabled: true
+  path: KNOWLEDGE.md

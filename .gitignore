@@ -18,3 +18,4 @@ htmlcov/
 *.log
 .commit-msg
 .crossby.yml
+PR-SUMMARY.md
