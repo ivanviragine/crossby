@@ -72,14 +72,18 @@ def sync(
     if sync_tool is None:
         installed_tools = AbstractAITool.detect_installed()
 
-    results = run_sync(
-        config,
-        project_root,
-        tool_id=sync_tool,
-        concern=sync_concern,
-        dry_run=dry_run,
-        installed_tools=installed_tools,
-    )
+    try:
+        results = run_sync(
+            config,
+            project_root,
+            tool_id=sync_tool,
+            concern=sync_concern,
+            dry_run=dry_run,
+            installed_tools=installed_tools,
+        )
+    except ValueError as e:
+        console.error(str(e))
+        raise typer.Exit(1)
 
     if not results:
         console.info("No sync writers matched the given filters.")

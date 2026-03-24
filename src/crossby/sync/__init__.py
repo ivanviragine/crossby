@@ -57,7 +57,12 @@ def run_sync(
         # Apply sync.tools config filter (empty list = all installed tools).
         config_tools = config.sync.tools if config.sync.tools else None
         if config_tools:
-            allowed = {AIToolID(t) for t in config_tools}
+            try:
+                allowed = {AIToolID(t) for t in config_tools}
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid tool ID in config.sync.tools: {exc}"
+                ) from exc
             installed_tools = [t for t in installed_tools if t in allowed]
 
         writers = [w for w in writers if w.tool_id in installed_tools]

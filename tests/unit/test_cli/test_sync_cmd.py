@@ -68,25 +68,22 @@ class TestSyncCommandPermissions:
         self, project_with_config: Path
     ) -> None:
         """crossby sync (no concern) runs all writers for installed tools."""
-        import crossby.ai_tools.base as _base
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                ["sync", "--path", str(project_with_config)],
+            )
 
-        installed = []
-        import shutil
+        assert result.exit_code == 0, result.output
 
-        for tid, cls in _base.AbstractAITool._registry.items():
-            adapter = cls()
-            if shutil.which(adapter.capabilities().binary):
-                installed.append(tid)
-
-        if not installed:
-            pytest.skip("No AI tools installed on this system")
-
-        result = runner.invoke(
-            app,
-            ["sync", "--path", str(project_with_config)],
-        )
-        # Should succeed (exit 0) even if no installed tools match writers
-        assert result.exit_code in (0, 1)
+        claude_settings = project_with_config / ".claude" / "settings.json"
+        cursor_config = project_with_config / ".cursor" / "cli.json"
+        assert claude_settings.exists()
+        assert cursor_config.exists()
 
     def test_sync_unknown_concern_exits_1(self, project_with_config: Path) -> None:
         result = runner.invoke(

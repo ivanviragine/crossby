@@ -86,7 +86,10 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         with contextlib.suppress(json.JSONDecodeError, OSError):
             raw = json.loads(settings_path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                allow = raw.get("permissions", {}).get("allow", [])
+                permissions = raw.get("permissions")
+                if not isinstance(permissions, dict):
+                    return False
+                allow = permissions.get("allow", [])
                 if not isinstance(allow, list):
                     return False
                 claude_patterns = [canonical_to_claude(p) for p in patterns]
@@ -213,7 +216,10 @@ class CursorPermissionWriter(AbstractSyncWriter):
         with contextlib.suppress(json.JSONDecodeError, OSError):
             raw = json.loads(config_file.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                allow = raw.get("permissions", {}).get("allow", [])
+                permissions = raw.get("permissions")
+                if not isinstance(permissions, dict):
+                    return False
+                allow = permissions.get("allow", [])
                 if not isinstance(allow, list):
                     return False
                 cursor_patterns = [canonical_to_cursor(p) for p in patterns]

@@ -49,7 +49,14 @@ def launch(
     if config.sync.auto:
         from crossby.sync import run_sync
 
-        run_sync(config, work_dir)
+        try:
+            sync_results = run_sync(config, work_dir)
+        except ValueError as e:
+            console.error(f"Sync config error: {e}")
+        else:
+            for result in sync_results:
+                if result.action == "error":
+                    console.error(f"Sync error: {result.message}")
 
     # Resolve AI selection
     resolved_tool = resolve_ai_tool(tool, config, command or "default")
