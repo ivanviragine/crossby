@@ -6,10 +6,8 @@ from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
 
-import pytest
-
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, PermissionsConfig, SyncConfig
+from crossby.models.config import CrossbyConfig, SyncConfig
 from crossby.sync import run_sync
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncRegistry, SyncResult
 

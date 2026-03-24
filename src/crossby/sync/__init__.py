@@ -33,8 +33,11 @@ def run_sync(
     Args:
         config: Loaded CrossbyConfig.
         project_root: Project root directory.
-        tool_id: When set, only writers for this tool run.  When None, all
-            installed tools run (subject to ``config.sync.tools`` filter).
+        tool_id: When set, only writers for this tool run, and the
+            installed-tools filter is bypassed (useful for forcing a sync on a
+            specific tool regardless of whether it is currently detected as
+            installed).  When None, all installed tools run (subject to the
+            ``config.sync.tools`` filter).
         concern: When set, only writers for this concern run.
         dry_run: Compute results without writing any files.
         installed_tools: Override the installed-tools list.  Detected

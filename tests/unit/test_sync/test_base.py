@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, PermissionsConfig
+from crossby.models.config import CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncRegistry, SyncResult
 
 
