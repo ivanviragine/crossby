@@ -23,6 +23,13 @@ Matches the .crossby.yml format:
       allowed_commands:
         - "myapp:*"
         - "./scripts/check.sh:*"
+    agents:
+      source: .crossby/agents
+      strategy: symlink
+      gitignore: true
+      targets:
+        claude: true
+        copilot: true
 """
 
 from __future__ import annotations
@@ -83,6 +90,24 @@ class SyncConfig(BaseModel):
     tools: list[str] = []
 
 
+class AgentsConfig(BaseModel):
+    """Agents sync configuration (``agents:`` section in .crossby.yml).
+
+    ``enabled``: True when an ``agents:`` section exists in ``.crossby.yml``.
+        Writers skip when False (no agents section → nothing to sync).
+    ``source``: canonical agent directory (default: ``.crossby/agents``).
+    ``strategy``: ``"symlink"`` (default) or ``"copy"``.
+    ``gitignore``: manage .gitignore entries for generated dirs (default: true).
+    ``targets``: dict of ``{tool_id: bool}`` — empty dict means all installed tools.
+    """
+
+    enabled: bool = False
+    source: str = ".crossby/agents"
+    strategy: str = "symlink"
+    gitignore: bool = True
+    targets: dict[str, bool] = {}
+
+
 class CrossbyConfig(BaseModel):
     """Full configuration from .crossby.yml.
 
@@ -96,6 +121,7 @@ class CrossbyConfig(BaseModel):
     models: dict[str, ComplexityModelMapping] = {}
     permissions: PermissionsConfig = PermissionsConfig()
     sync: SyncConfig = SyncConfig()
+    agents: AgentsConfig = AgentsConfig()
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)

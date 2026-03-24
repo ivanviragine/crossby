@@ -1,0 +1,527 @@
+"""Tests for agent sync writers."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from crossby.models.ai import AIToolID
+from crossby.models.config import AgentsConfig, CrossbyConfig
+from crossby.sync.agents import (
+    CopilotAgentsWriter,
+    ClaudeAgentsWriter,
+    CodexAgentsWriter,
+    CursorAgentsWriter,
+    GeminiAgentsWriter,
+    _create_dir_symlink,
+    _parse_frontmatter,
+    _render_frontmatter,
+    _translate_tools,
+    update_agents_gitignore,
+    _BLOCK_END,
+    _BLOCK_START,
+)
+from crossby.sync.base import SyncConcern
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _config(
+    source: str = ".crossby/agents",
+    strategy: str = "symlink",
+    gitignore: bool = True,
+    targets: dict[str, bool] | None = None,
+) -> CrossbyConfig:
+    return CrossbyConfig(
+        agents=AgentsConfig(
+            enabled=True,
+            source=source,
+            strategy=strategy,
+            gitignore=gitignore,
+            targets=targets or {},
+        )
+    )
+
+
+def _make_source(tmp_path: Path, agents: list[str] | None = None) -> Path:
+    """Create a .crossby/agents source dir with optional agent files."""
+    source = tmp_path / ".crossby" / "agents"
+    source.mkdir(parents=True)
+    for name in agents or []:
+        (source / name).write_text(
+            f"---\nname: {name.removesuffix('.md')}\ndescription: test\n---\nBody.\n",
+            encoding="utf-8",
+        )
+    return source
+
+
+# ---------------------------------------------------------------------------
+# _create_dir_symlink
+# ---------------------------------------------------------------------------
+
+
+class TestCreateDirSymlink:
+    def test_creates_relative_symlink(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        link = tmp_path / "sub" / "link"
+        created = _create_dir_symlink(source, link, dry_run=False)
+        assert created is True
+        assert link.is_symlink()
+        # Symlink target must be relative
+        assert not os.path.isabs(os.readlink(link))
+        assert link.resolve() == source.resolve()
+
+    def test_idempotent_correct_symlink(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        link = tmp_path / "link"
+        _create_dir_symlink(source, link, dry_run=False)
+        created = _create_dir_symlink(source, link, dry_run=False)
+        assert created is False  # already correct
+
+    def test_dry_run_does_not_create(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        link = tmp_path / "link"
+        created = _create_dir_symlink(source, link, dry_run=True)
+        assert created is True
+        assert not link.exists()
+
+    def test_wrong_target_updated(self, tmp_path: Path) -> None:
+        source_a = tmp_path / "a"
+        source_b = tmp_path / "b"
+        source_a.mkdir()
+        source_b.mkdir()
+        link = tmp_path / "link"
+        os.symlink(os.path.relpath(source_a, tmp_path), link)
+        # Now change to source_b
+        created = _create_dir_symlink(source_b, link, dry_run=False)
+        assert created is True
+        assert link.resolve() == source_b.resolve()
+
+    def test_existing_real_path_skipped(self, tmp_path: Path) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        link = tmp_path / "link"
+        link.mkdir()  # real dir
+        created = _create_dir_symlink(source, link, dry_run=False)
+        assert created is False  # skipped — not our job to remove real dirs
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter helpers
+# ---------------------------------------------------------------------------
+
+
+class TestParseFrontmatter:
+    def test_parses_valid_frontmatter(self) -> None:
+        content = "---\nname: foo\ndescription: bar\n---\nBody text.\n"
+        fm, body = _parse_frontmatter(content)
+        assert fm == {"name": "foo", "description": "bar"}
+        assert body == "Body text.\n"
+
+    def test_no_frontmatter(self) -> None:
+        content = "Just some text."
+        fm, body = _parse_frontmatter(content)
+        assert fm == {}
+        assert body == "Just some text."
+
+    def test_roundtrip(self) -> None:
+        fm = {"name": "test", "tools": ["Read", "Bash"]}
+        body = "Hello world.\n"
+        rendered = _render_frontmatter(fm, body)
+        fm2, body2 = _parse_frontmatter(rendered)
+        assert fm2 == fm
+        assert body2 == body
+
+
+class TestTranslateTools:
+    def test_copilot_translation(self) -> None:
+        tools = ["Read", "Bash", "Grep", "Unknown"]
+        result = _translate_tools(tools, "copilot")
+        assert result == ["read", "shell", "search", "Unknown"]
+
+    def test_cursor_translation(self) -> None:
+        tools = ["Read", "Bash", "Grep"]
+        result = _translate_tools(tools, "cursor")
+        assert result == ["Read", "Shell", "Grep"]
+
+    def test_claude_no_translation(self) -> None:
+        tools = ["Read", "Bash", "Grep"]
+        assert _translate_tools(tools, "claude") == tools
+
+    def test_codex_no_translation(self) -> None:
+        tools = ["WebSearch", "WebFetch"]
+        assert _translate_tools(tools, "codex") == tools
+
+
+# ---------------------------------------------------------------------------
+# Directory symlink strategy (non-Copilot writers)
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeAgentsWriter:
+    def test_creates_symlink(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["reviewer.md"])
+        w = ClaudeAgentsWriter()
+        config = _config(source=".crossby/agents")
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+        link = tmp_path / ".claude" / "agents"
+        assert link.is_symlink()
+        assert link.resolve() == (tmp_path / ".crossby" / "agents").resolve()
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path)
+        result = w.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "already linked"
+
+    def test_missing_source_is_error(self, tmp_path: Path) -> None:
+        w = ClaudeAgentsWriter()
+        config = _config(source=".crossby/agents")
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "source directory not found" in (result.message or "")
+
+    def test_existing_real_dir_is_error_without_force(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "--force" in (result.message or "")
+
+    def test_force_backs_up_and_replaces(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / "old.md").write_text("old", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path, force=True)
+        assert result.action == "created"
+        assert target.is_symlink()
+        backup = Path(str(target) + ".bak")
+        assert backup.is_dir()
+        assert (backup / "old.md").exists()
+
+    def test_dry_run_no_files_written(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path, dry_run=True)
+        assert result.action == "created"
+        assert not (tmp_path / ".claude" / "agents").exists()
+
+    def test_not_in_targets_skipped(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        config = _config(targets={"cursor": True, "copilot": True})
+        result = w.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "not in targets"
+
+    def test_in_targets_runs(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        config = _config(targets={"claude": True})
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+
+
+class TestRelativeSymlinkPaths:
+    """Verify symlink targets are relative, not absolute."""
+
+    @pytest.mark.parametrize(
+        "writer_cls, target_rel",
+        [
+            (ClaudeAgentsWriter, ".claude/agents"),
+            (CursorAgentsWriter, ".cursor/agents"),
+            (GeminiAgentsWriter, ".gemini/agents"),
+            (CodexAgentsWriter, ".agents"),
+        ],
+    )
+    def test_symlink_is_relative(
+        self, tmp_path: Path, writer_cls: type, target_rel: str
+    ) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = writer_cls()
+        config = _config()
+        w.sync(config, tmp_path)
+        link = tmp_path / target_rel
+        assert link.is_symlink()
+        assert not os.path.isabs(os.readlink(link)), "symlink target must be relative"
+
+
+# ---------------------------------------------------------------------------
+# Copy strategy
+# ---------------------------------------------------------------------------
+
+
+class TestCopyStrategy:
+    def test_copy_creates_files(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["reviewer.md"])
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+        target = tmp_path / ".claude" / "agents" / "reviewer.md"
+        assert target.is_file()
+        assert not target.is_symlink()
+
+    def test_copy_translates_tool_names_copilot(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path)
+        agent_content = (
+            "---\nname: test\ndescription: d\ntools:\n  - Read\n  - Bash\n---\nBody.\n"
+        )
+        (source / "test.md").write_text(agent_content, encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config(strategy="copy")
+        w.sync(config, tmp_path)
+        dest = tmp_path / ".github" / "agents" / "test.agent.md"
+        content = dest.read_text(encoding="utf-8")
+        assert "read" in content
+        assert "shell" in content
+        assert "Read" not in content
+        assert "Bash" not in content
+
+    def test_copy_no_translation_for_claude(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path)
+        agent_content = "---\nname: t\ndescription: d\ntools:\n  - Read\n  - Bash\n---\nBody.\n"
+        (source / "t.md").write_text(agent_content, encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        w.sync(config, tmp_path)
+        dest = tmp_path / ".claude" / "agents" / "t.md"
+        content = dest.read_text(encoding="utf-8")
+        assert "Read" in content
+        assert "Bash" in content
+
+
+# ---------------------------------------------------------------------------
+# Copilot writer (file-level symlinks)
+# ---------------------------------------------------------------------------
+
+
+class TestCopilotAgentsWriter:
+    def test_creates_agent_md_symlinks(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["reviewer.md", "tester.md"])
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+        target_dir = tmp_path / ".github" / "agents"
+        assert (target_dir / "reviewer.agent.md").is_symlink()
+        assert (target_dir / "tester.agent.md").is_symlink()
+        assert not (target_dir / "reviewer.md").exists()
+
+    def test_symlinks_are_relative(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = CopilotAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path)
+        link = tmp_path / ".github" / "agents" / "a.agent.md"
+        assert not os.path.isabs(os.readlink(link))
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = CopilotAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path)
+        result = w.sync(config, tmp_path)
+        assert result.action == "skipped"
+
+    def test_stale_cleanup(self, tmp_path: Path) -> None:
+        """Stale .agent.md symlinks are removed when source file is deleted."""
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path)
+        # Remove old.md from source
+        (source / "old.md").unlink()
+        # Re-sync
+        w.sync(config, tmp_path)
+        target_dir = tmp_path / ".github" / "agents"
+        assert not (target_dir / "old.agent.md").exists()
+        assert (target_dir / "a.agent.md").is_symlink()
+
+    def test_missing_source_is_error(self, tmp_path: Path) -> None:
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+
+    def test_copy_strategy_uses_agent_md_extension(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["foo.md"])
+        w = CopilotAgentsWriter()
+        config = _config(strategy="copy")
+        w.sync(config, tmp_path)
+        dest = tmp_path / ".github" / "agents" / "foo.agent.md"
+        assert dest.is_file()
+        assert not dest.is_symlink()
+
+    def test_existing_real_dir_with_unmanaged_content_is_error(self, tmp_path: Path) -> None:
+        """A pre-existing directory with non-.agent.md files blocks sync (needs --force)."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".github" / "agents"
+        target.mkdir(parents=True)
+        (target / "existing.md").write_text("user content", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "--force" in (result.message or "")
+
+    def test_force_works_with_unmanaged_content(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".github" / "agents"
+        target.mkdir(parents=True)
+        (target / "existing.md").write_text("user content", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path, force=True)
+        assert result.action == "created"
+        assert (target / "a.agent.md").is_symlink()
+
+
+# ---------------------------------------------------------------------------
+# Gitignore managed block
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateAgentsGitignore:
+    def test_creates_block_when_missing(self, tmp_path: Path) -> None:
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is not None
+        assert result.action in ("created", "updated")
+        content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert _BLOCK_START in content
+        assert ".claude/agents" in content
+        assert _BLOCK_END in content
+
+    def test_appends_to_existing_gitignore(self, tmp_path: Path) -> None:
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("*.pyc\n__pycache__\n", encoding="utf-8")
+        config = _config()
+        update_agents_gitignore(config, tmp_path)
+        content = gitignore.read_text(encoding="utf-8")
+        assert "*.pyc" in content
+        assert _BLOCK_START in content
+
+    def test_replaces_existing_block(self, tmp_path: Path) -> None:
+        gitignore = tmp_path / ".gitignore"
+        old_block = f"{_BLOCK_START}\n.old/agents\n{_BLOCK_END}\n"
+        gitignore.write_text(old_block, encoding="utf-8")
+        config = _config()
+        update_agents_gitignore(config, tmp_path)
+        content = gitignore.read_text(encoding="utf-8")
+        assert ".old/agents" not in content
+        assert ".claude/agents" in content
+        # Only one block
+        assert content.count(_BLOCK_START) == 1
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        config = _config()
+        update_agents_gitignore(config, tmp_path)
+        content_before = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is None  # No change
+        content_after = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert content_before == content_after
+
+    def test_targets_filter_entries(self, tmp_path: Path) -> None:
+        config = _config(targets={"claude": True, "cursor": True})
+        update_agents_gitignore(config, tmp_path)
+        content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert ".claude/agents" in content
+        assert ".cursor/agents" in content
+        assert ".github/agents" not in content
+        assert ".gemini/agents" not in content
+
+    def test_gitignore_false_does_nothing(self, tmp_path: Path) -> None:
+        config = _config(gitignore=False)
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is None
+        assert not (tmp_path / ".gitignore").exists()
+
+    def test_dry_run_no_write(self, tmp_path: Path) -> None:
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path, dry_run=True)
+        assert result is not None
+        assert not (tmp_path / ".gitignore").exists()
+
+
+# ---------------------------------------------------------------------------
+# Integration: run_sync with agents concern
+# ---------------------------------------------------------------------------
+
+
+class TestRunSyncAgents:
+    def test_full_sync_all_tools(self, tmp_path: Path) -> None:
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncRegistry
+        from crossby.sync.agents import (
+            ClaudeAgentsWriter,
+            CopilotAgentsWriter,
+            CursorAgentsWriter,
+        )
+
+        _make_source(tmp_path, ["a.md"])
+        reg = SyncRegistry()
+        reg.register(ClaudeAgentsWriter())
+        reg.register(CopilotAgentsWriter())
+        reg.register(CursorAgentsWriter())
+
+        config = _config()
+        results = run_sync(
+            config,
+            tmp_path,
+            tool_id=None,
+            concern=SyncConcern.AGENTS,
+            installed_tools=[AIToolID.CLAUDE, AIToolID.COPILOT, AIToolID.CURSOR],
+            registry=reg,
+        )
+
+        tool_ids = [r.tool_id for r in results]
+        assert AIToolID.CLAUDE in tool_ids
+        assert AIToolID.COPILOT in tool_ids
+        assert AIToolID.CURSOR in tool_ids
+
+        # Gitignore should have been updated
+        assert (tmp_path / ".gitignore").exists()
+        content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert _BLOCK_START in content
+
+    def test_dry_run_no_files_written(self, tmp_path: Path) -> None:
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncRegistry
+
+        _make_source(tmp_path, ["a.md"])
+        reg = SyncRegistry()
+        reg.register(ClaudeAgentsWriter())
+
+        config = _config()
+        run_sync(
+            config,
+            tmp_path,
+            concern=SyncConcern.AGENTS,
+            installed_tools=[AIToolID.CLAUDE],
+            dry_run=True,
+            registry=reg,
+        )
+
+        assert not (tmp_path / ".claude" / "agents").exists()
+        assert not (tmp_path / ".gitignore").exists()

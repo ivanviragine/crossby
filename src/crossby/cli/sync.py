@@ -20,6 +20,9 @@ def sync(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview changes without writing any files."
     ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite existing target directories (backs up first)."
+    ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
     """Sync .crossby.yml config to tool-specific files.
@@ -79,6 +82,7 @@ def sync(
             tool_id=sync_tool,
             concern=sync_concern,
             dry_run=dry_run,
+            force=force,
             installed_tools=installed_tools,
         )
     except ValueError as e:

@@ -140,6 +140,7 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         project_root: Path,
         *,
         dry_run: bool = False,
+        force: bool = False,
     ) -> SyncResult:
         patterns = config.permissions.allowed_commands
         if not patterns:
@@ -276,6 +277,7 @@ class CursorPermissionWriter(AbstractSyncWriter):
         project_root: Path,
         *,
         dry_run: bool = False,
+        force: bool = False,
     ) -> SyncResult:
         patterns = config.permissions.allowed_commands
         if not patterns:

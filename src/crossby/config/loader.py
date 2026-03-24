@@ -9,6 +9,7 @@ import yaml
 
 from crossby.models.config import (
     AIConfig,
+    AgentsConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
@@ -155,12 +156,32 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         tools=sync_raw.get("tools", []),
     )
 
+    # Parse agents section
+    agents_raw = raw.get("agents")
+    if agents_raw is None:
+        agents_raw = {}
+    if not isinstance(agents_raw, dict):
+        raise ConfigError("'agents' must be a mapping")
+    agents_targets_raw = agents_raw.get("targets")
+    if agents_targets_raw is None:
+        agents_targets_raw = {}
+    if not isinstance(agents_targets_raw, dict):
+        raise ConfigError("'agents.targets' must be a mapping")
+    agents = AgentsConfig(
+        enabled=bool(raw.get("agents")),  # True when an agents: section exists
+        source=agents_raw.get("source", ".crossby/agents"),
+        strategy=agents_raw.get("strategy", "symlink"),
+        gitignore=agents_raw.get("gitignore", True),
+        targets={str(k): bool(v) for k, v in agents_targets_raw.items()},
+    )
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
         sync=sync,
+        agents=agents,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )

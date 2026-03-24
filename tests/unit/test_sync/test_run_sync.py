@@ -32,7 +32,12 @@ def _make_writer(
             self.calls: list[bool] = []
 
         def sync(
-            self, config: CrossbyConfig, project_root: Path, *, dry_run: bool = False
+            self,
+            config: CrossbyConfig,
+            project_root: Path,
+            *,
+            dry_run: bool = False,
+            force: bool = False,
         ) -> SyncResult:
             self.calls.append(dry_run)
             if raises is not None:
