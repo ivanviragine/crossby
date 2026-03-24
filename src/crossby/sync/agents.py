@@ -238,6 +238,13 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 action="error",
                 message=f"source directory not found: {agents_cfg.source}",
             )
+        if not source_dir.is_dir():
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=f"source path is not a directory: {agents_cfg.source}",
+            )
 
         target_dir = project_root / self._target_rel
 
@@ -245,13 +252,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         dir_was_cleared = False
         if target_dir.is_dir() and not target_dir.is_symlink():
             if not force:
-                if agents_cfg.strategy == "copy":
-                    # Copy strategy is always re-entrant; proceed directly.
-                    return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
-                # Symlink strategy: check if it's a managed fallback directory
-                # (non-empty, only .md files = previously synced via copy fallback).
+                # Check if it's a managed fallback directory
+                # (empty, or only .md files = previously synced via copy fallback).
                 contents = list(target_dir.iterdir())
-                is_managed_fallback = contents and all(f.suffix == ".md" for f in contents)
+                is_managed_fallback = not contents or all(f.suffix == ".md" for f in contents)
                 if not is_managed_fallback:
                     return SyncResult(
                         tool_id=self.tool_id,
@@ -260,11 +264,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                         message=(
                             f"{self._target_rel} exists as a directory. "
                             f"Migrate its contents to {agents_cfg.source} first, "
-                            "or use --force to replace it."
+                            "or use --force to back it up and replace it."
                         ),
                     )
-                # Managed fallback directory: symlinks likely not supported here,
-                # continue syncing via copy for re-entrancy.
+                # Managed fallback directory: proceed with copy for re-entrancy.
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             dir_was_cleared = True
             if not dry_run:
@@ -445,13 +448,37 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 action="error",
                 message=f"source directory not found: {agents_cfg.source}",
             )
+        if not source_dir.is_dir():
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=f"source path is not a directory: {agents_cfg.source}",
+            )
 
         target_dir = project_root / self._target_rel
 
+        # If the target exists as a symlink, error by default to avoid writing into the
+        # symlink target (which may be outside the project). With --force, replace the
+        # symlink with a real directory under the project root.
+        if target_dir.is_symlink():
+            if not force:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=(
+                        f"{self._target_rel} exists as a symlink. Remove it or use --force "
+                        "to replace it with a real directory before syncing agents."
+                    ),
+                )
+            if not dry_run:
+                target_dir.unlink()
+                logger.info("agents.symlink_replaced", path=str(target_dir))
         # For Copilot, the target is always a real directory containing per-file symlinks.
         # Error if an UNMANAGED real directory exists (has non-agent.md content) unless
         # force is set.  Managed content (prior sync) is always re-entrant.
-        if target_dir.is_dir() and not target_dir.is_symlink():
+        elif target_dir.is_dir():
             has_unmanaged = any(
                 f for f in target_dir.iterdir() if not f.name.endswith(".agent.md")
             )
@@ -489,8 +516,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         self, source_dir: Path, target_dir: Path, *, dry_run: bool, force: bool
     ) -> SyncResult:
         """Create/update per-file .agent.md symlinks; clean up stale ones."""
+        dir_newly_created = False
         if not dry_run:
-            target_dir.mkdir(parents=True, exist_ok=True)
+            if not target_dir.is_dir():
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dir_newly_created = True
 
         source_stems = {f.stem for f in source_dir.glob("*.md")}
 
@@ -517,7 +547,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                     _copy_agent_file(src, link, "copilot")
                     created_count += 1
 
-        if created_count == 0:
+        if created_count == 0 and not dir_newly_created:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,

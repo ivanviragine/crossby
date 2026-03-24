@@ -197,11 +197,34 @@ class TestClaudeAgentsWriter:
         _make_source(tmp_path, ["a.md"])
         target = tmp_path / ".claude" / "agents"
         target.mkdir(parents=True)
+        (target / "unmanaged.txt").write_text("user content", encoding="utf-8")
         w = ClaudeAgentsWriter()
         config = _config()
         result = w.sync(config, tmp_path)
         assert result.action == "error"
         assert "--force" in (result.message or "")
+
+    def test_empty_target_dir_is_managed_fallback(self, tmp_path: Path) -> None:
+        """An empty target directory is treated as a managed fallback — proceed with copy."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+        assert (target / "a.md").is_file()
+
+    def test_source_is_file_is_error(self, tmp_path: Path) -> None:
+        """Source path that exists as a file (not a directory) returns an error."""
+        source = tmp_path / ".crossby" / "agents"
+        source.parent.mkdir(parents=True)
+        source.write_text("not a directory", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "not a directory" in (result.message or "")
 
     def test_force_backs_up_and_replaces(self, tmp_path: Path) -> None:
         _make_source(tmp_path, ["a.md"])
@@ -346,6 +369,29 @@ class TestCopyStrategy:
         assert "Read" in content
         assert "Bash" in content
 
+    def test_copy_errors_on_unmanaged_directory(self, tmp_path: Path) -> None:
+        """Copy strategy also errors when target has unmanaged (non-.md) content."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / "unmanaged.txt").write_text("user content", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "--force" in (result.message or "")
+
+    def test_copy_handles_managed_directory(self, tmp_path: Path) -> None:
+        """Copy strategy is re-entrant when target contains only .md files."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / "a.md").write_text("old content", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        result = w.sync(config, tmp_path)
+        assert result.action == "created"
+
 
 # ---------------------------------------------------------------------------
 # Copilot writer (file-level symlinks)
@@ -460,6 +506,46 @@ class TestCopilotAgentsWriter:
         result = w.sync(config, tmp_path, force=False)
         assert result.action == "skipped"  # no new symlinks created
         assert link.resolve() == other.resolve()  # still points to "other"
+
+    def test_source_is_file_is_error(self, tmp_path: Path) -> None:
+        """Source path that exists as a file (not a directory) returns an error."""
+        source = tmp_path / ".crossby" / "agents"
+        source.parent.mkdir(parents=True)
+        source.write_text("not a directory", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "not a directory" in (result.message or "")
+
+    def test_target_symlink_is_error_without_force(self, tmp_path: Path) -> None:
+        """A symlink at the target directory path errors without --force."""
+        _make_source(tmp_path, ["a.md"])
+        target_dir = tmp_path / ".github" / "agents"
+        target_dir.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target_dir.parent), target_dir)
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
+
+    def test_target_symlink_replaced_with_force(self, tmp_path: Path) -> None:
+        """With --force, a symlink at the target path is replaced with a real directory."""
+        _make_source(tmp_path, ["a.md"])
+        target_dir = tmp_path / ".github" / "agents"
+        target_dir.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target_dir.parent), target_dir)
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path, force=True)
+        assert result.action == "created"
+        assert not target_dir.is_symlink()
+        assert (target_dir / "a.agent.md").exists()
 
 
 # ---------------------------------------------------------------------------
