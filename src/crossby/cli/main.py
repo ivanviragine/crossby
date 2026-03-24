@@ -39,9 +39,11 @@ from crossby.cli.convert import convert  # noqa: E402
 from crossby.cli.init import init  # noqa: E402
 from crossby.cli.launch import launch  # noqa: E402
 from crossby.cli.stats import stats  # noqa: E402
+from crossby.cli.sync import sync  # noqa: E402
 
 app.command()(init)
 app.command()(launch)
+app.command()(sync)
 app.command()(convert)
 app.command()(stats)
 app.add_typer(config_app, name="config")

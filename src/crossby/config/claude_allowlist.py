@@ -2,6 +2,10 @@
 
 Configures the Claude Code permission allowlist to include project commands
 and scripts, so agents can run them without manual approval.
+
+Backward-compatible shim — allowlist logic lives in
+``crossby.sync.permissions.ClaudePermissionWriter``.  This module preserves
+the original public API for existing callers (e.g. wade).
 """
 
 from __future__ import annotations
@@ -12,22 +16,44 @@ from pathlib import Path
 
 import structlog
 
+from crossby.sync.permissions import (
+    ClaudePermissionWriter,
+    canonical_to_claude,
+)
+
 logger = structlog.get_logger()
 
+# Re-export for callers that import canonical_to_claude from here.
+__all__ = [
+    "canonical_to_claude",
+    "configure_allowlist",
+    "configure_plan_hooks",
+    "is_allowlist_configured",
+    "read_allowlist",
+]
 
-def canonical_to_claude(pattern: str) -> str:
-    """Convert a canonical command pattern to Claude Code allowlist syntax.
 
-    Canonical patterns use ``"cmd:args"`` notation (colon-separated).
-    Claude expects ``"Bash(cmd:args)"`` — the command string wrapped in ``Bash(…)``.
+def read_allowlist(project_root: Path) -> list[str]:
+    """Read Claude allowlist and return canonical command patterns.
 
-    Examples::
-
-        "myapp:*"                 → "Bash(myapp:*)"
-        "./scripts/check.sh:*"    → "Bash(./scripts/check.sh:*)"
-        "./scripts/check.sh"      → "Bash(./scripts/check.sh)"
+    Only extracts ``Bash(…)`` entries — other permission patterns
+    (``Read``, ``Edit``, …) are tool-specific and not portable.
+    Returns ``[]`` if the file is missing or malformed.
     """
-    return f"Bash({pattern})"
+    settings_path = project_root / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return []
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            allow = raw.get("permissions", {}).get("allow", [])
+            if isinstance(allow, list):
+                return [
+                    p[5:-1]
+                    for p in allow
+                    if isinstance(p, str) and p.startswith("Bash(") and p.endswith(")")
+                ]
+    return []
 
 
 def is_allowlist_configured(project_root: Path, patterns: list[str]) -> bool:
@@ -37,18 +63,7 @@ def is_allowlist_configured(project_root: Path, patterns: list[str]) -> bool:
         project_root: Project directory containing ``.claude/``.
         patterns: Canonical command patterns to check for.
     """
-    settings_path = project_root / ".claude" / "settings.json"
-    if not settings_path.is_file():
-        return False
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        raw = json.loads(settings_path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            allow = raw.get("permissions", {}).get("allow", [])
-            if not isinstance(allow, list):
-                return False
-            claude_patterns = [canonical_to_claude(p) for p in patterns]
-            return all(cp in allow for cp in claude_patterns)
-    return False
+    return ClaudePermissionWriter.check(project_root, patterns)
 
 
 def configure_allowlist(
@@ -66,44 +81,7 @@ def configure_allowlist(
     Idempotent — each pattern is added at most once.  Non-destructive
     merge with existing settings.
     """
-    settings_path = project_root / ".claude" / "settings.json"
-
-    existing: dict[str, object] = {}
-    if settings_path.is_file():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json.loads(settings_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = raw
-
-    permissions = existing.setdefault("permissions", {})
-    if not isinstance(permissions, dict):
-        permissions = {}
-        existing["permissions"] = permissions
-
-    allow_list = permissions.setdefault("allow", [])
-    if not isinstance(allow_list, list):
-        allow_list = []
-        permissions["allow"] = allow_list
-
-    changed = False
-
-    # Build the full set of Claude-syntax patterns to ensure
-    all_patterns = [canonical_to_claude(p) for p in patterns]
-
-    for pat in all_patterns:
-        if pat not in allow_list:
-            allow_list.append(pat)
-            changed = True
-
-    if not changed:
-        return  # All patterns already present
-
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        json.dumps(existing, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    logger.info("claude_allowlist.configured", path=str(settings_path))
+    ClaudePermissionWriter.write(project_root, patterns)
 
 
 def configure_plan_hooks(working_dir: Path, guard_script: Path) -> None:
