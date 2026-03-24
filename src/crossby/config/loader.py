@@ -151,8 +151,13 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         sync_raw = {}
     if not isinstance(sync_raw, dict):
         raise ConfigError("'sync' must be a mapping")
+    sync_auto = sync_raw.get("auto", True)
+    if not isinstance(sync_auto, bool):
+        raise ConfigError(
+            f"'sync.auto' must be a boolean (true/false), got {sync_auto!r}"
+        )
     sync = SyncConfig(
-        auto=sync_raw.get("auto", True),
+        auto=sync_auto,
         tools=sync_raw.get("tools", []),
     )
 
@@ -179,11 +184,16 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
                 f"'agents.targets.{k}' must be a boolean (true/false), got {v!r}"
             )
         targets[str(k)] = v
+    gitignore_raw = agents_raw.get("gitignore", True)
+    if not isinstance(gitignore_raw, bool):
+        raise ConfigError(
+            f"'agents.gitignore' must be a boolean (true/false), got {gitignore_raw!r}"
+        )
     agents = AgentsConfig(
         enabled="agents" in raw and raw.get("agents") is not None,
         source=agents_raw.get("source", ".crossby/agents"),
         strategy=strategy,
-        gitignore=agents_raw.get("gitignore", True),
+        gitignore=gitignore_raw,
         targets=targets,
     )
 

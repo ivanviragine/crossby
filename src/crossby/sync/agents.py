@@ -143,18 +143,23 @@ def _translate_tools(tools: list[str], tool_id: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_frontmatter(content: str) -> tuple[dict[str, object], str]:
-    """Split YAML frontmatter from markdown body.  Returns (fm_dict, body)."""
+def _parse_frontmatter(content: str) -> tuple[dict[str, object] | None, str]:
+    """Split YAML frontmatter from markdown body.
+
+    Returns (fm_dict, body) where fm_dict is None when frontmatter could not
+    be parsed (missing closing delimiter or invalid YAML).  Callers must treat
+    None as "unparsed" and avoid re-rendering frontmatter in that case.
+    """
     if not content.startswith("---\n"):
         return {}, content
     end = content.find("\n---\n", 4)
     if end == -1:
-        return {}, content
+        return None, content
     try:
         raw = yaml.safe_load(content[4:end])
         fm: dict[str, object] = raw if isinstance(raw, dict) else {}
     except yaml.YAMLError:
-        fm = {}
+        return None, content
     return fm, content[end + 5:]
 
 
@@ -167,18 +172,22 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
     """Copy one agent file to target, translating tool names."""
     content = source.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(content)
-    raw_tools = fm.get("tools")
-    if isinstance(raw_tools, list):
-        fm["tools"] = _translate_tools([str(t) for t in raw_tools], tool_id)
-    rendered = _render_frontmatter(fm, body)
+    if isinstance(fm, dict):
+        raw_tools = fm.get("tools")
+        if isinstance(raw_tools, list):
+            fm["tools"] = _translate_tools([str(t) for t in raw_tools], tool_id)
+        out = _render_frontmatter(fm, body)
+    else:
+        # Frontmatter could not be parsed — copy verbatim to avoid data loss
+        out = content
     if target.is_file():
         try:
-            if target.read_text(encoding="utf-8") == rendered:
+            if target.read_text(encoding="utf-8") == out:
                 return
         except OSError:
             pass
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(rendered, encoding="utf-8")
+    target.write_text(out, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +559,14 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             try:
                 if create_symlink(src, link, force=force, dry_run=dry_run):
                     created_count += 1
+                elif link.is_symlink() and link.resolve() != src.resolve():
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="error",
+                        file_path=link,
+                        message=f"{link.name} symlink points to a different location; use --force to replace",
+                    )
             except OSError:
                 # Fallback: copy the file
                 if not dry_run:

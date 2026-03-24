@@ -492,7 +492,7 @@ class TestCopilotAgentsWriter:
         assert (backup / "existing.md").exists()
 
     def test_force_false_does_not_overwrite_wrong_symlink(self, tmp_path: Path) -> None:
-        """Without --force, a wrong existing per-file symlink is left alone."""
+        """Without --force, a wrong existing per-file symlink returns an error."""
         source = _make_source(tmp_path, ["a.md"])
         other = tmp_path / "other.md"
         other.write_text("other", encoding="utf-8")
@@ -502,10 +502,10 @@ class TestCopilotAgentsWriter:
         os.symlink(os.path.relpath(other, target_dir), link)
         w = CopilotAgentsWriter()
         config = _config()
-        # force=False: wrong symlink is left alone (skipped)
         result = w.sync(config, tmp_path, force=False)
-        assert result.action == "skipped"  # no new symlinks created
-        assert link.resolve() == other.resolve()  # still points to "other"
+        assert result.action == "error"
+        assert "--force" in (result.message or "")
+        assert link.resolve() == other.resolve()  # symlink still points to "other"
 
     def test_source_is_file_is_error(self, tmp_path: Path) -> None:
         """Source path that exists as a file (not a directory) returns an error."""
