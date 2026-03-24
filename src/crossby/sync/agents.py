@@ -155,20 +155,15 @@ def _render_frontmatter(fm: dict[str, object], body: str) -> str:
     return f"---\n{yaml.dump(fm, default_flow_style=False, sort_keys=False)}---\n{body}"
 
 
-def _copy_agent_file(
-    source: Path, target: Path, tool_id: str, *, rename_ext: bool = False
-) -> None:
-    """Copy one agent file, translating tool names and optionally renaming extension."""
+def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
+    """Copy one agent file to target, translating tool names."""
     content = source.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(content)
     raw_tools = fm.get("tools")
     if isinstance(raw_tools, list):
         fm["tools"] = _translate_tools([str(t) for t in raw_tools], tool_id)
-    dest = target
-    if rename_ext:
-        dest = target.parent / target.name.replace(".md", ".agent.md")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(_render_frontmatter(fm, body), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_render_frontmatter(fm, body), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +171,7 @@ def _copy_agent_file(
 # ---------------------------------------------------------------------------
 
 
-def _create_dir_symlink(source: Path, link: Path, *, dry_run: bool) -> bool:
+def _create_symlink(source: Path, link: Path, *, dry_run: bool) -> bool:
     """Create a relative directory symlink.  Returns True if created/updated."""
     rel_target = os.path.relpath(source, link.parent)
 
@@ -268,6 +263,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         target_dir = project_root / self._target_rel
 
         # Existing real directory — error unless --force
+        dir_was_cleared = False
         if target_dir.is_dir() and not target_dir.is_symlink():
             if not force:
                 return SyncResult(
@@ -280,8 +276,11 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                         "or use --force to replace it."
                     ),
                 )
+            dir_was_cleared = True
             if not dry_run:
                 backup = Path(str(target_dir) + ".bak")
+                if backup.exists():
+                    shutil.rmtree(str(backup))
                 shutil.copytree(str(target_dir), str(backup))
                 shutil.rmtree(str(target_dir))
                 logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(backup))
@@ -289,13 +288,31 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         if agents_cfg.strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
 
-        return self._sync_symlink(source_dir, target_dir, dry_run=dry_run, force=force)
+        return self._sync_symlink(
+            source_dir, target_dir, dry_run=dry_run, force=force, dir_was_cleared=dir_was_cleared
+        )
 
     def _sync_symlink(
-        self, source_dir: Path, target_dir: Path, *, dry_run: bool, force: bool
+        self,
+        source_dir: Path,
+        target_dir: Path,
+        *,
+        dry_run: bool,
+        force: bool,
+        dir_was_cleared: bool = False,
     ) -> SyncResult:
+        # When force cleared a real directory (dry_run skips the removal), still
+        # report "created" — the symlink would succeed once the directory is gone.
+        if dir_was_cleared and dry_run:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="created",
+                file_path=target_dir,
+                message="(dry-run: would replace existing directory)",
+            )
         try:
-            created = _create_dir_symlink(source_dir, target_dir, dry_run=dry_run)
+            created = _create_symlink(source_dir, target_dir, dry_run=dry_run)
         except OSError as exc:
             logger.warning("agents.symlink_failed", tool=str(self.tool_id), error=str(exc))
             # Fallback: copy
@@ -488,7 +505,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         for src in source_dir.glob("*.md"):
             link = target_dir / f"{src.stem}.agent.md"
             try:
-                if _create_dir_symlink(src, link, dry_run=dry_run):
+                if _create_symlink(src, link, dry_run=dry_run):
                     created_count += 1
             except OSError:
                 # Fallback: copy the file

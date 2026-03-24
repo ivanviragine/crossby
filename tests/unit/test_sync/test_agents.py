@@ -15,7 +15,7 @@ from crossby.sync.agents import (
     CodexAgentsWriter,
     CursorAgentsWriter,
     GeminiAgentsWriter,
-    _create_dir_symlink,
+    _create_symlink,
     _parse_frontmatter,
     _render_frontmatter,
     _translate_tools,
@@ -61,7 +61,7 @@ def _make_source(tmp_path: Path, agents: list[str] | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _create_dir_symlink
+# _create_symlink
 # ---------------------------------------------------------------------------
 
 
@@ -70,7 +70,7 @@ class TestCreateDirSymlink:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "sub" / "link"
-        created = _create_dir_symlink(source, link, dry_run=False)
+        created = _create_symlink(source, link, dry_run=False)
         assert created is True
         assert link.is_symlink()
         # Symlink target must be relative
@@ -81,15 +81,15 @@ class TestCreateDirSymlink:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "link"
-        _create_dir_symlink(source, link, dry_run=False)
-        created = _create_dir_symlink(source, link, dry_run=False)
+        _create_symlink(source, link, dry_run=False)
+        created = _create_symlink(source, link, dry_run=False)
         assert created is False  # already correct
 
     def test_dry_run_does_not_create(self, tmp_path: Path) -> None:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "link"
-        created = _create_dir_symlink(source, link, dry_run=True)
+        created = _create_symlink(source, link, dry_run=True)
         assert created is True
         assert not link.exists()
 
@@ -101,7 +101,7 @@ class TestCreateDirSymlink:
         link = tmp_path / "link"
         os.symlink(os.path.relpath(source_a, tmp_path), link)
         # Now change to source_b
-        created = _create_dir_symlink(source_b, link, dry_run=False)
+        created = _create_symlink(source_b, link, dry_run=False)
         assert created is True
         assert link.resolve() == source_b.resolve()
 
@@ -110,7 +110,7 @@ class TestCreateDirSymlink:
         source.mkdir()
         link = tmp_path / "link"
         link.mkdir()  # real dir
-        created = _create_dir_symlink(source, link, dry_run=False)
+        created = _create_symlink(source, link, dry_run=False)
         assert created is False  # skipped — not our job to remove real dirs
 
 
@@ -224,6 +224,43 @@ class TestClaudeAgentsWriter:
         result = w.sync(config, tmp_path, dry_run=True)
         assert result.action == "created"
         assert not (tmp_path / ".claude" / "agents").exists()
+
+    def test_force_dry_run_with_real_dir_reports_created(self, tmp_path: Path) -> None:
+        """dry_run=True + force=True with existing real dir should report 'created'."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path, dry_run=True, force=True)
+        assert result.action == "created"
+        # Nothing written
+        assert target.is_dir() and not target.is_symlink()
+
+    def test_force_twice_no_backup_collision(self, tmp_path: Path) -> None:
+        """Running --force twice does not crash due to existing .bak directory."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / "old.md").write_text("old", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path, force=True)
+        # Replace symlink with a real dir again for second force run
+        (tmp_path / ".claude" / "agents").unlink()
+        target.mkdir(parents=True)
+        (target / "newer.md").write_text("newer", encoding="utf-8")
+        result = w.sync(config, tmp_path, force=True)
+        assert result.action == "created"
+
+    def test_no_agents_config_skipped(self, tmp_path: Path) -> None:
+        """Writers skip when no agents: section in .crossby.yml (enabled=False)."""
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        config = CrossbyConfig()  # default: enabled=False
+        result = w.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert "no agents config" in (result.message or "")
 
     def test_not_in_targets_skipped(self, tmp_path: Path) -> None:
         _make_source(tmp_path, ["a.md"])

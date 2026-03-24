@@ -168,7 +168,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     if not isinstance(agents_targets_raw, dict):
         raise ConfigError("'agents.targets' must be a mapping")
     agents = AgentsConfig(
-        enabled=bool(raw.get("agents")),  # True when an agents: section exists
+        enabled="agents" in raw and raw.get("agents") is not None,
         source=agents_raw.get("source", ".crossby/agents"),
         strategy=agents_raw.get("strategy", "symlink"),
         gitignore=agents_raw.get("gitignore", True),

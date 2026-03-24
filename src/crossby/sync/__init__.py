@@ -13,6 +13,7 @@ from crossby.sync.agents import (
     CopilotAgentsWriter,
     CursorAgentsWriter,
     GeminiAgentsWriter,
+    update_agents_gitignore,
 )
 from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
 
@@ -102,8 +103,6 @@ def run_sync(
 
     # After all agents writers, update .gitignore managed block once
     if agents_writers_ran:
-        from crossby.sync.agents import update_agents_gitignore
-
         gi_result = update_agents_gitignore(config, project_root, dry_run=dry_run)
         if gi_result is not None:
             results.append(gi_result)
