@@ -13,6 +13,7 @@ from crossby.models.config import (
     ComplexityModelMapping,
     CrossbyConfig,
     PermissionsConfig,
+    SyncConfig,
 )
 
 CONFIG_FILENAME = ".crossby.yml"
@@ -143,11 +144,23 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         allowed_commands=permissions_raw.get("allowed_commands", []),
     )
 
+    # Parse sync section
+    sync_raw = raw.get("sync")
+    if sync_raw is None:
+        sync_raw = {}
+    if not isinstance(sync_raw, dict):
+        raise ConfigError("'sync' must be a mapping")
+    sync = SyncConfig(
+        auto=sync_raw.get("auto", True),
+        tools=sync_raw.get("tools", []),
+    )
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
+        sync=sync,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )

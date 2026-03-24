@@ -45,6 +45,12 @@ def launch(
     work_dir = path.resolve()
     config = load_config(work_dir)
 
+    # Auto-sync before launching (new additive behavior, respects sync.auto)
+    if config.sync.auto:
+        from crossby.sync import run_sync
+
+        run_sync(config, work_dir)
+
     # Resolve AI selection
     resolved_tool = resolve_ai_tool(tool, config, command or "default")
     if not resolved_tool:

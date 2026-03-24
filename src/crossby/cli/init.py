@@ -83,6 +83,8 @@ def init(
 
     config_dict["permissions"] = {"allowed_commands": []}
 
+    config_dict["sync"] = {"auto": True, "tools": []}
+
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
