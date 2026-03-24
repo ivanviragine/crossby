@@ -129,7 +129,7 @@ class TestParseFrontmatter:
     def test_no_frontmatter(self) -> None:
         content = "Just some text."
         fm, body = _parse_frontmatter(content)
-        assert fm == {}
+        assert fm is None
         assert body == "Just some text."
 
     def test_roundtrip(self) -> None:
@@ -276,6 +276,19 @@ class TestClaudeAgentsWriter:
         result = w.sync(config, tmp_path, force=True)
         assert result.action == "created"
 
+    def test_regular_file_at_target_is_error(self, tmp_path: Path) -> None:
+        """A regular file at the symlink target path returns an error (not 'already linked')."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        target.write_text("regular file", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "regular file or directory" in (result.message or "")
+        assert "--force" in (result.message or "")
+
     def test_no_agents_config_skipped(self, tmp_path: Path) -> None:
         """Writers skip when no agents: section in .crossby.yml (enabled=False)."""
         _make_source(tmp_path, ["a.md"])
@@ -391,6 +404,36 @@ class TestCopyStrategy:
         config = _config(strategy="copy")
         result = w.sync(config, tmp_path)
         assert result.action == "created"
+
+    def test_copy_errors_on_symlinked_target_without_force(self, tmp_path: Path) -> None:
+        """Copy strategy errors when target path is a symlink (would write outside project)."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
+        assert "--force" in (result.message or "")
+
+    def test_copy_replaces_symlinked_target_with_force(self, tmp_path: Path) -> None:
+        """With --force, copy strategy removes the symlink and copies into a real directory."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        config = _config(strategy="copy")
+        result = w.sync(config, tmp_path, force=True)
+        assert result.action == "created"
+        assert not target.is_symlink()
+        assert (target / "a.md").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +561,19 @@ class TestCopilotAgentsWriter:
         assert result.action == "error"
         assert "not a directory" in (result.message or "")
 
+    def test_regular_file_at_link_path_is_error(self, tmp_path: Path) -> None:
+        """A regular file where a per-file symlink should be created returns an error."""
+        _make_source(tmp_path, ["a.md"])
+        target_dir = tmp_path / ".github" / "agents"
+        target_dir.mkdir(parents=True)
+        (target_dir / "a.agent.md").write_text("regular file, not a symlink", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "regular file" in (result.message or "")
+        assert "--force" in (result.message or "")
+
     def test_target_symlink_is_error_without_force(self, tmp_path: Path) -> None:
         """A symlink at the target directory path errors without --force."""
         _make_source(tmp_path, ["a.md"])
@@ -572,6 +628,22 @@ class TestUpdateAgentsGitignore:
         content = gitignore.read_text(encoding="utf-8")
         assert "*.pyc" in content
         assert _BLOCK_START in content
+
+    def test_malformed_block_missing_end_marker(self, tmp_path: Path) -> None:
+        """A malformed block (start but no end marker) falls back to appending a fresh block."""
+        gitignore = tmp_path / ".gitignore"
+        malformed = f"*.pyc\n{_BLOCK_START}\n.old/agents\n# end marker is missing\n"
+        gitignore.write_text(malformed, encoding="utf-8")
+        config = _config()
+        update_agents_gitignore(config, tmp_path)
+        content = gitignore.read_text(encoding="utf-8")
+        # Original content preserved
+        assert "*.pyc" in content
+        assert ".old/agents" in content
+        # Fresh block appended with correct end marker
+        assert content.count(_BLOCK_START) >= 1
+        assert _BLOCK_END in content
+        assert ".claude/agents" in content
 
     def test_replaces_existing_block(self, tmp_path: Path) -> None:
         gitignore = tmp_path / ".gitignore"

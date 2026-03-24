@@ -76,21 +76,32 @@ def update_agents_gitignore(
     if _BLOCK_START in existing:
         # Replace existing managed block
         lines = existing.splitlines()
-        new_lines: list[str] = []
-        inside = False
-        for line in lines:
-            if line == _BLOCK_START:
-                inside = True
-                new_lines.append(block)
-                continue
-            if inside:
-                if line == _BLOCK_END:
-                    inside = False
-                continue
-            new_lines.append(line)
-        new_content = "\n".join(new_lines)
-        if not new_content.endswith("\n"):
-            new_content += "\n"
+        start_idx = lines.index(_BLOCK_START)
+        if _BLOCK_END not in lines[start_idx + 1 :]:
+            # Malformed block: end marker is missing — fall back to appending a
+            # fresh block while preserving all existing content to avoid data loss.
+            logger.warning(
+                "crossby agents managed block in .gitignore is missing end marker; "
+                "appending a new block at end"
+            )
+            sep = "\n" if existing and not existing.endswith("\n") else ""
+            new_content = existing + sep + block + "\n"
+        else:
+            new_lines: list[str] = []
+            inside = False
+            for line in lines:
+                if line == _BLOCK_START:
+                    inside = True
+                    new_lines.append(block)
+                    continue
+                if inside:
+                    if line == _BLOCK_END:
+                        inside = False
+                    continue
+                new_lines.append(line)
+            new_content = "\n".join(new_lines)
+            if not new_content.endswith("\n"):
+                new_content += "\n"
     else:
         # Append block at end
         sep = "\n" if existing and not existing.endswith("\n") else ""
@@ -146,12 +157,12 @@ def _translate_tools(tools: list[str], tool_id: str) -> list[str]:
 def _parse_frontmatter(content: str) -> tuple[dict[str, object] | None, str]:
     """Split YAML frontmatter from markdown body.
 
-    Returns (fm_dict, body) where fm_dict is None when frontmatter could not
-    be parsed (missing closing delimiter or invalid YAML).  Callers must treat
-    None as "unparsed" and avoid re-rendering frontmatter in that case.
+    Returns (fm_dict, body) where fm_dict is None when there is no frontmatter
+    or when it could not be parsed (missing closing delimiter or invalid YAML).
+    Callers must treat None as "no parseable frontmatter" and copy verbatim.
     """
     if not content.startswith("---\n"):
-        return {}, content
+        return None, content
     end = content.find("\n---\n", 4)
     if end == -1:
         return None, content
@@ -257,6 +268,25 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 
         target_dir = project_root / self._target_rel
 
+        # For copy strategy, explicitly guard against following a symlinked target
+        # directory — copies would land in the symlink's destination, potentially
+        # outside the project root.
+        if agents_cfg.strategy == "copy" and target_dir.is_symlink():
+            if not force:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=(
+                        f"{self._target_rel} is a symlinked directory. "
+                        "Refusing to copy agents into a symlink target. "
+                        "Remove the symlink or re-run with --force to replace it."
+                    ),
+                )
+            if not dry_run:
+                target_dir.unlink()
+                logger.info("agents.symlink_replaced", target=str(target_dir))
+
         # Existing real directory — may need to error, proceed, or back up
         dir_was_cleared = False
         if target_dir.is_dir() and not target_dir.is_symlink():
@@ -344,6 +374,17 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                     action="error",
                     file_path=target_dir,
                     message="symlink points to a different location; use --force to replace",
+                )
+            if target_dir.exists() and not target_dir.is_symlink():
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=target_dir,
+                    message=(
+                        f"{self._target_rel} already exists as a regular file or directory; "
+                        "use --force to replace with a symlink"
+                    ),
                 )
             return SyncResult(
                 tool_id=self.tool_id,
@@ -566,6 +607,17 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                         action="error",
                         file_path=link,
                         message=f"{link.name} symlink points to a different location; use --force to replace",
+                    )
+                elif link.exists() and not link.is_symlink():
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="error",
+                        file_path=link,
+                        message=(
+                            f"{link.name} already exists as a regular file; "
+                            "remove it or use --force to replace with a symlink"
+                        ),
                     )
             except OSError:
                 # Fallback: copy the file
