@@ -14,9 +14,11 @@ ai:
   review_plan:
     mode: headless
     enabled: true
+    timeout: 600  # seconds
   review_implementation:
     mode: headless
     enabled: true
+    timeout: 600  # seconds
 models:
   claude:
     easy: claude-haiku-4.5

@@ -72,6 +72,17 @@ class PermissionsConfig(BaseModel):
     allowed_commands: list[str] = []
 
 
+class SyncConfig(BaseModel):
+    """Sync behavior configuration (``sync:`` section in .crossby.yml).
+
+    ``auto``: run sync automatically on ``crossby launch`` (default: true).
+    ``tools``: restrict sync to these tool IDs (empty = all installed tools).
+    """
+
+    auto: bool = True
+    tools: list[str] = []
+
+
 class CrossbyConfig(BaseModel):
     """Full configuration from .crossby.yml.
 
@@ -84,6 +95,7 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     permissions: PermissionsConfig = PermissionsConfig()
+    sync: SyncConfig = SyncConfig()
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)

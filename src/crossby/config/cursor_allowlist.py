@@ -10,6 +10,10 @@ Cursor supports two config locations:
 
 When a ``project_root`` is provided, the per-project config is used.
 When ``project_root`` is ``None``, the global config is used.
+
+Backward-compatible shim — allowlist logic lives in
+``crossby.sync.permissions.CursorPermissionWriter``.  This module preserves
+the original public API for existing callers (e.g. wade).
 """
 
 from __future__ import annotations
@@ -18,11 +22,24 @@ import contextlib
 import json
 from pathlib import Path
 
-import structlog
+import crossby.sync.permissions as _perm
+from crossby.sync.permissions import (
+    CursorPermissionWriter,
+    canonical_to_cursor,
+)
 
-logger = structlog.get_logger()
+# Re-export for callers that import canonical_to_cursor from here.
+__all__ = [
+    "canonical_to_cursor",
+    "configure_allowlist",
+    "is_allowlist_configured",
+    "read_allowlist",
+]
 
-_GLOBAL_CONFIG_PATH = Path.home() / ".cursor" / "cli-config.json"
+# Module-level alias kept for backward compatibility.  Tests that monkeypatch
+# the global config path should patch
+# ``crossby.sync.permissions._GLOBAL_CURSOR_CONFIG_PATH`` instead.
+_GLOBAL_CONFIG_PATH = _perm._GLOBAL_CURSOR_CONFIG_PATH
 
 
 def _config_path(project_root: Path | None) -> Path:
@@ -31,9 +48,7 @@ def _config_path(project_root: Path | None) -> Path:
     Per-project: ``<project_root>/.cursor/cli.json``
     Global:      ``~/.cursor/cli-config.json``
     """
-    if project_root is not None:
-        return project_root / ".cursor" / "cli.json"
-    return _GLOBAL_CONFIG_PATH
+    return _perm._cursor_config_path(project_root)
 
 
 def read_allowlist(project_root: Path) -> list[str]:
@@ -58,21 +73,6 @@ def read_allowlist(project_root: Path) -> list[str]:
     return []
 
 
-def canonical_to_cursor(pattern: str) -> str:
-    """Convert a canonical command pattern to Cursor CLI allowlist syntax.
-
-    Canonical patterns use ``"cmd:args"`` notation (colon-separated).
-    Cursor expects ``"Shell(cmd:args)"`` — the command string wrapped in
-    ``Shell(…)``.
-
-    Examples::
-
-        "myapp:*"                 → "Shell(myapp:*)"
-        "./scripts/check.sh:*"    → "Shell(./scripts/check.sh:*)"
-    """
-    return f"Shell({pattern})"
-
-
 def is_allowlist_configured(
     project_root: Path | None = None,
     patterns: list[str] | None = None,
@@ -86,20 +86,7 @@ def is_allowlist_configured(
         project_root: Project directory, or None for global config.
         patterns: Canonical command patterns to check for.
     """
-    if not patterns:
-        return True
-    config_file = _config_path(project_root)
-    if not config_file.is_file():
-        return False
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        raw = json.loads(config_file.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            allow = raw.get("permissions", {}).get("allow", [])
-            if not isinstance(allow, list):
-                return False
-            cursor_patterns = [canonical_to_cursor(p) for p in patterns]
-            return all(cp in allow for cp in cursor_patterns)
-    return False
+    return CursorPermissionWriter.check(project_root, patterns)
 
 
 def configure_allowlist(
@@ -119,44 +106,4 @@ def configure_allowlist(
     Idempotent — each pattern is added at most once.  Non-destructive
     merge with existing config.
     """
-    if not patterns:
-        return
-
-    config_file = _config_path(project_root)
-
-    existing: dict[str, object] = {}
-    if config_file.is_file():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json.loads(config_file.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = raw
-
-    permissions = existing.setdefault("permissions", {})
-    if not isinstance(permissions, dict):
-        permissions = {}
-        existing["permissions"] = permissions
-
-    allow_list = permissions.setdefault("allow", [])
-    if not isinstance(allow_list, list):
-        allow_list = []
-        permissions["allow"] = allow_list
-
-    changed = False
-
-    # Build the full set of Cursor-syntax patterns to ensure
-    all_patterns = [canonical_to_cursor(p) for p in patterns]
-
-    for pat in all_patterns:
-        if pat not in allow_list:
-            allow_list.append(pat)
-            changed = True
-
-    if not changed:
-        return  # All patterns already present
-
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        json.dumps(existing, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    logger.info("cursor_allowlist.configured", path=str(config_file))
+    CursorPermissionWriter.write(project_root, patterns)

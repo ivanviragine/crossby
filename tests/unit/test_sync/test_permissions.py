@@ -1,0 +1,250 @@
+"""Tests for ClaudePermissionWriter and CursorPermissionWriter."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from crossby.models.config import CrossbyConfig, PermissionsConfig
+from crossby.sync.permissions import (
+    ClaudePermissionWriter,
+    CursorPermissionWriter,
+    canonical_to_claude,
+    canonical_to_cursor,
+)
+
+
+@pytest.fixture(autouse=True)
+def _patch_cursor_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the Cursor global config path to a temp directory."""
+    fake = tmp_path / ".cursor" / "cli-config.json"
+    monkeypatch.setattr("crossby.sync.permissions._GLOBAL_CURSOR_CONFIG_PATH", fake)
+
+
+def _cursor_global(tmp_path: Path) -> Path:
+    return tmp_path / ".cursor" / "cli-config.json"
+
+
+# ---------------------------------------------------------------------------
+# Claude
+# ---------------------------------------------------------------------------
+
+
+class TestClaudePermissionWriterCheck:
+    def test_returns_false_when_file_missing(self, tmp_path: Path) -> None:
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_returns_true_when_present(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is True
+
+    def test_returns_false_when_pattern_absent(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(other:*)"]}}))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_returns_false_for_partial_match(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*", "other:*"]) is False
+
+
+class TestClaudePermissionWriterWrite:
+    def test_creates_from_scratch(self, tmp_path: Path) -> None:
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert data == {"permissions": {"allow": ["Bash(myapp:*)"]}}
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert data["permissions"]["allow"].count("Bash(myapp:*)") == 1
+
+    def test_non_destructive_merge(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}, "theme": "dark"}))
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        data = json.loads(path.read_text())
+        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        assert "Bash(git *)" in data["permissions"]["allow"]
+        assert data["theme"] == "dark"
+
+    def test_multiple_patterns(self, tmp_path: Path) -> None:
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*", "./scripts/run.sh:*"])
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        assert "Bash(./scripts/run.sh:*)" in data["permissions"]["allow"]
+
+
+class TestClaudePermissionWriterSync:
+    def test_skips_when_no_patterns(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=[]))
+        writer = ClaudePermissionWriter()
+        result = writer.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "no allowed_commands configured"
+
+    def test_creates_file(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = ClaudePermissionWriter()
+        result = writer.sync(config, tmp_path)
+        assert result.action == "created"
+        assert (tmp_path / ".claude" / "settings.json").exists()
+
+    def test_updated_when_file_exists(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = ClaudePermissionWriter()
+        result = writer.sync(config, tmp_path)
+        assert result.action == "updated"
+
+    def test_skips_when_already_configured(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}))
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = ClaudePermissionWriter()
+        result = writer.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "already configured"
+
+    def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = ClaudePermissionWriter()
+        result = writer.sync(config, tmp_path, dry_run=True)
+        assert result.action == "created"
+        assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Cursor
+# ---------------------------------------------------------------------------
+
+
+class TestCursorPermissionWriterCheck:
+    def test_returns_true_vacuously_for_empty_patterns(self, tmp_path: Path) -> None:
+        assert CursorPermissionWriter.check(tmp_path) is True
+
+    def test_returns_false_when_file_missing(self, tmp_path: Path) -> None:
+        assert CursorPermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_per_project_check(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        path = project / ".cursor" / "cli.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"permissions": {"allow": ["Shell(myapp:*)"]}}))
+        assert CursorPermissionWriter.check(project, ["myapp:*"]) is True
+
+    def test_global_check(self, tmp_path: Path) -> None:
+        path = _cursor_global(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"permissions": {"allow": ["Shell(myapp:*)"]}}))
+        assert CursorPermissionWriter.check(None, ["myapp:*"]) is True
+
+
+class TestCursorPermissionWriterWrite:
+    def test_creates_per_project(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        CursorPermissionWriter.write(project, ["myapp:*"])
+        data = json.loads((project / ".cursor" / "cli.json").read_text())
+        assert data == {"permissions": {"allow": ["Shell(myapp:*)"]}}
+
+    def test_creates_global(self, tmp_path: Path) -> None:
+        CursorPermissionWriter.write(None, ["myapp:*"])
+        data = json.loads(_cursor_global(tmp_path).read_text())
+        assert data == {"permissions": {"allow": ["Shell(myapp:*)"]}}
+
+    def test_noop_for_empty_patterns(self, tmp_path: Path) -> None:
+        CursorPermissionWriter.write(tmp_path)
+        assert not (tmp_path / ".cursor" / "cli.json").exists()
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        CursorPermissionWriter.write(project, ["myapp:*"])
+        CursorPermissionWriter.write(project, ["myapp:*"])
+        data = json.loads((project / ".cursor" / "cli.json").read_text())
+        assert data["permissions"]["allow"].count("Shell(myapp:*)") == 1
+
+    def test_non_destructive_merge(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        path = project / ".cursor" / "cli.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"permissions": {"allow": ["Shell(ls)"]}, "version": 1}))
+        CursorPermissionWriter.write(project, ["myapp:*"])
+        data = json.loads(path.read_text())
+        assert "Shell(myapp:*)" in data["permissions"]["allow"]
+        assert "Shell(ls)" in data["permissions"]["allow"]
+        assert data["version"] == 1
+
+    def test_per_project_does_not_write_global(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        CursorPermissionWriter.write(project, ["myapp:*"])
+        assert not _cursor_global(tmp_path).exists()
+
+
+class TestCursorPermissionWriterSync:
+    def test_skips_when_no_patterns(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=[]))
+        writer = CursorPermissionWriter()
+        result = writer.sync(config, tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "no allowed_commands configured"
+
+    def test_creates_project_config(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = CursorPermissionWriter(scope="project")
+        result = writer.sync(config, tmp_path)
+        assert result.action == "created"
+        assert (tmp_path / ".cursor" / "cli.json").exists()
+
+    def test_skips_when_already_configured(self, tmp_path: Path) -> None:
+        path = tmp_path / ".cursor" / "cli.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Shell(myapp:*)"]}}))
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = CursorPermissionWriter(scope="project")
+        result = writer.sync(config, tmp_path)
+        assert result.action == "skipped"
+
+    def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = CursorPermissionWriter(scope="project")
+        result = writer.sync(config, tmp_path, dry_run=True)
+        assert result.action == "created"
+        assert not (tmp_path / ".cursor" / "cli.json").exists()
+
+    def test_global_scope_uses_global_config(self, tmp_path: Path) -> None:
+        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        writer = CursorPermissionWriter(scope="global")
+        result = writer.sync(config, tmp_path)
+        assert result.action == "created"
+        assert _cursor_global(tmp_path).exists()
+        assert not (tmp_path / ".cursor" / "cli.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Pattern translators
+# ---------------------------------------------------------------------------
+
+
+class TestPatternTranslators:
+    def test_canonical_to_claude(self) -> None:
+        assert canonical_to_claude("myapp:*") == "Bash(myapp:*)"
+        assert canonical_to_claude("./scripts/run.sh") == "Bash(./scripts/run.sh)"
+
+    def test_canonical_to_cursor(self) -> None:
+        assert canonical_to_cursor("myapp:*") == "Shell(myapp:*)"
+        assert canonical_to_cursor("./scripts/run.sh") == "Shell(./scripts/run.sh)"

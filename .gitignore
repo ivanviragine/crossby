@@ -19,3 +19,7 @@ htmlcov/
 .commit-msg
 .crossby.yml
 PR-SUMMARY.md
+PLAN.md
+KNOWLEDGE.md
+.wade.yml
+.agents/
