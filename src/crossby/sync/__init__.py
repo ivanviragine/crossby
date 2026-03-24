@@ -101,8 +101,10 @@ def run_sync(
         if writer.concern == SyncConcern.AGENTS:
             agents_writers_ran = True
 
-    # After all agents writers, update .gitignore managed block once
-    if agents_writers_ran:
+    # After all agents writers, update .gitignore managed block once.
+    # Skip when a specific tool filter is active to avoid cross-tool side effects
+    # and misattributed results during --tool runs.
+    if agents_writers_ran and tool_id is None:
         gi_result = update_agents_gitignore(config, project_root, dry_run=dry_run)
         if gi_result is not None:
             results.append(gi_result)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.models.config import AgentsConfig, CrossbyConfig
 from crossby.sync.agents import (
@@ -15,7 +16,6 @@ from crossby.sync.agents import (
     CodexAgentsWriter,
     CursorAgentsWriter,
     GeminiAgentsWriter,
-    _create_symlink,
     _parse_frontmatter,
     _render_frontmatter,
     _translate_tools,
@@ -61,7 +61,7 @@ def _make_source(tmp_path: Path, agents: list[str] | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _create_symlink
+# create_symlink (shared helper, used by agents sync)
 # ---------------------------------------------------------------------------
 
 
@@ -70,7 +70,7 @@ class TestCreateDirSymlink:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "sub" / "link"
-        created = _create_symlink(source, link, dry_run=False)
+        created = create_symlink(source, link, force=True, dry_run=False)
         assert created is True
         assert link.is_symlink()
         # Symlink target must be relative
@@ -81,15 +81,15 @@ class TestCreateDirSymlink:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "link"
-        _create_symlink(source, link, dry_run=False)
-        created = _create_symlink(source, link, dry_run=False)
+        create_symlink(source, link, force=True, dry_run=False)
+        created = create_symlink(source, link, force=True, dry_run=False)
         assert created is False  # already correct
 
     def test_dry_run_does_not_create(self, tmp_path: Path) -> None:
         source = tmp_path / "src"
         source.mkdir()
         link = tmp_path / "link"
-        created = _create_symlink(source, link, dry_run=True)
+        created = create_symlink(source, link, force=True, dry_run=True)
         assert created is True
         assert not link.exists()
 
@@ -101,7 +101,7 @@ class TestCreateDirSymlink:
         link = tmp_path / "link"
         os.symlink(os.path.relpath(source_a, tmp_path), link)
         # Now change to source_b
-        created = _create_symlink(source_b, link, dry_run=False)
+        created = create_symlink(source_b, link, force=True, dry_run=False)
         assert created is True
         assert link.resolve() == source_b.resolve()
 
@@ -110,8 +110,8 @@ class TestCreateDirSymlink:
         source.mkdir()
         link = tmp_path / "link"
         link.mkdir()  # real dir
-        created = _create_symlink(source, link, dry_run=False)
-        assert created is False  # skipped — not our job to remove real dirs
+        created = create_symlink(source, link, force=True, dry_run=False)
+        assert created is False  # skipped — linker refuses to remove real dirs
 
 
 # ---------------------------------------------------------------------------
