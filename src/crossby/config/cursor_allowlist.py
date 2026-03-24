@@ -18,6 +18,8 @@ the original public API for existing callers (e.g. wade).
 
 from __future__ import annotations
 
+import contextlib
+import json
 from pathlib import Path
 
 import crossby.sync.permissions as _perm
@@ -31,6 +33,7 @@ __all__ = [
     "canonical_to_cursor",
     "configure_allowlist",
     "is_allowlist_configured",
+    "read_allowlist",
 ]
 
 # Module-level alias kept for backward compatibility.  Tests that monkeypatch
@@ -46,6 +49,28 @@ def _config_path(project_root: Path | None) -> Path:
     Global:      ``~/.cursor/cli-config.json``
     """
     return _perm._cursor_config_path(project_root)
+
+
+def read_allowlist(project_root: Path) -> list[str]:
+    """Read Cursor allowlist and return canonical command patterns.
+
+    Only extracts ``Shell(…)`` entries.
+    Returns ``[]`` if the file is missing or malformed.
+    """
+    config_file = _config_path(project_root)
+    if not config_file.is_file():
+        return []
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            allow = raw.get("permissions", {}).get("allow", [])
+            if isinstance(allow, list):
+                return [
+                    p[6:-1]
+                    for p in allow
+                    if isinstance(p, str) and p.startswith("Shell(") and p.endswith(")")
+                ]
+    return []
 
 
 def is_allowlist_configured(
