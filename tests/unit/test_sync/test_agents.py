@@ -561,18 +561,31 @@ class TestCopilotAgentsWriter:
         assert result.action == "error"
         assert "not a directory" in (result.message or "")
 
-    def test_regular_file_at_link_path_is_error(self, tmp_path: Path) -> None:
-        """A regular file where a per-file symlink should be created returns an error."""
-        _make_source(tmp_path, ["a.md"])
+    def test_regular_file_at_link_path_is_updated(self, tmp_path: Path) -> None:
+        """A regular .agent.md file (copy-fallback output) is updated via copy, not errored."""
+        source = _make_source(tmp_path, ["a.md"])
         target_dir = tmp_path / ".github" / "agents"
         target_dir.mkdir(parents=True)
-        (target_dir / "a.agent.md").write_text("regular file, not a symlink", encoding="utf-8")
+        (target_dir / "a.agent.md").write_text("stale content", encoding="utf-8")
         w = CopilotAgentsWriter()
         config = _config()
         result = w.sync(config, tmp_path)
-        assert result.action == "error"
-        assert "regular file" in (result.message or "")
-        assert "--force" in (result.message or "")
+        assert result.action == "created"
+        # Content should now match what _copy_agent_file produces from source
+        assert (target_dir / "a.agent.md").read_text(encoding="utf-8") != "stale content"
+
+    def test_stale_regular_file_is_cleaned_up(self, tmp_path: Path) -> None:
+        """A stale regular .agent.md file (copy-fallback) is removed when its source is gone."""
+        _make_source(tmp_path, ["a.md"])
+        target_dir = tmp_path / ".github" / "agents"
+        target_dir.mkdir(parents=True)
+        # Simulate a prior copy-fallback output for a source that no longer exists
+        (target_dir / "old.agent.md").write_text("stale copy from prior run", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path)
+        assert not (target_dir / "old.agent.md").exists()
+        assert (target_dir / "a.agent.md").is_symlink()
 
     def test_target_symlink_is_error_without_force(self, tmp_path: Path) -> None:
         """A symlink at the target directory path errors without --force."""
@@ -795,3 +808,30 @@ class TestRunSyncAgents:
 
         assert not (tmp_path / ".claude" / "agents").exists()
         assert not (tmp_path / ".gitignore").exists()
+
+    def test_force_forwarded_to_writers(self, tmp_path: Path) -> None:
+        """force=True passed to run_sync is forwarded to each writer."""
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncRegistry
+
+        _make_source(tmp_path, ["a.md"])
+        # Create a real directory at the target — without force this would error
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / "unmanaged.txt").write_text("user content", encoding="utf-8")
+
+        reg = SyncRegistry()
+        reg.register(ClaudeAgentsWriter())
+
+        config = _config()
+        results = run_sync(
+            config,
+            tmp_path,
+            concern=SyncConcern.AGENTS,
+            installed_tools=[AIToolID.CLAUDE],
+            force=True,
+            registry=reg,
+        )
+
+        actions = [r.action for r in results]
+        assert "created" in actions  # force allowed the backup+replace

@@ -582,12 +582,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
 
         source_stems = {f.stem for f in source_dir.glob("*.md")}
 
-        # Stale cleanup: remove managed symlinks whose source is gone.
-        # Only remove symlinks — never delete regular files that the user may manage.
+        # Stale cleanup: remove managed *.agent.md outputs whose source is gone.
+        # The .agent.md extension is crossby-specific; both symlinks and regular
+        # files (copy-fallback outputs) are treated as managed and eligible for removal.
         if not dry_run and target_dir.is_dir():
             for link in list(target_dir.glob("*.agent.md")):
-                if not link.is_symlink():
-                    continue
                 original_stem = link.name.removesuffix(".agent.md")
                 if original_stem not in source_stems:
                     os.unlink(link)
@@ -609,16 +608,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                         message=f"{link.name} symlink points to a different location; use --force to replace",
                     )
                 elif link.exists() and not link.is_symlink():
-                    return SyncResult(
-                        tool_id=self.tool_id,
-                        concern=self.concern,
-                        action="error",
-                        file_path=link,
-                        message=(
-                            f"{link.name} already exists as a regular file; "
-                            "remove it or use --force to replace with a symlink"
-                        ),
-                    )
+                    # Regular file at the link path — treat as a managed copy-fallback
+                    # output (.agent.md is crossby-specific) and keep it up to date.
+                    if not dry_run:
+                        _copy_agent_file(src, link, "copilot")
+                    created_count += 1
             except OSError:
                 # Fallback: copy the file
                 if not dry_run:
