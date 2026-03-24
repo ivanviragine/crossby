@@ -168,7 +168,10 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, object] | None, str]:
         return None, content
     try:
         raw = yaml.safe_load(content[4:end])
-        fm: dict[str, object] = raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            # Non-dict YAML (list, scalar, etc.) — copy verbatim to avoid data loss
+            return None, content
+        fm: dict[str, object] = raw
     except yaml.YAMLError:
         return None, content
     return fm, content[end + 5:]
@@ -294,7 +297,9 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 # Check if it's a managed fallback directory
                 # (empty, or only .md files = previously synced via copy fallback).
                 contents = list(target_dir.iterdir())
-                is_managed_fallback = not contents or all(f.suffix == ".md" for f in contents)
+                is_managed_fallback = not contents or all(
+                    f.suffix == ".md" and not f.is_symlink() for f in contents
+                )
                 if not is_managed_fallback:
                     return SyncResult(
                         tool_id=self.tool_id,

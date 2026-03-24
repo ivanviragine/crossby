@@ -132,6 +132,13 @@ class TestParseFrontmatter:
         assert fm is None
         assert body == "Just some text."
 
+    def test_non_dict_yaml_frontmatter(self) -> None:
+        """Non-dict YAML (list, scalar) in frontmatter returns None — copy verbatim."""
+        content = "---\n- item1\n- item2\n---\nBody.\n"
+        fm, body = _parse_frontmatter(content)
+        assert fm is None
+        assert body == content  # verbatim, not stripped
+
     def test_roundtrip(self) -> None:
         fm = {"name": "test", "tools": ["Read", "Bash"]}
         body = "Hello world.\n"
@@ -198,6 +205,21 @@ class TestClaudeAgentsWriter:
         target = tmp_path / ".claude" / "agents"
         target.mkdir(parents=True)
         (target / "unmanaged.txt").write_text("user content", encoding="utf-8")
+        w = ClaudeAgentsWriter()
+        config = _config()
+        result = w.sync(config, tmp_path)
+        assert result.action == "error"
+        assert "--force" in (result.message or "")
+
+    def test_symlinked_md_files_in_target_dir_are_unmanaged(self, tmp_path: Path) -> None:
+        """A target dir containing .md symlinks is treated as unmanaged (not a safe fallback)."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        # Symlinked .md file — should NOT be treated as a managed fallback
+        other = tmp_path / "external.md"
+        other.write_text("external", encoding="utf-8")
+        os.symlink(os.path.relpath(other, target), target / "a.md")
         w = ClaudeAgentsWriter()
         config = _config()
         result = w.sync(config, tmp_path)
