@@ -30,6 +30,7 @@ def _make_writer(
             self.tool_id = tool_id
             self.concern = concern
             self.calls: list[bool] = []
+            self.force_calls: list[bool] = []
 
         def sync(
             self,
@@ -40,6 +41,7 @@ def _make_writer(
             force: bool = False,
         ) -> SyncResult:
             self.calls.append(dry_run)
+            self.force_calls.append(force)
             if raises is not None:
                 raise raises
             return SyncResult(tool_id=self.tool_id, concern=self.concern, action=action)
@@ -215,6 +217,24 @@ class TestRunSyncDryRun:
 
         run_sync(config, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
         assert w.calls == [False]  # type: ignore[attr-defined]
+
+
+class TestRunSyncForce:
+    def test_force_flag_passed_to_writer(self, tmp_path: Path) -> None:
+        w = _make_writer(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
+        reg = _registry_with(w)
+        config = CrossbyConfig()
+
+        run_sync(config, tmp_path, tool_id=AIToolID.CLAUDE, force=True, registry=reg)
+        assert w.force_calls == [True]  # type: ignore[attr-defined]
+
+    def test_no_force_by_default(self, tmp_path: Path) -> None:
+        w = _make_writer(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
+        reg = _registry_with(w)
+        config = CrossbyConfig()
+
+        run_sync(config, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert w.force_calls == [False]  # type: ignore[attr-defined]
 
 
 class TestRunSyncAutoDetect:

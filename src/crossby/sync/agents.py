@@ -328,6 +328,14 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 )
 
         if not created:
+            if target_dir.is_symlink() and target_dir.resolve() != source_dir.resolve():
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=target_dir,
+                    message="symlink points to a different location; use --force to replace",
+                )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -524,10 +532,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
 
         source_stems = {f.stem for f in source_dir.glob("*.md")}
 
-        # Stale cleanup: remove .agent.md entries (symlinks or copies) whose source is gone
+        # Stale cleanup: remove managed symlinks whose source is gone.
+        # Only remove symlinks — never delete regular files that the user may manage.
         if not dry_run and target_dir.is_dir():
             for link in list(target_dir.glob("*.agent.md")):
-                if link.is_dir():
+                if not link.is_symlink():
                     continue
                 original_stem = link.name.removesuffix(".agent.md")
                 if original_stem not in source_stems:

@@ -172,12 +172,19 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError(
             f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
         )
+    targets: dict[str, bool] = {}
+    for k, v in agents_targets_raw.items():
+        if not isinstance(v, bool):
+            raise ConfigError(
+                f"'agents.targets.{k}' must be a boolean (true/false), got {v!r}"
+            )
+        targets[str(k)] = v
     agents = AgentsConfig(
         enabled="agents" in raw and raw.get("agents") is not None,
         source=agents_raw.get("source", ".crossby/agents"),
         strategy=strategy,
         gitignore=agents_raw.get("gitignore", True),
-        targets={str(k): bool(v) for k, v in agents_targets_raw.items()},
+        targets=targets,
     )
 
     return CrossbyConfig(
