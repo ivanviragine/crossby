@@ -119,7 +119,7 @@ def sync(
             detail = str(r.file_path)
         else:
             detail = r.message or ""
-        table.add_row(str(r.tool_id), r.concern.value, styled_action, detail)
+        table.add_row(str(r.tool_id) if r.tool_id is not None else "crossby", r.concern.value, styled_action, detail)
 
     console.out.print(table)
 

@@ -25,7 +25,7 @@ class SyncConcern(StrEnum):
 class SyncResult:
     """Result from a single sync writer run."""
 
-    tool_id: AIToolID
+    tool_id: AIToolID | None
     concern: SyncConcern
     action: Literal["created", "updated", "skipped", "error"]
     file_path: Path | None = None

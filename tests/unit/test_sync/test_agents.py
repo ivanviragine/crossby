@@ -432,6 +432,35 @@ class TestCopilotAgentsWriter:
         assert result.action == "created"
         assert (target / "a.agent.md").is_symlink()
 
+    def test_force_backs_up_unmanaged_directory(self, tmp_path: Path) -> None:
+        """--force with unmanaged content backs up the directory before replacing."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".github" / "agents"
+        target.mkdir(parents=True)
+        (target / "existing.md").write_text("user content", encoding="utf-8")
+        w = CopilotAgentsWriter()
+        config = _config()
+        w.sync(config, tmp_path, force=True)
+        backup = tmp_path / ".github" / "agents.bak"
+        assert backup.is_dir()
+        assert (backup / "existing.md").exists()
+
+    def test_force_false_does_not_overwrite_wrong_symlink(self, tmp_path: Path) -> None:
+        """Without --force, a wrong existing per-file symlink is left alone."""
+        source = _make_source(tmp_path, ["a.md"])
+        other = tmp_path / "other.md"
+        other.write_text("other", encoding="utf-8")
+        target_dir = tmp_path / ".github" / "agents"
+        target_dir.mkdir(parents=True)
+        link = target_dir / "a.agent.md"
+        os.symlink(os.path.relpath(other, target_dir), link)
+        w = CopilotAgentsWriter()
+        config = _config()
+        # force=False: wrong symlink is left alone (skipped)
+        result = w.sync(config, tmp_path, force=False)
+        assert result.action == "skipped"  # no new symlinks created
+        assert link.resolve() == other.resolve()  # still points to "other"
+
 
 # ---------------------------------------------------------------------------
 # Gitignore managed block
@@ -499,6 +528,52 @@ class TestUpdateAgentsGitignore:
         result = update_agents_gitignore(config, tmp_path, dry_run=True)
         assert result is not None
         assert not (tmp_path / ".gitignore").exists()
+
+    def test_tool_id_is_none(self, tmp_path: Path) -> None:
+        """Gitignore result should have tool_id=None (cross-tool operation)."""
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is not None
+        assert result.tool_id is None
+
+    def test_action_created_when_file_absent(self, tmp_path: Path) -> None:
+        """action='created' when .gitignore doesn't exist yet."""
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is not None
+        assert result.action == "created"
+
+    def test_action_updated_when_file_exists_but_empty(self, tmp_path: Path) -> None:
+        """action='updated' for an existing but empty .gitignore (not 'created')."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("", encoding="utf-8")
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path)
+        assert result is not None
+        assert result.action == "updated"
+
+    def test_installed_tools_filters_entries_when_targets_empty(self, tmp_path: Path) -> None:
+        """With no agents.targets, installed_tools restricts gitignore entries."""
+        config = _config()  # targets={}
+        result = update_agents_gitignore(
+            config, tmp_path, installed_tools=[AIToolID.CLAUDE, AIToolID.CURSOR]
+        )
+        assert result is not None
+        content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert ".claude/agents" in content
+        assert ".cursor/agents" in content
+        assert ".github/agents" not in content
+        assert ".gemini/agents" not in content
+
+    def test_installed_tools_none_includes_all(self, tmp_path: Path) -> None:
+        """With installed_tools=None and no targets, all known paths are included."""
+        config = _config()
+        result = update_agents_gitignore(config, tmp_path, installed_tools=None)
+        assert result is not None
+        content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+        assert ".claude/agents" in content
+        assert ".github/agents" in content
+        assert ".cursor/agents" in content
 
 
 # ---------------------------------------------------------------------------

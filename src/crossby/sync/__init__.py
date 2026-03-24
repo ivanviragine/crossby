@@ -105,7 +105,12 @@ def run_sync(
     # Skip when a specific tool filter is active to avoid cross-tool side effects
     # and misattributed results during --tool runs.
     if agents_writers_ran and tool_id is None:
-        gi_result = update_agents_gitignore(config, project_root, dry_run=dry_run)
+        gi_result = update_agents_gitignore(
+            config,
+            project_root,
+            dry_run=dry_run,
+            installed_tools=installed_tools,
+        )
         if gi_result is not None:
             results.append(gi_result)
 

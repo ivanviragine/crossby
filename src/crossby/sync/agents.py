@@ -39,6 +39,7 @@ def update_agents_gitignore(
     project_root: Path,
     *,
     dry_run: bool = False,
+    installed_tools: list[AIToolID] | None = None,
 ) -> SyncResult | None:
     """Write/update the crossby-managed block in .gitignore.
 
@@ -54,6 +55,12 @@ def update_agents_gitignore(
             _AGENT_TARGET_PATHS[tool_id]
             for tool_id, enabled in config.agents.targets.items()
             if enabled and tool_id in _AGENT_TARGET_PATHS
+        ]
+    elif installed_tools is not None:
+        entries = [
+            _AGENT_TARGET_PATHS[str(t)]
+            for t in installed_tools
+            if str(t) in _AGENT_TARGET_PATHS
         ]
     else:
         entries = list(_AGENT_TARGET_PATHS.values())
@@ -92,12 +99,12 @@ def update_agents_gitignore(
     if new_content == existing:
         return None  # Already up to date
 
-    action: Literal["created", "updated"] = "updated" if existing else "created"
+    action: Literal["created", "updated"] = "updated" if gitignore_path.is_file() else "created"
     if not dry_run:
         gitignore_path.write_text(new_content, encoding="utf-8")
 
     return SyncResult(
-        tool_id=AIToolID.CLAUDE,
+        tool_id=None,
         concern=SyncConcern.AGENTS,
         action=action,
         file_path=gitignore_path,
@@ -295,7 +302,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 message="(dry-run: would replace existing directory)",
             )
         try:
-            created = create_symlink(source_dir, target_dir, force=True, dry_run=dry_run)
+            created = create_symlink(source_dir, target_dir, force=force, dry_run=dry_run)
         except OSError as exc:
             logger.warning("agents.symlink_failed", tool=str(self.tool_id), error=str(exc))
             # Fallback: copy
@@ -442,23 +449,36 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         target_dir = project_root / self._target_rel
 
         # For Copilot, the target is always a real directory containing per-file symlinks.
-        # Only error if an UNMANAGED real directory exists (has non-agent.md content) and
-        # force is not set.  Managed content (prior sync) is always re-entrant.
-        if target_dir.is_dir() and not target_dir.is_symlink() and not force:
+        # Error if an UNMANAGED real directory exists (has non-agent.md content) unless
+        # force is set.  Managed content (prior sync) is always re-entrant.
+        if target_dir.is_dir() and not target_dir.is_symlink():
             has_unmanaged = any(
                 f for f in target_dir.iterdir() if not f.name.endswith(".agent.md")
             )
             if has_unmanaged:
-                return SyncResult(
-                    tool_id=self.tool_id,
-                    concern=self.concern,
-                    action="error",
-                    message=(
-                        f"{self._target_rel} exists as a directory with unmanaged content. "
-                        f"Migrate its contents to {agents_cfg.source} first, "
-                        "or use --force to replace it."
-                    ),
-                )
+                if not force:
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="error",
+                        message=(
+                            f"{self._target_rel} exists as a directory with unmanaged content. "
+                            f"Migrate its contents to {agents_cfg.source} first, "
+                            "or use --force to replace it."
+                        ),
+                    )
+                # force=True: back up and clear the directory before re-syncing
+                if not dry_run:
+                    backup = Path(str(target_dir) + ".bak")
+                    if backup.exists():
+                        shutil.rmtree(str(backup))
+                    shutil.copytree(str(target_dir), str(backup))
+                    shutil.rmtree(str(target_dir))
+                    logger.info(
+                        "agents.dir_backed_up",
+                        original=str(target_dir),
+                        backup=str(backup),
+                    )
 
         if agents_cfg.strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
@@ -489,7 +509,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         for src in source_dir.glob("*.md"):
             link = target_dir / f"{src.stem}.agent.md"
             try:
-                if create_symlink(src, link, force=True, dry_run=dry_run):
+                if create_symlink(src, link, force=force, dry_run=dry_run):
                     created_count += 1
             except OSError:
                 # Fallback: copy the file
