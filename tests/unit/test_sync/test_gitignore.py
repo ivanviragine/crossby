@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig, RulesConfig, RulesTargetsConfig
 from crossby.sync.rules import _BLOCK_END, _BLOCK_START, update_rules_gitignore
 
@@ -149,3 +150,24 @@ class TestUpdateRulesGitignore:
         assert result is None  # No change
         content2 = (tmp_path / ".gitignore").read_text()
         assert content1 == content2
+
+    def test_installed_tools_filter_excludes_uninstalled(self, tmp_path: Path):
+        """installed_tools limits gitignore entries to tools that actually ran."""
+        _setup_source(tmp_path)
+        config = _cfg()  # all targets enabled
+        update_rules_gitignore(config, tmp_path, installed_tools=[AIToolID.CLAUDE])
+
+        content = (tmp_path / ".gitignore").read_text()
+        assert "CLAUDE.md" in content
+        assert ".cursorrules" not in content
+        assert "GEMINI.md" not in content
+
+    def test_installed_tools_none_includes_all_enabled(self, tmp_path: Path):
+        """When installed_tools is None, all config-enabled entries are included."""
+        _setup_source(tmp_path)
+        config = _cfg()
+        update_rules_gitignore(config, tmp_path, installed_tools=None)
+
+        content = (tmp_path / ".gitignore").read_text()
+        assert "CLAUDE.md" in content
+        assert ".cursorrules" in content

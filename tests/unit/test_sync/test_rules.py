@@ -260,6 +260,44 @@ class TestDisabledTarget:
         assert "not in targets" in result.message
 
 
+class TestStrategySwitch:
+    def test_symlink_to_copy_resync(self, project: Path):
+        """Switching from symlink to copy should re-sync (not skip)."""
+        ClaudeRulesWriter().sync(_make_config(strategy="symlink"), project)
+        assert (project / "CLAUDE.md").is_symlink()
+
+        result = ClaudeRulesWriter().sync(_make_config(strategy="copy"), project)
+        assert result.action == "updated"
+        assert not (project / "CLAUDE.md").is_symlink()
+        assert (project / "CLAUDE.md").read_text().startswith(MANAGED_HEADER)
+
+    def test_copy_to_symlink_resync(self, project: Path):
+        """Switching from copy to symlink should re-sync (not skip)."""
+        ClaudeRulesWriter().sync(_make_config(strategy="copy"), project)
+        assert not (project / "CLAUDE.md").is_symlink()
+
+        result = ClaudeRulesWriter().sync(_make_config(strategy="symlink"), project)
+        assert result.action == "updated"
+        assert (project / "CLAUDE.md").is_symlink()
+
+
+class TestBackupSymlink:
+    def test_force_backup_of_unmanaged_symlink_is_symlink(self, project: Path, config: CrossbyConfig):
+        """When force-overwriting an unmanaged symlink, the backup should be a symlink."""
+        # Create an unmanaged symlink pointing elsewhere
+        other_file = project / "other.md"
+        other_file.write_text("other content")
+        (project / "CLAUDE.md").symlink_to("other.md")
+
+        result = ClaudeRulesWriter().sync(config, project, force=True)
+        assert result.action == "updated"
+
+        backup = project / "CLAUDE.md.bak"
+        assert backup.exists()
+        assert backup.is_symlink()
+        assert os.readlink(backup) == "other.md"
+
+
 class TestDisabledRules:
     def test_skips_when_not_enabled(self, project: Path):
         config = CrossbyConfig()  # rules.enabled=False by default

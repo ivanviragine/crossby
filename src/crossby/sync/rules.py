@@ -41,12 +41,12 @@ def update_rules_gitignore(
     project_root: Path,
     *,
     dry_run: bool = False,
+    installed_tools: list[AIToolID] | None = None,
 ) -> SyncResult | None:
     """Write/update the crossby-managed block in .gitignore for rules targets.
 
-    Entries are computed from config (all enabled, non-circular targets), not from
-    sync results, so the block is always complete regardless of which targets
-    changed in a given run.
+    Entries are computed from config (all enabled, non-circular targets), filtered
+    to installed tools when provided, so the block only covers tools that actually ran.
 
     Returns a SyncResult if a change was made (or would be in dry-run), else None.
     """
@@ -57,6 +57,8 @@ def update_rules_gitignore(
     entries: list[str] = []
     for tool_name, rel_path in TOOL_TARGETS.items():
         if not getattr(config.rules.targets, tool_name, False):
+            continue
+        if installed_tools is not None and AIToolID(tool_name) not in installed_tools:
             continue
         target_path = project_root / rel_path
         # Skip circular (source == target)
@@ -135,18 +137,30 @@ def _is_managed(target_path: Path, source_path: Path) -> bool:
 
 
 def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
-    """Check if the target is already up to date."""
-    if strategy == "symlink" and target_path.is_symlink():
-        return target_path.resolve() == source_path.resolve()
-    if target_path.is_file():
-        source_hash = hashlib.sha256(
-            source_path.read_text(encoding="utf-8").encode("utf-8")
-        ).hexdigest()
-        target_content = target_path.read_text(encoding="utf-8")
-        if target_content.startswith(MANAGED_HEADER):
-            target_content = target_content[len(MANAGED_HEADER) :].lstrip("\n")
-        target_hash = hashlib.sha256(target_content.encode("utf-8")).hexdigest()
+    """Check if the target is already up to date with the configured strategy."""
+    if strategy == "symlink":
+        if not target_path.is_symlink():
+            return False
+        try:
+            return target_path.resolve() == source_path.resolve()
+        except OSError:
+            return False
+
+    if strategy == "copy":
+        if not target_path.is_file() or target_path.is_symlink():
+            return False
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+            target_content = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not target_content.startswith(MANAGED_HEADER):
+            return False
+        target_body = target_content[len(MANAGED_HEADER) :].lstrip("\n")
+        source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        target_hash = hashlib.sha256(target_body.encode("utf-8")).hexdigest()
         return source_hash == target_hash
+
     return False
 
 
@@ -164,9 +178,8 @@ def _backup_file(target_path: Path) -> None:
         backup = target_path.with_suffix(f"{target_path.suffix}.bak{counter}")
         counter += 1
     if target_path.is_symlink():
-        resolved = target_path.resolve()
-        if resolved.exists():
-            shutil.copy2(resolved, backup)
+        link_target = os.readlink(target_path)
+        os.symlink(link_target, backup)
     else:
         shutil.copy2(target_path, backup)
 
@@ -266,6 +279,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                 if not dry_run:
                     _backup_file(target_path)
             elif _is_up_to_date(target_path, source_path, rules_cfg.strategy):
+                _warn_if_git_tracked(project_root, self._target_rel)
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
