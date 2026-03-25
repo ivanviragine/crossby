@@ -1,19 +1,39 @@
-"""Tests for rules/instructions sync."""
+"""Tests for rules/instructions sync writers."""
 
 import os
 from pathlib import Path
 
 import pytest
 
-from crossby.models.config import RulesConfig
-from crossby.sync.base import SyncAction
+from crossby.models.ai import AIToolID
+from crossby.models.config import CrossbyConfig, RulesConfig, RulesTargetsConfig
+from crossby.sync.base import SyncConcern, SyncRegistry
 from crossby.sync.rules import (
     MANAGED_HEADER,
     TOOL_TARGETS,
+    ClaudeRulesWriter,
+    CodexRulesWriter,
+    CopilotRulesWriter,
+    CursorRulesWriter,
+    GeminiRulesWriter,
     detect_existing_rules,
     suggest_source,
-    sync_rules,
 )
+
+
+def _make_config(
+    source: str = "AGENTS.md",
+    strategy: str = "symlink",
+    targets: RulesTargetsConfig | None = None,
+) -> CrossbyConfig:
+    return CrossbyConfig(
+        rules=RulesConfig(
+            enabled=True,
+            source=source,
+            strategy=strategy,
+            targets=targets or RulesTargetsConfig(),
+        ),
+    )
 
 
 @pytest.fixture()
@@ -24,161 +44,152 @@ def project(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def default_config() -> RulesConfig:
-    return RulesConfig()
+def config() -> CrossbyConfig:
+    return _make_config()
 
 
 class TestSymlinkCreation:
-    def test_creates_symlinks_for_all_targets(self, project: Path, default_config: RulesConfig):
-        results = sync_rules(project, default_config)
+    def test_creates_symlinks_for_all_targets(self, project: Path, config: CrossbyConfig):
+        from crossby.sync import run_sync
+
+        registry = SyncRegistry()
+        for writer_cls in (ClaudeRulesWriter, CursorRulesWriter, CopilotRulesWriter, GeminiRulesWriter, CodexRulesWriter):
+            registry.register(writer_cls())
+
+        all_tools = [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.GEMINI, AIToolID.CODEX]
+        results = run_sync(config, project, concern=SyncConcern.RULES, installed_tools=all_tools, registry=registry)
 
         # Codex target (AGENTS.md) should be skipped (same resolved path)
-        non_skipped = [r for r in results if r.action == SyncAction.CREATED]
-        assert len(non_skipped) == len(TOOL_TARGETS) - 1  # minus codex (same path)
+        created = [r for r in results if r.action == "created"]
+        assert len(created) == len(TOOL_TARGETS) - 1  # minus codex (same path)
 
         assert (project / "CLAUDE.md").is_symlink()
         assert (project / ".cursorrules").is_symlink()
         assert (project / ".github" / "copilot-instructions.md").is_symlink()
         assert (project / "GEMINI.md").is_symlink()
 
-    def test_symlinks_are_relative(self, project: Path, default_config: RulesConfig):
-        sync_rules(project, default_config)
+    def test_symlinks_are_relative(self, project: Path, config: CrossbyConfig):
+        ClaudeRulesWriter().sync(config, project)
 
         link = os.readlink(project / "CLAUDE.md")
         assert not os.path.isabs(link)
         assert link == "AGENTS.md"
 
-    def test_symlink_relative_for_nested_target(self, project: Path, default_config: RulesConfig):
-        sync_rules(project, default_config)
+    def test_symlink_relative_for_nested_target(self, project: Path, config: CrossbyConfig):
+        CopilotRulesWriter().sync(config, project)
 
         link = os.readlink(project / ".github" / "copilot-instructions.md")
         assert not os.path.isabs(link)
         assert link == os.path.join("..", "AGENTS.md")
 
-    def test_creates_parent_directory(self, project: Path, default_config: RulesConfig):
+    def test_creates_parent_directory(self, project: Path, config: CrossbyConfig):
         """The .github/ directory is created when needed."""
         assert not (project / ".github").exists()
-        sync_rules(project, default_config)
+        CopilotRulesWriter().sync(config, project)
         assert (project / ".github").is_dir()
 
 
 class TestCopyCreation:
     def test_creates_copies_with_header(self, project: Path):
-        config = RulesConfig(strategy="copy")
-        sync_rules(project, config)
+        config = _make_config(strategy="copy")
+        ClaudeRulesWriter().sync(config, project)
 
         content = (project / "CLAUDE.md").read_text()
         assert content.startswith(MANAGED_HEADER)
         assert "# Project Rules" in content
 
     def test_copy_hash_idempotency(self, project: Path):
-        config = RulesConfig(strategy="copy")
-        sync_rules(project, config)
+        config = _make_config(strategy="copy")
+        writer = ClaudeRulesWriter()
+        writer.sync(config, project)
 
-        results = sync_rules(project, config)
-        non_codex = [r for r in results if r.target != "AGENTS.md"]
-        assert all(r.action == SyncAction.UP_TO_DATE for r in non_codex)
+        result = writer.sync(config, project)
+        assert result.action == "skipped"
 
 
 class TestIdempotency:
-    def test_symlink_idempotent(self, project: Path, default_config: RulesConfig):
-        sync_rules(project, default_config)
-        results = sync_rules(project, default_config)
-
-        non_codex = [r for r in results if r.target != "AGENTS.md"]
-        assert all(r.action == SyncAction.UP_TO_DATE for r in non_codex)
+    def test_symlink_idempotent(self, project: Path, config: CrossbyConfig):
+        writer = ClaudeRulesWriter()
+        writer.sync(config, project)
+        result = writer.sync(config, project)
+        assert result.action == "skipped"
 
     def test_copy_idempotent(self, project: Path):
-        config = RulesConfig(strategy="copy")
-        sync_rules(project, config)
-        results = sync_rules(project, config)
-
-        non_codex = [r for r in results if r.target != "AGENTS.md"]
-        assert all(r.action == SyncAction.UP_TO_DATE for r in non_codex)
+        config = _make_config(strategy="copy")
+        writer = ClaudeRulesWriter()
+        writer.sync(config, project)
+        result = writer.sync(config, project)
+        assert result.action == "skipped"
 
 
 class TestCircularSymlinkGuard:
-    def test_skip_when_source_equals_target(self, project: Path, default_config: RulesConfig):
+    def test_skip_when_source_equals_target(self, project: Path, config: CrossbyConfig):
         """Codex target is AGENTS.md, same as source — must be skipped."""
-        results = sync_rules(project, default_config)
-
-        codex = [r for r in results if r.target == "AGENTS.md"]
-        assert len(codex) == 1
-        assert codex[0].action == SyncAction.SKIPPED
-        assert "same file" in codex[0].message
+        result = CodexRulesWriter().sync(config, project)
+        assert result.action == "skipped"
+        assert "same file" in result.message
 
     def test_skip_with_custom_source_matching_target(self, project: Path):
         (project / "CLAUDE.md").write_text("hello")
-        config = RulesConfig(source="CLAUDE.md")
-        results = sync_rules(project, config)
-
-        claude = [r for r in results if r.target == "CLAUDE.md"]
-        assert len(claude) == 1
-        assert claude[0].action == SyncAction.SKIPPED
+        config = _make_config(source="CLAUDE.md")
+        result = ClaudeRulesWriter().sync(config, project)
+        assert result.action == "skipped"
 
 
 class TestSourceNotFound:
-    def test_error_when_source_missing(self, tmp_path: Path, default_config: RulesConfig):
-        results = sync_rules(tmp_path, default_config)
-
-        assert len(results) == 1
-        assert results[0].action == SyncAction.ERROR
-        assert "not found" in results[0].message
+    def test_error_when_source_missing(self, tmp_path: Path, config: CrossbyConfig):
+        result = ClaudeRulesWriter().sync(config, tmp_path)
+        assert result.action == "error"
+        assert "not found" in result.message
 
 
 class TestUnmanagedFileCollision:
-    def test_skip_unmanaged_file(self, project: Path, default_config: RulesConfig):
+    def test_skip_unmanaged_file(self, project: Path, config: CrossbyConfig):
         (project / "CLAUDE.md").write_text("my custom rules")
-        results = sync_rules(project, default_config)
+        result = ClaudeRulesWriter().sync(config, project)
 
-        claude = [r for r in results if r.target == "CLAUDE.md"]
-        assert claude[0].action == SyncAction.SKIPPED
-        assert "--force" in claude[0].message
-
+        assert result.action == "skipped"
+        assert "--force" in result.message
         # Original file is preserved
         assert (project / "CLAUDE.md").read_text() == "my custom rules"
 
-    def test_force_overwrites_with_backup(self, project: Path, default_config: RulesConfig):
+    def test_force_overwrites_with_backup(self, project: Path, config: CrossbyConfig):
         (project / "CLAUDE.md").write_text("my custom rules")
-        results = sync_rules(project, default_config, force=True)
+        result = ClaudeRulesWriter().sync(config, project, force=True)
 
-        claude = [r for r in results if r.target == "CLAUDE.md"]
-        assert claude[0].action in (SyncAction.CREATED, SyncAction.UPDATED)
-
+        assert result.action == "created"
         # Backup was created
         assert (project / "CLAUDE.md.bak").exists()
         assert (project / "CLAUDE.md.bak").read_text() == "my custom rules"
-
         # New file is a symlink
         assert (project / "CLAUDE.md").is_symlink()
 
 
 class TestDryRun:
-    def test_dry_run_no_files_written(self, project: Path, default_config: RulesConfig):
-        results = sync_rules(project, default_config, dry_run=True)
+    def test_dry_run_no_files_written(self, project: Path, config: CrossbyConfig):
+        result = ClaudeRulesWriter().sync(config, project, dry_run=True)
 
-        created = [r for r in results if r.action == SyncAction.CREATED]
-        assert len(created) == 4
-        assert all(r.dry_run for r in created)
-
+        assert result.action == "created"
+        assert "dry-run" in result.message
         # No files actually created
         assert not (project / "CLAUDE.md").exists()
-        assert not (project / ".cursorrules").exists()
 
-    def test_dry_run_reports_would_create(self, project: Path, default_config: RulesConfig):
-        results = sync_rules(project, default_config, dry_run=True)
-
-        for r in results:
-            if r.action == SyncAction.CREATED:
-                assert "Would" in r.message
+    def test_dry_run_reports_would_create(self, project: Path, config: CrossbyConfig):
+        result = ClaudeRulesWriter().sync(config, project, dry_run=True)
+        assert "would sync" in result.message.lower()
 
 
 class TestToolFilter:
-    def test_filter_single_tool(self, project: Path, default_config: RulesConfig):
-        results = sync_rules(project, default_config, tool_filter="claude")
+    def test_filter_single_tool(self, project: Path, config: CrossbyConfig):
+        from crossby.sync import run_sync
 
+        registry = SyncRegistry()
+        for writer_cls in (ClaudeRulesWriter, CursorRulesWriter, CopilotRulesWriter, GeminiRulesWriter, CodexRulesWriter):
+            registry.register(writer_cls())
+
+        results = run_sync(config, project, tool_id=AIToolID.CLAUDE, concern=SyncConcern.RULES, registry=registry)
         assert len(results) == 1
-        assert results[0].target == "CLAUDE.md"
+        assert results[0].tool_id == AIToolID.CLAUDE
 
 
 class TestDetectExisting:
@@ -215,29 +226,41 @@ class TestSuggestSource:
 
 class TestCopyDetectsSourceChange:
     def test_copy_updated_after_source_modification(self, project: Path):
-        config = RulesConfig(strategy="copy")
-        sync_rules(project, config)
+        config = _make_config(strategy="copy")
+        writer = ClaudeRulesWriter()
+        writer.sync(config, project)
 
         # Modify source
         (project / "AGENTS.md").write_text("# Updated Rules\nNew content.\n")
-        results = sync_rules(project, config)
-
-        claude = [r for r in results if r.target == "CLAUDE.md"]
-        assert claude[0].action == SyncAction.UPDATED
+        result = writer.sync(config, project)
+        assert result.action == "created"
 
 
 class TestForceBackupNumbering:
-    def test_second_force_creates_numbered_backup(self, project: Path, default_config: RulesConfig):
+    def test_second_force_creates_numbered_backup(self, project: Path, config: CrossbyConfig):
         (project / "CLAUDE.md").write_text("original")
-        sync_rules(project, default_config, force=True)
+        ClaudeRulesWriter().sync(config, project, force=True)
 
-        # First backup exists
         assert (project / "CLAUDE.md.bak").exists()
 
         # Create another unmanaged file and force again
         (project / "CLAUDE.md").unlink()
         (project / "CLAUDE.md").write_text("second version")
-        sync_rules(project, default_config, force=True)
+        ClaudeRulesWriter().sync(config, project, force=True)
 
-        # Second backup has numbered suffix
         assert (project / "CLAUDE.md.bak2").exists()
+
+
+class TestDisabledTarget:
+    def test_skips_disabled_target(self, project: Path):
+        config = _make_config(targets=RulesTargetsConfig(claude=False))
+        result = ClaudeRulesWriter().sync(config, project)
+        assert result.action == "skipped"
+        assert "not in targets" in result.message
+
+
+class TestDisabledRules:
+    def test_skips_when_not_enabled(self, project: Path):
+        config = CrossbyConfig()  # rules.enabled=False by default
+        result = ClaudeRulesWriter().sync(config, project)
+        assert result.action == "skipped"

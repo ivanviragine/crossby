@@ -10,13 +10,13 @@ class TestRulesConfigParsing:
     def test_no_rules_section(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text("version: 1\n")
         config = load_config(tmp_path)
-        assert config.rules is None
+        assert config.rules.enabled is False
 
     def test_default_rules(self, tmp_path):
         data = {"version": 1, "rules": {}}
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         config = load_config(tmp_path)
-        assert config.rules is not None
+        assert config.rules.enabled is True
         assert config.rules.source == "AGENTS.md"
         assert config.rules.strategy == "symlink"
         assert config.rules.gitignore is True

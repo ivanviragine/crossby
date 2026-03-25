@@ -1,19 +1,21 @@
-"""Rules/instructions sync — keep tool-specific instruction files in sync."""
+"""Rules sync writers — distribute a canonical instruction file to each tool's format."""
 
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
-from crossby.models.config import RulesConfig, RulesTargetsConfig
-from crossby.sync.base import SyncAction, SyncResult
-from crossby.sync.gitignore import update_gitignore_block
+import structlog
 
-logger = logging.getLogger(__name__)
+from crossby.models.ai import AIToolID
+from crossby.models.config import CrossbyConfig, RulesConfig
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+
+logger = structlog.get_logger()
 
 MANAGED_HEADER = "<!-- managed by crossby — do not edit, changes will be overwritten -->"
 
@@ -26,163 +28,82 @@ TOOL_TARGETS: dict[str, str] = {
     "codex": "AGENTS.md",
 }
 
+# ---------------------------------------------------------------------------
+# Gitignore managed-block
+# ---------------------------------------------------------------------------
 
-def sync_rules(
+_BLOCK_START = "# >>> crossby rules sync (generated — do not edit) >>>"
+_BLOCK_END = "# <<< crossby rules sync <<<"
+
+
+def update_rules_gitignore(
+    config: CrossbyConfig,
     project_root: Path,
-    config: RulesConfig,
     *,
     dry_run: bool = False,
-    force: bool = False,
-    tool_filter: str | None = None,
-) -> list[SyncResult]:
-    """Sync rules from canonical source to all configured targets.
+    synced_targets: list[str] | None = None,
+) -> SyncResult | None:
+    """Write/update the crossby-managed block in .gitignore for rules targets.
 
-    Returns a list of SyncResult for each target.
+    Returns a SyncResult if a change was made (or would be in dry-run), else None.
     """
-    source_path = project_root / config.source
+    if not config.rules.enabled or not config.rules.gitignore:
+        return None
 
-    if not source_path.exists():
-        return [
-            SyncResult(
-                target=config.source,
-                action=SyncAction.ERROR,
-                message=f"Source file not found: {config.source}",
-            )
-        ]
+    entries = synced_targets or []
+    if not entries:
+        return None
 
-    targets = _active_targets(config.targets, tool_filter)
-    results: list[SyncResult] = []
+    block = "\n".join([_BLOCK_START, *sorted(entries), _BLOCK_END])
 
-    for tool_name, rel_target in targets.items():
-        target_path = project_root / rel_target
-        result = _write_rule_target(
-            source_path=source_path,
-            target_path=target_path,
-            rel_target=rel_target,
-            strategy=config.strategy,
-            dry_run=dry_run,
-            force=force,
-        )
-        results.append(result)
+    gitignore_path = project_root / ".gitignore"
+    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
 
-    # Manage .gitignore block
-    if config.gitignore and not dry_run:
-        gitignore_entries = [
-            rel_target
-            for _, rel_target in targets.items()
-            if any(
-                r.target == rel_target
-                and r.action in (SyncAction.CREATED, SyncAction.UPDATED, SyncAction.UP_TO_DATE)
-                for r in results
-            )
-        ]
-        update_gitignore_block(project_root, gitignore_entries)
-
-        # Warn about already-tracked files by annotating the existing result
-        for rel_target in gitignore_entries:
-            if _is_git_tracked(project_root, rel_target):
-                for r in results:
-                    if r.target == rel_target:
-                        warning = f"Warning: {rel_target} is tracked by git. Run: git rm --cached {rel_target}"
-                        r.message = f"{r.message}; {warning}" if r.message else warning
-                        break
-
-    return results
-
-
-def _active_targets(
-    targets: RulesTargetsConfig, tool_filter: str | None
-) -> dict[str, str]:
-    """Return map of tool_name -> rel_target for enabled targets."""
-    result: dict[str, str] = {}
-    for tool_name, rel_target in TOOL_TARGETS.items():
-        if tool_filter and tool_name != tool_filter:
-            continue
-        if getattr(targets, tool_name, False):
-            result[tool_name] = rel_target
-    return result
-
-
-def _write_rule_target(
-    *,
-    source_path: Path,
-    target_path: Path,
-    rel_target: str,
-    strategy: str,
-    dry_run: bool,
-    force: bool,
-) -> SyncResult:
-    """Write a single rule target (symlink or copy)."""
-    # Circular symlink guard — compare canonical paths WITHOUT following
-    # the target symlink (otherwise all existing symlinks look "circular").
-    source_canonical = source_path.parent.resolve() / source_path.name
-    target_canonical = target_path.parent.resolve() / target_path.name
-    if source_canonical == target_canonical:
-        return SyncResult(
-            target=rel_target,
-            action=SyncAction.SKIPPED,
-            message="Source and target resolve to the same file",
-        )
-
-    # Check existing target
-    if target_path.exists() or target_path.is_symlink():
-        managed = _is_managed(target_path, source_path)
-        if not managed:
-            if force:
-                if not dry_run:
-                    _backup_file(target_path)
-                # Fall through to create/overwrite
-            else:
-                return SyncResult(
-                    target=rel_target,
-                    action=SyncAction.SKIPPED,
-                    message=(
-                        "Target file exists and is not managed by crossby. "
-                        "Use --force to overwrite."
-                    ),
-                )
-        elif _is_up_to_date(target_path, source_path, strategy):
-            return SyncResult(
-                target=rel_target,
-                action=SyncAction.UP_TO_DATE,
-                dry_run=dry_run,
-            )
-
-    action = SyncAction.CREATED if not (target_path.exists() or target_path.is_symlink()) else SyncAction.UPDATED
-
-    if dry_run:
-        return SyncResult(
-            target=rel_target,
-            action=action,
-            message=f"Would {'create' if action == SyncAction.CREATED else 'update'} via {strategy}",
-            dry_run=True,
-        )
-
-    # Ensure parent directory exists
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Remove existing file/symlink before writing
-    if target_path.exists() or target_path.is_symlink():
-        target_path.unlink()
-
-    if strategy == "symlink":
-        try:
-            rel_link = os.path.relpath(source_path, target_path.parent)
-            target_path.symlink_to(rel_link)
-        except OSError:
-            logger.warning(
-                "Symlink creation failed for %s, falling back to copy", rel_target
-            )
-            _write_copy(source_path, target_path)
-            return SyncResult(
-                target=rel_target,
-                action=action,
-                message="Symlink failed, fell back to copy",
-            )
+    if _BLOCK_START in existing:
+        lines = existing.splitlines()
+        start_idx = lines.index(_BLOCK_START)
+        if _BLOCK_END not in lines[start_idx + 1 :]:
+            # Orphan start marker — replace from start to EOF
+            new_content = "\n".join(lines[:start_idx]) + "\n" + block + "\n"
+        else:
+            new_lines: list[str] = []
+            inside = False
+            for line in lines:
+                if line == _BLOCK_START:
+                    inside = True
+                    new_lines.append(block)
+                    continue
+                if inside:
+                    if line == _BLOCK_END:
+                        inside = False
+                    continue
+                new_lines.append(line)
+            new_content = "\n".join(new_lines)
+            if not new_content.endswith("\n"):
+                new_content += "\n"
     else:
-        _write_copy(source_path, target_path)
+        sep = "\n" if existing and not existing.endswith("\n") else ""
+        new_content = existing + sep + block + "\n"
 
-    return SyncResult(target=rel_target, action=action)
+    if new_content == existing:
+        return None
+
+    action: Literal["created", "updated"] = "updated" if gitignore_path.is_file() else "created"
+    if not dry_run:
+        gitignore_path.write_text(new_content, encoding="utf-8")
+
+    return SyncResult(
+        tool_id=None,
+        concern=SyncConcern.RULES,
+        action=action,
+        file_path=gitignore_path,
+        message="gitignore",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
 def _is_managed(target_path: Path, source_path: Path) -> bool:
@@ -203,8 +124,9 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
     if strategy == "symlink" and target_path.is_symlink():
         return target_path.resolve() == source_path.resolve()
     if target_path.is_file():
-        source_hash = _text_hash(source_path)
-        # For copies, strip the managed header before comparing
+        source_hash = hashlib.sha256(
+            source_path.read_text(encoding="utf-8").encode("utf-8")
+        ).hexdigest()
         target_content = target_path.read_text(encoding="utf-8")
         if target_content.startswith(MANAGED_HEADER):
             target_content = target_content[len(MANAGED_HEADER) :].lstrip("\n")
@@ -213,31 +135,19 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
     return False
 
 
-def _text_hash(path: Path) -> str:
-    """Compute SHA-256 hex digest of a file's text content."""
-    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-
-
 def _write_copy(source_path: Path, target_path: Path) -> None:
     """Copy source to target with managed header."""
     content = source_path.read_text(encoding="utf-8")
-    target_path.write_text(
-        MANAGED_HEADER + "\n" + content,
-        encoding="utf-8",
-    )
+    target_path.write_text(MANAGED_HEADER + "\n" + content, encoding="utf-8")
 
 
 def _backup_file(target_path: Path) -> None:
-    """Create a .bak backup of the target file.
-
-    If .bak already exists, tries .bak2, .bak3, etc.
-    """
+    """Create a .bak backup of the target file (numbered if .bak exists)."""
     backup = target_path.with_suffix(target_path.suffix + ".bak")
     counter = 2
     while backup.exists():
         backup = target_path.with_suffix(f"{target_path.suffix}.bak{counter}")
         counter += 1
-
     if target_path.is_symlink():
         resolved = target_path.resolve()
         if resolved.exists():
@@ -260,11 +170,171 @@ def _is_git_tracked(project_root: Path, rel_path: str) -> bool:
         return False
 
 
-def detect_existing_rules(project_root: Path) -> dict[str, Path]:
-    """Detect existing instruction files in the project.
+# ---------------------------------------------------------------------------
+# Base rules writer
+# ---------------------------------------------------------------------------
 
-    Returns a map of tool_name -> path for files that exist.
-    """
+
+class _BaseRulesWriter(AbstractSyncWriter):
+    """Common sync logic for rules writers."""
+
+    concern = SyncConcern.RULES
+    _target_rel: str  # e.g. "CLAUDE.md"
+
+    def sync(
+        self,
+        config: CrossbyConfig,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        rules_cfg = config.rules
+
+        if not rules_cfg.enabled:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="no rules config",
+            )
+
+        if not getattr(rules_cfg.targets, str(self.tool_id), False):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="not in targets",
+            )
+
+        source_path = project_root / rules_cfg.source
+        if not source_path.exists():
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=f"source file not found: {rules_cfg.source}",
+            )
+
+        target_path = project_root / self._target_rel
+
+        # Circular symlink guard — compare canonical paths WITHOUT following
+        # the target symlink (otherwise all existing symlinks look "circular").
+        source_canonical = source_path.parent.resolve() / source_path.name
+        target_canonical = target_path.parent.resolve() / target_path.name
+        if source_canonical == target_canonical:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="source and target resolve to the same file",
+            )
+
+        # Check existing target
+        if target_path.exists() or target_path.is_symlink():
+            managed = _is_managed(target_path, source_path)
+            if not managed:
+                if not force:
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="skipped",
+                        file_path=target_path,
+                        message="target exists and is not managed by crossby; use --force",
+                    )
+                if not dry_run:
+                    _backup_file(target_path)
+            elif _is_up_to_date(target_path, source_path, rules_cfg.strategy):
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="skipped",
+                    file_path=target_path,
+                    message="already linked",
+                )
+
+        if dry_run:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="created",
+                file_path=target_path,
+                message=f"(dry-run: would sync via {rules_cfg.strategy})",
+            )
+
+        # Ensure parent directory exists
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove existing file/symlink before writing
+        if target_path.exists() or target_path.is_symlink():
+            target_path.unlink()
+
+        if rules_cfg.strategy == "symlink":
+            try:
+                rel_link = os.path.relpath(source_path, target_path.parent)
+                target_path.symlink_to(rel_link)
+            except OSError:
+                logger.warning(
+                    "rules.symlink_failed",
+                    tool=str(self.tool_id),
+                    target=self._target_rel,
+                )
+                _write_copy(source_path, target_path)
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="created",
+                    file_path=target_path,
+                    message="copy (symlink failed)",
+                )
+        else:
+            _write_copy(source_path, target_path)
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action="created",
+            file_path=target_path,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Concrete writers
+# ---------------------------------------------------------------------------
+
+
+class ClaudeRulesWriter(_BaseRulesWriter):
+    tool_id = AIToolID.CLAUDE
+    _target_rel = "CLAUDE.md"
+
+
+class CursorRulesWriter(_BaseRulesWriter):
+    tool_id = AIToolID.CURSOR
+    _target_rel = ".cursorrules"
+
+
+class CopilotRulesWriter(_BaseRulesWriter):
+    tool_id = AIToolID.COPILOT
+    _target_rel = ".github/copilot-instructions.md"
+
+
+class GeminiRulesWriter(_BaseRulesWriter):
+    tool_id = AIToolID.GEMINI
+    _target_rel = "GEMINI.md"
+
+
+class CodexRulesWriter(_BaseRulesWriter):
+    tool_id = AIToolID.CODEX
+    _target_rel = "AGENTS.md"
+
+
+# ---------------------------------------------------------------------------
+# Detection helpers (used by crossby init)
+# ---------------------------------------------------------------------------
+
+
+def detect_existing_rules(project_root: Path) -> dict[str, Path]:
+    """Detect existing instruction files in the project."""
     found: dict[str, Path] = {}
     for tool_name, rel_target in TOOL_TARGETS.items():
         path = project_root / rel_target
@@ -275,7 +345,6 @@ def detect_existing_rules(project_root: Path) -> dict[str, Path]:
 
 def suggest_source(existing: dict[str, Path]) -> str:
     """Suggest a source file based on what exists."""
-    # Prefer AGENTS.md (universal standard), then CLAUDE.md, then first found
     if "codex" in existing:
         return "AGENTS.md"
     if "claude" in existing:

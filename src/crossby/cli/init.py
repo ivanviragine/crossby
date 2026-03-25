@@ -83,6 +83,8 @@ def init(
 
     config_dict["permissions"] = {"allowed_commands": []}
 
+    config_dict["sync"] = {"auto": True, "tools": []}
+
     # Detect existing instruction files and propose rules config
     rules_dict = _prompt_rules_config(project_root)
     if rules_dict:
@@ -115,7 +117,6 @@ def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
     suggested = suggest_source(existing)
 
     if prompts.is_tty():
-        # Let user confirm or pick source
         seen = {suggested}
         source_choices = [suggested]
         for p in existing.values():
@@ -123,6 +124,7 @@ def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
             if s not in seen:
                 seen.add(s)
                 source_choices.append(s)
+
         if len(source_choices) > 1:
             idx = prompts.select("Select canonical source file", source_choices)
             source = source_choices[idx]

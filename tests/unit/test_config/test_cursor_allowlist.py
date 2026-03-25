@@ -18,7 +18,7 @@ from crossby.config.cursor_allowlist import (
 def _patch_global_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect the global config path to a temp directory."""
     fake_config = tmp_path / ".cursor" / "cli-config.json"
-    monkeypatch.setattr("crossby.config.cursor_allowlist._GLOBAL_CONFIG_PATH", fake_config)
+    monkeypatch.setattr("crossby.sync.permissions._GLOBAL_CURSOR_CONFIG_PATH", fake_config)
 
 
 def _global_config_path(tmp_path: Path) -> Path:
