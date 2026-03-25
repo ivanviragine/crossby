@@ -12,7 +12,7 @@ from typing import Literal
 import structlog
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, RulesConfig
+from crossby.models.config import CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
 
 logger = structlog.get_logger()
@@ -41,16 +41,31 @@ def update_rules_gitignore(
     project_root: Path,
     *,
     dry_run: bool = False,
-    synced_targets: list[str] | None = None,
 ) -> SyncResult | None:
     """Write/update the crossby-managed block in .gitignore for rules targets.
+
+    Entries are computed from config (all enabled, non-circular targets), not from
+    sync results, so the block is always complete regardless of which targets
+    changed in a given run.
 
     Returns a SyncResult if a change was made (or would be in dry-run), else None.
     """
     if not config.rules.enabled or not config.rules.gitignore:
         return None
 
-    entries = synced_targets or []
+    source_path = project_root / config.rules.source
+    entries: list[str] = []
+    for tool_name, rel_path in TOOL_TARGETS.items():
+        if not getattr(config.rules.targets, tool_name, False):
+            continue
+        target_path = project_root / rel_path
+        # Skip circular (source == target)
+        source_canonical = source_path.parent.resolve() / source_path.name
+        target_canonical = target_path.parent.resolve() / target_path.name
+        if source_canonical == target_canonical:
+            continue
+        entries.append(rel_path)
+
     if not entries:
         return None
 
@@ -156,8 +171,8 @@ def _backup_file(target_path: Path) -> None:
         shutil.copy2(target_path, backup)
 
 
-def _is_git_tracked(project_root: Path, rel_path: str) -> bool:
-    """Check if a file is tracked by git."""
+def _warn_if_git_tracked(project_root: Path, rel_path: str) -> None:
+    """Log a warning if the target file is already tracked by git."""
     try:
         result = subprocess.run(
             ["git", "ls-files", "--error-unmatch", rel_path],
@@ -165,9 +180,14 @@ def _is_git_tracked(project_root: Path, rel_path: str) -> bool:
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            logger.warning(
+                "rules.target_git_tracked",
+                path=rel_path,
+                hint=f"git rm --cached {rel_path}",
+            )
     except (OSError, subprocess.SubprocessError):
-        return False
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +251,8 @@ class _BaseRulesWriter(AbstractSyncWriter):
             )
 
         # Check existing target
-        if target_path.exists() or target_path.is_symlink():
+        target_existed = target_path.exists() or target_path.is_symlink()
+        if target_existed:
             managed = _is_managed(target_path, source_path)
             if not managed:
                 if not force:
@@ -253,11 +274,13 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     message="already linked",
                 )
 
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
+
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="created",
+                action=action,
                 file_path=target_path,
                 message=f"(dry-run: would sync via {rules_cfg.strategy})",
             )
@@ -266,7 +289,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Remove existing file/symlink before writing
-        if target_path.exists() or target_path.is_symlink():
+        if target_existed:
             target_path.unlink()
 
         if rules_cfg.strategy == "symlink":
@@ -283,17 +306,19 @@ class _BaseRulesWriter(AbstractSyncWriter):
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
-                    action="created",
+                    action=action,
                     file_path=target_path,
                     message="copy (symlink failed)",
                 )
         else:
             _write_copy(source_path, target_path)
 
+        _warn_if_git_tracked(project_root, self._target_rel)
+
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
-            action="created",
+            action=action,
             file_path=target_path,
         )
 

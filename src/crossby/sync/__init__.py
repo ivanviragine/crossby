@@ -101,7 +101,6 @@ def run_sync(
     results: list[SyncResult] = []
     agents_writers_ran = False
     rules_writers_ran = False
-    rules_synced_targets: list[str] = []
     for writer in writers:
         try:
             result = writer.sync(config, project_root, dry_run=dry_run, force=force)
@@ -117,9 +116,6 @@ def run_sync(
             agents_writers_ran = True
         if writer.concern == SyncConcern.RULES:
             rules_writers_ran = True
-            if result.action in ("created", "updated") and result.file_path:
-                rel = str(result.file_path.relative_to(project_root))
-                rules_synced_targets.append(rel)
 
     # After all agents writers, update .gitignore managed block once.
     # Skip when a specific tool filter is active to avoid cross-tool side effects
@@ -140,7 +136,6 @@ def run_sync(
             config,
             project_root,
             dry_run=dry_run,
-            synced_targets=rules_synced_targets,
         )
         if gi_result is not None:
             results.append(gi_result)

@@ -158,7 +158,7 @@ class TestUnmanagedFileCollision:
         (project / "CLAUDE.md").write_text("my custom rules")
         result = ClaudeRulesWriter().sync(config, project, force=True)
 
-        assert result.action == "created"
+        assert result.action == "updated"
         # Backup was created
         assert (project / "CLAUDE.md.bak").exists()
         assert (project / "CLAUDE.md.bak").read_text() == "my custom rules"
@@ -234,7 +234,7 @@ class TestCopyDetectsSourceChange:
         # Modify source
         (project / "AGENTS.md").write_text("# Updated Rules\nNew content.\n")
         result = writer.sync(config, project)
-        assert result.action == "created"
+        assert result.action == "updated"
 
 
 class TestForceBackupNumbering:
