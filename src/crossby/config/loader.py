@@ -12,6 +12,7 @@ from crossby.models.config import (
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
+    MCPServerConfig,
     PermissionsConfig,
 )
 
@@ -143,11 +144,27 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         allowed_commands=permissions_raw.get("allowed_commands", []),
     )
 
+    # Parse mcp_servers section
+    mcp_raw = raw.get("mcp_servers")
+    if mcp_raw is None:
+        mcp_raw = {}
+    if not isinstance(mcp_raw, dict):
+        raise ConfigError("'mcp_servers' must be a mapping")
+    mcp_servers: dict[str, MCPServerConfig] = {}
+    for server_name, server_raw in mcp_raw.items():
+        if not isinstance(server_raw, dict):
+            raise ConfigError(f"'mcp_servers.{server_name}' must be a mapping")
+        try:
+            mcp_servers[server_name] = MCPServerConfig(**server_raw)
+        except (TypeError, ValueError) as e:
+            raise ConfigError(f"Invalid MCP server '{server_name}': {e}") from e
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
+        mcp_servers=mcp_servers,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )

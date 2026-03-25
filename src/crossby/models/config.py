@@ -23,11 +23,43 @@ Matches the .crossby.yml format:
       allowed_commands:
         - "myapp:*"
         - "./scripts/check.sh:*"
+    mcp_servers:
+      context7:
+        command: npx
+        args: ["-y", "@upstash/context7-mcp"]
+      postgres:
+        transport: http
+        url: "http://localhost:8080/mcp"
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class MCPServerConfig(BaseModel):
+    """Configuration for a single MCP server entry.
+
+    A server must have either ``command`` (stdio transport) or ``url``
+    (http/sse transport) — not both, not neither.
+    """
+
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    transport: str = "stdio"
+    url: str | None = None
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_transport_fields(self) -> "MCPServerConfig":
+        has_command = self.command is not None
+        has_url = self.url is not None
+        if has_command and has_url:
+            raise ValueError("MCP server must have 'command' or 'url', not both")
+        if not has_command and not has_url:
+            raise ValueError("MCP server must have either 'command' (stdio) or 'url' (http/sse)")
+        return self
 
 
 class ComplexityModelMapping(BaseModel):
@@ -84,6 +116,7 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     permissions: PermissionsConfig = PermissionsConfig()
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)

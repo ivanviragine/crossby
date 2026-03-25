@@ -83,6 +83,22 @@ def init(
 
     config_dict["permissions"] = {"allowed_commands": []}
 
+    # Discover existing MCP servers from tool configs
+    from crossby.sync.mcp_discovery import discover_mcp_servers
+
+    discovery = discover_mcp_servers(project_root)
+    if discovery.servers:
+        mcp_dict: dict[str, object] = {}
+        for name, discovered in discovery.servers.items():
+            mcp_dict[name] = {k: v for k, v in discovered.data.items() if v is not None and v != []}
+        config_dict["mcp_servers"] = mcp_dict
+        console.success(f"Discovered {len(discovery.servers)} MCP server(s) from existing tool configs")
+        if discovery.conflicts:
+            for server_name, tool1, tool2 in discovery.conflicts:
+                console.warn(
+                    f"MCP server '{server_name}' found in both {tool1} and {tool2} — kept {tool1} definition"
+                )
+
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
@@ -90,3 +106,5 @@ def init(
 
     console.success(f"Created {config_path}")
     console.hint("Edit .crossby.yml to customize models, commands, and permissions")
+    if discovery.servers:
+        console.hint("Run 'crossby sync mcp' to sync MCP servers to all tools")
