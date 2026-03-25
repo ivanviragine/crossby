@@ -78,19 +78,14 @@ def sync_rules(
         ]
         update_gitignore_block(project_root, gitignore_entries)
 
-        # Warn about already-tracked files
+        # Warn about already-tracked files by annotating the existing result
         for rel_target in gitignore_entries:
             if _is_git_tracked(project_root, rel_target):
-                results.append(
-                    SyncResult(
-                        target=rel_target,
-                        action=SyncAction.SKIPPED,
-                        message=(
-                            f"{rel_target} is tracked by git. "
-                            f"Run: git rm --cached {rel_target}"
-                        ),
-                    )
-                )
+                for r in results:
+                    if r.target == rel_target:
+                        warning = f"Warning: {rel_target} is tracked by git. Run: git rm --cached {rel_target}"
+                        r.message = f"{r.message}; {warning}" if r.message else warning
+                        break
 
     return results
 
@@ -208,7 +203,7 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
     if strategy == "symlink" and target_path.is_symlink():
         return target_path.resolve() == source_path.resolve()
     if target_path.is_file():
-        source_hash = _file_hash(source_path)
+        source_hash = _text_hash(source_path)
         # For copies, strip the managed header before comparing
         target_content = target_path.read_text(encoding="utf-8")
         if target_content.startswith(MANAGED_HEADER):
@@ -218,9 +213,9 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
     return False
 
 
-def _file_hash(path: Path) -> str:
-    """Compute SHA-256 hex digest of a file."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _text_hash(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file's text content."""
+    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
 
 def _write_copy(source_path: Path, target_path: Path) -> None:
@@ -233,10 +228,17 @@ def _write_copy(source_path: Path, target_path: Path) -> None:
 
 
 def _backup_file(target_path: Path) -> None:
-    """Create a .bak backup of the target file."""
+    """Create a .bak backup of the target file.
+
+    If .bak already exists, tries .bak2, .bak3, etc.
+    """
     backup = target_path.with_suffix(target_path.suffix + ".bak")
+    counter = 2
+    while backup.exists():
+        backup = target_path.with_suffix(f"{target_path.suffix}.bak{counter}")
+        counter += 1
+
     if target_path.is_symlink():
-        # Resolve and copy the actual content
         resolved = target_path.resolve()
         if resolved.exists():
             shutil.copy2(resolved, backup)

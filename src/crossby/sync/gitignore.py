@@ -48,6 +48,11 @@ def _replace_block(content: str, new_block: str) -> str:
             end_idx = i
             break
 
+    # Handle orphan start marker (no matching end) — treat everything from
+    # start to EOF as the managed block so we don't create a duplicate.
+    if start_idx is not None and end_idx is None:
+        end_idx = len(lines) - 1
+
     if start_idx is not None and end_idx is not None:
         if not new_block:
             # Remove the block entirely

@@ -84,7 +84,7 @@ def init(
     config_dict["permissions"] = {"allowed_commands": []}
 
     # Detect existing instruction files and propose rules config
-    rules_dict = _detect_rules(project_root)
+    rules_dict = _prompt_rules_config(project_root)
     if rules_dict:
         config_dict["rules"] = rules_dict
 
@@ -99,7 +99,7 @@ def init(
         console.hint("Run 'crossby sync rules' to sync instruction files")
 
 
-def _detect_rules(project_root: Path) -> dict[str, object] | None:
+def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
     """Detect existing instruction files and build a rules config dict."""
     from crossby.sync.rules import detect_existing_rules, suggest_source
     from crossby.ui import prompts
@@ -116,7 +116,13 @@ def _detect_rules(project_root: Path) -> dict[str, object] | None:
 
     if prompts.is_tty():
         # Let user confirm or pick source
-        source_choices = list({suggested} | {str(p.relative_to(project_root)) for p in existing.values()})
+        seen = {suggested}
+        source_choices = [suggested]
+        for p in existing.values():
+            s = str(p.relative_to(project_root))
+            if s not in seen:
+                seen.add(s)
+                source_choices.append(s)
         if len(source_choices) > 1:
             idx = prompts.select("Select canonical source file", source_choices)
             source = source_choices[idx]

@@ -25,9 +25,8 @@ def rules(
 ) -> None:
     """Sync project instructions to all configured AI tool formats."""
     from crossby.config.loader import load_config
-    from crossby.models.config import RulesConfig
     from crossby.sync.base import SyncAction
-    from crossby.sync.rules import sync_rules
+    from crossby.sync.rules import TOOL_TARGETS, sync_rules
 
     config = load_config()
     project_root = Path(config.project_root) if config.project_root else Path.cwd()
@@ -38,9 +37,9 @@ def rules(
         console.hint("Run 'crossby init' or add a rules section to .crossby.yml")
         raise typer.Exit(1)
 
-    if tool and tool not in ("claude", "cursor", "copilot", "gemini", "codex"):
+    if tool and tool not in TOOL_TARGETS:
         console.error(f"Unknown tool: {tool}")
-        console.hint("Valid tools: claude, cursor, copilot, gemini, codex")
+        console.hint(f"Valid tools: {', '.join(TOOL_TARGETS)}")
         raise typer.Exit(1)
 
     if dry_run:

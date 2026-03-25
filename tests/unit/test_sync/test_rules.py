@@ -9,6 +9,7 @@ from crossby.models.config import RulesConfig
 from crossby.sync.base import SyncAction
 from crossby.sync.rules import (
     MANAGED_HEADER,
+    TOOL_TARGETS,
     detect_existing_rules,
     suggest_source,
     sync_rules,
@@ -33,7 +34,7 @@ class TestSymlinkCreation:
 
         # Codex target (AGENTS.md) should be skipped (same resolved path)
         non_skipped = [r for r in results if r.action == SyncAction.CREATED]
-        assert len(non_skipped) == 4
+        assert len(non_skipped) == len(TOOL_TARGETS) - 1  # minus codex (same path)
 
         assert (project / "CLAUDE.md").is_symlink()
         assert (project / ".cursorrules").is_symlink()
@@ -210,3 +211,33 @@ class TestSuggestSource:
 
     def test_default_agents_when_empty(self):
         assert suggest_source({}) == "AGENTS.md"
+
+
+class TestCopyDetectsSourceChange:
+    def test_copy_updated_after_source_modification(self, project: Path):
+        config = RulesConfig(strategy="copy")
+        sync_rules(project, config)
+
+        # Modify source
+        (project / "AGENTS.md").write_text("# Updated Rules\nNew content.\n")
+        results = sync_rules(project, config)
+
+        claude = [r for r in results if r.target == "CLAUDE.md"]
+        assert claude[0].action == SyncAction.UPDATED
+
+
+class TestForceBackupNumbering:
+    def test_second_force_creates_numbered_backup(self, project: Path, default_config: RulesConfig):
+        (project / "CLAUDE.md").write_text("original")
+        sync_rules(project, default_config, force=True)
+
+        # First backup exists
+        assert (project / "CLAUDE.md.bak").exists()
+
+        # Create another unmanaged file and force again
+        (project / "CLAUDE.md").unlink()
+        (project / "CLAUDE.md").write_text("second version")
+        sync_rules(project, default_config, force=True)
+
+        # Second backup has numbered suffix
+        assert (project / "CLAUDE.md.bak2").exists()

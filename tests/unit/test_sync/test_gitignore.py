@@ -74,3 +74,14 @@ class TestUpdateGitignoreBlock:
         assert not (tmp_path / ".gitignore").exists()
         update_gitignore_block(tmp_path, ["CLAUDE.md"])
         assert (tmp_path / ".gitignore").exists()
+
+    def test_orphan_start_marker_does_not_duplicate(self, tmp_path: Path):
+        """Orphan _BLOCK_START without _BLOCK_END should not create a second block."""
+        (tmp_path / ".gitignore").write_text(
+            f"node_modules/\n{_BLOCK_START}\nCLAUDE.md\n"
+        )
+        update_gitignore_block(tmp_path, ["GEMINI.md"])
+
+        content = (tmp_path / ".gitignore").read_text()
+        assert content.count(_BLOCK_START) == 1
+        assert "GEMINI.md" in content
