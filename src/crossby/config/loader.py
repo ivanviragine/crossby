@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from crossby.models.config import (
     AIConfig,
@@ -160,7 +161,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             raise ConfigError(f"'mcp_servers.{server_name}' must be a mapping")
         try:
             mcp_servers[server_name] = MCPServerConfig(**server_raw)
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError, ValidationError) as e:
             raise ConfigError(f"Invalid MCP server '{server_name}': {e}") from e
 
     # Parse sync section

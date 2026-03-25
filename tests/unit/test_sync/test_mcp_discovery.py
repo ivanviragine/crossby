@@ -128,3 +128,12 @@ class TestDiscoverMCPServers:
 
         result = discover_mcp_servers(tmp_path)
         assert result.servers["api"].data["url"] == "http://localhost/mcp"
+
+    def test_ignores_malformed_codex_toml(self, tmp_path: Path) -> None:
+        pytest.importorskip("tomli_w")
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text("[[invalid toml\n", encoding="utf-8")
+
+        result = discover_mcp_servers(tmp_path)
+        assert result.servers == {}

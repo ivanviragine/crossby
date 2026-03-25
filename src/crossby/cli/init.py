@@ -102,7 +102,7 @@ def init(
                 console.warn(f"Skipping discovered MCP server '{name}' — invalid config from {discovered.source_tool}")
         if mcp_dict:
             config_dict["mcp_servers"] = mcp_dict
-        console.success(f"Discovered {len(discovery.servers)} MCP server(s) from existing tool configs")
+            console.success(f"Discovered {len(mcp_dict)} MCP server(s) from existing tool configs")
         if discovery.conflicts:
             for server_name, tool1, tool2 in discovery.conflicts:
                 console.warn(

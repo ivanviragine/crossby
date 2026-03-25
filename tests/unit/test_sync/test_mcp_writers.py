@@ -210,6 +210,11 @@ class TestCursorMCPWriter:
         assert result.action == "error"
         assert path.read_text() == original
 
+    def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
+        assert result.action == "skipped"
+        assert not (tmp_path / ".cursor" / "mcp.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # CopilotMCPWriter
@@ -258,6 +263,11 @@ class TestCopilotMCPWriter:
         assert result.action == "error"
         assert path.read_text() == original
 
+    def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
+        assert result.action == "skipped"
+        assert not (tmp_path / ".vscode" / "mcp.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # GeminiMCPWriter
@@ -303,6 +313,11 @@ class TestGeminiMCPWriter:
         assert result.action == "error"
         assert path.read_text() == original
 
+    def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
+        assert result.action == "skipped"
+        assert not (tmp_path / ".gemini" / "settings.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # CodexMCPWriter
@@ -317,14 +332,20 @@ class TestCodexMCPWriter:
         assert result.action == "created"
         path = tmp_path / ".codex" / "config.toml"
         assert path.exists()
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
 
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert "context7" in data["mcp_servers"]
         assert data["mcp_servers"]["context7"]["command"] == "npx"
 
     def test_merges_into_existing_toml(self, tmp_path: Path) -> None:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
         import tomli_w
 
         path = tmp_path / ".codex" / "config.toml"
@@ -338,7 +359,10 @@ class TestCodexMCPWriter:
         assert "new" in data["mcp_servers"]
 
     def test_preserves_other_toml_keys(self, tmp_path: Path) -> None:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
         import tomli_w
 
         path = tmp_path / ".codex" / "config.toml"
@@ -359,7 +383,10 @@ class TestCodexMCPWriter:
         assert result.action == "skipped"
 
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
         import tomli_w
 
         path = tmp_path / ".codex" / "config.toml"
@@ -393,8 +420,16 @@ class TestCodexMCPWriter:
         assert result.action == "error"
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
+    def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
+        assert result.action == "skipped"
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
     def test_args_in_toml(self, tmp_path: Path) -> None:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
 
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
