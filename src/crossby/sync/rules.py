@@ -157,10 +157,7 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
         if not target_content.startswith(MANAGED_HEADER):
             return False
         after_header = target_content[len(MANAGED_HEADER) :]
-        if after_header.startswith("\n"):
-            target_body = after_header[1:]
-        else:
-            target_body = after_header
+        target_body = after_header[1:] if after_header.startswith("\n") else after_header
         source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         target_hash = hashlib.sha256(target_body.encode("utf-8")).hexdigest()
         return source_hash == target_hash

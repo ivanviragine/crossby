@@ -6,7 +6,6 @@ from pathlib import Path
 
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
-from crossby.sync.base import SyncConcern, SyncRegistry, SyncResult
 from crossby.sync.agents import (
     ClaudeAgentsWriter,
     CodexAgentsWriter,
@@ -15,6 +14,7 @@ from crossby.sync.agents import (
     GeminiAgentsWriter,
     update_agents_gitignore,
 )
+from crossby.sync.base import SyncConcern, SyncRegistry, SyncResult
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
     CodexMCPWriter,
@@ -103,9 +103,7 @@ def run_sync(
             try:
                 allowed = {AIToolID(t) for t in config_tools}
             except ValueError as exc:
-                raise ValueError(
-                    f"Invalid tool ID in config.sync.tools: {exc}"
-                ) from exc
+                raise ValueError(f"Invalid tool ID in config.sync.tools: {exc}") from exc
             installed_tools = [t for t in installed_tools if t in allowed]
 
         writers = [w for w in writers if w.tool_id in installed_tools]
@@ -116,7 +114,7 @@ def run_sync(
     for writer in writers:
         try:
             result = writer.sync(config, project_root, dry_run=dry_run, force=force)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result = SyncResult(
                 tool_id=writer.tool_id,
                 concern=writer.concern,
@@ -157,9 +155,9 @@ def run_sync(
 
 
 __all__ = [
-    "run_sync",
     "SyncConcern",
     "SyncRegistry",
     "SyncResult",
     "_registry",
+    "run_sync",
 ]

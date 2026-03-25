@@ -48,25 +48,26 @@ def sync(
     from crossby.sync import run_sync
     from crossby.sync.base import SyncConcern
 
-    project_root = path.resolve()
-    config = load_config(project_root)
+    start_path = path.resolve()
+    config = load_config(start_path)
+    project_root = Path(config.project_root).resolve() if config.project_root else start_path
 
     sync_concern: SyncConcern | None = None
     if concern:
         try:
             sync_concern = SyncConcern(concern.lower())
-        except ValueError:
+        except ValueError as err:
             valid = ", ".join(c.value for c in SyncConcern)
             console.error(f"Unknown concern: {concern!r}. Valid values: {valid}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from err
 
     sync_tool: AIToolID | None = None
     if tool:
         try:
             sync_tool = AIToolID(tool.lower())
-        except ValueError:
+        except ValueError as err:
             console.error(f"Unknown tool: {tool!r}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from err
 
     if dry_run:
         console.info("Dry-run mode — no files will be written")

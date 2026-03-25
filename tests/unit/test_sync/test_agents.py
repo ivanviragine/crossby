@@ -11,20 +11,19 @@ from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.models.config import AgentsConfig, CrossbyConfig
 from crossby.sync.agents import (
-    CopilotAgentsWriter,
+    _BLOCK_END,
+    _BLOCK_START,
     ClaudeAgentsWriter,
     CodexAgentsWriter,
+    CopilotAgentsWriter,
     CursorAgentsWriter,
     GeminiAgentsWriter,
     _parse_frontmatter,
     _render_frontmatter,
     _translate_tools,
     update_agents_gitignore,
-    _BLOCK_END,
-    _BLOCK_START,
 )
 from crossby.sync.base import SyncConcern
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -348,9 +347,7 @@ class TestRelativeSymlinkPaths:
             (CodexAgentsWriter, ".agents"),
         ],
     )
-    def test_symlink_is_relative(
-        self, tmp_path: Path, writer_cls: type, target_rel: str
-    ) -> None:
+    def test_symlink_is_relative(self, tmp_path: Path, writer_cls: type, target_rel: str) -> None:
         _make_source(tmp_path, ["a.md"])
         w = writer_cls()
         config = _config()
@@ -378,9 +375,7 @@ class TestCopyStrategy:
 
     def test_copy_translates_tool_names_copilot(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path)
-        agent_content = (
-            "---\nname: test\ndescription: d\ntools:\n  - Read\n  - Bash\n---\nBody.\n"
-        )
+        agent_content = "---\nname: test\ndescription: d\ntools:\n  - Read\n  - Bash\n---\nBody.\n"
         (source / "test.md").write_text(agent_content, encoding="utf-8")
         w = CopilotAgentsWriter()
         config = _config(strategy="copy")
@@ -558,7 +553,7 @@ class TestCopilotAgentsWriter:
 
     def test_force_false_does_not_overwrite_wrong_symlink(self, tmp_path: Path) -> None:
         """Without --force, a wrong existing per-file symlink returns an error."""
-        source = _make_source(tmp_path, ["a.md"])
+        _make_source(tmp_path, ["a.md"])
         other = tmp_path / "other.md"
         other.write_text("other", encoding="utf-8")
         target_dir = tmp_path / ".github" / "agents"
@@ -585,7 +580,7 @@ class TestCopilotAgentsWriter:
 
     def test_regular_file_at_link_path_is_updated(self, tmp_path: Path) -> None:
         """A regular .agent.md file (copy-fallback output) is updated via copy, not errored."""
-        source = _make_source(tmp_path, ["a.md"])
+        _make_source(tmp_path, ["a.md"])
         target_dir = tmp_path / ".github" / "agents"
         target_dir.mkdir(parents=True)
         (target_dir / "a.agent.md").write_text("stale content", encoding="utf-8")
@@ -777,12 +772,12 @@ class TestUpdateAgentsGitignore:
 class TestRunSyncAgents:
     def test_full_sync_all_tools(self, tmp_path: Path) -> None:
         from crossby.sync import run_sync
-        from crossby.sync.base import SyncRegistry
         from crossby.sync.agents import (
             ClaudeAgentsWriter,
             CopilotAgentsWriter,
             CursorAgentsWriter,
         )
+        from crossby.sync.base import SyncRegistry
 
         _make_source(tmp_path, ["a.md"])
         reg = SyncRegistry()

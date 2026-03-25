@@ -14,6 +14,7 @@ from typing import Literal
 
 import structlog
 
+from crossby.config.patterns import canonical_to_wrapped
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
@@ -41,7 +42,7 @@ def canonical_to_claude(pattern: str) -> str:
         "./scripts/check.sh:*"    → "Bash(./scripts/check.sh:*)"
         "./scripts/check.sh"      → "Bash(./scripts/check.sh)"
     """
-    return f"Bash({pattern})"
+    return canonical_to_wrapped(pattern, "Bash")
 
 
 def canonical_to_cursor(pattern: str) -> str:
@@ -56,7 +57,7 @@ def canonical_to_cursor(pattern: str) -> str:
         "myapp:*"                 → "Shell(myapp:*)"
         "./scripts/check.sh:*"    → "Shell(./scripts/check.sh:*)"
     """
-    return f"Shell({pattern})"
+    return canonical_to_wrapped(pattern, "Shell")
 
 
 def _cursor_config_path(project_root: Path | None) -> Path:

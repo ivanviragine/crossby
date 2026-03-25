@@ -72,6 +72,7 @@ def read_allowlist(project_root: Path) -> list[str]:
                 ]
     return []
 
+
 def is_allowlist_configured(
     project_root: Path | None = None,
     patterns: list[str] | None = None,

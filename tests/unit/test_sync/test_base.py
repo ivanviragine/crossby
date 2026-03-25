@@ -14,15 +14,31 @@ from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncRegistry, Syn
 class _FakeWriter(AbstractSyncWriter):
     """Test writer that records calls."""
 
-    def __init__(self, tool_id: AIToolID, concern: SyncConcern, action: str = "skipped") -> None:
+    def __init__(
+        self,
+        tool_id: AIToolID,
+        concern: SyncConcern,
+        action: str = "skipped",
+    ) -> None:
         self.tool_id = tool_id
         self.concern = concern
         self._action = action
         self.calls: list[tuple[CrossbyConfig, Path, bool]] = []
 
-    def sync(self, config: CrossbyConfig, project_root: Path, *, dry_run: bool = False, force: bool = False) -> SyncResult:
+    def sync(
+        self,
+        config: CrossbyConfig,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
         self.calls.append((config, project_root, dry_run))
-        return SyncResult(tool_id=self.tool_id, concern=self.concern, action=self._action)  # type: ignore[arg-type]
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=self._action,  # type: ignore[arg-type]
+        )
 
 
 class TestSyncRegistry:

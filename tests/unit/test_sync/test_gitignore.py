@@ -54,12 +54,28 @@ class TestUpdateRulesGitignore:
         _setup_source(tmp_path)
         # First: only claude
         update_rules_gitignore(
-            _cfg(targets=RulesTargetsConfig(claude=True, cursor=False, copilot=False, gemini=False, codex=False)),
+            _cfg(
+                targets=RulesTargetsConfig(
+                    claude=True,
+                    cursor=False,
+                    copilot=False,
+                    gemini=False,
+                    codex=False,
+                )
+            ),
             tmp_path,
         )
         # Then: claude + gemini
         update_rules_gitignore(
-            _cfg(targets=RulesTargetsConfig(claude=True, cursor=False, copilot=False, gemini=True, codex=False)),
+            _cfg(
+                targets=RulesTargetsConfig(
+                    claude=True,
+                    cursor=False,
+                    copilot=False,
+                    gemini=True,
+                    codex=False,
+                )
+            ),
             tmp_path,
         )
 
@@ -101,9 +117,7 @@ class TestUpdateRulesGitignore:
     def test_orphan_start_marker_does_not_duplicate(self, tmp_path: Path):
         """Orphan _BLOCK_START without _BLOCK_END should not create a second block."""
         _setup_source(tmp_path)
-        (tmp_path / ".gitignore").write_text(
-            f"node_modules/\n{_BLOCK_START}\nCLAUDE.md\n"
-        )
+        (tmp_path / ".gitignore").write_text(f"node_modules/\n{_BLOCK_START}\nCLAUDE.md\n")
         update_rules_gitignore(_cfg(), tmp_path)
 
         content = (tmp_path / ".gitignore").read_text()
@@ -116,18 +130,30 @@ class TestUpdateRulesGitignore:
 
     def test_returns_none_when_no_targets(self, tmp_path: Path):
         _setup_source(tmp_path)
-        config = _cfg(targets=RulesTargetsConfig(
-            claude=False, cursor=False, copilot=False, gemini=False, codex=False,
-        ))
+        config = _cfg(
+            targets=RulesTargetsConfig(
+                claude=False,
+                cursor=False,
+                copilot=False,
+                gemini=False,
+                codex=False,
+            )
+        )
         result = update_rules_gitignore(config, tmp_path)
         assert result is None
 
     def test_skips_circular_target(self, tmp_path: Path):
         """AGENTS.md as source + codex target → codex excluded from gitignore."""
         _setup_source(tmp_path)
-        config = _cfg(targets=RulesTargetsConfig(
-            claude=True, cursor=False, copilot=False, gemini=False, codex=True,
-        ))
+        config = _cfg(
+            targets=RulesTargetsConfig(
+                claude=True,
+                cursor=False,
+                copilot=False,
+                gemini=False,
+                codex=True,
+            )
+        )
         update_rules_gitignore(config, tmp_path)
 
         content = (tmp_path / ".gitignore").read_text()

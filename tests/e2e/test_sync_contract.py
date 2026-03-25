@@ -3,51 +3,49 @@
 from __future__ import annotations
 
 from pathlib import Path
-from textwrap import dedent
 
 import pytest
-
+import yaml
 from tests.e2e._support import install_mock_binary, run_crossby
 
 pytestmark = [pytest.mark.contract, pytest.mark.e2e_deterministic]
 
 
 def _setup_sync_project(project: Path, *, sync_tools: list[str] | None = None) -> None:
-    sync_tools_yaml = "[]"
-    if sync_tools:
-        sync_tools_yaml = "\n" + "".join(f"    - {tool}\n" for tool in sync_tools)
+    config = {
+        "version": 1,
+        "permissions": {"allowed_commands": ["myapp:*"]},
+        "sync": {
+            "auto": True,
+            "tools": sync_tools or [],
+        },
+        "rules": {
+            "source": "AGENTS.md",
+            "strategy": "symlink",
+            "gitignore": True,
+            "targets": {
+                "claude": True,
+                "cursor": True,
+                "copilot": False,
+                "gemini": False,
+                "codex": False,
+            },
+        },
+        "agents": {
+            "source": ".crossby/agents",
+            "strategy": "symlink",
+            "gitignore": True,
+            "targets": {
+                "claude": True,
+                "cursor": True,
+                "copilot": False,
+                "gemini": False,
+                "codex": False,
+            },
+        },
+    }
     (project / ".crossby.yml").write_text(
-        dedent(
-            f"""\
-            version: 1
-            permissions:
-              allowed_commands:
-                - "myapp:*"
-            sync:
-              auto: true
-              tools: {sync_tools_yaml}
-            rules:
-              source: AGENTS.md
-              strategy: symlink
-              gitignore: true
-              targets:
-                claude: true
-                cursor: true
-                copilot: false
-                gemini: false
-                codex: false
-            agents:
-              source: .crossby/agents
-              strategy: symlink
-              gitignore: true
-              targets:
-                claude: true
-                cursor: true
-                copilot: false
-                gemini: false
-                codex: false
-            """
-        ),
+        yaml.safe_dump(config, sort_keys=False),
         encoding="utf-8",
     )
     (project / "AGENTS.md").write_text("# Shared rules\n", encoding="utf-8")

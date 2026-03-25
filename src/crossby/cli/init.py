@@ -134,9 +134,7 @@ def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
     if not existing:
         return None
 
-    console.step(
-        f"Found instruction file(s): {', '.join(str(p.name) for p in existing.values())}"
-    )
+    console.step(f"Found instruction file(s): {', '.join(str(p.name) for p in existing.values())}")
 
     suggested = suggest_source(existing)
 

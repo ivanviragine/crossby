@@ -53,11 +53,29 @@ class TestSymlinkCreation:
         from crossby.sync import run_sync
 
         registry = SyncRegistry()
-        for writer_cls in (ClaudeRulesWriter, CursorRulesWriter, CopilotRulesWriter, GeminiRulesWriter, CodexRulesWriter):
+        for writer_cls in (
+            ClaudeRulesWriter,
+            CursorRulesWriter,
+            CopilotRulesWriter,
+            GeminiRulesWriter,
+            CodexRulesWriter,
+        ):
             registry.register(writer_cls())
 
-        all_tools = [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.GEMINI, AIToolID.CODEX]
-        results = run_sync(config, project, concern=SyncConcern.RULES, installed_tools=all_tools, registry=registry)
+        all_tools = [
+            AIToolID.CLAUDE,
+            AIToolID.CURSOR,
+            AIToolID.COPILOT,
+            AIToolID.GEMINI,
+            AIToolID.CODEX,
+        ]
+        results = run_sync(
+            config,
+            project,
+            concern=SyncConcern.RULES,
+            installed_tools=all_tools,
+            registry=registry,
+        )
 
         # Codex target (AGENTS.md) should be skipped (same resolved path)
         # Filter out gitignore result (tool_id=None)
@@ -185,10 +203,22 @@ class TestToolFilter:
         from crossby.sync import run_sync
 
         registry = SyncRegistry()
-        for writer_cls in (ClaudeRulesWriter, CursorRulesWriter, CopilotRulesWriter, GeminiRulesWriter, CodexRulesWriter):
+        for writer_cls in (
+            ClaudeRulesWriter,
+            CursorRulesWriter,
+            CopilotRulesWriter,
+            GeminiRulesWriter,
+            CodexRulesWriter,
+        ):
             registry.register(writer_cls())
 
-        results = run_sync(config, project, tool_id=AIToolID.CLAUDE, concern=SyncConcern.RULES, registry=registry)
+        results = run_sync(
+            config,
+            project,
+            tool_id=AIToolID.CLAUDE,
+            concern=SyncConcern.RULES,
+            registry=registry,
+        )
         assert len(results) == 1
         assert results[0].tool_id == AIToolID.CLAUDE
 
@@ -300,7 +330,9 @@ class TestStrategySwitch:
 
 
 class TestBackupSymlink:
-    def test_force_backup_of_unmanaged_symlink_is_symlink(self, project: Path, config: CrossbyConfig):
+    def test_force_backup_of_unmanaged_symlink_is_symlink(
+        self, project: Path, config: CrossbyConfig
+    ):
         """When force-overwriting an unmanaged symlink, the backup should be a symlink."""
         # Create an unmanaged symlink pointing elsewhere
         other_file = project / "other.md"

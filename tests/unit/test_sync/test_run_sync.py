@@ -11,7 +11,6 @@ from crossby.models.config import CrossbyConfig, SyncConfig
 from crossby.sync import run_sync
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncRegistry, SyncResult
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -167,9 +166,7 @@ class TestRunSyncFiltering:
 
 class TestRunSyncContinueOnError:
     def test_error_recorded_other_writers_continue(self, tmp_path: Path) -> None:
-        w_fail = _make_writer(
-            AIToolID.CLAUDE, SyncConcern.PERMISSIONS, raises=RuntimeError("boom")
-        )
+        w_fail = _make_writer(AIToolID.CLAUDE, SyncConcern.PERMISSIONS, raises=RuntimeError("boom"))
         w_ok = _make_writer(AIToolID.CURSOR, SyncConcern.PERMISSIONS)
         reg = _registry_with(w_fail, w_ok)
         config = CrossbyConfig()
@@ -194,9 +191,7 @@ class TestRunSyncContinueOnError:
         reg = _registry_with(w)
         config = CrossbyConfig()
 
-        results = run_sync(
-            config, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg
-        )
+        results = run_sync(config, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
         assert results[0].action == "error"
         assert "bad config" in (results[0].message or "")
 
@@ -238,9 +233,7 @@ class TestRunSyncForce:
 
 
 class TestRunSyncAutoDetect:
-    def test_auto_detects_installed_tools_when_not_provided(
-        self, tmp_path: Path
-    ) -> None:
+    def test_auto_detects_installed_tools_when_not_provided(self, tmp_path: Path) -> None:
         """When installed_tools is None, detect_installed() is called."""
         w = _make_writer(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
         reg = _registry_with(w)

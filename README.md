@@ -19,11 +19,14 @@ pip install crossby
 ## Quick Start
 
 ```bash
-# Sync configs from Claude to all other installed tools
-crossby sync --from claude --all
-
-# Sync configs interactively (wizard mode)
+# Sync .crossby.yml into installed tools
 crossby sync
+
+# Preview sync changes
+crossby sync --dry-run
+
+# Sync only permissions for Claude
+crossby sync permissions --tool claude
 
 # Initialize config in your project
 crossby init
@@ -125,42 +128,43 @@ Session IDs are extracted from transcripts automatically when `--transcript` is 
 
 ### Config Sync (`crossby sync`)
 
-Sync portable configs between AI tools — no `crossby init` required. Reads files directly from their standard locations.
+Syncs the concerns declared in `.crossby.yml` into tool-specific files.
+`crossby sync` uses your project config as the source of truth; it no longer
+ports files directly from one AI tool to another.
 
 ```bash
-# Interactive wizard — select source, targets, review plan, approve
+# All concerns for all installed tools
 crossby sync
 
-# Direct mode — Claude to Cursor
-crossby sync --from claude --to cursor
+# Permissions only
+crossby sync permissions
 
-# Claude to all installed tools
-crossby sync --from claude --all
+# All concerns for one tool
+crossby sync --tool claude
 
 # Preview without applying
-crossby sync --from claude --to cursor --dry-run
+crossby sync --dry-run
 
-# Sync only specific config types
-crossby sync --from claude --to cursor --instructions --skills
+# Start from a nested path; crossby writes to the discovered project root
+crossby sync --path ./src/feature
 ```
 
 **What gets synced:**
 
-| Config Type | Strategy | Details |
+| Concern | Strategy | Details |
 |---|---|---|
-| Instructions | Symlink | `CLAUDE.md` / `.cursorrules` / `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` |
-| Skills | Symlink | `.claude/skills/` / `.cursor/skills/` / `.gemini/skills/` / `.agents/skills/` / `.github/skills/` |
-| Allowlist | Convert | Claude `Bash()` <-> Cursor `Shell()` format translation |
+| Permissions | Merge | Writes canonical `allowed_commands` into `.claude/settings.json` and `.cursor/cli.json` |
+| Rules | Symlink or copy | Distributes a canonical rules file such as `AGENTS.md` into tool-specific instruction files |
+| Agents | Symlink or copy | Distributes `.crossby/agents/` into each tool's agent directory |
 
-**What gets detected but can't be synced yet:**
+**Concern filters and scope:**
 
-| Config Type | Reason |
-|---|---|
-| Hooks | Different schema per tool — not yet supported |
-| MCP servers | Claude-specific, no cross-tool equivalent |
-| Custom commands | Claude-specific slash commands |
+- Use positional concerns such as `permissions`, `rules`, or `agents` to sync only one concern.
+- Use `--tool` to target one installed tool explicitly.
+- Use `sync.tools` in `.crossby.yml` to restrict the default multi-tool sync lane.
+- `--dry-run` previews the exact files that would be created or updated without writing them.
 
-Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
+`mcp` is reserved as a sync concern, but there are no MCP writers yet, so filtering to it currently produces no matching writers.
 
 ### Transcript Parsing (`crossby stats`)
 

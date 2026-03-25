@@ -10,7 +10,6 @@ from typer.testing import CliRunner
 
 from crossby.cli.main import app
 
-
 runner = CliRunner()
 
 
@@ -65,9 +64,7 @@ class TestSyncCommandPermissions:
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
         assert ".claude/settings.json" in result.output
 
-    def test_sync_all_creates_files_for_all_installed(
-        self, project_with_config: Path
-    ) -> None:
+    def test_sync_all_creates_files_for_all_installed(self, project_with_config: Path) -> None:
         """crossby sync (no concern) runs all writers for installed tools."""
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
@@ -121,9 +118,7 @@ class TestSyncCommandPermissions:
         assert ".claude/settings.json" in result.output
         assert not (project_with_config / ".claude" / "settings.json").exists()
 
-    def test_sync_tool_and_concern_are_case_insensitive(
-        self, project_with_config: Path
-    ) -> None:
+    def test_sync_tool_and_concern_are_case_insensitive(self, project_with_config: Path) -> None:
         """CLI filters should accept common mixed-case input."""
         result = runner.invoke(
             app,
@@ -168,3 +163,23 @@ class TestSyncCommandPermissions:
 
         assert result.exit_code == 1
         assert "Invalid tool ID in config.sync.tools" in result.output
+
+    def test_sync_writes_to_discovered_config_root_when_path_is_nested(
+        self, tmp_path: Path
+    ) -> None:
+        project_root = tmp_path / "repo"
+        nested = project_root / "src" / "feature"
+        nested.mkdir(parents=True)
+        (project_root / ".crossby.yml").write_text(
+            "version: 1\npermissions:\n  allowed_commands:\n    - 'myapp:*'\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["sync", "--tool", "claude", "--path", str(nested)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (project_root / ".claude" / "settings.json").is_file()
+        assert not (nested / ".claude" / "settings.json").exists()

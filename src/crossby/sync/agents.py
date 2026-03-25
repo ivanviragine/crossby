@@ -58,9 +58,7 @@ def update_agents_gitignore(
         ]
     elif installed_tools is not None:
         entries = [
-            _AGENT_TARGET_PATHS[str(t)]
-            for t in installed_tools
-            if str(t) in _AGENT_TARGET_PATHS
+            _AGENT_TARGET_PATHS[str(t)] for t in installed_tools if str(t) in _AGENT_TARGET_PATHS
         ]
     else:
         entries = list(_AGENT_TARGET_PATHS.values())
@@ -174,7 +172,7 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, object] | None, str]:
         fm: dict[str, object] = raw
     except yaml.YAMLError:
         return None, content
-    return fm, content[end + 5:]
+    return fm, content[end + 5 :]
 
 
 def _render_frontmatter(fm: dict[str, object], body: str) -> str:
@@ -405,9 +403,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
-    def _sync_copy(
-        self, source_dir: Path, target_dir: Path, *, dry_run: bool
-    ) -> SyncResult:
+    def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,
@@ -542,9 +538,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         # Error if an UNMANAGED real directory exists (has non-agent.md content) unless
         # force is set.  Managed content (prior sync) is always re-entrant.
         elif target_dir.is_dir():
-            has_unmanaged = any(
-                f for f in target_dir.iterdir() if not f.name.endswith(".agent.md")
-            )
+            has_unmanaged = any(f for f in target_dir.iterdir() if not f.name.endswith(".agent.md"))
             if has_unmanaged:
                 if not force:
                     return SyncResult(
@@ -580,10 +574,9 @@ class CopilotAgentsWriter(AbstractSyncWriter):
     ) -> SyncResult:
         """Create/update per-file .agent.md symlinks; clean up stale ones."""
         dir_newly_created = False
-        if not dry_run:
-            if not target_dir.is_dir():
-                target_dir.mkdir(parents=True, exist_ok=True)
-                dir_newly_created = True
+        if not dry_run and not target_dir.is_dir():
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dir_newly_created = True
 
         source_stems = {f.stem for f in source_dir.glob("*.md")}
 
@@ -610,7 +603,10 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                         concern=self.concern,
                         action="error",
                         file_path=link,
-                        message=f"{link.name} symlink points to a different location; use --force to replace",
+                        message=(
+                            f"{link.name} symlink points to a different location; "
+                            "use --force to replace"
+                        ),
                     )
                 elif link.exists() and not link.is_symlink():
                     # Regular file at the link path — treat as a managed copy-fallback
@@ -639,9 +635,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
-    def _sync_copy(
-        self, source_dir: Path, target_dir: Path, *, dry_run: bool
-    ) -> SyncResult:
+    def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,

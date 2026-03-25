@@ -15,12 +15,20 @@ import pytest
 
 from crossby.config.claude_allowlist import (
     canonical_to_claude,
+)
+from crossby.config.claude_allowlist import (
     configure_allowlist as claude_configure,
+)
+from crossby.config.claude_allowlist import (
     is_allowlist_configured as claude_is_configured,
 )
 from crossby.config.cursor_allowlist import (
     canonical_to_cursor,
+)
+from crossby.config.cursor_allowlist import (
     configure_allowlist as cursor_configure,
+)
+from crossby.config.cursor_allowlist import (
     is_allowlist_configured as cursor_is_configured,
 )
 
