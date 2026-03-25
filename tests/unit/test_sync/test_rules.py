@@ -60,7 +60,8 @@ class TestSymlinkCreation:
         results = run_sync(config, project, concern=SyncConcern.RULES, installed_tools=all_tools, registry=registry)
 
         # Codex target (AGENTS.md) should be skipped (same resolved path)
-        created = [r for r in results if r.action == "created"]
+        # Filter out gitignore result (tool_id=None)
+        created = [r for r in results if r.action == "created" and r.tool_id is not None]
         assert len(created) == len(TOOL_TARGETS) - 1  # minus codex (same path)
 
         assert (project / "CLAUDE.md").is_symlink()
