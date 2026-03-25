@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 def _load_config_and_sync(project_root: Path, servers_yaml: dict[str, Any]) -> None:

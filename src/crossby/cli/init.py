@@ -88,10 +88,18 @@ def init(
 
     discovery = discover_mcp_servers(project_root)
     if discovery.servers:
+        from crossby.models.config import MCPServerConfig
+
         mcp_dict: dict[str, object] = {}
         for name, discovered in discovery.servers.items():
-            mcp_dict[name] = {k: v for k, v in discovered.data.items() if v is not None and v != []}
-        config_dict["mcp_servers"] = mcp_dict
+            entry = {k: v for k, v in discovered.data.items() if v is not None and v != []}
+            try:
+                MCPServerConfig(**entry)
+                mcp_dict[name] = entry
+            except Exception:
+                console.warn(f"Skipping discovered MCP server '{name}' — invalid config from {discovered.source_tool}")
+        if mcp_dict:
+            config_dict["mcp_servers"] = mcp_dict
         console.success(f"Discovered {len(discovery.servers)} MCP server(s) from existing tool configs")
         if discovery.conflicts:
             for server_name, tool1, tool2 in discovery.conflicts:

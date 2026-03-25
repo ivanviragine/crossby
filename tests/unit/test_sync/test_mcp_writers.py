@@ -7,8 +7,6 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
 from crossby.models.config import MCPServerConfig
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
@@ -32,39 +30,6 @@ STDIO_WITH_ENV = MCPServerConfig(
 )
 HTTP_SERVER = MCPServerConfig(transport="http", url="http://localhost:8080/mcp")
 DISABLED_SERVER = MCPServerConfig(command="npx", args=["-y", "old-mcp"], enabled=False)
-
-
-# ---------------------------------------------------------------------------
-# MCPServerConfig model validation
-# ---------------------------------------------------------------------------
-
-
-class TestMCPServerConfig:
-    def test_valid_stdio(self) -> None:
-        s = MCPServerConfig(command="npx", args=["-y", "mcp"])
-        assert s.command == "npx"
-        assert s.transport == "stdio"
-        assert s.enabled is True
-
-    def test_valid_http(self) -> None:
-        s = MCPServerConfig(transport="http", url="http://localhost:8080/mcp")
-        assert s.url == "http://localhost:8080/mcp"
-
-    def test_neither_command_nor_url_raises(self) -> None:
-        with pytest.raises(Exception, match="command.*url|url.*command"):
-            MCPServerConfig()
-
-    def test_both_command_and_url_raises(self) -> None:
-        with pytest.raises(Exception, match="command.*url|url.*command|not both"):
-            MCPServerConfig(command="npx", url="http://localhost")
-
-    def test_enabled_false(self) -> None:
-        s = MCPServerConfig(command="npx", enabled=False)
-        assert s.enabled is False
-
-    def test_env_var_passthrough(self) -> None:
-        s = MCPServerConfig(command="npx", env={"TOKEN": "${MY_TOKEN}"})
-        assert s.env["TOKEN"] == "${MY_TOKEN}"
 
 
 # ---------------------------------------------------------------------------

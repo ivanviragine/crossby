@@ -11,11 +11,12 @@ format using a non-destructive merge strategy:
 from __future__ import annotations
 
 import warnings
+from abc import abstractmethod
 from pathlib import Path
 from typing import Any
 
 from crossby.models.config import MCPServerConfig
-from crossby.sync.base import AbstractSyncWriter, SyncResult
+from crossby.sync.base import AbstractSyncWriter, SyncAction, SyncResult
 from crossby.sync.json_utils import read_merge_write_json
 
 
@@ -81,84 +82,102 @@ def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
     return entry
 
 
-class ClaudeMCPWriter(AbstractSyncWriter):
+class _JsonMCPWriter(AbstractSyncWriter):
+    """Base class for JSON-based MCP writers (Claude, Cursor, Gemini, Copilot)."""
+
+    @property
+    @abstractmethod
+    def _config_path_parts(self) -> tuple[str, str]:
+        """Return (directory, filename) relative to project_root."""
+
+    @property
+    @abstractmethod
+    def _mcp_key(self) -> str:
+        """Return the top-level JSON key for MCP servers."""
+
+    def _to_entry(self, server: MCPServerConfig) -> dict[str, Any]:
+        """Convert a server to the tool's JSON entry format."""
+        return _to_json_entry(server)
+
+    def write(
+        self,
+        servers: dict[str, MCPServerConfig],
+        project_root: Path,
+        dry_run: bool = False,
+    ) -> list[SyncResult]:
+        dirname, filename = self._config_path_parts
+        path = project_root / dirname / filename
+        enabled, disabled = _split_servers(servers)
+        updates = {name: self._to_entry(s) for name, s in enabled.items()}
+        action, message = read_merge_write_json(path, self._mcp_key, updates, disabled, dry_run)
+        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]
+
+
+class ClaudeMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .claude/settings.json → mcpServers."""
 
     @property
     def tool_id(self) -> str:
         return "claude"
 
-    def write(
-        self,
-        servers: dict[str, MCPServerConfig],
-        project_root: Path,
-        dry_run: bool = False,
-    ) -> list[SyncResult]:
-        path = project_root / ".claude" / "settings.json"
-        enabled, disabled = _split_servers(servers)
-        updates = {name: _to_json_entry(s) for name, s in enabled.items()}
-        action, message = read_merge_write_json(path, "mcpServers", updates, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]  # type: ignore[arg-type]
+    @property
+    def _config_path_parts(self) -> tuple[str, str]:
+        return ".claude", "settings.json"
+
+    @property
+    def _mcp_key(self) -> str:
+        return "mcpServers"
 
 
-class CursorMCPWriter(AbstractSyncWriter):
+class CursorMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .cursor/mcp.json → mcpServers."""
 
     @property
     def tool_id(self) -> str:
         return "cursor"
 
-    def write(
-        self,
-        servers: dict[str, MCPServerConfig],
-        project_root: Path,
-        dry_run: bool = False,
-    ) -> list[SyncResult]:
-        path = project_root / ".cursor" / "mcp.json"
-        enabled, disabled = _split_servers(servers)
-        updates = {name: _to_json_entry(s) for name, s in enabled.items()}
-        action, message = read_merge_write_json(path, "mcpServers", updates, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]  # type: ignore[arg-type]
+    @property
+    def _config_path_parts(self) -> tuple[str, str]:
+        return ".cursor", "mcp.json"
+
+    @property
+    def _mcp_key(self) -> str:
+        return "mcpServers"
 
 
-class CopilotMCPWriter(AbstractSyncWriter):
+class CopilotMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .vscode/mcp.json → servers (Copilot format)."""
 
     @property
     def tool_id(self) -> str:
         return "copilot"
 
-    def write(
-        self,
-        servers: dict[str, MCPServerConfig],
-        project_root: Path,
-        dry_run: bool = False,
-    ) -> list[SyncResult]:
-        path = project_root / ".vscode" / "mcp.json"
-        enabled, disabled = _split_servers(servers)
-        updates = {name: _to_copilot_entry(s) for name, s in enabled.items()}
-        action, message = read_merge_write_json(path, "servers", updates, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]  # type: ignore[arg-type]
+    @property
+    def _config_path_parts(self) -> tuple[str, str]:
+        return ".vscode", "mcp.json"
+
+    @property
+    def _mcp_key(self) -> str:
+        return "servers"
+
+    def _to_entry(self, server: MCPServerConfig) -> dict[str, Any]:
+        return _to_copilot_entry(server)
 
 
-class GeminiMCPWriter(AbstractSyncWriter):
+class GeminiMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .gemini/settings.json → mcpServers."""
 
     @property
     def tool_id(self) -> str:
         return "gemini"
 
-    def write(
-        self,
-        servers: dict[str, MCPServerConfig],
-        project_root: Path,
-        dry_run: bool = False,
-    ) -> list[SyncResult]:
-        path = project_root / ".gemini" / "settings.json"
-        enabled, disabled = _split_servers(servers)
-        updates = {name: _to_json_entry(s) for name, s in enabled.items()}
-        action, message = read_merge_write_json(path, "mcpServers", updates, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]  # type: ignore[arg-type]
+    @property
+    def _config_path_parts(self) -> tuple[str, str]:
+        return ".gemini", "settings.json"
+
+    @property
+    def _mcp_key(self) -> str:
+        return "mcpServers"
 
 
 class CodexMCPWriter(AbstractSyncWriter):
@@ -177,7 +196,7 @@ class CodexMCPWriter(AbstractSyncWriter):
         path = project_root / ".codex" / "config.toml"
         enabled, disabled = _split_servers(servers)
         action, message = self._write_toml(path, enabled, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]  # type: ignore[arg-type]
+        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]
 
     def _write_toml(
         self,
@@ -185,14 +204,9 @@ class CodexMCPWriter(AbstractSyncWriter):
         enabled: dict[str, MCPServerConfig],
         disabled: set[str],
         dry_run: bool,
-    ) -> tuple[str, str]:
+    ) -> tuple[SyncAction, str]:
         try:
             import tomli_w
-
-            try:
-                import tomllib
-            except ImportError:
-                import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
             msg = (
                 "tomli-w is not installed — skipping Codex MCP sync. "
@@ -201,8 +215,22 @@ class CodexMCPWriter(AbstractSyncWriter):
             warnings.warn(msg, stacklevel=3)
             return "error", msg
 
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
+                msg = (
+                    "Neither tomllib (Python 3.11+) nor tomli is available — "
+                    "skipping Codex MCP sync. Install tomli: pip install tomli"
+                )
+                warnings.warn(msg, stacklevel=3)
+                return "error", msg
+
+        was_new = not path.exists()
         existing: dict[str, Any] = {}
-        if path.exists():
+        if not was_new:
             try:
                 existing = tomllib.loads(path.read_text(encoding="utf-8"))
             except Exception as e:
@@ -213,7 +241,6 @@ class CodexMCPWriter(AbstractSyncWriter):
                 warnings.warn(msg, stacklevel=3)
                 return "error", msg
 
-        was_new = not path.exists()
         mcp_section: dict[str, Any] = existing.get("mcp_servers", {})
         if not isinstance(mcp_section, dict):
             mcp_section = {}

@@ -11,26 +11,28 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from crossby.sync.base import SyncAction
 
-def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Read a JSON file, returning (data, error_message).
+
+def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]:
+    """Read a JSON file, returning (data, error_message, was_new).
 
     Returns:
-        (dict, None) on success.
-        (None, error_message) if file is malformed.
-        ({}, None) if file does not exist.
+        (dict, None, False) on success for an existing file.
+        (None, error_message, False) if file is malformed.
+        ({}, None, True) if file does not exist.
     """
     if not path.exists():
-        return {}, None
+        return {}, None, True
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        return None, f"contains invalid JSON: {e}"
+        return None, f"contains invalid JSON: {e}", False
     except OSError as e:
-        return None, f"could not be read: {e}"
+        return None, f"could not be read: {e}", False
     if not isinstance(raw, dict):
-        return None, "root value is not a JSON object"
-    return raw, None
+        return None, "root value is not a JSON object", False
+    return raw, None, False
 
 
 def read_merge_write_json(
@@ -39,7 +41,7 @@ def read_merge_write_json(
     updates: dict[str, Any],
     removals: set[str],
     dry_run: bool = False,
-) -> tuple[str, str]:
+) -> tuple[SyncAction, str]:
     """Atomic read-modify-write for a JSON config file.
 
     Merges ``updates`` into ``file[key]`` and removes ``removals`` from it.
@@ -57,14 +59,13 @@ def read_merge_write_json(
         Tuple of (action, message) where action is one of:
         ``"created"``, ``"updated"``, ``"skipped"``, ``"error"``.
     """
-    data, error = read_json_file(path)
+    data, error, was_new = read_json_file(path)
     if error is not None:
         msg = f"{path} {error} — skipping MCP sync. Fix the file manually or delete it."
         warnings.warn(msg, stacklevel=2)
         return "error", msg
 
     existing = data or {}
-    was_new = not path.exists()
 
     section: dict[str, Any] = existing.get(key, {})
     if not isinstance(section, dict):

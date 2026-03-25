@@ -69,7 +69,7 @@ class TestDiscoverMCPServers:
         assert result.servers["gemini-srv"].source_tool == "gemini"
 
     def test_discovers_codex_toml_servers(self, tmp_path: Path) -> None:
-        import tomli_w
+        tomli_w = pytest.importorskip("tomli_w")
 
         path = tmp_path / ".codex" / "config.toml"
         path.parent.mkdir()

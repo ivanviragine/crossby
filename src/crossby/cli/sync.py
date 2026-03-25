@@ -15,8 +15,6 @@ sync_app = typer.Typer(
     no_args_is_help=True,
 )
 
-_VALID_TOOLS = {"claude", "cursor", "copilot", "gemini", "codex"}
-
 
 @sync_app.command("mcp")
 def sync_mcp(
@@ -39,8 +37,8 @@ def sync_mcp(
 
     project_root = project_path.resolve()
 
-    if tool is not None and tool not in _VALID_TOOLS:
-        console.error(f"Unknown tool '{tool}'. Valid: {', '.join(sorted(_VALID_TOOLS))}")
+    if tool is not None and tool not in MCP_WRITERS:
+        console.error(f"Unknown tool '{tool}'. Valid: {', '.join(sorted(MCP_WRITERS))}")
         raise typer.Exit(1)
 
     try:
