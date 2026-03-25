@@ -210,6 +210,14 @@ class TestDetectExisting:
         found = detect_existing_rules(tmp_path)
         assert found == {}
 
+    def test_detect_broken_symlink(self, tmp_path: Path):
+        """A broken symlink (dangling) should still be detected as existing."""
+        claude_path = tmp_path / "CLAUDE.md"
+        claude_path.symlink_to(tmp_path / "nonexistent_source.md")
+        assert not claude_path.exists()  # broken
+        found = detect_existing_rules(tmp_path)
+        assert "claude" in found
+
 
 class TestSuggestSource:
     def test_prefer_agents_md(self, project: Path):
@@ -235,6 +243,16 @@ class TestCopyDetectsSourceChange:
         (project / "AGENTS.md").write_text("# Updated Rules\nNew content.\n")
         result = writer.sync(config, project)
         assert result.action == "updated"
+
+    def test_copy_up_to_date_when_source_starts_with_newline(self, tmp_path: Path):
+        """Source content with leading newlines must not cause repeated rewrites."""
+        (tmp_path / "AGENTS.md").write_text("\n# Rules\nContent.\n")
+        config = _make_config(strategy="copy")
+        writer = ClaudeRulesWriter()
+        writer.sync(config, tmp_path)
+        # Second sync must detect it is already up-to-date
+        result = writer.sync(config, tmp_path)
+        assert result.action == "skipped"
 
 
 class TestForceBackupNumbering:

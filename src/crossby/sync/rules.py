@@ -156,7 +156,11 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
             return False
         if not target_content.startswith(MANAGED_HEADER):
             return False
-        target_body = target_content[len(MANAGED_HEADER) :].lstrip("\n")
+        after_header = target_content[len(MANAGED_HEADER) :]
+        if after_header.startswith("\n"):
+            target_body = after_header[1:]
+        else:
+            target_body = after_header
         source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         target_hash = hashlib.sha256(target_body.encode("utf-8")).hexdigest()
         return source_hash == target_hash
@@ -377,7 +381,7 @@ def detect_existing_rules(project_root: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
     for tool_name, rel_target in TOOL_TARGETS.items():
         path = project_root / rel_target
-        if path.exists():
+        if path.exists() or path.is_symlink():
             found[tool_name] = path
     return found
 

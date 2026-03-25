@@ -64,3 +64,23 @@ class TestRulesConfigParsing:
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         config = load_config(tmp_path)
         assert config.rules.gitignore is False
+
+    def test_gitignore_non_bool_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("rules:\n  gitignore: yes_please\n")
+        with pytest.raises(ConfigError, match="'rules.gitignore' must be a boolean"):
+            load_config(tmp_path)
+
+    def test_unknown_target_key_raises(self, tmp_path):
+        """Typos like 'copliot' must surface as an error, not be silently ignored."""
+        (tmp_path / ".crossby.yml").write_text(
+            "rules:\n  targets:\n    copliot: false\n"
+        )
+        with pytest.raises(ConfigError, match="Unknown 'rules.targets' keys"):
+            load_config(tmp_path)
+
+    def test_non_bool_target_value_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text(
+            "rules:\n  targets:\n    claude: yes_please\n"
+        )
+        with pytest.raises(ConfigError, match="'rules.targets.claude' must be a boolean"):
+            load_config(tmp_path)
