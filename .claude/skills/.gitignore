@@ -1,0 +1,6 @@
+# Wade-managed session skills — installed per worktree, not committed
+implementation-session/
+review-pr-comments-session/
+plan-session/
+deps/
+task/

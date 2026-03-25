@@ -24,7 +24,7 @@ def _load_config_and_sync(project_root: Path, servers_yaml: dict[str, Any]) -> N
 
     config = load_config(project_root)
     for writer in MCP_WRITERS.values():
-        writer.write(config.mcp_servers, project_root)
+        writer.sync(config, project_root)
 
 
 class TestFullSyncMCP:
@@ -65,9 +65,8 @@ class TestFullSyncMCP:
         # Second sync should produce all "skipped"
         config = load_config(tmp_path)
         for writer in MCP_WRITERS.values():
-            results = writer.write(config.mcp_servers, tmp_path)
-            for r in results:
-                assert r.action == "skipped", f"{writer.tool_id}: expected skipped, got {r.action}"
+            result = writer.sync(config, tmp_path)
+            assert result.action == "skipped", f"{writer.tool_id}: expected skipped, got {result.action}"
 
     def test_enabled_false_removes_from_all_tools(self, tmp_path: Path) -> None:
         # First: add the server

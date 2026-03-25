@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from crossby.sync.base import SyncAction
+SyncAction = Literal["created", "updated", "skipped", "error"]
 
 
 def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]:

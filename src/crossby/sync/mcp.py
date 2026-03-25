@@ -15,9 +15,10 @@ from abc import abstractmethod
 from pathlib import Path
 from typing import Any
 
-from crossby.models.config import MCPServerConfig
-from crossby.sync.base import AbstractSyncWriter, SyncAction, SyncResult
-from crossby.sync.json_utils import read_merge_write_json
+from crossby.models.ai import AIToolID
+from crossby.models.config import CrossbyConfig, MCPServerConfig
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.json_utils import SyncAction, read_merge_write_json
 
 
 def _split_servers(
@@ -85,6 +86,8 @@ def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
 class _JsonMCPWriter(AbstractSyncWriter):
     """Base class for JSON-based MCP writers (Claude, Cursor, Gemini, Copilot)."""
 
+    concern = SyncConcern.MCP
+
     @property
     @abstractmethod
     def _config_path_parts(self) -> tuple[str, str]:
@@ -99,26 +102,32 @@ class _JsonMCPWriter(AbstractSyncWriter):
         """Convert a server to the tool's JSON entry format."""
         return _to_json_entry(server)
 
-    def write(
+    def sync(
         self,
-        servers: dict[str, MCPServerConfig],
+        config: CrossbyConfig,
         project_root: Path,
+        *,
         dry_run: bool = False,
-    ) -> list[SyncResult]:
+        force: bool = False,
+    ) -> SyncResult:
         dirname, filename = self._config_path_parts
         path = project_root / dirname / filename
-        enabled, disabled = _split_servers(servers)
+        enabled, disabled = _split_servers(config.mcp_servers)
         updates = {name: self._to_entry(s) for name, s in enabled.items()}
         action, message = read_merge_write_json(path, self._mcp_key, updates, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=path,
+            message=message or None,
+        )
 
 
 class ClaudeMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .claude/settings.json → mcpServers."""
 
-    @property
-    def tool_id(self) -> str:
-        return "claude"
+    tool_id = AIToolID.CLAUDE
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
@@ -132,9 +141,7 @@ class ClaudeMCPWriter(_JsonMCPWriter):
 class CursorMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .cursor/mcp.json → mcpServers."""
 
-    @property
-    def tool_id(self) -> str:
-        return "cursor"
+    tool_id = AIToolID.CURSOR
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
@@ -148,9 +155,7 @@ class CursorMCPWriter(_JsonMCPWriter):
 class CopilotMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .vscode/mcp.json → servers (Copilot format)."""
 
-    @property
-    def tool_id(self) -> str:
-        return "copilot"
+    tool_id = AIToolID.COPILOT
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
@@ -167,9 +172,7 @@ class CopilotMCPWriter(_JsonMCPWriter):
 class GeminiMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .gemini/settings.json → mcpServers."""
 
-    @property
-    def tool_id(self) -> str:
-        return "gemini"
+    tool_id = AIToolID.GEMINI
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
@@ -183,20 +186,27 @@ class GeminiMCPWriter(_JsonMCPWriter):
 class CodexMCPWriter(AbstractSyncWriter):
     """Merges MCP servers into .codex/config.toml → [mcp_servers.<name>]."""
 
-    @property
-    def tool_id(self) -> str:
-        return "codex"
+    tool_id = AIToolID.CODEX
+    concern = SyncConcern.MCP
 
-    def write(
+    def sync(
         self,
-        servers: dict[str, MCPServerConfig],
+        config: CrossbyConfig,
         project_root: Path,
+        *,
         dry_run: bool = False,
-    ) -> list[SyncResult]:
+        force: bool = False,
+    ) -> SyncResult:
         path = project_root / ".codex" / "config.toml"
-        enabled, disabled = _split_servers(servers)
+        enabled, disabled = _split_servers(config.mcp_servers)
         action, message = self._write_toml(path, enabled, disabled, dry_run)
-        return [SyncResult(tool=self.tool_id, path=path, action=action, message=message, dry_run=dry_run)]
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=path,
+            message=message or None,
+        )
 
     def _write_toml(
         self,
@@ -269,9 +279,9 @@ class CodexMCPWriter(AbstractSyncWriter):
         return ("created" if was_new else "updated"), ""
 
 
-# Registry: all available MCP writers, keyed by tool_id
+# Registry: all available MCP writers, keyed by tool_id string
 MCP_WRITERS: dict[str, AbstractSyncWriter] = {
-    w.tool_id: w
+    str(w.tool_id): w
     for w in [
         ClaudeMCPWriter(),
         CursorMCPWriter(),

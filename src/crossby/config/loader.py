@@ -9,11 +9,15 @@ import yaml
 
 from crossby.models.config import (
     AIConfig,
+    AgentsConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
     MCPServerConfig,
     PermissionsConfig,
+    RulesConfig,
+    RulesTargetsConfig,
+    SyncConfig,
 )
 
 CONFIG_FILENAME = ".crossby.yml"
@@ -159,14 +163,114 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         except (TypeError, ValueError) as e:
             raise ConfigError(f"Invalid MCP server '{server_name}': {e}") from e
 
+    # Parse sync section
+    sync_raw = raw.get("sync")
+    if sync_raw is None:
+        sync_raw = {}
+    if not isinstance(sync_raw, dict):
+        raise ConfigError("'sync' must be a mapping")
+    sync_auto = sync_raw.get("auto", True)
+    if not isinstance(sync_auto, bool):
+        raise ConfigError(
+            f"'sync.auto' must be a boolean (true/false), got {sync_auto!r}"
+        )
+    sync = SyncConfig(
+        auto=sync_auto,
+        tools=sync_raw.get("tools", []),
+    )
+
+    # Parse agents section
+    agents_raw = raw.get("agents")
+    if agents_raw is None:
+        agents_raw = {}
+    if not isinstance(agents_raw, dict):
+        raise ConfigError("'agents' must be a mapping")
+    agents_targets_raw = agents_raw.get("targets")
+    if agents_targets_raw is None:
+        agents_targets_raw = {}
+    if not isinstance(agents_targets_raw, dict):
+        raise ConfigError("'agents.targets' must be a mapping")
+    strategy = agents_raw.get("strategy", "symlink")
+    if strategy not in ("symlink", "copy"):
+        raise ConfigError(
+            f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
+        )
+    targets: dict[str, bool] = {}
+    for k, v in agents_targets_raw.items():
+        if not isinstance(v, bool):
+            raise ConfigError(
+                f"'agents.targets.{k}' must be a boolean (true/false), got {v!r}"
+            )
+        targets[str(k)] = v
+    gitignore_raw = agents_raw.get("gitignore", True)
+    if not isinstance(gitignore_raw, bool):
+        raise ConfigError(
+            f"'agents.gitignore' must be a boolean (true/false), got {gitignore_raw!r}"
+        )
+    agents = AgentsConfig(
+        enabled="agents" in raw and raw.get("agents") is not None,
+        source=agents_raw.get("source", ".crossby/agents"),
+        strategy=strategy,
+        gitignore=gitignore_raw,
+        targets=targets,
+    )
+
+    # Parse rules section
+    rules = _parse_rules_config(raw)
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
         mcp_servers=mcp_servers,
+        rules=rules,
+        sync=sync,
+        agents=agents,
         config_path=str(config_path),
         project_root=str(config_path.parent),
+    )
+
+
+def _parse_rules_config(raw: dict[str, Any]) -> RulesConfig:
+    """Parse the rules section from config YAML."""
+    rules_raw = raw.get("rules")
+    if rules_raw is None:
+        return RulesConfig()
+    if not isinstance(rules_raw, dict):
+        raise ConfigError("'rules' must be a mapping")
+
+    targets_raw = rules_raw.get("targets")
+    targets = RulesTargetsConfig()
+    if targets_raw is not None:
+        if not isinstance(targets_raw, dict):
+            raise ConfigError("'rules.targets' must be a mapping")
+        known_target_keys = set(RulesTargetsConfig.model_fields)
+        unknown_keys = [k for k in targets_raw.keys() if k not in known_target_keys]
+        if unknown_keys:
+            unknown_list = ", ".join(sorted(str(k) for k in unknown_keys))
+            raise ConfigError(f"Unknown 'rules.targets' keys: {unknown_list}")
+        for key, value in targets_raw.items():
+            if key in known_target_keys and not isinstance(value, bool):
+                raise ConfigError(f"'rules.targets.{key}' must be a boolean")
+        targets = RulesTargetsConfig(**{
+            k: v for k, v in targets_raw.items() if k in known_target_keys
+        })
+
+    strategy = rules_raw.get("strategy", "symlink")
+    if strategy not in ("symlink", "copy"):
+        raise ConfigError(f"'rules.strategy' must be 'symlink' or 'copy', got '{strategy}'")
+
+    gitignore_raw = rules_raw.get("gitignore", True)
+    if not isinstance(gitignore_raw, bool):
+        raise ConfigError("'rules.gitignore' must be a boolean")
+
+    return RulesConfig(
+        enabled="rules" in raw and raw.get("rules") is not None,
+        source=rules_raw.get("source", "AGENTS.md"),
+        strategy=strategy,
+        gitignore=gitignore_raw,
+        targets=targets,
     )
 
 

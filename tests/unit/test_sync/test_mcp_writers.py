@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from crossby.models.config import MCPServerConfig
+from crossby.models.config import CrossbyConfig, MCPServerConfig
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
     CopilotMCPWriter,
@@ -41,6 +41,11 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _cfg(servers: dict[str, MCPServerConfig]) -> CrossbyConfig:
+    """Build a minimal CrossbyConfig with the given mcp_servers."""
+    return CrossbyConfig(mcp_servers=servers)
+
+
 # ---------------------------------------------------------------------------
 # ClaudeMCPWriter
 # ---------------------------------------------------------------------------
@@ -50,8 +55,8 @@ class TestClaudeMCPWriter:
     writer = ClaudeMCPWriter()
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "created"
         path = tmp_path / ".claude" / "settings.json"
         assert path.exists()
         data = _read_json(path)
@@ -65,7 +70,7 @@ class TestClaudeMCPWriter:
             "mcpServers": {"existing": {"command": "node", "args": ["server.js"]}},
         }), encoding="utf-8")
 
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
 
         data = _read_json(path)
         assert "existing" in data["mcpServers"]
@@ -78,16 +83,16 @@ class TestClaudeMCPWriter:
         existing = {"mcpServers": {"user-server": {"command": "node"}}}
         path.write_text(json.dumps(existing), encoding="utf-8")
 
-        self.writer.write({"crossby-server": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"crossby-server": STDIO_SERVER}), tmp_path)
 
         data = _read_json(path)
         assert "user-server" in data["mcpServers"]
         assert "crossby-server" in data["mcpServers"]
 
     def test_idempotent_skipped(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "skipped"
 
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
@@ -95,39 +100,37 @@ class TestClaudeMCPWriter:
         path.write_text(json.dumps({"mcpServers": {"old": {"command": "npx"}}}), encoding="utf-8")
 
         servers = {"old": MCPServerConfig(command="npx", enabled=False)}
-        self.writer.write(servers, tmp_path)
+        self.writer.sync(_cfg(servers), tmp_path)
 
         data = _read_json(path)
         assert "old" not in data["mcpServers"]
 
     def test_disabled_server_not_added(self, tmp_path: Path) -> None:
-        results = self.writer.write({"never": DISABLED_SERVER}, tmp_path)
-        path = tmp_path / ".claude" / "settings.json"
+        result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
         # No enabled servers, nothing to write
-        assert results[0].action == "skipped"
+        assert result.action == "skipped"
 
     def test_env_var_preserved(self, tmp_path: Path) -> None:
-        self.writer.write({"github": STDIO_WITH_ENV}, tmp_path)
+        self.writer.sync(_cfg({"github": STDIO_WITH_ENV}), tmp_path)
         data = _read_json(tmp_path / ".claude" / "settings.json")
         assert data["mcpServers"]["github"]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}
 
     def test_http_server_entry(self, tmp_path: Path) -> None:
-        self.writer.write({"api": HTTP_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
         data = _read_json(tmp_path / ".claude" / "settings.json")
         entry = data["mcpServers"]["api"]
         assert entry["url"] == "http://localhost:8080/mcp"
         assert "command" not in entry
 
     def test_dry_run_no_write(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].action == "created"
-        assert results[0].dry_run is True
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "created"
         assert not (tmp_path / ".claude" / "settings.json").exists()
 
     def test_dry_run_no_change(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "skipped"
 
     def test_malformed_json_skipped(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
@@ -135,20 +138,20 @@ class TestClaudeMCPWriter:
         path.write_text("{invalid json!!", encoding="utf-8")
         original_content = path.read_text()
 
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         # File must not be truncated or overwritten
         assert path.read_text() == original_content
 
     def test_sorted_keys_output(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         raw = (tmp_path / ".claude" / "settings.json").read_text()
         # Verify keys are sorted (mcpServers should appear after any earlier key)
         data = json.loads(raw)
         assert list(data.keys()) == sorted(data.keys())
 
     def test_consistent_two_space_indent(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         raw = (tmp_path / ".claude" / "settings.json").read_text()
         assert '  "mcpServers"' in raw
 
@@ -162,8 +165,8 @@ class TestCursorMCPWriter:
     writer = CursorMCPWriter()
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "created"
         path = tmp_path / ".cursor" / "mcp.json"
         assert path.exists()
         data = _read_json(path)
@@ -174,28 +177,28 @@ class TestCursorMCPWriter:
         path.parent.mkdir()
         path.write_text(json.dumps({"mcpServers": {"old": {"command": "node"}}}), encoding="utf-8")
 
-        self.writer.write({"new": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"new": STDIO_SERVER}), tmp_path)
         data = _read_json(path)
         assert "old" in data["mcpServers"]
         assert "new" in data["mcpServers"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "skipped"
 
     def test_removes_disabled(self, tmp_path: Path) -> None:
         path = tmp_path / ".cursor" / "mcp.json"
         path.parent.mkdir()
         path.write_text(json.dumps({"mcpServers": {"gone": {"command": "node"}}}), encoding="utf-8")
 
-        self.writer.write({"gone": MCPServerConfig(command="node", enabled=False)}, tmp_path)
+        self.writer.sync(_cfg({"gone": MCPServerConfig(command="node", enabled=False)}), tmp_path)
         data = _read_json(path)
         assert "gone" not in data["mcpServers"]
 
     def test_dry_run(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "created"
         assert not (tmp_path / ".cursor" / "mcp.json").exists()
 
     def test_malformed_json_skipped(self, tmp_path: Path) -> None:
@@ -203,8 +206,8 @@ class TestCursorMCPWriter:
         path.parent.mkdir()
         path.write_text("{bad", encoding="utf-8")
         original = path.read_text()
-        results = self.writer.write({"x": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+        result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         assert path.read_text() == original
 
 
@@ -217,33 +220,33 @@ class TestCopilotMCPWriter:
     writer = CopilotMCPWriter()
 
     def test_creates_servers_key(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = _read_json(tmp_path / ".vscode" / "mcp.json")
         assert "servers" in data
         assert "mcpServers" not in data
 
     def test_adds_type_field_stdio(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = _read_json(tmp_path / ".vscode" / "mcp.json")
         entry = data["servers"]["context7"]
         assert entry["type"] == "stdio"
         assert entry["command"] == "npx"
 
     def test_adds_type_field_http(self, tmp_path: Path) -> None:
-        self.writer.write({"api": HTTP_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
         data = _read_json(tmp_path / ".vscode" / "mcp.json")
         entry = data["servers"]["api"]
         assert entry["type"] == "http"
         assert entry["url"] == "http://localhost:8080/mcp"
 
     def test_idempotent(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "skipped"
 
     def test_dry_run(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].dry_run is True
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "created"
         assert not (tmp_path / ".vscode" / "mcp.json").exists()
 
     def test_malformed_json_skipped(self, tmp_path: Path) -> None:
@@ -251,8 +254,8 @@ class TestCopilotMCPWriter:
         path.parent.mkdir()
         path.write_text("[not-an-object]", encoding="utf-8")
         original = path.read_text()
-        results = self.writer.write({"x": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+        result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         assert path.read_text() == original
 
 
@@ -265,8 +268,8 @@ class TestGeminiMCPWriter:
     writer = GeminiMCPWriter()
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "created"
         data = _read_json(tmp_path / ".gemini" / "settings.json")
         assert "context7" in data["mcpServers"]
 
@@ -276,19 +279,19 @@ class TestGeminiMCPWriter:
         existing = {"hooks": [{"event": "pre_tool", "command": "echo hi"}], "mcpServers": {}}
         path.write_text(json.dumps(existing), encoding="utf-8")
 
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = _read_json(path)
         assert data["hooks"] == existing["hooks"]
         assert "context7" in data["mcpServers"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "skipped"
 
     def test_dry_run(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "created"
         assert not (tmp_path / ".gemini" / "settings.json").exists()
 
     def test_malformed_json_skipped(self, tmp_path: Path) -> None:
@@ -296,8 +299,8 @@ class TestGeminiMCPWriter:
         path.parent.mkdir()
         path.write_text("{bad}", encoding="utf-8")
         original = path.read_text()
-        results = self.writer.write({"x": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+        result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         assert path.read_text() == original
 
 
@@ -310,8 +313,8 @@ class TestCodexMCPWriter:
     writer = CodexMCPWriter()
 
     def test_creates_new_toml_file(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "created"
         path = tmp_path / ".codex" / "config.toml"
         assert path.exists()
         import tomllib
@@ -328,7 +331,7 @@ class TestCodexMCPWriter:
         path.parent.mkdir()
         path.write_text(tomli_w.dumps({"mcp_servers": {"old": {"command": "node"}}}), encoding="utf-8")
 
-        self.writer.write({"new": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"new": STDIO_SERVER}), tmp_path)
 
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert "old" in data["mcp_servers"]
@@ -345,15 +348,15 @@ class TestCodexMCPWriter:
             encoding="utf-8",
         )
 
-        self.writer.write({"ctx": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"ctx": STDIO_SERVER}), tmp_path)
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert data["model"] == "gpt-4o"
         assert "ctx" in data["mcp_servers"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "skipped"
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "skipped"
 
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
         import tomllib
@@ -365,13 +368,13 @@ class TestCodexMCPWriter:
             tomli_w.dumps({"mcp_servers": {"old": {"command": "npx"}}}),
             encoding="utf-8",
         )
-        self.writer.write({"old": MCPServerConfig(command="npx", enabled=False)}, tmp_path)
+        self.writer.sync(_cfg({"old": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert "old" not in data["mcp_servers"]
 
     def test_dry_run(self, tmp_path: Path) -> None:
-        results = self.writer.write({"context7": STDIO_SERVER}, tmp_path, dry_run=True)
-        assert results[0].action == "created"
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
+        assert result.action == "created"
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_malformed_toml_skipped(self, tmp_path: Path) -> None:
@@ -379,21 +382,21 @@ class TestCodexMCPWriter:
         path.parent.mkdir()
         path.write_text("[[invalid toml\n", encoding="utf-8")
         original = path.read_text()
-        results = self.writer.write({"x": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+        result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         assert path.read_text() == original
 
     def test_missing_tomli_w_graceful_skip(self, tmp_path: Path) -> None:
         """CodexMCPWriter returns error if tomli-w is not installed."""
         with mock.patch.dict(sys.modules, {"tomli_w": None}):
-            results = self.writer.write({"context7": STDIO_SERVER}, tmp_path)
-        assert results[0].action == "error"
+            result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_args_in_toml(self, tmp_path: Path) -> None:
         import tomllib
 
-        self.writer.write({"context7": STDIO_SERVER}, tmp_path)
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
         assert data["mcp_servers"]["context7"]["args"] == ["-y", "@upstash/context7-mcp"]
 
