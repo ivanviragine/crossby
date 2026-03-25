@@ -9,6 +9,7 @@ import yaml
 
 from crossby.models.config import (
     AIConfig,
+    AgentsConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
@@ -150,9 +151,50 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         sync_raw = {}
     if not isinstance(sync_raw, dict):
         raise ConfigError("'sync' must be a mapping")
+    sync_auto = sync_raw.get("auto", True)
+    if not isinstance(sync_auto, bool):
+        raise ConfigError(
+            f"'sync.auto' must be a boolean (true/false), got {sync_auto!r}"
+        )
     sync = SyncConfig(
-        auto=sync_raw.get("auto", True),
+        auto=sync_auto,
         tools=sync_raw.get("tools", []),
+    )
+
+    # Parse agents section
+    agents_raw = raw.get("agents")
+    if agents_raw is None:
+        agents_raw = {}
+    if not isinstance(agents_raw, dict):
+        raise ConfigError("'agents' must be a mapping")
+    agents_targets_raw = agents_raw.get("targets")
+    if agents_targets_raw is None:
+        agents_targets_raw = {}
+    if not isinstance(agents_targets_raw, dict):
+        raise ConfigError("'agents.targets' must be a mapping")
+    strategy = agents_raw.get("strategy", "symlink")
+    if strategy not in ("symlink", "copy"):
+        raise ConfigError(
+            f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
+        )
+    targets: dict[str, bool] = {}
+    for k, v in agents_targets_raw.items():
+        if not isinstance(v, bool):
+            raise ConfigError(
+                f"'agents.targets.{k}' must be a boolean (true/false), got {v!r}"
+            )
+        targets[str(k)] = v
+    gitignore_raw = agents_raw.get("gitignore", True)
+    if not isinstance(gitignore_raw, bool):
+        raise ConfigError(
+            f"'agents.gitignore' must be a boolean (true/false), got {gitignore_raw!r}"
+        )
+    agents = AgentsConfig(
+        enabled="agents" in raw and raw.get("agents") is not None,
+        source=agents_raw.get("source", ".crossby/agents"),
+        strategy=strategy,
+        gitignore=gitignore_raw,
+        targets=targets,
     )
 
     return CrossbyConfig(
@@ -161,6 +203,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         models=models,
         permissions=permissions,
         sync=sync,
+        agents=agents,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )

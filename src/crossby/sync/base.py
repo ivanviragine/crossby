@@ -25,7 +25,7 @@ class SyncConcern(StrEnum):
 class SyncResult:
     """Result from a single sync writer run."""
 
-    tool_id: AIToolID
+    tool_id: AIToolID | None
     concern: SyncConcern
     action: Literal["created", "updated", "skipped", "error"]
     file_path: Path | None = None
@@ -50,6 +50,7 @@ class AbstractSyncWriter(ABC):
         project_root: Path,
         *,
         dry_run: bool = False,
+        force: bool = False,
     ) -> SyncResult:
         """Sync config to tool-specific files.
 
@@ -57,6 +58,7 @@ class AbstractSyncWriter(ABC):
             config: Loaded CrossbyConfig.
             project_root: Project root directory.
             dry_run: If True, compute the result without writing any files.
+            force: If True, overwrite existing target directories (with backup).
 
         Returns:
             SyncResult describing what happened.

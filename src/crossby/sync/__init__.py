@@ -7,12 +7,25 @@ from pathlib import Path
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
 from crossby.sync.base import SyncConcern, SyncRegistry, SyncResult
+from crossby.sync.agents import (
+    ClaudeAgentsWriter,
+    CodexAgentsWriter,
+    CopilotAgentsWriter,
+    CursorAgentsWriter,
+    GeminiAgentsWriter,
+    update_agents_gitignore,
+)
 from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
 
 # Global default registry — one writer per (tool, concern) pair.
 _registry = SyncRegistry()
 _registry.register(ClaudePermissionWriter())
 _registry.register(CursorPermissionWriter(scope="project"))
+_registry.register(ClaudeAgentsWriter())
+_registry.register(CopilotAgentsWriter())
+_registry.register(CursorAgentsWriter())
+_registry.register(GeminiAgentsWriter())
+_registry.register(CodexAgentsWriter())
 
 
 def run_sync(
@@ -22,6 +35,7 @@ def run_sync(
     tool_id: AIToolID | None = None,
     concern: SyncConcern | None = None,
     dry_run: bool = False,
+    force: bool = False,
     installed_tools: list[AIToolID] | None = None,
     registry: SyncRegistry | None = None,
 ) -> list[SyncResult]:
@@ -40,6 +54,7 @@ def run_sync(
             ``config.sync.tools`` filter).
         concern: When set, only writers for this concern run.
         dry_run: Compute results without writing any files.
+        force: If True, overwrite existing target directories (with backup).
         installed_tools: Override the installed-tools list.  Detected
             automatically when None.  Ignored when ``tool_id`` is set.
         registry: Custom registry (defaults to the global ``_registry``).
@@ -71,9 +86,10 @@ def run_sync(
         writers = [w for w in writers if w.tool_id in installed_tools]
 
     results: list[SyncResult] = []
+    agents_writers_ran = False
     for writer in writers:
         try:
-            result = writer.sync(config, project_root, dry_run=dry_run)
+            result = writer.sync(config, project_root, dry_run=dry_run, force=force)
         except Exception as exc:  # noqa: BLE001
             result = SyncResult(
                 tool_id=writer.tool_id,
@@ -82,6 +98,21 @@ def run_sync(
                 message=str(exc),
             )
         results.append(result)
+        if writer.concern == SyncConcern.AGENTS:
+            agents_writers_ran = True
+
+    # After all agents writers, update .gitignore managed block once.
+    # Skip when a specific tool filter is active to avoid cross-tool side effects
+    # and misattributed results during --tool runs.
+    if agents_writers_ran and tool_id is None:
+        gi_result = update_agents_gitignore(
+            config,
+            project_root,
+            dry_run=dry_run,
+            installed_tools=installed_tools,
+        )
+        if gi_result is not None:
+            results.append(gi_result)
 
     return results
 

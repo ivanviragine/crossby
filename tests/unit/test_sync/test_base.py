@@ -20,7 +20,7 @@ class _FakeWriter(AbstractSyncWriter):
         self._action = action
         self.calls: list[tuple[CrossbyConfig, Path, bool]] = []
 
-    def sync(self, config: CrossbyConfig, project_root: Path, *, dry_run: bool = False) -> SyncResult:
+    def sync(self, config: CrossbyConfig, project_root: Path, *, dry_run: bool = False, force: bool = False) -> SyncResult:
         self.calls.append((config, project_root, dry_run))
         return SyncResult(tool_id=self.tool_id, concern=self.concern, action=self._action)  # type: ignore[arg-type]
 
