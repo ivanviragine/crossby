@@ -14,6 +14,8 @@ from crossby.models.config import (
     ComplexityModelMapping,
     CrossbyConfig,
     PermissionsConfig,
+    RulesConfig,
+    RulesTargetsConfig,
     SyncConfig,
 )
 
@@ -197,15 +199,61 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         targets=targets,
     )
 
+    # Parse rules section
+    rules = _parse_rules_config(raw)
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
+        rules=rules,
         sync=sync,
         agents=agents,
         config_path=str(config_path),
         project_root=str(config_path.parent),
+    )
+
+
+def _parse_rules_config(raw: dict[str, Any]) -> RulesConfig:
+    """Parse the rules section from config YAML."""
+    rules_raw = raw.get("rules")
+    if rules_raw is None:
+        return RulesConfig()
+    if not isinstance(rules_raw, dict):
+        raise ConfigError("'rules' must be a mapping")
+
+    targets_raw = rules_raw.get("targets")
+    targets = RulesTargetsConfig()
+    if targets_raw is not None:
+        if not isinstance(targets_raw, dict):
+            raise ConfigError("'rules.targets' must be a mapping")
+        known_target_keys = set(RulesTargetsConfig.model_fields)
+        unknown_keys = [k for k in targets_raw.keys() if k not in known_target_keys]
+        if unknown_keys:
+            unknown_list = ", ".join(sorted(str(k) for k in unknown_keys))
+            raise ConfigError(f"Unknown 'rules.targets' keys: {unknown_list}")
+        for key, value in targets_raw.items():
+            if key in known_target_keys and not isinstance(value, bool):
+                raise ConfigError(f"'rules.targets.{key}' must be a boolean")
+        targets = RulesTargetsConfig(**{
+            k: v for k, v in targets_raw.items() if k in known_target_keys
+        })
+
+    strategy = rules_raw.get("strategy", "symlink")
+    if strategy not in ("symlink", "copy"):
+        raise ConfigError(f"'rules.strategy' must be 'symlink' or 'copy', got '{strategy}'")
+
+    gitignore_raw = rules_raw.get("gitignore", True)
+    if not isinstance(gitignore_raw, bool):
+        raise ConfigError("'rules.gitignore' must be a boolean")
+
+    return RulesConfig(
+        enabled="rules" in raw and raw.get("rules") is not None,
+        source=rules_raw.get("source", "AGENTS.md"),
+        strategy=strategy,
+        gitignore=gitignore_raw,
+        targets=targets,
     )
 
 

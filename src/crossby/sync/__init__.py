@@ -16,6 +16,14 @@ from crossby.sync.agents import (
     update_agents_gitignore,
 )
 from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
+from crossby.sync.rules import (
+    ClaudeRulesWriter,
+    CodexRulesWriter,
+    CopilotRulesWriter,
+    CursorRulesWriter,
+    GeminiRulesWriter,
+    update_rules_gitignore,
+)
 
 # Global default registry — one writer per (tool, concern) pair.
 _registry = SyncRegistry()
@@ -26,6 +34,11 @@ _registry.register(CopilotAgentsWriter())
 _registry.register(CursorAgentsWriter())
 _registry.register(GeminiAgentsWriter())
 _registry.register(CodexAgentsWriter())
+_registry.register(ClaudeRulesWriter())
+_registry.register(CursorRulesWriter())
+_registry.register(CopilotRulesWriter())
+_registry.register(GeminiRulesWriter())
+_registry.register(CodexRulesWriter())
 
 
 def run_sync(
@@ -87,6 +100,7 @@ def run_sync(
 
     results: list[SyncResult] = []
     agents_writers_ran = False
+    rules_writers_ran = False
     for writer in writers:
         try:
             result = writer.sync(config, project_root, dry_run=dry_run, force=force)
@@ -100,12 +114,25 @@ def run_sync(
         results.append(result)
         if writer.concern == SyncConcern.AGENTS:
             agents_writers_ran = True
+        if writer.concern == SyncConcern.RULES:
+            rules_writers_ran = True
 
     # After all agents writers, update .gitignore managed block once.
     # Skip when a specific tool filter is active to avoid cross-tool side effects
     # and misattributed results during --tool runs.
     if agents_writers_ran and tool_id is None:
         gi_result = update_agents_gitignore(
+            config,
+            project_root,
+            dry_run=dry_run,
+            installed_tools=installed_tools,
+        )
+        if gi_result is not None:
+            results.append(gi_result)
+
+    # After all rules writers, update .gitignore managed block once.
+    if rules_writers_ran and tool_id is None:
+        gi_result = update_rules_gitignore(
             config,
             project_root,
             dry_run=dry_run,

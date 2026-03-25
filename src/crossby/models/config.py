@@ -34,6 +34,8 @@ Matches the .crossby.yml format:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -90,6 +92,26 @@ class SyncConfig(BaseModel):
     tools: list[str] = []
 
 
+class RulesTargetsConfig(BaseModel):
+    """Which tool-specific instruction files to generate."""
+
+    claude: bool = True
+    cursor: bool = True
+    copilot: bool = True
+    gemini: bool = True
+    codex: bool = True
+
+
+class RulesConfig(BaseModel):
+    """Rules/instructions sync configuration."""
+
+    enabled: bool = False
+    source: str = "AGENTS.md"
+    strategy: Literal["symlink", "copy"] = "symlink"
+    gitignore: bool = True
+    targets: RulesTargetsConfig = RulesTargetsConfig()
+
+
 class AgentsConfig(BaseModel):
     """Agents sync configuration (``agents:`` section in .crossby.yml).
 
@@ -120,6 +142,7 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     permissions: PermissionsConfig = PermissionsConfig()
+    rules: RulesConfig = RulesConfig()
     sync: SyncConfig = SyncConfig()
     agents: AgentsConfig = AgentsConfig()
 
