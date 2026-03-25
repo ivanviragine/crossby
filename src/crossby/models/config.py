@@ -27,7 +27,28 @@ Matches the .crossby.yml format:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+class RulesTargetsConfig(BaseModel):
+    """Which tool-specific instruction files to generate."""
+
+    claude: bool = True
+    cursor: bool = True
+    copilot: bool = True
+    gemini: bool = True
+    codex: bool = True
+
+
+class RulesConfig(BaseModel):
+    """Rules/instructions sync configuration."""
+
+    source: str = "AGENTS.md"
+    strategy: Literal["symlink", "copy"] = "symlink"
+    gitignore: bool = True
+    targets: RulesTargetsConfig = RulesTargetsConfig()
 
 
 class ComplexityModelMapping(BaseModel):
@@ -84,6 +105,7 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     permissions: PermissionsConfig = PermissionsConfig()
+    rules: RulesConfig | None = None
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)

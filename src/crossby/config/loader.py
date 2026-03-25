@@ -13,6 +13,8 @@ from crossby.models.config import (
     ComplexityModelMapping,
     CrossbyConfig,
     PermissionsConfig,
+    RulesConfig,
+    RulesTargetsConfig,
 )
 
 CONFIG_FILENAME = ".crossby.yml"
@@ -143,13 +145,45 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         allowed_commands=permissions_raw.get("allowed_commands", []),
     )
 
+    # Parse rules section
+    rules = _parse_rules_config(raw.get("rules"))
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         permissions=permissions,
+        rules=rules,
         config_path=str(config_path),
         project_root=str(config_path.parent),
+    )
+
+
+def _parse_rules_config(raw: Any) -> RulesConfig | None:
+    """Parse the rules section from config YAML."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("'rules' must be a mapping")
+
+    targets_raw = raw.get("targets")
+    targets = RulesTargetsConfig()
+    if targets_raw is not None:
+        if not isinstance(targets_raw, dict):
+            raise ConfigError("'rules.targets' must be a mapping")
+        targets = RulesTargetsConfig(**{
+            k: v for k, v in targets_raw.items() if k in RulesTargetsConfig.model_fields
+        })
+
+    strategy = raw.get("strategy", "symlink")
+    if strategy not in ("symlink", "copy"):
+        raise ConfigError(f"'rules.strategy' must be 'symlink' or 'copy', got '{strategy}'")
+
+    return RulesConfig(
+        source=raw.get("source", "AGENTS.md"),
+        strategy=strategy,
+        gitignore=raw.get("gitignore", True),
+        targets=targets,
     )
 
 

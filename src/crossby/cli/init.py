@@ -83,6 +83,11 @@ def init(
 
     config_dict["permissions"] = {"allowed_commands": []}
 
+    # Detect existing instruction files and propose rules config
+    rules_dict = _detect_rules(project_root)
+    if rules_dict:
+        config_dict["rules"] = rules_dict
+
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
@@ -90,3 +95,40 @@ def init(
 
     console.success(f"Created {config_path}")
     console.hint("Edit .crossby.yml to customize models, commands, and permissions")
+    if rules_dict:
+        console.hint("Run 'crossby sync rules' to sync instruction files")
+
+
+def _detect_rules(project_root: Path) -> dict[str, object] | None:
+    """Detect existing instruction files and build a rules config dict."""
+    from crossby.sync.rules import detect_existing_rules, suggest_source
+    from crossby.ui import prompts
+
+    existing = detect_existing_rules(project_root)
+    if not existing:
+        return None
+
+    console.step(
+        f"Found instruction file(s): {', '.join(str(p.name) for p in existing.values())}"
+    )
+
+    suggested = suggest_source(existing)
+
+    if prompts.is_tty():
+        # Let user confirm or pick source
+        source_choices = list({suggested} | {str(p.relative_to(project_root)) for p in existing.values()})
+        if len(source_choices) > 1:
+            idx = prompts.select("Select canonical source file", source_choices)
+            source = source_choices[idx]
+        else:
+            source = suggested
+
+        strategy_idx = prompts.select("Sync strategy", ["symlink", "copy"])
+        strategy = ["symlink", "copy"][strategy_idx]
+    else:
+        source = suggested
+        strategy = "symlink"
+
+    rules: dict[str, object] = {"source": source, "strategy": strategy}
+    console.success(f"Rules: source={source}, strategy={strategy}")
+    return rules
