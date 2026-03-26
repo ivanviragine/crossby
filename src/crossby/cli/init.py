@@ -114,6 +114,11 @@ def init(
     if rules_dict:
         config_dict["rules"] = rules_dict
 
+    # Detect existing agent directories and propose agents config
+    agents_dict = _prompt_agents_config(project_root)
+    if agents_dict:
+        config_dict["agents"] = agents_dict
+
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
@@ -125,6 +130,8 @@ def init(
         console.hint("Run 'crossby sync mcp' to sync MCP servers to all tools")
     if rules_dict:
         console.hint("Run 'crossby sync rules' to sync instruction files")
+    if agents_dict:
+        console.hint("Run 'crossby sync agents' to sync agent files")
 
 
 def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
@@ -166,3 +173,62 @@ def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
     rules: dict[str, object] = {"source": source, "strategy": strategy}
     console.success(f"Rules: source={source}, strategy={strategy}")
     return rules
+
+
+# Agent directory paths per tool (relative to project root)
+_AGENT_DIRS: dict[str, str] = {
+    "claude": ".claude/agents",
+    "copilot": ".github/agents",
+    "cursor": ".cursor/agents",
+    "gemini": ".gemini/agents",
+    "codex": ".agents",
+}
+
+
+def detect_existing_agents(project_root: Path) -> dict[str, Path]:
+    """Detect existing agent directories in the project."""
+    found: dict[str, Path] = {}
+    for tool_name, rel_dir in _AGENT_DIRS.items():
+        path = project_root / rel_dir
+        if path.is_dir():
+            found[tool_name] = path
+    return found
+
+
+def _prompt_agents_config(project_root: Path) -> dict[str, object] | None:
+    """Detect existing agent directories and build an agents config dict."""
+    from crossby.ui import prompts
+
+    existing = detect_existing_agents(project_root)
+    if not existing:
+        return None
+
+    console.step(
+        f"Found agent dir(s): {', '.join(str(p.relative_to(project_root)) for p in existing.values())}"
+    )
+
+    # Pick the first found directory as the suggested source
+    first_tool = next(iter(existing))
+    suggested = str(existing[first_tool].relative_to(project_root))
+
+    if prompts.is_tty():
+        seen = {suggested}
+        source_choices = [suggested, ".crossby/agents"]
+        for p in existing.values():
+            s = str(p.relative_to(project_root))
+            if s not in seen:
+                seen.add(s)
+                source_choices.append(s)
+
+        idx = prompts.select("Select canonical agents source directory", source_choices)
+        source = source_choices[idx]
+
+        strategy_idx = prompts.select("Agents sync strategy", ["symlink", "copy"])
+        strategy = ["symlink", "copy"][strategy_idx]
+    else:
+        source = suggested
+        strategy = "symlink"
+
+    agents: dict[str, object] = {"source": source, "strategy": strategy}
+    console.success(f"Agents: source={source}, strategy={strategy}")
+    return agents
