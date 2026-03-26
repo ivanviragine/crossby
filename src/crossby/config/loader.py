@@ -196,6 +196,13 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError(
             f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
         )
+    from crossby.models.ai import AIToolID
+
+    known_agent_targets = {str(t) for t in AIToolID}
+    unknown_agent_keys = [k for k in agents_targets_raw if str(k) not in known_agent_targets]
+    if unknown_agent_keys:
+        unknown_list = ", ".join(sorted(str(k) for k in unknown_agent_keys))
+        raise ConfigError(f"Unknown 'agents.targets' keys: {unknown_list}")
     targets: dict[str, bool] = {}
     for k, v in agents_targets_raw.items():
         if not isinstance(v, bool):

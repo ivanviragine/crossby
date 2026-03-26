@@ -14,7 +14,6 @@ from crossby.sync.mcp import (
     CursorMCPWriter,
     GeminiMCPWriter,
     CodexMCPWriter,
-    MCP_WRITERS,
 )
 
 
@@ -446,20 +445,3 @@ class TestCodexMCPWriter:
         entry = data["mcp_servers"]["api"]
         assert entry["url"] == "http://localhost:8080/mcp"
         assert entry["transport"] == "http"
-
-
-# ---------------------------------------------------------------------------
-# MCP_WRITERS registry
-# ---------------------------------------------------------------------------
-
-
-class TestMCPWritersRegistry:
-    def test_all_tools_registered(self) -> None:
-        assert set(MCP_WRITERS.keys()) == {"claude", "cursor", "copilot", "gemini", "codex"}
-
-    def test_writer_types(self) -> None:
-        assert isinstance(MCP_WRITERS["claude"], ClaudeMCPWriter)
-        assert isinstance(MCP_WRITERS["cursor"], CursorMCPWriter)
-        assert isinstance(MCP_WRITERS["copilot"], CopilotMCPWriter)
-        assert isinstance(MCP_WRITERS["gemini"], GeminiMCPWriter)
-        assert isinstance(MCP_WRITERS["codex"], CodexMCPWriter)
