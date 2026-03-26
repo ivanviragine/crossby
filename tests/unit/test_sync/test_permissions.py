@@ -7,13 +7,23 @@ from pathlib import Path
 
 import pytest
 
+from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig, PermissionsConfig
+from crossby.sync import run_sync
+from crossby.sync.base import SyncConcern
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
     CursorPermissionWriter,
     canonical_to_claude,
     canonical_to_cursor,
 )
+
+
+def _make_config(patterns: list[str] | None = None) -> CrossbyConfig:
+    """Build a CrossbyConfig with the given permission patterns."""
+    return CrossbyConfig(
+        permissions=PermissionsConfig(allowed_commands=patterns or []),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +64,30 @@ class TestClaudePermissionWriterCheck:
         path.write_text(json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}))
         assert ClaudePermissionWriter.check(tmp_path, ["myapp:*", "other:*"]) is False
 
+    def test_returns_false_for_malformed_json(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text("{bad json!!")
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_returns_false_for_non_dict_root(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps(["not", "a", "dict"]))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_returns_false_when_permissions_not_dict(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": "invalid"}))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
+    def test_returns_false_when_allow_not_list(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": "not-a-list"}}))
+        assert ClaudePermissionWriter.check(tmp_path, ["myapp:*"]) is False
+
 
 class TestClaudePermissionWriterWrite:
     def test_creates_from_scratch(self, tmp_path: Path) -> None:
@@ -82,6 +116,23 @@ class TestClaudePermissionWriterWrite:
         data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
         assert "Bash(./scripts/run.sh:*)" in data["permissions"]["allow"]
+
+    def test_write_over_malformed_json(self, tmp_path: Path) -> None:
+        """write() gracefully handles malformed JSON — starts fresh."""
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text("{bad json!!")
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        data = json.loads(path.read_text())
+        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+
+    def test_update_adds_new_pattern_preserving_old(self, tmp_path: Path) -> None:
+        """Updating with a new pattern preserves old ones."""
+        ClaudePermissionWriter.write(tmp_path, ["first:*"])
+        ClaudePermissionWriter.write(tmp_path, ["second:*"])
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "Bash(first:*)" in data["permissions"]["allow"]
+        assert "Bash(second:*)" in data["permissions"]["allow"]
 
 
 class TestClaudePermissionWriterSync:
@@ -233,6 +284,67 @@ class TestCursorPermissionWriterSync:
         assert result.action == "created"
         assert _cursor_global(tmp_path).exists()
         assert not (tmp_path / ".cursor" / "cli.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Pattern translators
+# ---------------------------------------------------------------------------
+
+
+class TestClaudePermissionSyncIdempotency:
+    """Verify sync() is idempotent: first call writes, second is a no-op."""
+
+    def test_sync_then_sync_is_skipped(self, tmp_path: Path) -> None:
+        config = _make_config(["myapp:*"])
+        writer = ClaudePermissionWriter()
+        r1 = writer.sync(config, tmp_path)
+        assert r1.action == "created"
+        r2 = writer.sync(config, tmp_path)
+        assert r2.action == "skipped"
+        assert r2.message == "already configured"
+
+    def test_sync_with_additional_patterns(self, tmp_path: Path) -> None:
+        writer = ClaudePermissionWriter()
+        r1 = writer.sync(_make_config(["first:*"]), tmp_path)
+        assert r1.action == "created"
+        r2 = writer.sync(_make_config(["first:*", "second:*"]), tmp_path)
+        assert r2.action == "updated"
+        r3 = writer.sync(_make_config(["first:*", "second:*"]), tmp_path)
+        assert r3.action == "skipped"
+
+
+class TestPermissionsRunSyncIntegration:
+    """Test permissions through the run_sync() orchestrator."""
+
+    def test_run_sync_creates_both_claude_and_cursor(self, tmp_path: Path) -> None:
+        config = _make_config(["myapp:*"])
+        results = run_sync(
+            config,
+            tmp_path,
+            concern=SyncConcern.PERMISSIONS,
+            installed_tools=[AIToolID.CLAUDE, AIToolID.CURSOR],
+        )
+        actions = {r.tool_id: r.action for r in results}
+        assert actions[AIToolID.CLAUDE] == "created"
+        assert actions[AIToolID.CURSOR] == "created"
+        assert (tmp_path / ".claude" / "settings.json").exists()
+        assert (tmp_path / ".cursor" / "cli.json").exists()
+
+    def test_run_sync_skips_when_already_configured(self, tmp_path: Path) -> None:
+        config = _make_config(["myapp:*"])
+        run_sync(
+            config,
+            tmp_path,
+            concern=SyncConcern.PERMISSIONS,
+            installed_tools=[AIToolID.CLAUDE],
+        )
+        results = run_sync(
+            config,
+            tmp_path,
+            concern=SyncConcern.PERMISSIONS,
+            installed_tools=[AIToolID.CLAUDE],
+        )
+        assert all(r.action == "skipped" for r in results)
 
 
 # ---------------------------------------------------------------------------

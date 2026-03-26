@@ -93,6 +93,15 @@ class TestClaudeMCPWriter:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "skipped"
 
+    def test_update_existing_server_with_changed_args(self, tmp_path: Path) -> None:
+        """Updating a server with different args triggers an update."""
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        updated = MCPServerConfig(command="npx", args=["-y", "@upstash/context7-mcp", "--new-flag"])
+        result = self.writer.sync(_cfg({"context7": updated}), tmp_path)
+        assert result.action == "updated"
+        data = _read_json(tmp_path / ".claude" / "settings.json")
+        assert "--new-flag" in data["mcpServers"]["context7"]["args"]
+
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
