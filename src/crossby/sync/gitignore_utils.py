@@ -60,9 +60,9 @@ def update_managed_block(
             # Malformed block: end marker is missing — replace from the orphaned
             # start marker to EOF with a fresh block.
             logger.warning(
-                "crossby managed block in .gitignore is missing end marker; "
-                "replacing from orphaned start marker",
+                "gitignore.managed_block_missing_end_marker",
                 block_id=block_id,
+                path=str(gitignore_path),
             )
             prefix = "\n".join(lines[:start_idx])
             sep = "\n" if prefix else ""
