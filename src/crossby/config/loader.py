@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from crossby.models.ai import AIToolID
 from crossby.models.config import (
     AIConfig,
     AgentsConfig,
@@ -196,8 +197,6 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError(
             f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
         )
-    from crossby.models.ai import AIToolID
-
     known_agent_targets = {str(t) for t in AIToolID}
     unknown_agent_keys = [k for k in agents_targets_raw if str(k) not in known_agent_targets]
     if unknown_agent_keys:

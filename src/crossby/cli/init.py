@@ -175,20 +175,12 @@ def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
     return rules
 
 
-# Agent directory paths per tool (relative to project root)
-_AGENT_DIRS: dict[str, str] = {
-    "claude": ".claude/agents",
-    "copilot": ".github/agents",
-    "cursor": ".cursor/agents",
-    "gemini": ".gemini/agents",
-    "codex": ".agents",
-}
-
-
 def detect_existing_agents(project_root: Path) -> dict[str, Path]:
     """Detect existing agent directories in the project."""
+    from crossby.sync.agents import _AGENT_TARGET_PATHS
+
     found: dict[str, Path] = {}
-    for tool_name, rel_dir in _AGENT_DIRS.items():
+    for tool_name, rel_dir in _AGENT_TARGET_PATHS.items():
         path = project_root / rel_dir
         if path.is_dir():
             found[tool_name] = path
@@ -213,7 +205,10 @@ def _prompt_agents_config(project_root: Path) -> dict[str, object] | None:
 
     if prompts.is_tty():
         seen = {suggested}
-        source_choices = [suggested, ".crossby/agents"]
+        source_choices = [suggested]
+        if ".crossby/agents" not in seen:
+            seen.add(".crossby/agents")
+            source_choices.append(".crossby/agents")
         for p in existing.values():
             s = str(p.relative_to(project_root))
             if s not in seen:

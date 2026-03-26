@@ -126,6 +126,15 @@ class TestClaudePermissionWriterWrite:
         data = json.loads(path.read_text())
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
 
+    def test_write_over_non_dict_json(self, tmp_path: Path) -> None:
+        """write() gracefully handles non-dict JSON root — starts fresh."""
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps(["list", "value"]))
+        ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        data = json.loads(path.read_text())
+        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+
     def test_update_adds_new_pattern_preserving_old(self, tmp_path: Path) -> None:
         """Updating with a new pattern preserves old ones."""
         ClaudePermissionWriter.write(tmp_path, ["first:*"])
