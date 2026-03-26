@@ -48,9 +48,14 @@ def update_managed_block(
     gitignore_path = project_root / ".gitignore"
     existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
 
-    if block_start in existing:
-        lines = existing.splitlines()
-        start_idx = lines.index(block_start)
+    lines = existing.splitlines()
+    start_idx: int | None = None
+    for i, line in enumerate(lines):
+        if line == block_start:
+            start_idx = i
+            break
+
+    if start_idx is not None:
         if block_end not in lines[start_idx + 1 :]:
             # Malformed block: end marker is missing — replace from the orphaned
             # start marker to EOF with a fresh block.

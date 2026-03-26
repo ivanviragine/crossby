@@ -62,7 +62,7 @@ def read_merge_write_json(
     """
     data, error, was_new = read_json_file(path)
     if error is not None:
-        msg = f"{path} {error} — skipping MCP sync. Fix the file manually or delete it."
+        msg = f"{path} {error} — skipping sync. Fix the file manually or delete it."
         warnings.warn(msg, stacklevel=2)
         return "error", msg
 
