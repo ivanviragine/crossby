@@ -184,7 +184,6 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "structlog", specifier = ">=24.0" },
-    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'codex'", specifier = ">=2.0" },
     { name = "tomli-w", marker = "extra == 'codex'", specifier = ">=1.0" },
     { name = "tomli-w", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.12" },
