@@ -28,7 +28,7 @@ def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         return None, f"contains invalid JSON: {e}", False
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         return None, f"could not be read: {e}", False
     if not isinstance(raw, dict):
         return None, "root value is not a JSON object", False

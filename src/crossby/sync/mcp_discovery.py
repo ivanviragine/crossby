@@ -35,7 +35,7 @@ def _read_json_section(path: Path, key: str) -> dict[str, Any] | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -124,13 +124,7 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
 def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
     """Read mcp_servers from a Codex TOML config file."""
     try:
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                return None
+        import tomllib
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
         section = raw.get("mcp_servers")
         if isinstance(section, dict):
