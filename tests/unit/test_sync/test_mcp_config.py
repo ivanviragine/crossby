@@ -48,6 +48,18 @@ class TestMCPServerConfigValidation:
         s = MCPServerConfig(transport="sse", url="http://localhost:8080/sse")
         assert s.transport == "sse"
 
+    def test_url_with_stdio_transport_raises(self) -> None:
+        with pytest.raises(Exception, match="transport"):
+            MCPServerConfig(url="http://localhost", transport="stdio")
+
+    def test_command_with_http_transport_raises(self) -> None:
+        with pytest.raises(Exception, match="transport"):
+            MCPServerConfig(command="npx", transport="http")
+
+    def test_invalid_transport_value_raises(self) -> None:
+        with pytest.raises(Exception):
+            MCPServerConfig(command="npx", transport="grpc")  # type: ignore[arg-type]
+
     def test_disabled(self) -> None:
         s = MCPServerConfig(command="npx", enabled=False)
         assert s.enabled is False

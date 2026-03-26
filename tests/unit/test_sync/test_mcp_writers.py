@@ -414,10 +414,10 @@ class TestCodexMCPWriter:
         assert path.read_text() == original
 
     def test_missing_tomli_w_graceful_skip(self, tmp_path: Path) -> None:
-        """CodexMCPWriter returns error if tomli-w is not installed."""
+        """CodexMCPWriter gracefully skips if tomli-w is not installed."""
         with mock.patch.dict(sys.modules, {"tomli_w": None}):
             result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-        assert result.action == "error"
+        assert result.action == "skipped"
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
@@ -434,6 +434,18 @@ class TestCodexMCPWriter:
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
         assert data["mcp_servers"]["context7"]["args"] == ["-y", "@upstash/context7-mcp"]
+
+    def test_http_server_includes_transport_in_toml(self, tmp_path: Path) -> None:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
+        data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        entry = data["mcp_servers"]["api"]
+        assert entry["url"] == "http://localhost:8080/mcp"
+        assert entry["transport"] == "http"
 
 
 # ---------------------------------------------------------------------------

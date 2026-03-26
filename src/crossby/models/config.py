@@ -56,7 +56,7 @@ class MCPServerConfig(BaseModel):
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
-    transport: str = "stdio"
+    transport: Literal["stdio", "http", "sse"] = "stdio"
     url: str | None = None
     enabled: bool = True
 
@@ -68,6 +68,14 @@ class MCPServerConfig(BaseModel):
             raise ValueError("MCP server must have 'command' or 'url', not both")
         if not has_command and not has_url:
             raise ValueError("MCP server must have either 'command' (stdio) or 'url' (http/sse)")
+        if has_command and self.transport != "stdio":
+            raise ValueError(
+                f"transport must be 'stdio' when 'command' is set, got '{self.transport}'"
+            )
+        if has_url and self.transport not in {"http", "sse"}:
+            raise ValueError(
+                f"transport must be 'http' or 'sse' when 'url' is set, got '{self.transport}'"
+            )
         return self
 
 

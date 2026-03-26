@@ -78,6 +78,7 @@ def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
             entry["args"] = server.args
     if server.url is not None:
         entry["url"] = server.url
+        entry["transport"] = server.transport
     if server.env:
         entry["env"] = dict(server.env)
     return entry
@@ -223,7 +224,7 @@ class CodexMCPWriter(AbstractSyncWriter):
                 "Install it with: pip install tomli-w"
             )
             warnings.warn(msg, stacklevel=3)
-            return "error", msg
+            return "skipped", msg
 
         try:
             import tomllib

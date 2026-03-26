@@ -91,9 +91,9 @@ def read_merge_write_json(
         return action, ""
 
     existing[key] = section
+    json_text = json.dumps(existing, indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(existing, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json_text, encoding="utf-8")
+    tmp_path.replace(path)
     return ("created" if was_new else "updated"), ""
