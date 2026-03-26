@@ -11,9 +11,12 @@ from typing import Literal
 
 import structlog
 
+from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.file_utils import backup_path
+from crossby.sync.gitignore_utils import update_managed_block
 
 logger = structlog.get_logger()
 
@@ -32,8 +35,7 @@ TOOL_TARGETS: dict[str, str] = {
 # Gitignore managed-block
 # ---------------------------------------------------------------------------
 
-_BLOCK_START = "# >>> crossby rules sync (generated — do not edit) >>>"
-_BLOCK_END = "# <<< crossby rules sync <<<"
+_GITIGNORE_BLOCK_ID = "rules sync"
 
 
 def update_rules_gitignore(
@@ -71,43 +73,14 @@ def update_rules_gitignore(
     if not entries:
         return None
 
-    block = "\n".join([_BLOCK_START, *sorted(entries), _BLOCK_END])
-
     gitignore_path = project_root / ".gitignore"
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
-
-    if _BLOCK_START in existing:
-        lines = existing.splitlines()
-        start_idx = lines.index(_BLOCK_START)
-        if _BLOCK_END not in lines[start_idx + 1 :]:
-            # Orphan start marker — replace from start to EOF
-            new_content = "\n".join(lines[:start_idx]) + "\n" + block + "\n"
-        else:
-            new_lines: list[str] = []
-            inside = False
-            for line in lines:
-                if line == _BLOCK_START:
-                    inside = True
-                    new_lines.append(block)
-                    continue
-                if inside:
-                    if line == _BLOCK_END:
-                        inside = False
-                    continue
-                new_lines.append(line)
-            new_content = "\n".join(new_lines)
-            if not new_content.endswith("\n"):
-                new_content += "\n"
-    else:
-        sep = "\n" if existing and not existing.endswith("\n") else ""
-        new_content = existing + sep + block + "\n"
-
-    if new_content == existing:
-        return None
-
     action: Literal["created", "updated"] = "updated" if gitignore_path.is_file() else "created"
-    if not dry_run:
-        gitignore_path.write_text(new_content, encoding="utf-8")
+
+    changed = update_managed_block(
+        project_root, _GITIGNORE_BLOCK_ID, sorted(entries), dry_run=dry_run
+    )
+    if not changed:
+        return None
 
     return SyncResult(
         tool_id=None,
@@ -176,16 +149,12 @@ def _write_copy(source_path: Path, target_path: Path) -> None:
 
 def _backup_file(target_path: Path) -> None:
     """Create a .bak backup of the target file (numbered if .bak exists)."""
-    backup = target_path.with_suffix(target_path.suffix + ".bak")
-    counter = 2
-    while backup.exists():
-        backup = target_path.with_suffix(f"{target_path.suffix}.bak{counter}")
-        counter += 1
+    dest = backup_path(target_path)
     if target_path.is_symlink():
         link_target = os.readlink(target_path)
-        os.symlink(link_target, backup)
+        os.symlink(link_target, dest)
     else:
-        shutil.copy2(target_path, backup)
+        shutil.copy2(target_path, dest)
 
 
 def _warn_if_git_tracked(project_root: Path, rel_path: str) -> None:
@@ -312,8 +281,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
 
         if rules_cfg.strategy == "symlink":
             try:
-                rel_link = os.path.relpath(source_path, target_path.parent)
-                target_path.symlink_to(rel_link)
+                create_symlink(source_path, target_path)
             except OSError:
                 logger.warning(
                     "rules.symlink_failed",
