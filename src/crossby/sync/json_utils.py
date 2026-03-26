@@ -1,7 +1,8 @@
-"""JSON read-modify-write utility for MCP sync writers.
+"""JSON read-modify-write utilities for sync writers.
 
 Provides atomic read-modify-write with consistent formatting (2-space indent,
-sorted keys) and safe malformed-file handling.
+sorted keys) and safe malformed-file handling.  Used by both MCP and
+permissions sync modules.
 """
 
 from __future__ import annotations
@@ -91,9 +92,18 @@ def read_merge_write_json(
         return action, ""
 
     existing[key] = section
-    json_text = json.dumps(existing, indent=2, sort_keys=True) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json_text, encoding="utf-8")
-    tmp_path.replace(path)
+    write_json_file(path, existing)
     return ("created" if was_new else "updated"), ""
+
+
+def write_json_file(path: Path, data: dict[str, Any]) -> None:
+    """Atomic write of a JSON dict with consistent formatting.
+
+    Uses 2-space indent, sorted keys, and a tmp+replace pattern to avoid
+    partial writes on crash.
+    """
+    json_text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json_text, encoding="utf-8")
+    tmp.replace(path)
