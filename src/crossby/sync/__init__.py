@@ -15,6 +15,13 @@ from crossby.sync.agents import (
     GeminiAgentsWriter,
     update_agents_gitignore,
 )
+from crossby.sync.mcp import (
+    ClaudeMCPWriter,
+    CodexMCPWriter,
+    CopilotMCPWriter,
+    CursorMCPWriter,
+    GeminiMCPWriter,
+)
 from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
 from crossby.sync.rules import (
     ClaudeRulesWriter,
@@ -39,6 +46,11 @@ _registry.register(CursorRulesWriter())
 _registry.register(CopilotRulesWriter())
 _registry.register(GeminiRulesWriter())
 _registry.register(CodexRulesWriter())
+_registry.register(ClaudeMCPWriter())
+_registry.register(CursorMCPWriter())
+_registry.register(CopilotMCPWriter())
+_registry.register(GeminiMCPWriter())
+_registry.register(CodexMCPWriter())
 
 
 def run_sync(

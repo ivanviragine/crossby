@@ -35,6 +35,7 @@ def sync(
 
         crossby sync                        # all concerns, all installed tools
         crossby sync permissions            # permissions only
+        crossby sync mcp                    # MCP servers only
         crossby sync --tool claude          # all concerns for Claude only
         crossby sync --tool claude rules    # rules for Claude only
         crossby sync --dry-run              # preview all changes

@@ -85,6 +85,30 @@ def init(
 
     config_dict["sync"] = {"auto": True, "tools": []}
 
+    # Discover existing MCP servers from tool configs
+    from crossby.sync.mcp_discovery import discover_mcp_servers
+
+    discovery = discover_mcp_servers(project_root)
+    if discovery.servers:
+        from crossby.models.config import MCPServerConfig
+
+        mcp_dict: dict[str, object] = {}
+        for name, discovered in discovery.servers.items():
+            entry = {k: v for k, v in discovered.data.items() if v is not None and v != []}
+            try:
+                MCPServerConfig(**entry)
+                mcp_dict[name] = entry
+            except Exception:
+                console.warn(f"Skipping discovered MCP server '{name}' — invalid config from {discovered.source_tool}")
+        if mcp_dict:
+            config_dict["mcp_servers"] = mcp_dict
+            console.success(f"Discovered {len(mcp_dict)} MCP server(s) from existing tool configs")
+        if discovery.conflicts:
+            for server_name, tool1, tool2 in discovery.conflicts:
+                console.warn(
+                    f"MCP server '{server_name}' found in both {tool1} and {tool2} — kept {tool1} definition"
+                )
+
     # Detect existing instruction files and propose rules config
     rules_dict = _prompt_rules_config(project_root)
     if rules_dict:
@@ -97,6 +121,8 @@ def init(
 
     console.success(f"Created {config_path}")
     console.hint("Edit .crossby.yml to customize models, commands, and permissions")
+    if discovery.servers:
+        console.hint("Run 'crossby sync mcp' to sync MCP servers to all tools")
     if rules_dict:
         console.hint("Run 'crossby sync rules' to sync instruction files")
 
