@@ -95,6 +95,13 @@ class TestAgentsConfigParsing:
         with pytest.raises(ConfigError, match="Unknown 'agents.targets' keys"):
             load_config(tmp_path)
 
+    def test_aitoolid_without_agent_path_raises(self, tmp_path):
+        """AIToolID values not backed by an agent sync target (e.g. vscode) should be rejected."""
+        data = {"version": 1, "agents": {"targets": {"vscode": True}}}
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        with pytest.raises(ConfigError, match="Unknown 'agents.targets' keys"):
+            load_config(tmp_path)
+
     def test_valid_agents_target_key_accepted(self, tmp_path):
         data = {"version": 1, "agents": {"targets": {"claude": True, "cursor": False}}}
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))

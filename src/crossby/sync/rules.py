@@ -281,8 +281,10 @@ class _BaseRulesWriter(AbstractSyncWriter):
 
         if rules_cfg.strategy == "symlink":
             try:
-                create_symlink(source_path, target_path)
+                ok = create_symlink(source_path, target_path)
             except OSError:
+                ok = False
+            if not ok:
                 logger.warning(
                     "rules.symlink_failed",
                     tool=str(self.tool_id),

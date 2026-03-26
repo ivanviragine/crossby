@@ -13,7 +13,7 @@ def backup_path(target: Path) -> Path:
     """
     candidate = Path(str(target) + ".bak")
     counter = 2
-    while candidate.exists():
+    while candidate.exists() or candidate.is_symlink():
         candidate = Path(str(target) + f".bak{counter}")
         counter += 1
     return candidate

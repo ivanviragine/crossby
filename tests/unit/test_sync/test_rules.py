@@ -89,6 +89,19 @@ class TestSymlinkCreation:
         CopilotRulesWriter().sync(config, project)
         assert (project / ".github").is_dir()
 
+    def test_symlink_false_return_falls_back_to_copy(self, project: Path, config: CrossbyConfig):
+        """When create_symlink returns False (e.g. circular guard), sync falls back to copy."""
+        from unittest.mock import patch
+
+        with patch("crossby.sync.rules.create_symlink", return_value=False):
+            result = ClaudeRulesWriter().sync(config, project)
+
+        assert result.action == "created"
+        assert result.message == "copy (symlink failed)"
+        target = project / "CLAUDE.md"
+        assert target.exists()
+        assert not target.is_symlink()
+
 
 class TestCopyCreation:
     def test_creates_copies_with_header(self, project: Path):
@@ -297,6 +310,21 @@ class TestStrategySwitch:
         result = ClaudeRulesWriter().sync(_make_config(strategy="symlink"), project)
         assert result.action == "updated"
         assert (project / "CLAUDE.md").is_symlink()
+
+
+class TestBackupPath:
+    def test_broken_symlink_slot_is_skipped(self, tmp_path: Path):
+        """backup_path must not return a path occupied by a broken symlink."""
+        from crossby.sync.file_utils import backup_path
+
+        target = tmp_path / "file.md"
+        target.write_text("content")
+        bak = tmp_path / "file.md.bak"
+        bak.symlink_to(tmp_path / "nonexistent")
+        assert not bak.exists()  # broken symlink
+
+        result = backup_path(target)
+        assert result == tmp_path / "file.md.bak2"
 
 
 class TestBackupSymlink:
