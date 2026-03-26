@@ -10,6 +10,11 @@ from tests.e2e._support import install_mock_binary, run_crossby
 
 pytestmark = [pytest.mark.contract, pytest.mark.e2e_deterministic]
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 def _setup_sync_project(project: Path, *, sync_tools: list[str] | None = None) -> None:
     config = {
@@ -52,6 +57,30 @@ def _setup_sync_project(project: Path, *, sync_tools: list[str] | None = None) -
     agents_dir = project / ".crossby" / "agents"
     agents_dir.mkdir(parents=True)
     (agents_dir / "reviewer.md").write_text("# Reviewer\n", encoding="utf-8")
+
+
+def _setup_mcp_project(project: Path, *, sync_tools: list[str] | None = None) -> None:
+    config = {
+        "version": 1,
+        "sync": {
+            "auto": True,
+            "tools": sync_tools or [],
+        },
+        "mcp_servers": {
+            "context7": {
+                "command": "npx",
+                "args": ["-y", "@upstash/context7-mcp"],
+            },
+            "api": {
+                "transport": "http",
+                "url": "http://localhost:8080/mcp",
+            },
+        },
+    }
+    (project / ".crossby.yml").write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def test_sync_dry_run_reports_changes_without_writing(e2e_context) -> None:
@@ -140,3 +169,33 @@ def test_sync_respects_configured_tool_filter(e2e_context) -> None:
     assert ".cursor/cli.json" not in combined
     assert (e2e_context.project / ".claude" / "settings.json").is_file()
     assert not (e2e_context.project / ".cursor" / "cli.json").exists()
+
+
+def test_sync_mcp_writes_json_and_toml_configs(e2e_context) -> None:
+    install_mock_binary(e2e_context.bin_dir, "claude")
+    install_mock_binary(e2e_context.bin_dir, "codex")
+    _setup_mcp_project(e2e_context.project)
+
+    result = run_crossby(
+        ["sync", "mcp", "--path", str(e2e_context.project)],
+        cwd=e2e_context.project,
+        env=e2e_context.env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert ".claude/settings.json" in combined
+    assert ".codex/config.toml" in combined
+
+    claude_settings = e2e_context.project / ".claude" / "settings.json"
+    codex_config = e2e_context.project / ".codex" / "config.toml"
+    assert claude_settings.is_file()
+    assert codex_config.is_file()
+
+    claude_data = yaml.safe_load(claude_settings.read_text(encoding="utf-8"))
+    assert claude_data["mcpServers"]["context7"]["command"] == "npx"
+    assert claude_data["mcpServers"]["api"]["transport"] == "http"
+
+    codex_data = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+    assert codex_data["mcp_servers"]["context7"]["args"] == ["-y", "@upstash/context7-mcp"]
+    assert codex_data["mcp_servers"]["api"]["url"] == "http://localhost:8080/mcp"

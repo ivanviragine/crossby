@@ -19,11 +19,16 @@ class TestDiscoverMCPServers:
     def test_discovers_claude_servers(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "mcpServers": {
-                "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
-            }
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         result = discover_mcp_servers(tmp_path)
         assert "context7" in result.servers
@@ -33,9 +38,10 @@ class TestDiscoverMCPServers:
     def test_discovers_cursor_servers(self, tmp_path: Path) -> None:
         path = tmp_path / ".cursor" / "mcp.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "mcpServers": {"myserver": {"command": "node", "args": ["server.js"]}}
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps({"mcpServers": {"myserver": {"command": "node", "args": ["server.js"]}}}),
+            encoding="utf-8",
+        )
 
         result = discover_mcp_servers(tmp_path)
         assert "myserver" in result.servers
@@ -44,11 +50,16 @@ class TestDiscoverMCPServers:
     def test_discovers_copilot_servers_normalizes_type(self, tmp_path: Path) -> None:
         path = tmp_path / ".vscode" / "mcp.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "servers": {
-                "ctx": {"type": "stdio", "command": "npx", "args": ["-y", "mcp"]},
-            }
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "servers": {
+                        "ctx": {"type": "stdio", "command": "npx", "args": ["-y", "mcp"]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         result = discover_mcp_servers(tmp_path)
         assert "ctx" in result.servers
@@ -59,10 +70,15 @@ class TestDiscoverMCPServers:
     def test_discovers_gemini_servers(self, tmp_path: Path) -> None:
         path = tmp_path / ".gemini" / "settings.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "hooks": [],
-            "mcpServers": {"gemini-srv": {"command": "npx"}},
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": [],
+                    "mcpServers": {"gemini-srv": {"command": "npx"}},
+                }
+            ),
+            encoding="utf-8",
+        )
 
         result = discover_mcp_servers(tmp_path)
         assert "gemini-srv" in result.servers
@@ -85,15 +101,15 @@ class TestDiscoverMCPServers:
     def test_merges_union_first_seen_wins(self, tmp_path: Path) -> None:
         claude_path = tmp_path / ".claude" / "settings.json"
         claude_path.parent.mkdir()
-        claude_path.write_text(json.dumps({
-            "mcpServers": {"shared": {"command": "claude-version"}}
-        }), encoding="utf-8")
+        claude_path.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "claude-version"}}}), encoding="utf-8"
+        )
 
         cursor_path = tmp_path / ".cursor" / "mcp.json"
         cursor_path.parent.mkdir()
-        cursor_path.write_text(json.dumps({
-            "mcpServers": {"shared": {"command": "cursor-version"}}
-        }), encoding="utf-8")
+        cursor_path.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "cursor-version"}}}), encoding="utf-8"
+        )
 
         result = discover_mcp_servers(tmp_path)
         # claude comes first → first-seen wins
@@ -122,9 +138,12 @@ class TestDiscoverMCPServers:
     def test_normalizes_http_server(self, tmp_path: Path) -> None:
         path = tmp_path / ".cursor" / "mcp.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "mcpServers": {"api": {"url": "http://localhost/mcp", "transport": "http"}}
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {"mcpServers": {"api": {"url": "http://localhost/mcp", "transport": "http"}}}
+            ),
+            encoding="utf-8",
+        )
 
         result = discover_mcp_servers(tmp_path)
         assert result.servers["api"].data["url"] == "http://localhost/mcp"

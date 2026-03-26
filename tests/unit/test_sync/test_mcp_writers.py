@@ -10,13 +10,11 @@ from unittest import mock
 from crossby.models.config import CrossbyConfig, MCPServerConfig
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
+    CodexMCPWriter,
     CopilotMCPWriter,
     CursorMCPWriter,
     GeminiMCPWriter,
-    CodexMCPWriter,
-    MCP_WRITERS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,15 +58,23 @@ class TestClaudeMCPWriter:
         path = tmp_path / ".claude" / "settings.json"
         assert path.exists()
         data = _read_json(path)
-        assert data["mcpServers"]["context7"] == {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}
+        assert data["mcpServers"]["context7"] == {
+            "command": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+        }
 
     def test_merges_into_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({
-            "permissions": {"allow": ["Bash(git *)"]},
-            "mcpServers": {"existing": {"command": "node", "args": ["server.js"]}},
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "permissions": {"allow": ["Bash(git *)"]},
+                    "mcpServers": {"existing": {"command": "node", "args": ["server.js"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
 
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
 
@@ -113,7 +119,9 @@ class TestClaudeMCPWriter:
     def test_env_var_preserved(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"github": STDIO_WITH_ENV}), tmp_path)
         data = _read_json(tmp_path / ".claude" / "settings.json")
-        assert data["mcpServers"]["github"]["env"] == {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}
+        assert data["mcpServers"]["github"]["env"] == {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+        }
 
     def test_http_server_entry(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
@@ -141,6 +149,17 @@ class TestClaudeMCPWriter:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "error"
         # File must not be truncated or overwritten
+        assert path.read_text() == original_content
+
+    def test_invalid_mcp_section_shape_is_preserved(self, tmp_path: Path) -> None:
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+        original_content = path.read_text()
+
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+
+        assert result.action == "error"
         assert path.read_text() == original_content
 
     def test_sorted_keys_output(self, tmp_path: Path) -> None:
@@ -350,7 +369,10 @@ class TestCodexMCPWriter:
 
         path = tmp_path / ".codex" / "config.toml"
         path.parent.mkdir()
-        path.write_text(tomli_w.dumps({"mcp_servers": {"old": {"command": "node"}}}), encoding="utf-8")
+        path.write_text(
+            tomli_w.dumps({"mcp_servers": {"old": {"command": "node"}}}),
+            encoding="utf-8",
+        )
 
         self.writer.sync(_cfg({"new": STDIO_SERVER}), tmp_path)
 
@@ -413,6 +435,19 @@ class TestCodexMCPWriter:
         assert result.action == "error"
         assert path.read_text() == original
 
+    def test_invalid_mcp_section_shape_is_preserved(self, tmp_path: Path) -> None:
+        import tomli_w
+
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text(tomli_w.dumps({"mcp_servers": []}), encoding="utf-8")
+        original = path.read_text()
+
+        result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
+
+        assert result.action == "error"
+        assert path.read_text() == original
+
     def test_missing_tomli_w_graceful_skip(self, tmp_path: Path) -> None:
         """CodexMCPWriter gracefully skips if tomli-w is not installed."""
         with mock.patch.dict(sys.modules, {"tomli_w": None}):
@@ -446,20 +481,3 @@ class TestCodexMCPWriter:
         entry = data["mcp_servers"]["api"]
         assert entry["url"] == "http://localhost:8080/mcp"
         assert entry["transport"] == "http"
-
-
-# ---------------------------------------------------------------------------
-# MCP_WRITERS registry
-# ---------------------------------------------------------------------------
-
-
-class TestMCPWritersRegistry:
-    def test_all_tools_registered(self) -> None:
-        assert set(MCP_WRITERS.keys()) == {"claude", "cursor", "copilot", "gemini", "codex"}
-
-    def test_writer_types(self) -> None:
-        assert isinstance(MCP_WRITERS["claude"], ClaudeMCPWriter)
-        assert isinstance(MCP_WRITERS["cursor"], CursorMCPWriter)
-        assert isinstance(MCP_WRITERS["copilot"], CopilotMCPWriter)
-        assert isinstance(MCP_WRITERS["gemini"], GeminiMCPWriter)
-        assert isinstance(MCP_WRITERS["codex"], CodexMCPWriter)

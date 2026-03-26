@@ -61,7 +61,7 @@ class MCPServerConfig(BaseModel):
     enabled: bool = True
 
     @model_validator(mode="after")
-    def validate_transport_fields(self) -> "MCPServerConfig":
+    def validate_transport_fields(self) -> MCPServerConfig:
         has_command = self.command is not None
         has_url = self.url is not None
         if has_command and has_url:

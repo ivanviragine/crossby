@@ -56,10 +56,10 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
     if "command" in entry:
         result["command"] = entry["command"]
-    if "args" in entry and entry["args"]:
-        result["args"] = entry["args"]
-    if "env" in entry and entry["env"]:
-        result["env"] = entry["env"]
+    if args := entry.get("args"):
+        result["args"] = args
+    if env := entry.get("env"):
+        result["env"] = env
     if "url" in entry:
         result["url"] = entry["url"]
 
@@ -125,10 +125,11 @@ def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
     """Read mcp_servers from a Codex TOML config file."""
     try:
         import tomllib
+
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
         section = raw.get("mcp_servers")
         if isinstance(section, dict):
-            return section  # type: ignore[return-value]
+            return section
     except Exception:
         pass
     return None

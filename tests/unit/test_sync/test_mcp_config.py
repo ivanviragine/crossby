@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import yaml
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from crossby.config.loader import ConfigError, load_config
 from crossby.models.config import MCPServerConfig
@@ -13,11 +14,11 @@ from crossby.models.config import MCPServerConfig
 
 class TestMCPServerConfigValidation:
     def test_stdio_requires_command(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             MCPServerConfig()  # no command or url
 
     def test_both_command_and_url_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             MCPServerConfig(command="npx", url="http://localhost")
 
     def test_valid_stdio_minimal(self) -> None:
@@ -57,7 +58,7 @@ class TestMCPServerConfigValidation:
             MCPServerConfig(command="npx", transport="http")
 
     def test_invalid_transport_value_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             MCPServerConfig(command="npx", transport="grpc")  # type: ignore[arg-type]
 
     def test_disabled(self) -> None:

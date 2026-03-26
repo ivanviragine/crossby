@@ -97,14 +97,18 @@ def init(
                 MCPServerConfig(**entry)
                 mcp_dict[name] = entry
             except Exception:
-                console.warn(f"Skipping discovered MCP server '{name}' — invalid config from {discovered.source_tool}")
+                console.warn(
+                    f"Skipping discovered MCP server '{name}' — invalid config "
+                    f"from {discovered.source_tool}"
+                )
         if mcp_dict:
             config_dict["mcp_servers"] = mcp_dict
             console.success(f"Discovered {len(mcp_dict)} MCP server(s) from existing tool configs")
         if discovery.conflicts:
             for server_name, tool1, tool2 in discovery.conflicts:
                 console.warn(
-                    f"MCP server '{server_name}' found in both {tool1} and {tool2} — kept {tool1} definition"
+                    f"MCP server '{server_name}' found in both {tool1} and {tool2} "
+                    f"— kept {tool1} definition"
                 )
 
     # Detect existing instruction files and propose rules config

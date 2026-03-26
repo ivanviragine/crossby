@@ -226,18 +226,7 @@ class CodexMCPWriter(AbstractSyncWriter):
             warnings.warn(msg, stacklevel=3)
             return "skipped", msg
 
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                msg = (
-                    "Neither tomllib (Python 3.11+) nor tomli is available — "
-                    "skipping Codex MCP sync. Install tomli: pip install tomli"
-                )
-                warnings.warn(msg, stacklevel=3)
-                return "error", msg
+        import tomllib
 
         was_new = not path.exists()
         existing: dict[str, Any] = {}
@@ -252,9 +241,18 @@ class CodexMCPWriter(AbstractSyncWriter):
                 warnings.warn(msg, stacklevel=3)
                 return "error", msg
 
-        mcp_section: dict[str, Any] = existing.get("mcp_servers", {})
-        if not isinstance(mcp_section, dict):
-            mcp_section = {}
+        section_value = existing.get("mcp_servers", {})
+        if not isinstance(section_value, dict):
+            if "mcp_servers" in existing:
+                msg = (
+                    f"{path} has 'mcp_servers' as a non-table value — skipping MCP sync "
+                    "for Codex. Fix the file manually or delete it."
+                )
+                warnings.warn(msg, stacklevel=3)
+                return "error", msg
+            mcp_section: dict[str, Any] = {}
+        else:
+            mcp_section = section_value
 
         changed = False
         for name, server in enabled.items():
@@ -278,16 +276,3 @@ class CodexMCPWriter(AbstractSyncWriter):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tomli_w.dumps(existing), encoding="utf-8")
         return ("created" if was_new else "updated"), ""
-
-
-# Registry: all available MCP writers, keyed by tool_id string
-MCP_WRITERS: dict[str, AbstractSyncWriter] = {
-    str(w.tool_id): w
-    for w in [
-        ClaudeMCPWriter(),
-        CursorMCPWriter(),
-        CopilotMCPWriter(),
-        GeminiMCPWriter(),
-        CodexMCPWriter(),
-    ]
-}

@@ -154,17 +154,16 @@ crossby sync --path ./src/feature
 | Concern | Strategy | Details |
 |---|---|---|
 | Permissions | Merge | Writes canonical `allowed_commands` into `.claude/settings.json` and `.cursor/cli.json` |
+| MCP | Merge | Writes canonical `mcp_servers` into `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`, and `.codex/config.toml` |
 | Rules | Symlink or copy | Distributes a canonical rules file such as `AGENTS.md` into tool-specific instruction files |
 | Agents | Symlink or copy | Distributes `.crossby/agents/` into each tool's agent directory |
 
 **Concern filters and scope:**
 
-- Use positional concerns such as `permissions`, `rules`, or `agents` to sync only one concern.
+- Use positional concerns such as `permissions`, `mcp`, `rules`, or `agents` to sync only one concern.
 - Use `--tool` to target one installed tool explicitly.
 - Use `sync.tools` in `.crossby.yml` to restrict the default multi-tool sync lane.
 - `--dry-run` previews the exact files that would be created or updated without writing them.
-
-`mcp` is reserved as a sync concern, but there are no MCP writers yet, so filtering to it currently produces no matching writers.
 
 ### Transcript Parsing (`crossby stats`)
 

@@ -67,9 +67,18 @@ def read_merge_write_json(
 
     existing = data or {}
 
-    section: dict[str, Any] = existing.get(key, {})
-    if not isinstance(section, dict):
-        section = {}
+    section_value = existing.get(key, {})
+    if not isinstance(section_value, dict):
+        if key in existing:
+            msg = (
+                f"{path} has '{key}' as a non-object value — skipping MCP sync. "
+                "Fix the file manually or delete it."
+            )
+            warnings.warn(msg, stacklevel=2)
+            return "error", msg
+        section: dict[str, Any] = {}
+    else:
+        section = section_value
 
     changed = False
 
@@ -87,7 +96,7 @@ def read_merge_write_json(
         return "skipped", ""
 
     if dry_run:
-        action: str = "created" if was_new else "updated"
+        action: SyncAction = "created" if was_new else "updated"
         return action, ""
 
     existing[key] = section
