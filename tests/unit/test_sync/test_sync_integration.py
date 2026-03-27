@@ -20,11 +20,14 @@ def _load_config_and_sync(project_root: Path, servers_yaml: dict[str, Any]) -> N
     (project_root / ".crossby.yml").write_text(yaml.dump(cfg), encoding="utf-8")
 
     from crossby.config.loader import load_config
-    from crossby.sync.mcp import MCP_WRITERS
+    from crossby.sync import run_sync
+    from crossby.sync.base import SyncConcern
 
     config = load_config(project_root)
-    for writer in MCP_WRITERS.values():
-        writer.sync(config, project_root)
+    from crossby.models.ai import AIToolID
+
+    all_tools = list(AIToolID)
+    run_sync(config, project_root, concern=SyncConcern.MCP, installed_tools=all_tools)
 
 
 class TestFullSyncMCP:
@@ -57,16 +60,21 @@ class TestFullSyncMCP:
 
     def test_second_sync_is_idempotent(self, tmp_path: Path) -> None:
         from crossby.config.loader import load_config
-        from crossby.sync.mcp import MCP_WRITERS
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern
 
         servers = {"ctx": {"command": "npx", "args": ["-y", "mcp"]}}
         _load_config_and_sync(tmp_path, servers)
 
         # Second sync should produce all "skipped"
         config = load_config(tmp_path)
-        for writer in MCP_WRITERS.values():
-            result = writer.sync(config, tmp_path)
-            assert result.action == "skipped", f"{writer.tool_id}: expected skipped, got {result.action}"
+        from crossby.models.ai import AIToolID
+
+        results = run_sync(
+            config, tmp_path, concern=SyncConcern.MCP, installed_tools=list(AIToolID)
+        )
+        for result in results:
+            assert result.action == "skipped", f"{result.tool_id}: expected skipped, got {result.action}"
 
     def test_enabled_false_removes_from_all_tools(self, tmp_path: Path) -> None:
         # First: add the server

@@ -4,7 +4,11 @@ from pathlib import Path
 
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig, RulesConfig, RulesTargetsConfig
-from crossby.sync.rules import _BLOCK_END, _BLOCK_START, update_rules_gitignore
+from crossby.sync.rules import _GITIGNORE_BLOCK_ID, update_rules_gitignore
+
+# Derive the markers from the block ID, matching gitignore_utils conventions
+_BLOCK_START = f"# >>> crossby {_GITIGNORE_BLOCK_ID} (generated — do not edit) >>>"
+_BLOCK_END = f"# <<< crossby {_GITIGNORE_BLOCK_ID} <<<"
 
 
 def _cfg(

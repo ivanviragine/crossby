@@ -196,6 +196,12 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError(
             f"'agents.strategy' must be one of 'symlink' or 'copy', got {strategy!r}"
         )
+    from crossby.sync.agents import _AGENT_TARGET_PATHS  # lazy to avoid circular imports
+
+    unknown_agent_keys = [k for k in agents_targets_raw if str(k) not in _AGENT_TARGET_PATHS]
+    if unknown_agent_keys:
+        unknown_list = ", ".join(sorted(str(k) for k in unknown_agent_keys))
+        raise ConfigError(f"Unknown 'agents.targets' keys: {unknown_list}")
     targets: dict[str, bool] = {}
     for k, v in agents_targets_raw.items():
         if not isinstance(v, bool):

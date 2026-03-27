@@ -278,16 +278,3 @@ class CodexMCPWriter(AbstractSyncWriter):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tomli_w.dumps(existing), encoding="utf-8")
         return ("created" if was_new else "updated"), ""
-
-
-# Registry: all available MCP writers, keyed by tool_id string
-MCP_WRITERS: dict[str, AbstractSyncWriter] = {
-    str(w.tool_id): w
-    for w in [
-        ClaudeMCPWriter(),
-        CursorMCPWriter(),
-        CopilotMCPWriter(),
-        GeminiMCPWriter(),
-        CodexMCPWriter(),
-    ]
-}

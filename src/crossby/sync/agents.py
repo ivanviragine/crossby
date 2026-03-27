@@ -14,6 +14,8 @@ from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.models.config import AgentsConfig, CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.file_utils import backup_path
+from crossby.sync.gitignore_utils import update_managed_block
 
 logger = structlog.get_logger()
 
@@ -21,8 +23,7 @@ logger = structlog.get_logger()
 # Gitignore managed-block
 # ---------------------------------------------------------------------------
 
-_BLOCK_START = "# >>> crossby agents sync (generated — do not edit) >>>"
-_BLOCK_END = "# <<< crossby agents sync <<<"
+_GITIGNORE_BLOCK_ID = "agents sync"
 
 # Per-tool agent directory paths (relative to project root)
 _AGENT_TARGET_PATHS: dict[str, str] = {
@@ -68,51 +69,14 @@ def update_agents_gitignore(
     if not entries:
         return None
 
-    block = "\n".join([_BLOCK_START, *entries, _BLOCK_END])
-
     gitignore_path = project_root / ".gitignore"
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
-
-    if _BLOCK_START in existing:
-        # Replace existing managed block
-        lines = existing.splitlines()
-        start_idx = lines.index(_BLOCK_START)
-        if _BLOCK_END not in lines[start_idx + 1 :]:
-            # Malformed block: end marker is missing — fall back to appending a
-            # fresh block while preserving all existing content to avoid data loss.
-            logger.warning(
-                "crossby agents managed block in .gitignore is missing end marker; "
-                "appending a new block at end"
-            )
-            sep = "\n" if existing and not existing.endswith("\n") else ""
-            new_content = existing + sep + block + "\n"
-        else:
-            new_lines: list[str] = []
-            inside = False
-            for line in lines:
-                if line == _BLOCK_START:
-                    inside = True
-                    new_lines.append(block)
-                    continue
-                if inside:
-                    if line == _BLOCK_END:
-                        inside = False
-                    continue
-                new_lines.append(line)
-            new_content = "\n".join(new_lines)
-            if not new_content.endswith("\n"):
-                new_content += "\n"
-    else:
-        # Append block at end
-        sep = "\n" if existing and not existing.endswith("\n") else ""
-        new_content = existing + sep + block + "\n"
-
-    if new_content == existing:
-        return None  # Already up to date
-
     action: Literal["created", "updated"] = "updated" if gitignore_path.is_file() else "created"
-    if not dry_run:
-        gitignore_path.write_text(new_content, encoding="utf-8")
+
+    changed = update_managed_block(
+        project_root, _GITIGNORE_BLOCK_ID, entries, dry_run=dry_run
+    )
+    if not changed:
+        return None
 
     return SyncResult(
         tool_id=None,
@@ -315,12 +279,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             dir_was_cleared = True
             if not dry_run:
-                backup = Path(str(target_dir) + ".bak")
-                if backup.exists():
-                    shutil.rmtree(str(backup))
-                shutil.copytree(str(target_dir), str(backup))
+                bak = backup_path(target_dir)
+                shutil.copytree(str(target_dir), str(bak))
                 shutil.rmtree(str(target_dir))
-                logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(backup))
+                logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(bak))
 
         if agents_cfg.strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
@@ -559,15 +521,13 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                     )
                 # force=True: back up and clear the directory before re-syncing
                 if not dry_run:
-                    backup = Path(str(target_dir) + ".bak")
-                    if backup.exists():
-                        shutil.rmtree(str(backup))
-                    shutil.copytree(str(target_dir), str(backup))
+                    bak = backup_path(target_dir)
+                    shutil.copytree(str(target_dir), str(bak))
                     shutil.rmtree(str(target_dir))
                     logger.info(
                         "agents.dir_backed_up",
                         original=str(target_dir),
-                        backup=str(backup),
+                        backup=str(bak),
                     )
 
         if agents_cfg.strategy == "copy":

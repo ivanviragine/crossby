@@ -165,7 +165,7 @@ class AgentsConfig(BaseModel):
 
     enabled: bool = False
     source: str = ".crossby/agents"
-    strategy: str = "symlink"
+    strategy: Literal["symlink", "copy"] = "symlink"
     gitignore: bool = True
     targets: dict[str, bool] = {}
 

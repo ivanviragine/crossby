@@ -58,7 +58,9 @@ class AbstractSyncWriter(ABC):
             config: Loaded CrossbyConfig.
             project_root: Project root directory.
             dry_run: If True, compute the result without writing any files.
-            force: If True, overwrite existing target directories (with backup).
+            force: If True, overwrite existing target files/directories (with
+                backup).  Merge-style writers (permissions, MCP) perform
+                non-destructive appends, so ``force`` is a no-op for them.
 
         Returns:
             SyncResult describing what happened.
