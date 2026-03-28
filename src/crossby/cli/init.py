@@ -85,6 +85,40 @@ def init(
 
     config_dict["sync"] = {"auto": True, "tools": []}
 
+    # Discover existing MCP servers from tool configs
+    from crossby.sync.mcp_discovery import discover_mcp_servers
+
+    discovery = discover_mcp_servers(project_root)
+    if discovery.servers:
+        from crossby.models.config import MCPServerConfig
+
+        mcp_dict: dict[str, object] = {}
+        for name, discovered in discovery.servers.items():
+            entry = {k: v for k, v in discovered.data.items() if v is not None and v != []}
+            try:
+                MCPServerConfig(**entry)
+                mcp_dict[name] = entry
+            except Exception:
+                console.warn(f"Skipping discovered MCP server '{name}' — invalid config from {discovered.source_tool}")
+        if mcp_dict:
+            config_dict["mcp_servers"] = mcp_dict
+            console.success(f"Discovered {len(mcp_dict)} MCP server(s) from existing tool configs")
+        if discovery.conflicts:
+            for server_name, tool1, tool2 in discovery.conflicts:
+                console.warn(
+                    f"MCP server '{server_name}' found in both {tool1} and {tool2} — kept {tool1} definition"
+                )
+
+    # Detect existing instruction files and propose rules config
+    rules_dict = _prompt_rules_config(project_root)
+    if rules_dict:
+        config_dict["rules"] = rules_dict
+
+    # Detect existing agent directories and propose agents config
+    agents_dict = _prompt_agents_config(project_root)
+    if agents_dict:
+        config_dict["agents"] = agents_dict
+
     config_path.write_text(
         yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
@@ -92,3 +126,104 @@ def init(
 
     console.success(f"Created {config_path}")
     console.hint("Edit .crossby.yml to customize models, commands, and permissions")
+    if discovery.servers:
+        console.hint("Run 'crossby sync mcp' to sync MCP servers to all tools")
+    if rules_dict:
+        console.hint("Run 'crossby sync rules' to sync instruction files")
+    if agents_dict:
+        console.hint("Run 'crossby sync agents' to sync agent files")
+
+
+def _prompt_rules_config(project_root: Path) -> dict[str, object] | None:
+    """Detect existing instruction files and build a rules config dict."""
+    from crossby.sync.rules import detect_existing_rules, suggest_source
+    from crossby.ui import prompts
+
+    existing = detect_existing_rules(project_root)
+    if not existing:
+        return None
+
+    console.step(
+        f"Found instruction file(s): {', '.join(str(p.name) for p in existing.values())}"
+    )
+
+    suggested = suggest_source(existing)
+
+    if prompts.is_tty():
+        seen = {suggested}
+        source_choices = [suggested]
+        for p in existing.values():
+            s = str(p.relative_to(project_root))
+            if s not in seen:
+                seen.add(s)
+                source_choices.append(s)
+
+        if len(source_choices) > 1:
+            idx = prompts.select("Select canonical source file", source_choices)
+            source = source_choices[idx]
+        else:
+            source = suggested
+
+        strategy_idx = prompts.select("Sync strategy", ["symlink", "copy"])
+        strategy = ["symlink", "copy"][strategy_idx]
+    else:
+        source = suggested
+        strategy = "symlink"
+
+    rules: dict[str, object] = {"source": source, "strategy": strategy}
+    console.success(f"Rules: source={source}, strategy={strategy}")
+    return rules
+
+
+def detect_existing_agents(project_root: Path) -> dict[str, Path]:
+    """Detect existing agent directories in the project."""
+    from crossby.sync.agents import _AGENT_TARGET_PATHS
+
+    found: dict[str, Path] = {}
+    for tool_name, rel_dir in _AGENT_TARGET_PATHS.items():
+        path = project_root / rel_dir
+        if path.is_dir():
+            found[tool_name] = path
+    return found
+
+
+def _prompt_agents_config(project_root: Path) -> dict[str, object] | None:
+    """Detect existing agent directories and build an agents config dict."""
+    from crossby.ui import prompts
+
+    existing = detect_existing_agents(project_root)
+    if not existing:
+        return None
+
+    console.step(
+        f"Found agent dir(s): {', '.join(str(p.relative_to(project_root)) for p in existing.values())}"
+    )
+
+    # Pick the first found directory as the suggested source
+    first_tool = next(iter(existing))
+    suggested = str(existing[first_tool].relative_to(project_root))
+
+    if prompts.is_tty():
+        seen = {suggested}
+        source_choices = [suggested]
+        if ".crossby/agents" not in seen:
+            seen.add(".crossby/agents")
+            source_choices.append(".crossby/agents")
+        for p in existing.values():
+            s = str(p.relative_to(project_root))
+            if s not in seen:
+                seen.add(s)
+                source_choices.append(s)
+
+        idx = prompts.select("Select canonical agents source directory", source_choices)
+        source = source_choices[idx]
+
+        strategy_idx = prompts.select("Agents sync strategy", ["symlink", "copy"])
+        strategy = ["symlink", "copy"][strategy_idx]
+    else:
+        source = suggested
+        strategy = "symlink"
+
+    agents: dict[str, object] = {"source": source, "strategy": strategy}
+    console.success(f"Agents: source={source}, strategy={strategy}")
+    return agents

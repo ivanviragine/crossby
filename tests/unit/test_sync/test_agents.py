@@ -16,14 +16,17 @@ from crossby.sync.agents import (
     CodexAgentsWriter,
     CursorAgentsWriter,
     GeminiAgentsWriter,
+    _GITIGNORE_BLOCK_ID,
     _parse_frontmatter,
     _render_frontmatter,
     _translate_tools,
     update_agents_gitignore,
-    _BLOCK_END,
-    _BLOCK_START,
 )
 from crossby.sync.base import SyncConcern
+
+# Derive the markers from the block ID, matching gitignore_utils conventions
+_BLOCK_START = f"# >>> crossby {_GITIGNORE_BLOCK_ID} (generated — do not edit) >>>"
+_BLOCK_END = f"# <<< crossby {_GITIGNORE_BLOCK_ID} <<<"
 
 
 # ---------------------------------------------------------------------------
@@ -665,18 +668,17 @@ class TestUpdateAgentsGitignore:
         assert _BLOCK_START in content
 
     def test_malformed_block_missing_end_marker(self, tmp_path: Path) -> None:
-        """A malformed block (start but no end marker) falls back to appending a fresh block."""
+        """A malformed block (start but no end marker) replaces from orphan to EOF."""
         gitignore = tmp_path / ".gitignore"
         malformed = f"*.pyc\n{_BLOCK_START}\n.old/agents\n# end marker is missing\n"
         gitignore.write_text(malformed, encoding="utf-8")
         config = _config()
         update_agents_gitignore(config, tmp_path)
         content = gitignore.read_text(encoding="utf-8")
-        # Original content preserved
+        # Content before orphan preserved
         assert "*.pyc" in content
-        assert ".old/agents" in content
-        # Fresh block appended with correct end marker
-        assert content.count(_BLOCK_START) >= 1
+        # Fresh block replaces orphaned content
+        assert content.count(_BLOCK_START) == 1
         assert _BLOCK_END in content
         assert ".claude/agents" in content
 

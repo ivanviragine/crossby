@@ -17,6 +17,7 @@ import structlog
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.json_utils import read_json_file, write_json_file
 
 logger = structlog.get_logger()
 
@@ -101,12 +102,8 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         """Add patterns to .claude/settings.json. Idempotent, non-destructive."""
         settings_path = project_root / ".claude" / "settings.json"
 
-        existing: dict[str, object] = {}
-        if settings_path.is_file():
-            with contextlib.suppress(json.JSONDecodeError, OSError):
-                raw = json.loads(settings_path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    existing = raw
+        data, _error, _was_new = read_json_file(settings_path)
+        existing: dict[str, object] = data if data is not None else {}
 
         permissions = existing.setdefault("permissions", {})
         if not isinstance(permissions, dict):
@@ -127,11 +124,7 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         if not changed:
             return
 
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(
-            json.dumps(existing, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(settings_path, existing)
         logger.info("claude_allowlist.configured", path=str(settings_path))
 
     def sync(
@@ -238,12 +231,8 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
         config_file = _cursor_config_path(project_root)
 
-        existing: dict[str, object] = {}
-        if config_file.is_file():
-            with contextlib.suppress(json.JSONDecodeError, OSError):
-                raw = json.loads(config_file.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    existing = raw
+        data, _error, _was_new = read_json_file(config_file)
+        existing: dict[str, object] = data if data is not None else {}
 
         permissions = existing.setdefault("permissions", {})
         if not isinstance(permissions, dict):
@@ -264,11 +253,7 @@ class CursorPermissionWriter(AbstractSyncWriter):
         if not changed:
             return
 
-        config_file.parent.mkdir(parents=True, exist_ok=True)
-        config_file.write_text(
-            json.dumps(existing, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_file(config_file, existing)
         logger.info("cursor_allowlist.configured", path=str(config_file))
 
     def sync(
