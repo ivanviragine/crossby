@@ -84,6 +84,8 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="…"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
 | `--prompt` | positional arg | `-i <prompt>` | positional arg | positional arg | `--prompt <prompt>` | positional arg | — | — |
 | `--transcript` | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | — | — |
+| `--resume` | `--resume <id>` | `--resume=<id>` | `--resume <id>` | `codex resume <id>` (subcommand) | `-s <id>` | — | — | — |
+| `--trusted-dir` | `--add-dir` | `--add-dir` | `--include-directories` | `--sandbox workspace-write --add-dir` | — | — | — | — |
 
 ### Effort Level Mapping
 

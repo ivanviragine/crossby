@@ -78,3 +78,134 @@ class TestTranscriptParentDir:
 
         assert result.exit_code == 0, result.output
         mock_adapter.launch.assert_called_once()
+
+
+class TestResumeFlag:
+    """--resume routes to build_resume_command and run_with_transcript."""
+
+    def _make_adapter(self, supports_resume: bool = True) -> MagicMock:
+        adapter = MagicMock()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_resume=supports_resume,
+            supports_initial_message=True,
+        )
+        adapter.build_resume_command.return_value = ["claude", "--resume", "abc-123"]
+        adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
+        return adapter
+
+    def test_resume_calls_build_resume_command(self, tmp_path: Path) -> None:
+        """--resume reaches adapter.build_resume_command with the correct session ID."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = self._make_adapter()
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as mock_run,
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "claude", "--resume", "abc-123"]
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_adapter.build_resume_command.assert_called_once_with("abc-123")
+        mock_run.assert_called_once()
+        launched_cmd = mock_run.call_args[0][0]
+        assert launched_cmd == ["claude", "--resume", "abc-123"]
+        # Normal adapter.launch() must NOT be called
+        mock_adapter.launch.assert_not_called()
+
+    def test_resume_unsupported_tool_exits_1(self, tmp_path: Path) -> None:
+        """--resume with a tool that lacks supports_resume exits 1."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: cursor\n")
+        mock_adapter = self._make_adapter(supports_resume=False)
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("cursor", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--resume", "any"]
+            )
+
+        assert result.exit_code == 1
+        assert "does not support" in result.output.lower() or "resume" in result.output.lower()
+
+
+class TestTrustedDirFlag:
+    """--trusted-dir passes directories through to adapter.launch."""
+
+    def _make_adapter(self) -> MagicMock:
+        adapter = MagicMock()
+        adapter.launch.return_value = 0
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_resume=False,
+            supports_initial_message=True,
+        )
+        adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
+        return adapter
+
+    def test_single_trusted_dir_passed_to_launch(self, tmp_path: Path) -> None:
+        """A single --trusted-dir value reaches adapter.launch as trusted_dirs."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = self._make_adapter()
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "claude", "--trusted-dir", "/tmp/plan"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_adapter.launch.assert_called_once()
+        _, kwargs = mock_adapter.launch.call_args
+        assert kwargs.get("trusted_dirs") == ["/tmp/plan"]
+
+    def test_multiple_trusted_dirs_passed_to_launch(self, tmp_path: Path) -> None:
+        """Multiple --trusted-dir values are collected and passed as a list."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = self._make_adapter()
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "claude",
+                    "--trusted-dir",
+                    "/a",
+                    "--trusted-dir",
+                    "/b",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_adapter.launch.assert_called_once()
+        _, kwargs = mock_adapter.launch.call_args
+        assert set(kwargs.get("trusted_dirs", [])) == {"/a", "/b"}

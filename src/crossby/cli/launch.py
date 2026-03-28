@@ -25,6 +25,12 @@ def launch(
     transcript: Path | None = typer.Option(
         None, "--transcript", help="Path to save session transcript."
     ),
+    resume: str | None = typer.Option(
+        None, "--resume", help="Resume a previous session by ID."
+    ),
+    trusted_dirs: list[str] = typer.Option(
+        [], "--trusted-dir", help="Pre-authorize a directory (repeatable)."
+    ),
 ) -> None:
     """Launch an AI tool with resolved configuration.
 
@@ -115,6 +121,37 @@ def launch(
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
+    # --resume path: build and run the resume command, then exit early
+    if resume:
+        if not caps.supports_resume:
+            console.error(f"{caps.display_name} does not support session resume.")
+            raise typer.Exit(1)
+        resume_cmd = adapter.build_resume_command(resume)
+        if resume_cmd is None:
+            console.error(f"{caps.display_name} does not support session resume.")
+            raise typer.Exit(1)
+        console.kv("AI tool", caps.display_name)
+        console.kv("Session", resume)
+        console.empty()
+        if transcript:
+            try:
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                console.error(f"Cannot create transcript directory: {e}")
+                raise typer.Exit(1) from e
+        from crossby.utils.process import run_with_transcript
+
+        exit_code = run_with_transcript(resume_cmd, transcript, cwd=work_dir)
+        if exit_code != 0:
+            console.warn(f"AI tool exited with code {exit_code}")
+        if transcript and transcript.exists():
+            usage = adapter.parse_transcript(transcript)
+            if usage.total_tokens:
+                console.kv("Tokens", f"{usage.total_tokens:,}")
+            if usage.session_id:
+                console.kv("Session ID", usage.session_id)
+        raise typer.Exit(exit_code)
+
     # Display selection
     console.kv("AI tool", caps.display_name)
     if resolved_model:
@@ -148,6 +185,7 @@ def launch(
         model=resolved_model,
         prompt=prompt if caps.supports_initial_message else None,
         transcript_path=transcript,
+        trusted_dirs=trusted_dirs or None,
         effort=resolved_effort,
         allowed_commands=allowed_commands,
         yolo=resolved_yolo,
