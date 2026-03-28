@@ -3,5 +3,18 @@
     "allow": [
       "Bash(wade:*)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/ivanviragine/Documents/workspace/.worktrees/crossby/feat-14-feat-expose-resume-and-trusted-dir-flags-in/.claude/hooks/worktree_guard.py"
+          }
+        ]
+      }
+    ]
   }
 }
