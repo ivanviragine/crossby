@@ -22,6 +22,12 @@ from crossby.sync.mcp import (
     CursorMCPWriter,
     GeminiMCPWriter,
 )
+from crossby.sync.hooks import (
+    ClaudeHooksWriter,
+    CopilotHooksWriter,
+    CursorHooksWriter,
+    GeminiHooksWriter,
+)
 from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
 from crossby.sync.rules import (
     ClaudeRulesWriter,
@@ -51,6 +57,10 @@ _registry.register(CursorMCPWriter())
 _registry.register(CopilotMCPWriter())
 _registry.register(GeminiMCPWriter())
 _registry.register(CodexMCPWriter())
+_registry.register(ClaudeHooksWriter())
+_registry.register(CursorHooksWriter())
+_registry.register(CopilotHooksWriter())
+_registry.register(GeminiHooksWriter())
 
 
 def run_sync(

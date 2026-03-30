@@ -19,6 +19,7 @@ class SyncConcern(StrEnum):
     RULES = "rules"
     MCP = "mcp"
     AGENTS = "agents"
+    HOOKS = "hooks"
 
 
 @dataclass

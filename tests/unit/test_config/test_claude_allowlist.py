@@ -8,7 +8,6 @@ from pathlib import Path
 from crossby.config.claude_allowlist import (
     canonical_to_claude,
     configure_allowlist,
-    configure_plan_hooks,
     is_allowlist_configured,
 )
 
@@ -238,43 +237,3 @@ class TestIsAllowlistConfigured:
         assert is_allowlist_configured(project_root, patterns=["myapp:*", "other:*"]) is False
 
 
-class TestConfigurePlanHooks:
-    """Tests for configure_plan_hooks()."""
-
-    def test_adds_pretooluse_hook(self, tmp_path: Path) -> None:
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        assert settings_path.is_file()
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        hooks = data["hooks"]["PreToolUse"]
-        assert len(hooks) == 1
-        assert hooks[0]["matcher"] == "Edit|Write|NotebookEdit"
-        # Verify hook is an object with type and command keys
-        assert isinstance(hooks[0]["hooks"], list)
-        assert len(hooks[0]["hooks"]) == 1
-        assert hooks[0]["hooks"][0]["type"] == "command"
-        assert hooks[0]["hooks"][0]["command"] == f"python3 {guard}"
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert len(data["hooks"]["PreToolUse"]) == 1
-
-    def test_merges_with_existing_allowlist(self, tmp_path: Path) -> None:
-        configure_allowlist(tmp_path, patterns=["myapp:*"])
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
-        assert len(data["hooks"]["PreToolUse"]) == 1

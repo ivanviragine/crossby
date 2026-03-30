@@ -95,9 +95,9 @@ class TestDetectHooks:
         items = detect_source_configs(AIToolID.CLAUDE, tmp_path)
         hooks = [i for i in items if i.config_type == "hooks"]
         assert len(hooks) == 1
-        assert hooks[0].portable is False
+        assert hooks[0].portable is True
         assert "1 hook" in hooks[0].detail
-        assert hooks[0].reason  # has a reason
+        assert hooks[0].reason == ""
 
     def test_no_hooks_returns_empty(self, tmp_path: Path) -> None:
         items = detect_source_configs(AIToolID.CLAUDE, tmp_path)
@@ -176,5 +176,5 @@ class TestDetectFull:
 
         portable = [i for i in items if i.portable]
         not_portable = [i for i in items if not i.portable]
-        assert len(portable) == 3  # instructions, skills, allowlist
-        assert len(not_portable) == 3  # hooks, mcp, commands
+        assert len(portable) == 4  # instructions, skills, allowlist, hooks
+        assert len(not_portable) == 2  # mcp, commands

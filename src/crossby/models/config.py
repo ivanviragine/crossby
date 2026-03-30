@@ -152,6 +152,24 @@ class RulesConfig(BaseModel):
     targets: RulesTargetsConfig = RulesTargetsConfig()
 
 
+class HookEntry(BaseModel):
+    """A single canonical hook definition.
+
+    Canonical format (in .crossby.yml):
+
+        hooks:
+          - event: pre_tool_use
+            command: "python3 ./scripts/guard.py"
+            tools: ["Edit", "Write"]
+            description: "Plan write guard"
+    """
+
+    event: str
+    command: str
+    tools: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
 class AgentsConfig(BaseModel):
     """Agents sync configuration (``agents:`` section in .crossby.yml).
 
@@ -186,6 +204,7 @@ class CrossbyConfig(BaseModel):
     rules: RulesConfig = RulesConfig()
     sync: SyncConfig = SyncConfig()
     agents: AgentsConfig = AgentsConfig()
+    hooks: list[HookEntry] = Field(default_factory=list)
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)
