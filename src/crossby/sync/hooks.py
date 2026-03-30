@@ -23,15 +23,15 @@ from crossby.sync.json_utils import read_json_file, write_json_file
 # Event name translation
 # ---------------------------------------------------------------------------
 
-_EVENT_NAMES: dict[str, dict[str, str]] = {
-    "claude": {"pre_tool_use": "PreToolUse"},
-    "cursor": {"pre_tool_use": "preToolUse"},
-    "copilot": {"pre_tool_use": "preToolUse"},
-    "gemini": {"pre_tool_use": "BeforeTool"},
+_EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
+    AIToolID.CLAUDE: {"pre_tool_use": "PreToolUse"},
+    AIToolID.CURSOR: {"pre_tool_use": "preToolUse"},
+    AIToolID.COPILOT: {"pre_tool_use": "preToolUse"},
+    AIToolID.GEMINI: {"pre_tool_use": "BeforeTool"},
 }
 
 
-def _translate_event(event: str, tool_id: str) -> str:
+def _translate_event(event: str, tool_id: AIToolID) -> str:
     """Translate canonical event name to tool-specific name."""
     return _EVENT_NAMES.get(tool_id, {}).get(event, event)
 
@@ -40,13 +40,13 @@ def _translate_event(event: str, tool_id: str) -> str:
 # Tool name translation
 # ---------------------------------------------------------------------------
 
-_TOOL_NAME_MAP: dict[str, dict[str, str]] = {
-    "cursor": {"Bash": "Shell"},
-    "copilot": {"Edit": "edit", "Write": "write", "Bash": "shell"},
+_TOOL_NAME_MAP: dict[AIToolID, dict[str, str]] = {
+    AIToolID.CURSOR: {"Bash": "Shell"},
+    AIToolID.COPILOT: {"Edit": "edit", "Write": "write", "Bash": "shell"},
 }
 
 
-def _translate_tools(tools: list[str], tool_id: str) -> list[str]:
+def _translate_tools(tools: list[str], tool_id: AIToolID) -> list[str]:
     """Translate canonical tool names to tool-specific names."""
     mapping = _TOOL_NAME_MAP.get(tool_id, {})
     return [mapping.get(t, t) for t in tools]
@@ -129,7 +129,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 
         changed = False
         for hook in config.hooks:
-            event_name = _translate_event(hook.event, "claude")
+            event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
                 event_list = []
@@ -236,7 +236,7 @@ class CursorHooksWriter(AbstractSyncWriter):
         changed = False
 
         for hook in config.hooks:
-            event_name = _translate_event(hook.event, "cursor")
+            event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = existing.get(event_name, [])
             if not isinstance(event_list, list):
                 event_list = []
@@ -249,7 +249,7 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
             if not already_exists:
-                tools = _translate_tools(hook.tools or [], "cursor")
+                tools = _translate_tools(hook.tools or [], self.tool_id)
                 new_entry: dict[str, Any] = {
                     "event": event_name,
                     "command": command,
@@ -344,16 +344,10 @@ class CopilotHooksWriter(AbstractSyncWriter):
         warnings_msgs: list[str] = []
 
         for hook in config.hooks:
-            event_name = _translate_event(hook.event, "copilot")
+            event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
                 event_list = []
-
-            if hook.tools:
-                warnings_msgs.append(
-                    f"Copilot hooks do not support tool filtering — "
-                    f"'{hook.command}' will apply to all tools."
-                )
 
             # Dedup: check if bash command already present
             command = hook.command
@@ -363,6 +357,11 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
             if not already_exists:
+                if hook.tools:
+                    warnings_msgs.append(
+                        "Copilot hooks do not support tool filtering — "
+                        f"'{command}' will apply to all tools."
+                    )
                 new_entry: dict[str, Any] = {
                     "type": "command",
                     "bash": command,
@@ -456,7 +455,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
         changed = False
 
         for hook in config.hooks:
-            event_name = _translate_event(hook.event, "gemini")
+            event_name = _translate_event(hook.event, self.tool_id)
             command = hook.command
 
             # Dedup: check if (event, command) pair already present

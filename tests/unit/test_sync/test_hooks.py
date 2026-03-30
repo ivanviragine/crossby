@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig, HookEntry
 from crossby.sync.hooks import (
     ClaudeHooksWriter,
@@ -52,37 +53,37 @@ def _read_json(path: Path) -> dict:
 
 class TestTranslateEvent:
     def test_pre_tool_use_to_claude(self) -> None:
-        assert _translate_event("pre_tool_use", "claude") == "PreToolUse"
+        assert _translate_event("pre_tool_use", AIToolID.CLAUDE) == "PreToolUse"
 
     def test_pre_tool_use_to_cursor(self) -> None:
-        assert _translate_event("pre_tool_use", "cursor") == "preToolUse"
+        assert _translate_event("pre_tool_use", AIToolID.CURSOR) == "preToolUse"
 
     def test_pre_tool_use_to_copilot(self) -> None:
-        assert _translate_event("pre_tool_use", "copilot") == "preToolUse"
+        assert _translate_event("pre_tool_use", AIToolID.COPILOT) == "preToolUse"
 
     def test_pre_tool_use_to_gemini(self) -> None:
-        assert _translate_event("pre_tool_use", "gemini") == "BeforeTool"
+        assert _translate_event("pre_tool_use", AIToolID.GEMINI) == "BeforeTool"
 
     def test_unknown_event_passthrough(self) -> None:
-        assert _translate_event("post_tool_use", "claude") == "post_tool_use"
+        assert _translate_event("post_tool_use", AIToolID.CLAUDE) == "post_tool_use"
 
 
 class TestTranslateTools:
     def test_cursor_bash_to_shell(self) -> None:
-        assert _translate_tools(["Bash"], "cursor") == ["Shell"]
+        assert _translate_tools(["Bash"], AIToolID.CURSOR) == ["Shell"]
 
     def test_cursor_other_unchanged(self) -> None:
-        assert _translate_tools(["Edit", "Write"], "cursor") == ["Edit", "Write"]
+        assert _translate_tools(["Edit", "Write"], AIToolID.CURSOR) == ["Edit", "Write"]
 
     def test_copilot_name_lowercasing(self) -> None:
-        result = _translate_tools(["Edit", "Write", "Bash"], "copilot")
+        result = _translate_tools(["Edit", "Write", "Bash"], AIToolID.COPILOT)
         assert result == ["edit", "write", "shell"]
 
     def test_gemini_no_translation(self) -> None:
-        assert _translate_tools(["Edit", "Bash", "Write"], "gemini") == ["Edit", "Bash", "Write"]
+        assert _translate_tools(["Edit", "Bash", "Write"], AIToolID.GEMINI) == ["Edit", "Bash", "Write"]
 
     def test_claude_no_translation(self) -> None:
-        assert _translate_tools(["Edit", "Bash"], "claude") == ["Edit", "Bash"]
+        assert _translate_tools(["Edit", "Bash"], AIToolID.CLAUDE) == ["Edit", "Bash"]
 
 
 class TestToolsToMatcher:
@@ -349,6 +350,13 @@ class TestCopilotHooksWriter:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "skipped"
 
+    def test_idempotent_no_warning_on_already_present_hook(self, tmp_path: Path) -> None:
+        """On the idempotent path, no tools-warning is emitted."""
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "skipped"
+        assert result.message is None
+
     def test_dry_run_no_write(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path, dry_run=True)
         assert result.action == "created"
@@ -455,7 +463,7 @@ class TestGeminiHooksWriter:
         hook2 = HookEntry(event="post_tool_use", command="python3 ./scripts/guard.py", tools=[])
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         result = self.writer.sync(_cfg(hook2), tmp_path)
-        assert result.action in ("created", "updated")
+        assert result.action == "updated"
         data = _read_json(tmp_path / ".gemini" / "settings.json")
         assert len(data["hooks"]) == 2
 
