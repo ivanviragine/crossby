@@ -218,6 +218,26 @@ class TestClaudeHooksWriter:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "updated"
 
+    def test_legacy_string_hook_dedup(self, tmp_path: Path) -> None:
+        """Legacy string entries in inner hooks[] are recognized as duplicates."""
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        # Simulate a legacy config where the inner hooks entry is a plain string
+        existing = {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": ["python3 ./scripts/guard.py"]}
+                ]
+            }
+        }
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        assert result.action == "skipped"
+        data = _read_json(path)
+        assert len(data["hooks"]["PreToolUse"]) == 1
+
 
 # ---------------------------------------------------------------------------
 # CursorHooksWriter
@@ -386,6 +406,39 @@ class TestCopilotHooksWriter:
         path.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
         result = self.writer.sync(_cfg(BARE_HOOK), tmp_path)
         assert result.action == "updated"
+
+    def test_wildcard_tools_no_warning(self, tmp_path: Path) -> None:
+        """tools=['*'] is semantically 'all tools' and should not trigger a warning."""
+        hook = HookEntry(event="pre_tool_use", command="echo hi", tools=["*"])
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.message is None
+
+    def test_fixes_missing_version(self, tmp_path: Path) -> None:
+        """Writes file even on idempotent hook path when version is missing."""
+        path = tmp_path / ".github" / "hooks" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        # Hooks already present, but version is absent
+        existing = {"hooks": {"preToolUse": [{"type": "command", "bash": "python3 ./scripts/lint.py", "comment": ""}]}}
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        result = self.writer.sync(_cfg(BARE_HOOK), tmp_path)
+
+        assert result.action == "updated"
+        data = _read_json(path)
+        assert data["version"] == 1
+
+    def test_fixes_wrong_version(self, tmp_path: Path) -> None:
+        """Writes file even on idempotent hook path when version value is wrong."""
+        path = tmp_path / ".github" / "hooks" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        existing = {"version": 99, "hooks": {"preToolUse": [{"type": "command", "bash": "python3 ./scripts/lint.py", "comment": ""}]}}
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        result = self.writer.sync(_cfg(BARE_HOOK), tmp_path)
+
+        assert result.action == "updated"
+        data = _read_json(path)
+        assert data["version"] == 1
 
 
 # ---------------------------------------------------------------------------

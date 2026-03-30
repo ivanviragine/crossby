@@ -147,6 +147,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                     if isinstance(inner, dict) and inner.get("command") == command:
                         already_exists = True
                         break
+                    if isinstance(inner, str) and inner == command:
+                        already_exists = True
+                        break
                 if already_exists:
                     break
 
@@ -357,7 +360,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
             if not already_exists:
-                if hook.tools:
+                if hook.tools and hook.tools != ["*"]:
                     warnings_msgs.append(
                         "Copilot hooks do not support tool filtering — "
                         f"'{command}' will apply to all tools."
@@ -371,7 +374,9 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 hooks_section[event_name] = event_list
                 changed = True
 
-        if not changed:
+        version_correct = existing.get("version") == 1
+
+        if not changed and version_correct:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -382,7 +387,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
 
         action = "created" if was_new else "updated"
         if not dry_run:
-            existing.setdefault("version", 1)
+            existing["version"] = 1
             existing["hooks"] = hooks_section
             write_json_file(path, existing)
 
