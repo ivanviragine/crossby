@@ -157,13 +157,14 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError("'profiles' must be a mapping")
     profiles: dict[str, ProfileConfig] = {}
     for name, profile_raw in profiles_raw.items():
-        if isinstance(profile_raw, dict):
-            profiles[name] = ProfileConfig(
-                tool=profile_raw.get("tool"),
-                model=profile_raw.get("model"),
-                effort=profile_raw.get("effort"),
-                yolo=profile_raw.get("yolo"),
-            )
+        if not isinstance(profile_raw, dict):
+            raise ConfigError(f"'profiles.{name}' must be a mapping")
+        profiles[name] = ProfileConfig(
+            tool=profile_raw.get("tool"),
+            model=profile_raw.get("model"),
+            effort=profile_raw.get("effort"),
+            yolo=profile_raw.get("yolo"),
+        )
 
     return CrossbyConfig(
         version=version,

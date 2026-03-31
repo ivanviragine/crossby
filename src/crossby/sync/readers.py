@@ -451,9 +451,11 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
     discovery = discover_mcp_servers(project_root)
     mcp_by_tool: dict[AIToolID, list[str]] = {}
     for name, ds in discovery.servers.items():
-        tid = AIToolID(ds.source_tool) if ds.source_tool in AIToolID.__members__.values() else None
-        if tid:
-            mcp_by_tool.setdefault(tid, []).append(name)
+        try:
+            tid = AIToolID(ds.source_tool)
+        except (ValueError, TypeError):
+            continue
+        mcp_by_tool.setdefault(tid, []).append(name)
     mcp_summary = (
         f"{len(discovery.servers)} server(s) from "
         + ", ".join(str(t) for t in mcp_by_tool)

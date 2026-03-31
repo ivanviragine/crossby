@@ -51,16 +51,23 @@ def launch(
     )
     from crossby.services.prompt_delivery import deliver_prompt_if_needed
 
-    work_dir = path.resolve()
-    config = load_config(work_dir)
-
     # Apply profile overrides (--profile or positional profile name)
     profile_name = profile
     path_str = str(path)
-    if not profile_name and not path.exists() and path_str != "." and "/" not in path_str:
-        # Simple name without path separators — treat as profile name
+    if (
+        not profile_name
+        and not path.exists()
+        and path_str != "."
+        and not path.is_absolute()
+        and len(path.parts) == 1
+    ):
+        # Simple name without path structure — treat as profile name
         profile_name = path_str
         work_dir = Path(".").resolve()
+    else:
+        work_dir = path.resolve()
+
+    config = load_config(work_dir)
 
     if profile_name:
         prof = config.get_profile(profile_name)

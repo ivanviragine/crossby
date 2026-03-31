@@ -54,8 +54,6 @@ def sync(
     from crossby.sync.base import SyncConcern, SyncData
     from crossby.sync.readers import (
         build_sync_data,
-        detect_agents,
-        detect_rules,
         discover_hooks,
         discover_mcp,
         discover_permissions,
@@ -93,6 +91,10 @@ def sync(
             console.error(f"Unknown tool: {to_tool!r}")
             raise typer.Exit(1)
 
+    if target_tool is not None and source_tool is None:
+        console.error("--to requires --from; omit --to for the interactive wizard.")
+        raise typer.Exit(1)
+
     # Detect installed tools
     installed_tools = AbstractAITool.detect_installed()
     if not installed_tools:
@@ -106,7 +108,11 @@ def sync(
     # Non-interactive mode: --from is specified
     if source_tool is not None:
         data = build_sync_data(project_root, from_tool=source_tool)
-        target_tools = [target_tool] if target_tool else None
+        target_tools = (
+            [target_tool]
+            if target_tool
+            else [t for t in installed_tools if t != source_tool]
+        )
         results = run_sync(
             data,
             project_root,
@@ -150,6 +156,8 @@ def sync(
     from crossby.ui import prompts
 
     data = SyncData()
+    rules_src_tool: AIToolID | None = None
+    agents_src_tool: AIToolID | None = None
 
     # Rules
     if scan.rules.found and (sync_concern is None or sync_concern == SyncConcern.RULES):
@@ -160,6 +168,7 @@ def sync(
             if other_tools:
                 if prompts.confirm(f"Port rules ({source_path}) to {', '.join(other_tools)}?", default=True):
                     data.rules_source = source_path
+                    rules_src_tool = source
 
     # Agents
     if scan.agents.found and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
@@ -170,6 +179,7 @@ def sync(
             if other_tools:
                 if prompts.confirm(f"Port agents ({source_path}) to {', '.join(other_tools)}?", default=True):
                     data.agents_source = source_path
+                    agents_src_tool = source
 
     # MCP
     if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
@@ -204,15 +214,27 @@ def sync(
         console.info("Nothing to sync.")
         return
 
-    # Execute
-    results = run_sync(
-        data,
-        project_root,
-        concern=sync_concern,
-        dry_run=dry_run,
-        force=force,
-        installed_tools=installed_tools,
-    )
+    # Execute per-concern to avoid writing back to the source tool.
+    # Rules and agents have an explicit source; exclude it from their targets.
+    # MCP, permissions, and hooks are merged from all tools — write to all.
+    results: list[SyncResult] = []
+    if data.rules_source and (sync_concern is None or sync_concern == SyncConcern.RULES):
+        rules_targets = [t for t in installed_tools if t != rules_src_tool]
+        results += run_sync(data, project_root, concern=SyncConcern.RULES,
+                            dry_run=dry_run, force=force, installed_tools=rules_targets)
+    if data.agents_source and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
+        agents_targets = [t for t in installed_tools if t != agents_src_tool]
+        results += run_sync(data, project_root, concern=SyncConcern.AGENTS,
+                            dry_run=dry_run, force=force, installed_tools=agents_targets)
+    if data.mcp_servers and (sync_concern is None or sync_concern == SyncConcern.MCP):
+        results += run_sync(data, project_root, concern=SyncConcern.MCP,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
+    if data.allowed_commands and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
+        results += run_sync(data, project_root, concern=SyncConcern.PERMISSIONS,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
+    if data.hooks and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
+        results += run_sync(data, project_root, concern=SyncConcern.HOOKS,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
 
     if not results:
         console.info("No sync writers matched the given filters.")
