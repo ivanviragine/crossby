@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from crossby.ui.console import console
+
+if TYPE_CHECKING:
+    from crossby.sync.base import SyncResult
 
 
 def sync(
@@ -109,7 +113,7 @@ def sync(
             tool_id=target_tool,
             concern=sync_concern,
             dry_run=dry_run,
-            force=True,  # non-interactive = force by default
+            force=force,
             installed_tools=target_tools,
         )
         _display_results(results)
@@ -224,7 +228,7 @@ def sync(
         raise typer.Exit(1)
 
 
-def _display_results(results: list) -> None:
+def _display_results(results: list["SyncResult"]) -> None:
     """Display sync results in a Rich table."""
     from rich.table import Table
 

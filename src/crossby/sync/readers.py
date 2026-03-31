@@ -45,12 +45,12 @@ def detect_rules(project_root: Path) -> dict[AIToolID, str]:
     """Find existing instruction files across all tools.
 
     Returns a dict of tool → relative file path for each tool that has one.
-    Only real files and symlinks are detected (not broken symlinks).
+    Broken symlinks are excluded — only files that actually resolve are returned.
     """
     found: dict[AIToolID, str] = {}
     for tool_id, rel_path in _INSTRUCTION_FILES.items():
         path = project_root / rel_path
-        if path.exists() or path.is_symlink():
+        if path.exists():
             found[tool_id] = rel_path
     return found
 
@@ -197,6 +197,8 @@ def discover_permissions(
     Scans Claude and Cursor configs (the only tools with persistent allowlists).
     Returns deduplicated canonical patterns.
     """
+    if from_tool is not None and from_tool not in _PERMISSION_READERS:
+        return []
     seen: set[str] = set()
     result: list[str] = []
     readers = (
@@ -380,6 +382,8 @@ def discover_hooks(
 
     Returns deduplicated canonical hook entries (dedup by event+command).
     """
+    if from_tool is not None and from_tool not in _HOOK_READERS:
+        return []
     seen: set[tuple[str, str]] = set()
     result: list[HookEntry] = []
     readers = (

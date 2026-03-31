@@ -56,9 +56,10 @@ def launch(
 
     # Apply profile overrides (--profile or positional profile name)
     profile_name = profile
-    if not profile_name and not path.exists() and str(path) != ".":
-        # Positional arg might be a profile name instead of a path
-        profile_name = str(path)
+    path_str = str(path)
+    if not profile_name and not path.exists() and path_str != "." and "/" not in path_str:
+        # Simple name without path separators — treat as profile name
+        profile_name = path_str
         work_dir = Path(".").resolve()
 
     if profile_name:
