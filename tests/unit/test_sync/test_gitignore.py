@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, RulesConfig, RulesTargetsConfig
+from crossby.sync.base import SyncData
 from crossby.sync.rules import _GITIGNORE_BLOCK_ID, update_rules_gitignore
 
 # Derive the markers from the block ID, matching gitignore_utils conventions
@@ -13,16 +13,11 @@ _BLOCK_END = f"# <<< crossby {_GITIGNORE_BLOCK_ID} <<<"
 
 def _cfg(
     source: str = "AGENTS.md",
-    targets: RulesTargetsConfig | None = None,
     gitignore: bool = True,
-) -> CrossbyConfig:
-    return CrossbyConfig(
-        rules=RulesConfig(
-            enabled=True,
-            source=source,
-            gitignore=gitignore,
-            targets=targets or RulesTargetsConfig(),
-        ),
+) -> SyncData:
+    return SyncData(
+        rules_source=source,
+        rules_gitignore=gitignore,
     )
 
 
@@ -58,13 +53,11 @@ class TestUpdateRulesGitignore:
         _setup_source(tmp_path)
         # First: only claude
         update_rules_gitignore(
-            _cfg(targets=RulesTargetsConfig(claude=True, cursor=False, copilot=False, gemini=False, codex=False)),
-            tmp_path,
+            _cfg(), tmp_path, installed_tools=[AIToolID.CLAUDE],
         )
         # Then: claude + gemini
         update_rules_gitignore(
-            _cfg(targets=RulesTargetsConfig(claude=True, cursor=False, copilot=False, gemini=True, codex=False)),
-            tmp_path,
+            _cfg(), tmp_path, installed_tools=[AIToolID.CLAUDE, AIToolID.GEMINI],
         )
 
         content = (tmp_path / ".gitignore").read_text()
@@ -118,21 +111,17 @@ class TestUpdateRulesGitignore:
         result = update_rules_gitignore(_cfg(gitignore=False), tmp_path)
         assert result is None
 
-    def test_returns_none_when_no_targets(self, tmp_path: Path):
+    def test_returns_none_when_no_installed_tools(self, tmp_path: Path):
         _setup_source(tmp_path)
-        config = _cfg(targets=RulesTargetsConfig(
-            claude=False, cursor=False, copilot=False, gemini=False, codex=False,
-        ))
-        result = update_rules_gitignore(config, tmp_path)
+        result = update_rules_gitignore(_cfg(), tmp_path, installed_tools=[])
         assert result is None
 
     def test_skips_circular_target(self, tmp_path: Path):
         """AGENTS.md as source + codex target → codex excluded from gitignore."""
         _setup_source(tmp_path)
-        config = _cfg(targets=RulesTargetsConfig(
-            claude=True, cursor=False, copilot=False, gemini=False, codex=True,
-        ))
-        update_rules_gitignore(config, tmp_path)
+        update_rules_gitignore(
+            _cfg(), tmp_path, installed_tools=[AIToolID.CLAUDE, AIToolID.CODEX],
+        )
 
         content = (tmp_path / ".gitignore").read_text()
         assert "CLAUDE.md" in content
@@ -142,15 +131,15 @@ class TestUpdateRulesGitignore:
     def test_all_enabled_targets_present_on_idempotent_run(self, tmp_path: Path):
         """Gitignore block includes ALL enabled targets, not just newly-synced ones."""
         _setup_source(tmp_path)
-        config = _cfg()
+        data = _cfg()
         # First run creates the block
-        update_rules_gitignore(config, tmp_path)
+        update_rules_gitignore(data, tmp_path)
         content1 = (tmp_path / ".gitignore").read_text()
         assert "CLAUDE.md" in content1
         assert ".cursorrules" in content1
 
         # Second run (idempotent) — block should remain identical
-        result = update_rules_gitignore(config, tmp_path)
+        result = update_rules_gitignore(data, tmp_path)
         assert result is None  # No change
         content2 = (tmp_path / ".gitignore").read_text()
         assert content1 == content2
@@ -158,8 +147,8 @@ class TestUpdateRulesGitignore:
     def test_installed_tools_filter_excludes_uninstalled(self, tmp_path: Path):
         """installed_tools limits gitignore entries to tools that actually ran."""
         _setup_source(tmp_path)
-        config = _cfg()  # all targets enabled
-        update_rules_gitignore(config, tmp_path, installed_tools=[AIToolID.CLAUDE])
+        data = _cfg()  # all targets enabled
+        update_rules_gitignore(data, tmp_path, installed_tools=[AIToolID.CLAUDE])
 
         content = (tmp_path / ".gitignore").read_text()
         assert "CLAUDE.md" in content
@@ -167,10 +156,10 @@ class TestUpdateRulesGitignore:
         assert "GEMINI.md" not in content
 
     def test_installed_tools_none_includes_all_enabled(self, tmp_path: Path):
-        """When installed_tools is None, all config-enabled entries are included."""
+        """When installed_tools is None, all known entries are included."""
         _setup_source(tmp_path)
-        config = _cfg()
-        update_rules_gitignore(config, tmp_path, installed_tools=None)
+        data = _cfg()
+        update_rules_gitignore(data, tmp_path, installed_tools=None)
 
         content = (tmp_path / ".gitignore").read_text()
         assert "CLAUDE.md" in content

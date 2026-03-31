@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
+from crossby.sync.base import SyncData
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
 from crossby.sync.json_utils import read_json_file, write_json_file
 
@@ -95,13 +95,13 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -110,7 +110,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".claude" / "settings.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -122,13 +122,13 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
         changed = False
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -208,13 +208,13 @@ class CursorHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -223,7 +223,7 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".cursor" / "hooks.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -235,10 +235,10 @@ class CursorHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         changed = False
 
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = existing.get(event_name, [])
             if not isinstance(event_list, list):
@@ -311,13 +311,13 @@ class CopilotHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -326,7 +326,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".github" / "hooks" / "hooks.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -338,7 +338,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
@@ -346,7 +346,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
         changed = False
         warnings_msgs: list[str] = []
 
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -425,13 +425,13 @@ class GeminiHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -440,7 +440,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".gemini" / "settings.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -452,14 +452,14 @@ class GeminiHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         hooks_list: list[Any] = existing.get("hooks", [])
         if not isinstance(hooks_list, list):
             hooks_list = []
 
         changed = False
 
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             command = hook.command
 

@@ -14,7 +14,7 @@ class TestCrossbyConfig:
         assert config.version == 1
         assert config.ai.default_tool is None
         assert config.ai.commands == {}
-        assert config.permissions.allowed_commands == []
+        assert config.profiles == {}
 
     def test_get_ai_tool_global(self):
         config = CrossbyConfig(ai=AIConfig(default_tool="claude"))
@@ -75,6 +75,6 @@ class TestCrossbyConfig:
         assert config.get_yolo("implement") is True
         assert config.get_yolo("other") is False
 
-    def test_permissions_empty_default(self):
+    def test_profiles_empty_default(self):
         config = CrossbyConfig()
-        assert config.permissions.allowed_commands == []
+        assert config.profiles == {}

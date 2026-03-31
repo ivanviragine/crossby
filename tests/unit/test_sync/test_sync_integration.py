@@ -6,28 +6,30 @@ import json
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
+from crossby.models.ai import AIToolID
+from crossby.models.config import MCPServerConfig
+from crossby.sync import run_sync
+from crossby.sync.base import SyncConcern, SyncData
 
-def _load_config_and_sync(project_root: Path, servers_yaml: dict[str, Any]) -> None:
-    """Helper: write .crossby.yml and run all MCP writers."""
-    cfg = {"version": 1, "mcp_servers": servers_yaml}
-    (project_root / ".crossby.yml").write_text(yaml.dump(cfg), encoding="utf-8")
 
-    from crossby.config.loader import load_config
-    from crossby.sync import run_sync
-    from crossby.sync.base import SyncConcern
+def _build_sync_data(servers_yaml: dict[str, Any]) -> SyncData:
+    """Build SyncData with MCP servers from a dict (matching YAML structure)."""
+    mcp_servers = {
+        name: MCPServerConfig(**entry) for name, entry in servers_yaml.items()
+    }
+    return SyncData(mcp_servers=mcp_servers)
 
-    config = load_config(project_root)
-    from crossby.models.ai import AIToolID
 
+def _sync_mcp(project_root: Path, servers_yaml: dict[str, Any]) -> None:
+    """Helper: build SyncData and run all MCP writers."""
+    data = _build_sync_data(servers_yaml)
     all_tools = list(AIToolID)
-    run_sync(config, project_root, concern=SyncConcern.MCP, installed_tools=all_tools)
+    run_sync(data, project_root, concern=SyncConcern.MCP, installed_tools=all_tools)
 
 
 class TestFullSyncMCP:
@@ -35,7 +37,7 @@ class TestFullSyncMCP:
         servers = {
             "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
         }
-        _load_config_and_sync(tmp_path, servers)
+        _sync_mcp(tmp_path, servers)
 
         # Claude
         data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
@@ -59,26 +61,20 @@ class TestFullSyncMCP:
         assert "context7" in data["mcp_servers"]
 
     def test_second_sync_is_idempotent(self, tmp_path: Path) -> None:
-        from crossby.config.loader import load_config
-        from crossby.sync import run_sync
-        from crossby.sync.base import SyncConcern
-
         servers = {"ctx": {"command": "npx", "args": ["-y", "mcp"]}}
-        _load_config_and_sync(tmp_path, servers)
+        _sync_mcp(tmp_path, servers)
 
         # Second sync should produce all "skipped"
-        config = load_config(tmp_path)
-        from crossby.models.ai import AIToolID
-
+        data = _build_sync_data(servers)
         results = run_sync(
-            config, tmp_path, concern=SyncConcern.MCP, installed_tools=list(AIToolID)
+            data, tmp_path, concern=SyncConcern.MCP, installed_tools=list(AIToolID)
         )
         for result in results:
             assert result.action == "skipped", f"{result.tool_id}: expected skipped, got {result.action}"
 
     def test_enabled_false_removes_from_all_tools(self, tmp_path: Path) -> None:
         # First: add the server
-        _load_config_and_sync(
+        _sync_mcp(
             tmp_path,
             {"old": {"command": "npx", "args": ["-y", "old-mcp"]}},
         )
@@ -88,7 +84,7 @@ class TestFullSyncMCP:
         assert "old" in data["mcpServers"]
 
         # Now disable it
-        _load_config_and_sync(
+        _sync_mcp(
             tmp_path,
             {"old": {"command": "npx", "enabled": False}},
         )
@@ -108,7 +104,7 @@ class TestFullSyncMCP:
             encoding="utf-8",
         )
 
-        _load_config_and_sync(
+        _sync_mcp(
             tmp_path,
             {"crossby-srv": {"command": "npx", "args": ["-y", "mcp"]}},
         )
@@ -125,7 +121,7 @@ class TestFullSyncMCP:
                 "env": {"TOKEN": "${GITHUB_TOKEN}"},
             }
         }
-        _load_config_and_sync(tmp_path, servers)
+        _sync_mcp(tmp_path, servers)
 
         for path, key, entry_key in [
             (tmp_path / ".claude" / "settings.json", "mcpServers", "github"),

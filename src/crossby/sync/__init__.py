@@ -5,8 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
-from crossby.sync.base import SyncConcern, SyncRegistry, SyncResult
+from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
 from crossby.sync.agents import (
     ClaudeAgentsWriter,
     CodexAgentsWriter,
@@ -64,7 +63,7 @@ _registry.register(GeminiHooksWriter())
 
 
 def run_sync(
-    config: CrossbyConfig,
+    data: SyncData,
     project_root: Path,
     *,
     tool_id: AIToolID | None = None,
@@ -80,13 +79,11 @@ def run_sync(
     ``SyncResult(action="error")`` and the next writer proceeds.
 
     Args:
-        config: Loaded CrossbyConfig.
+        data: Sync input data (from readers or wizard).
         project_root: Project root directory.
         tool_id: When set, only writers for this tool run, and the
-            installed-tools filter is bypassed (useful for forcing a sync on a
-            specific tool regardless of whether it is currently detected as
-            installed).  When None, all installed tools run (subject to the
-            ``config.sync.tools`` filter).
+            installed-tools filter is bypassed.  When None, all installed
+            tools run.
         concern: When set, only writers for this concern run.
         dry_run: Compute results without writing any files.
         force: If True, overwrite existing target directories (with backup).
@@ -107,17 +104,6 @@ def run_sync(
 
             installed_tools = AbstractAITool.detect_installed()
 
-        # Apply sync.tools config filter (empty list = all installed tools).
-        config_tools = config.sync.tools if config.sync.tools else None
-        if config_tools:
-            try:
-                allowed = {AIToolID(t) for t in config_tools}
-            except ValueError as exc:
-                raise ValueError(
-                    f"Invalid tool ID in config.sync.tools: {exc}"
-                ) from exc
-            installed_tools = [t for t in installed_tools if t in allowed]
-
         writers = [w for w in writers if w.tool_id in installed_tools]
 
     results: list[SyncResult] = []
@@ -125,7 +111,7 @@ def run_sync(
     rules_writers_ran = False
     for writer in writers:
         try:
-            result = writer.sync(config, project_root, dry_run=dry_run, force=force)
+            result = writer.sync(data, project_root, dry_run=dry_run, force=force)
         except Exception as exc:  # noqa: BLE001
             result = SyncResult(
                 tool_id=writer.tool_id,
@@ -144,7 +130,7 @@ def run_sync(
     # and misattributed results during --tool runs.
     if agents_writers_ran and tool_id is None:
         gi_result = update_agents_gitignore(
-            config,
+            data,
             project_root,
             dry_run=dry_run,
             installed_tools=installed_tools,
@@ -155,7 +141,7 @@ def run_sync(
     # After all rules writers, update .gitignore managed block once.
     if rules_writers_ran and tool_id is None:
         gi_result = update_rules_gitignore(
-            config,
+            data,
             project_root,
             dry_run=dry_run,
             installed_tools=installed_tools,
@@ -169,6 +155,7 @@ def run_sync(
 __all__ = [
     "run_sync",
     "SyncConcern",
+    "SyncData",
     "SyncRegistry",
     "SyncResult",
     "_registry",

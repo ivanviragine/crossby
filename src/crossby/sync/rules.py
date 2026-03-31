@@ -13,8 +13,7 @@ import structlog
 
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
-from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
 
@@ -39,7 +38,7 @@ _GITIGNORE_BLOCK_ID = "rules sync"
 
 
 def update_rules_gitignore(
-    config: CrossbyConfig,
+    data: SyncData,
     project_root: Path,
     *,
     dry_run: bool = False,
@@ -47,19 +46,17 @@ def update_rules_gitignore(
 ) -> SyncResult | None:
     """Write/update the crossby-managed block in .gitignore for rules targets.
 
-    Entries are computed from config (all enabled, non-circular targets), filtered
-    to installed tools when provided, so the block only covers tools that actually ran.
+    Entries are computed from installed tools (all non-circular targets),
+    so the block only covers tools that actually ran.
 
     Returns a SyncResult if a change was made (or would be in dry-run), else None.
     """
-    if not config.rules.enabled or not config.rules.gitignore:
+    if data.rules_source is None or not data.rules_gitignore:
         return None
 
-    source_path = project_root / config.rules.source
+    source_path = project_root / data.rules_source
     entries: list[str] = []
     for tool_name, rel_path in TOOL_TARGETS.items():
-        if not getattr(config.rules.targets, tool_name, False):
-            continue
         if installed_tools is not None and AIToolID(tool_name) not in installed_tools:
             continue
         target_path = project_root / rel_path
@@ -189,37 +186,27 @@ class _BaseRulesWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        rules_cfg = config.rules
-
-        if not rules_cfg.enabled:
+        if data.rules_source is None:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
-                message="no rules config",
+                message="no rules source detected",
             )
 
-        if not getattr(rules_cfg.targets, str(self.tool_id), False):
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                message="not in targets",
-            )
-
-        source_path = project_root / rules_cfg.source
+        source_path = project_root / data.rules_source
         if not source_path.exists():
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="error",
-                message=f"source file not found: {rules_cfg.source}",
+                message=f"source file not found: {data.rules_source}",
             )
 
         target_path = project_root / self._target_rel
@@ -251,7 +238,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     )
                 if not dry_run:
                     _backup_file(target_path)
-            elif _is_up_to_date(target_path, source_path, rules_cfg.strategy):
+            elif _is_up_to_date(target_path, source_path, data.rules_strategy):
                 _warn_if_git_tracked(project_root, self._target_rel)
                 return SyncResult(
                     tool_id=self.tool_id,
@@ -269,7 +256,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                 concern=self.concern,
                 action=action,
                 file_path=target_path,
-                message=f"(dry-run: would sync via {rules_cfg.strategy})",
+                message=f"(dry-run: would sync via {data.rules_strategy})",
             )
 
         # Ensure parent directory exists
@@ -279,7 +266,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
         if target_existed:
             target_path.unlink()
 
-        if rules_cfg.strategy == "symlink":
+        if data.rules_strategy == "symlink":
             try:
                 ok = create_symlink(source_path, target_path)
             except OSError:
