@@ -11,6 +11,7 @@ from typing import Literal
 
 import structlog
 
+from crossby.config.instructions import INSTRUCTIONS_FILE
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
@@ -22,14 +23,8 @@ logger = structlog.get_logger()
 
 MANAGED_HEADER = "<!-- managed by crossby — do not edit, changes will be overwritten -->"
 
-# Tool name -> relative target path (from project root)
-TOOL_TARGETS: dict[str, str] = {
-    "claude": "CLAUDE.md",
-    "cursor": ".cursorrules",
-    "copilot": ".github/copilot-instructions.md",
-    "gemini": "GEMINI.md",
-    "codex": "AGENTS.md",
-}
+# Derived from the canonical INSTRUCTIONS_FILE mapping.
+TOOL_TARGETS: dict[str, str] = {str(k): v for k, v in INSTRUCTIONS_FILE.items()}
 
 # ---------------------------------------------------------------------------
 # Gitignore managed-block

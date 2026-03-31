@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -68,6 +69,68 @@ def _cursor_config_path(project_root: Path | None) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_allowlist(
+    config_file: Path,
+    patterns: list[str],
+    translator: Callable[[str], str],
+) -> bool:
+    """Return True if ALL translated patterns are present in the allowlist."""
+    if not config_file.is_file():
+        return False
+    with contextlib.suppress(json.JSONDecodeError, OSError):
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            permissions = raw.get("permissions")
+            if not isinstance(permissions, dict):
+                return False
+            allow = permissions.get("allow", [])
+            if not isinstance(allow, list):
+                return False
+            translated = [translator(p) for p in patterns]
+            return all(tp in allow for tp in translated)
+    return False
+
+
+def _write_allowlist(
+    config_file: Path,
+    patterns: list[str],
+    translator: Callable[[str], str],
+) -> bool:
+    """Add translated patterns to the allowlist. Idempotent, non-destructive.
+
+    Returns True if any patterns were added.
+    """
+    data, _error, _was_new = read_json_file(config_file)
+    existing: dict[str, object] = data if data is not None else {}
+
+    permissions = existing.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        permissions = {}
+        existing["permissions"] = permissions
+
+    allow_list = permissions.setdefault("allow", [])
+    if not isinstance(allow_list, list):
+        allow_list = []
+        permissions["allow"] = allow_list
+
+    changed = False
+    for pat in [translator(p) for p in patterns]:
+        if pat not in allow_list:
+            allow_list.append(pat)
+            changed = True
+
+    if not changed:
+        return False
+
+    write_json_file(config_file, existing)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
 
@@ -81,51 +144,16 @@ class ClaudePermissionWriter(AbstractSyncWriter):
     @staticmethod
     def check(project_root: Path, patterns: list[str]) -> bool:
         """Return True if ALL patterns are present in .claude/settings.json."""
-        settings_path = project_root / ".claude" / "settings.json"
-        if not settings_path.is_file():
-            return False
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json.loads(settings_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                permissions = raw.get("permissions")
-                if not isinstance(permissions, dict):
-                    return False
-                allow = permissions.get("allow", [])
-                if not isinstance(allow, list):
-                    return False
-                claude_patterns = [canonical_to_claude(p) for p in patterns]
-                return all(cp in allow for cp in claude_patterns)
-        return False
+        return _check_allowlist(
+            project_root / ".claude" / "settings.json", patterns, canonical_to_claude
+        )
 
     @staticmethod
     def write(project_root: Path, patterns: list[str]) -> None:
         """Add patterns to .claude/settings.json. Idempotent, non-destructive."""
         settings_path = project_root / ".claude" / "settings.json"
-
-        data, _error, _was_new = read_json_file(settings_path)
-        existing: dict[str, object] = data if data is not None else {}
-
-        permissions = existing.setdefault("permissions", {})
-        if not isinstance(permissions, dict):
-            permissions = {}
-            existing["permissions"] = permissions
-
-        allow_list = permissions.setdefault("allow", [])
-        if not isinstance(allow_list, list):
-            allow_list = []
-            permissions["allow"] = allow_list
-
-        changed = False
-        for pat in [canonical_to_claude(p) for p in patterns]:
-            if pat not in allow_list:
-                allow_list.append(pat)
-                changed = True
-
-        if not changed:
-            return
-
-        write_json_file(settings_path, existing)
-        logger.info("claude_allowlist.configured", path=str(settings_path))
+        if _write_allowlist(settings_path, patterns, canonical_to_claude):
+            logger.info("claude_allowlist.configured", path=str(settings_path))
 
     def sync(
         self,
@@ -197,28 +225,12 @@ class CursorPermissionWriter(AbstractSyncWriter):
         project_root: Path | None = None,
         patterns: list[str] | None = None,
     ) -> bool:
-        """Return True if ALL patterns are in the Cursor allowlist.
-
-        When ``project_root`` is given, checks the per-project config.
-        Otherwise checks the global config.
-        """
+        """Return True if ALL patterns are in the Cursor allowlist."""
         if not patterns:
             return True
-        config_file = _cursor_config_path(project_root)
-        if not config_file.is_file():
-            return False
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json.loads(config_file.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                permissions = raw.get("permissions")
-                if not isinstance(permissions, dict):
-                    return False
-                allow = permissions.get("allow", [])
-                if not isinstance(allow, list):
-                    return False
-                cursor_patterns = [canonical_to_cursor(p) for p in patterns]
-                return all(cp in allow for cp in cursor_patterns)
-        return False
+        return _check_allowlist(
+            _cursor_config_path(project_root), patterns, canonical_to_cursor
+        )
 
     @staticmethod
     def write(
@@ -228,33 +240,9 @@ class CursorPermissionWriter(AbstractSyncWriter):
         """Add patterns to the Cursor CLI allowlist. Idempotent."""
         if not patterns:
             return
-
         config_file = _cursor_config_path(project_root)
-
-        data, _error, _was_new = read_json_file(config_file)
-        existing: dict[str, object] = data if data is not None else {}
-
-        permissions = existing.setdefault("permissions", {})
-        if not isinstance(permissions, dict):
-            permissions = {}
-            existing["permissions"] = permissions
-
-        allow_list = permissions.setdefault("allow", [])
-        if not isinstance(allow_list, list):
-            allow_list = []
-            permissions["allow"] = allow_list
-
-        changed = False
-        for pat in [canonical_to_cursor(p) for p in patterns]:
-            if pat not in allow_list:
-                allow_list.append(pat)
-                changed = True
-
-        if not changed:
-            return
-
-        write_json_file(config_file, existing)
-        logger.info("cursor_allowlist.configured", path=str(config_file))
+        if _write_allowlist(config_file, patterns, canonical_to_cursor):
+            logger.info("cursor_allowlist.configured", path=str(config_file))
 
     def sync(
         self,

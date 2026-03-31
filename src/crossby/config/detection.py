@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from crossby.config.instructions import INSTRUCTIONS_FILE
 from crossby.config.skills import SKILLS_DIR
 from crossby.models.ai import AIToolID
+from crossby.sync.json_utils import read_json_file as _read_json
 
 
 @dataclass
@@ -151,9 +152,17 @@ def _detect_hooks(
 def _detect_mcp_servers(
     tool_id: AIToolID, root: Path, items: list[DetectedConfig]
 ) -> None:
-    if tool_id != AIToolID.CLAUDE:
+    mcp_paths: dict[AIToolID, tuple[str, str]] = {
+        AIToolID.CLAUDE: (".claude/settings.json", "mcpServers"),
+        AIToolID.CURSOR: (".cursor/mcp.json", "mcpServers"),
+        AIToolID.COPILOT: (".vscode/mcp.json", "servers"),
+        AIToolID.GEMINI: (".gemini/settings.json", "mcpServers"),
+    }
+    entry = mcp_paths.get(tool_id)
+    if entry is None:
         return
-    servers = _read_json_key(root / ".claude" / "settings.json", "mcpServers")
+    rel_path, key = entry
+    servers = _read_json_key(root / rel_path, key)
     if not isinstance(servers, dict) or not servers:
         return
     n = len(servers)
@@ -161,8 +170,7 @@ def _detect_mcp_servers(
     items.append(DetectedConfig(
         config_type="mcp_servers",
         detail=label,
-        portable=False,
-        reason="tool-specific, no cross-tool equivalent yet",
+        portable=True,
     ))
 
 
@@ -191,12 +199,9 @@ def _detect_custom_commands(
 # ------------------------------------------------------------------
 
 
-def _read_json_file(path: Path) -> object:
-    if not path.is_file():
-        return None
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        return json.loads(path.read_text(encoding="utf-8"))
-    return None
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    data, _error, _was_new = _read_json(path)
+    return data
 
 
 def _read_json_key(path: Path, key: str) -> object:
@@ -207,7 +212,7 @@ def _read_json_key(path: Path, key: str) -> object:
 
 
 def _read_json_list(path: Path, keys: list[str], *, prefix: str = "") -> list[str]:
-    data = _read_json_file(path)
+    data: object = _read_json_file(path)
     for key in keys:
         if not isinstance(data, dict):
             return []

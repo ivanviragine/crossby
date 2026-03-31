@@ -26,12 +26,12 @@ logger = structlog.get_logger()
 _GITIGNORE_BLOCK_ID = "agents sync"
 
 # Per-tool agent directory paths (relative to project root)
-_AGENT_TARGET_PATHS: dict[str, str] = {
-    "claude": ".claude/agents",
-    "copilot": ".github/agents",
-    "cursor": ".cursor/agents",
-    "gemini": ".gemini/agents",
-    "codex": ".agents",
+_AGENT_TARGET_PATHS: dict[AIToolID, str] = {
+    AIToolID.CLAUDE: ".claude/agents",
+    AIToolID.COPILOT: ".github/agents",
+    AIToolID.CURSOR: ".cursor/agents",
+    AIToolID.GEMINI: ".gemini/agents",
+    AIToolID.CODEX: ".agents",
 }
 
 
@@ -53,15 +53,15 @@ def update_agents_gitignore(
     # Determine which tool target paths to include in the block
     if config.agents.targets:
         entries = [
-            _AGENT_TARGET_PATHS[tool_id]
-            for tool_id, enabled in config.agents.targets.items()
-            if enabled and tool_id in _AGENT_TARGET_PATHS
+            _AGENT_TARGET_PATHS[AIToolID(tid)]
+            for tid, enabled in config.agents.targets.items()
+            if enabled and AIToolID(tid) in _AGENT_TARGET_PATHS
         ]
     elif installed_tools is not None:
         entries = [
-            _AGENT_TARGET_PATHS[str(t)]
+            _AGENT_TARGET_PATHS[t]
             for t in installed_tools
-            if str(t) in _AGENT_TARGET_PATHS
+            if t in _AGENT_TARGET_PATHS
         ]
     else:
         entries = list(_AGENT_TARGET_PATHS.values())
@@ -91,8 +91,8 @@ def update_agents_gitignore(
 # Tool name translation (copy strategy)
 # ---------------------------------------------------------------------------
 
-_TOOL_NAME_MAP: dict[str, dict[str, str]] = {
-    "copilot": {
+_TOOL_NAME_MAP: dict[AIToolID, dict[str, str]] = {
+    AIToolID.COPILOT: {
         "Read": "read",
         "Edit": "edit",
         "Grep": "search",
@@ -101,13 +101,13 @@ _TOOL_NAME_MAP: dict[str, dict[str, str]] = {
         "WebSearch": "web_search",
         "WebFetch": "web_fetch",
     },
-    "cursor": {
+    AIToolID.CURSOR: {
         "Bash": "Shell",
     },
 }
 
 
-def _translate_tools(tools: list[str], tool_id: str) -> list[str]:
+def _translate_tools(tools: list[str], tool_id: AIToolID) -> list[str]:
     """Map canonical tool names to tool-specific names."""
     mapping = _TOOL_NAME_MAP.get(tool_id, {})
     return [mapping.get(t, t) for t in tools]
@@ -146,7 +146,7 @@ def _render_frontmatter(fm: dict[str, object], body: str) -> str:
     return f"---\n{yaml.dump(fm, default_flow_style=False, sort_keys=False)}---\n{body}"
 
 
-def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
+def _copy_agent_file(source: Path, target: Path, tool_id: AIToolID) -> None:
     """Copy one agent file to target, translating tool names."""
     content = source.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(content)
@@ -317,7 +317,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             # Fallback: copy
             try:
                 if not dry_run:
-                    _copy_all_agents(source_dir, target_dir, str(self.tool_id))
+                    _copy_all_agents(source_dir, target_dir, self.tool_id)
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
@@ -378,7 +378,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
-        _copy_all_agents(source_dir, target_dir, str(self.tool_id))
+        _copy_all_agents(source_dir, target_dir, self.tool_id)
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
@@ -387,7 +387,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         )
 
 
-def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: str) -> None:
+def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: AIToolID) -> None:
     """Copy all .md agent files from source to target, translating tool names."""
     target_dir.mkdir(parents=True, exist_ok=True)
     for src in source_dir.glob("*.md"):
@@ -576,12 +576,12 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                     # Regular file at the link path — treat as a managed copy-fallback
                     # output (.agent.md is crossby-specific) and keep it up to date.
                     if not dry_run:
-                        _copy_agent_file(src, link, "copilot")
+                        _copy_agent_file(src, link, AIToolID.COPILOT)
                     created_count += 1
             except OSError:
                 # Fallback: copy the file
                 if not dry_run:
-                    _copy_agent_file(src, link, "copilot")
+                    _copy_agent_file(src, link, AIToolID.COPILOT)
                     created_count += 1
 
         if created_count == 0 and not dir_newly_created:
@@ -613,7 +613,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         target_dir.mkdir(parents=True, exist_ok=True)
         for src in source_dir.glob("*.md"):
             dest = target_dir / f"{src.stem}.agent.md"
-            _copy_agent_file(src, dest, "copilot")
+            _copy_agent_file(src, dest, AIToolID.COPILOT)
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,

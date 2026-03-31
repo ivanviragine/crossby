@@ -9,11 +9,12 @@ import yaml
 from pydantic import ValidationError
 
 from crossby.models.config import (
-    AIConfig,
     AgentsConfig,
+    AIConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
+    HookEntry,
     MCPServerConfig,
     PermissionsConfig,
     RulesConfig,
@@ -198,7 +199,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         )
     from crossby.sync.agents import _AGENT_TARGET_PATHS  # lazy to avoid circular imports
 
-    unknown_agent_keys = [k for k in agents_targets_raw if str(k) not in _AGENT_TARGET_PATHS]
+    valid_agent_keys = {str(k) for k in _AGENT_TARGET_PATHS}
+    unknown_agent_keys = [k for k in agents_targets_raw if str(k) not in valid_agent_keys]
     if unknown_agent_keys:
         unknown_list = ", ".join(sorted(str(k) for k in unknown_agent_keys))
         raise ConfigError(f"Unknown 'agents.targets' keys: {unknown_list}")
@@ -225,6 +227,9 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     # Parse rules section
     rules = _parse_rules_config(raw)
 
+    # Parse hooks section
+    hooks = _parse_hooks_config(raw)
+
     return CrossbyConfig(
         version=version,
         ai=ai,
@@ -234,6 +239,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         rules=rules,
         sync=sync,
         agents=agents,
+        hooks=hooks,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )
@@ -279,6 +285,42 @@ def _parse_rules_config(raw: dict[str, Any]) -> RulesConfig:
         gitignore=gitignore_raw,
         targets=targets,
     )
+
+
+def _parse_hooks_config(raw: dict[str, Any]) -> list[HookEntry]:
+    """Parse the hooks section from config YAML."""
+    hooks_raw = raw.get("hooks")
+    if hooks_raw is None:
+        return []
+    if not isinstance(hooks_raw, list):
+        raise ConfigError("'hooks' must be a list")
+
+    hooks: list[HookEntry] = []
+    for i, entry in enumerate(hooks_raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"'hooks[{i}]' must be a mapping")
+        event = entry.get("event")
+        if not isinstance(event, str) or not event:
+            raise ConfigError(f"'hooks[{i}].event' must be a non-empty string")
+        command = entry.get("command")
+        if not isinstance(command, str) or not command:
+            raise ConfigError(f"'hooks[{i}].command' must be a non-empty string")
+        tools = entry.get("tools", [])
+        if not isinstance(tools, list):
+            raise ConfigError(f"'hooks[{i}].tools' must be a list")
+        for j, tool in enumerate(tools):
+            if not isinstance(tool, str):
+                raise ConfigError(f"'hooks[{i}].tools[{j}]' must be a string")
+        description = entry.get("description", "")
+        if not isinstance(description, str):
+            raise ConfigError(f"'hooks[{i}].description' must be a string")
+        hooks.append(HookEntry(
+            event=event,
+            command=command,
+            tools=tools,
+            description=description,
+        ))
+    return hooks
 
 
 def _parse_command_config(raw: dict[str, Any] | None) -> CommandConfig:

@@ -2,56 +2,52 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import typer
 
 from crossby.ui.console import console
 
-# Tool format translators
-_TRANSLATORS: dict[str, dict[str, object]] = {}
+PatternTranslator = Callable[[str], str]
 
 
-def _get_to_canonical(tool: str) -> object:
-    """Get the function that converts a tool-specific pattern to canonical."""
-    # For now, support stripping the wrapper
-    wrappers = {
-        "claude": "Bash(",
-        "cursor": "Shell(",
-        "copilot": "shell(",
-        "gemini": "shell(",
-    }
-    prefix = wrappers.get(tool)
-    if not prefix:
-        return None
-
-    def _strip(pattern: str) -> str:
-        if pattern.startswith(prefix) and pattern.endswith(")"):
-            return pattern[len(prefix) : -1]
-        return pattern
-
-    return _strip
+def _strip_wrapper(pattern: str, prefix: str) -> str:
+    """Strip a tool-specific wrapper like ``Bash(…)`` or ``Shell(…)``."""
+    if pattern.startswith(prefix) and pattern.endswith(")"):
+        return pattern[len(prefix) : -1]
+    return pattern
 
 
-def _get_from_canonical(tool: str) -> object:
-    """Get the function that converts a canonical pattern to tool-specific."""
-    translators: dict[str, object] = {}
+def _to_shell(pattern: str) -> str:
+    """Convert a canonical pattern to shell() format (Copilot/Gemini)."""
+    parts = pattern.split(":", 1)
+    binary = parts[0]
+    args = parts[1] if len(parts) > 1 else ""
+    return f"shell({binary}:{args})" if args else f"shell({binary})"
 
-    from crossby.config.claude_allowlist import canonical_to_claude
-    from crossby.config.cursor_allowlist import canonical_to_cursor
 
-    translators["claude"] = canonical_to_claude
-    translators["cursor"] = canonical_to_cursor
+_TO_CANONICAL: dict[str, PatternTranslator] = {
+    "claude": lambda p: _strip_wrapper(p, "Bash("),
+    "cursor": lambda p: _strip_wrapper(p, "Shell("),
+    "copilot": lambda p: _strip_wrapper(p, "shell("),
+    "gemini": lambda p: _strip_wrapper(p, "shell("),
+}
 
-    # Copilot and Gemini use the same shell() format
-    def _to_shell(pattern: str) -> str:
-        parts = pattern.split(":", 1)
-        binary = parts[0]
-        args = parts[1] if len(parts) > 1 else ""
-        return f"shell({binary}:{args})" if args else f"shell({binary})"
+_FROM_CANONICAL: dict[str, PatternTranslator] = {}
 
-    translators["copilot"] = _to_shell
-    translators["gemini"] = _to_shell
 
-    return translators.get(tool)
+def _init_from_canonical() -> dict[str, PatternTranslator]:
+    """Build the canonical→tool translator map (lazy, cached)."""
+    if _FROM_CANONICAL:
+        return _FROM_CANONICAL
+
+    from crossby.sync.permissions import canonical_to_claude, canonical_to_cursor
+
+    _FROM_CANONICAL["claude"] = canonical_to_claude
+    _FROM_CANONICAL["cursor"] = canonical_to_cursor
+    _FROM_CANONICAL["copilot"] = _to_shell
+    _FROM_CANONICAL["gemini"] = _to_shell
+    return _FROM_CANONICAL
 
 
 def convert(
@@ -82,14 +78,15 @@ def convert(
     if from_tool == "canonical":
         canonical = pattern
     else:
-        strip_fn = _get_to_canonical(from_tool)
-        canonical = strip_fn(pattern) if strip_fn and callable(strip_fn) else pattern
+        strip_fn = _TO_CANONICAL.get(from_tool)
+        canonical = strip_fn(pattern) if strip_fn else pattern
 
     # Step 2: Convert from canonical to target format
     if to_tool == "canonical":
         result = canonical
     else:
-        translate_fn = _get_from_canonical(to_tool)
-        result = translate_fn(canonical) if translate_fn and callable(translate_fn) else canonical
+        translators = _init_from_canonical()
+        translate_fn = translators.get(to_tool)
+        result = translate_fn(canonical) if translate_fn else canonical
 
     console.plain(result)

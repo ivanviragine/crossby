@@ -120,11 +120,22 @@ class TestDetectMcpServers:
         items = detect_source_configs(AIToolID.CLAUDE, tmp_path)
         mcp = [i for i in items if i.config_type == "mcp_servers"]
         assert len(mcp) == 1
-        assert mcp[0].portable is False
+        assert mcp[0].portable is True
         assert "2 MCP servers" in mcp[0].detail
 
-    def test_only_claude_has_mcp(self, tmp_path: Path) -> None:
+    def test_cursor_mcp_detected(self, tmp_path: Path) -> None:
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir()
+        settings = {"mcpServers": {"search": {"command": "npx", "args": ["-y", "@mcp/search"]}}}
+        (cursor_dir / "mcp.json").write_text(json.dumps(settings))
+
         items = detect_source_configs(AIToolID.CURSOR, tmp_path)
+        mcp = [i for i in items if i.config_type == "mcp_servers"]
+        assert len(mcp) == 1
+        assert mcp[0].portable is True
+
+    def test_unsupported_tool_no_mcp(self, tmp_path: Path) -> None:
+        items = detect_source_configs(AIToolID.OPENCODE, tmp_path)
         mcp = [i for i in items if i.config_type == "mcp_servers"]
         assert len(mcp) == 0
 
@@ -176,5 +187,5 @@ class TestDetectFull:
 
         portable = [i for i in items if i.portable]
         not_portable = [i for i in items if not i.portable]
-        assert len(portable) == 4  # instructions, skills, allowlist, hooks
-        assert len(not_portable) == 2  # mcp, commands
+        assert len(portable) == 5  # instructions, skills, allowlist, hooks, mcp
+        assert len(not_portable) == 1  # commands

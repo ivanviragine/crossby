@@ -150,7 +150,7 @@ class TestBuildLaunchCommand:
 
     def test_with_prompt(self) -> None:
         adapter = AbstractAITool.get("claude")
-        cmd = adapter.build_launch_command(prompt="Do something")
+        cmd = adapter.build_launch_command(headless_prompt="Do something")
         assert "--print" in cmd
         assert "Do something" in cmd
 
@@ -175,7 +175,7 @@ class TestBuildLaunchCommand:
     def test_opencode_headless_with_prompt(self) -> None:
         """opencode headless uses run arg."""
         adapter = AbstractAITool.get("opencode")
-        cmd = adapter.build_launch_command(model="anthropic/claude-haiku-4-5", prompt="Fix the bug")
+        cmd = adapter.build_launch_command(model="anthropic/claude-haiku-4-5", headless_prompt="Fix the bug")
         assert cmd == [
             "opencode",
             "--model",
@@ -187,7 +187,7 @@ class TestBuildLaunchCommand:
     def test_codex_headless_with_prompt(self) -> None:
         """codex headless uses exec subcommand."""
         adapter = AbstractAITool.get("codex")
-        cmd = adapter.build_launch_command(model="codex-mini-latest", prompt="Review code")
+        cmd = adapter.build_launch_command(model="codex-mini-latest", headless_prompt="Review code")
         assert cmd == [
             "codex",
             "--model",

@@ -321,7 +321,7 @@ class AbstractAITool(ABC):
     def build_launch_command(
         self,
         model: str | None = None,
-        prompt: str | None = None,
+        headless_prompt: str | None = None,
         plan_mode: bool = False,
         json_schema: dict[str, Any] | None = None,
         trusted_dirs: list[str] | None = None,
@@ -349,8 +349,8 @@ class AbstractAITool(ABC):
         if effective_model and caps.supports_model_flag:
             cmd.extend([caps.model_flag, self.normalize_model_format(effective_model)])
 
-        if prompt and caps.supports_headless and caps.headless_flag:
-            cmd.extend([caps.headless_flag, prompt])
+        if headless_prompt and caps.supports_headless and caps.headless_flag:
+            cmd.extend([caps.headless_flag, headless_prompt])
 
         # YOLO mode supersedes plan_mode: YOLO grants full-auto permissions
         # which is a superset of plan permissions. If the tool doesn't support
