@@ -144,8 +144,7 @@ def _detect_hooks(
     items.append(DetectedConfig(
         config_type="hooks",
         detail=label,
-        portable=False,
-        reason="not yet supported — different formats per tool",
+        portable=True,
     ))
 
 
