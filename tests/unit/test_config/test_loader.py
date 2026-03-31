@@ -72,7 +72,9 @@ class TestLoadConfig:
             "models": {
                 "claude": {"easy": "haiku", "medium": "sonnet"},
             },
-            "permissions": {"allowed_commands": ["myapp:*"]},
+            "profiles": {
+                "fast": {"tool": "claude", "effort": "low"},
+            },
         }
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         config = load_config(tmp_path)
@@ -85,7 +87,8 @@ class TestLoadConfig:
         assert config.ai.commands["plan"].model == "gpt-5"
         assert config.ai.commands["review"].effort == "low"
         assert config.models["claude"].easy == "haiku"
-        assert config.permissions.allowed_commands == ["myapp:*"]
+        assert config.profiles["fast"].tool == "claude"
+        assert config.profiles["fast"].effort == "low"
 
     def test_invalid_yaml(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text(": invalid: yaml: [")

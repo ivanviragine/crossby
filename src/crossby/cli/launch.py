@@ -10,7 +10,7 @@ from crossby.ui.console import console
 
 
 def launch(
-    path: Path = typer.Argument(Path("."), help="Working directory for the AI tool."),
+    path: Path = typer.Argument(Path("."), help="Working directory or profile name."),
     tool: str | None = typer.Option(None, "--tool", "-t", help="AI tool to use."),
     model: str | None = typer.Option(None, "--model", "-m", help="Model to use."),
     effort: str | None = typer.Option(None, "--effort", "-e", help="Effort level."),
@@ -25,11 +25,20 @@ def launch(
     transcript: Path | None = typer.Option(
         None, "--transcript", help="Path to save session transcript."
     ),
+    profile: str | None = typer.Option(
+        None, "--profile", "-P", help="Named launch profile from .crossby.yml."
+    ),
 ) -> None:
     """Launch an AI tool with resolved configuration.
 
-    Resolves tool, model, effort, and yolo from CLI flags, config file,
-    and auto-detection. Optionally captures session transcript.
+    Resolves tool, model, effort, and yolo from CLI flags, profiles,
+    config file, and auto-detection. Works without any config file.
+
+    Examples::
+
+        crossby launch                     # auto-detect everything
+        crossby launch --tool claude       # specific tool
+        crossby launch --profile ccyolo    # use saved profile
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.config.loader import load_config
@@ -42,21 +51,39 @@ def launch(
     )
     from crossby.services.prompt_delivery import deliver_prompt_if_needed
 
-    work_dir = path.resolve()
+    # Apply profile overrides (--profile or positional profile name)
+    profile_name = profile
+    path_str = str(path)
+    if (
+        not profile_name
+        and not path.exists()
+        and path_str != "."
+        and not path.is_absolute()
+        and len(path.parts) == 1
+    ):
+        # Simple name without path structure — treat as profile name
+        profile_name = path_str
+        work_dir = Path(".").resolve()
+    else:
+        work_dir = path.resolve()
+
     config = load_config(work_dir)
 
-    # Auto-sync before launching (new additive behavior, respects sync.auto)
-    if config.sync.auto:
-        from crossby.sync import run_sync
-
-        try:
-            sync_results = run_sync(config, work_dir)
-        except ValueError as e:
-            console.error(f"Sync config error: {e}")
-        else:
-            for result in sync_results:
-                if result.action == "error":
-                    console.error(f"Sync error: {result.message}")
+    if profile_name:
+        prof = config.get_profile(profile_name)
+        if prof is None:
+            console.error(f"Unknown profile: {profile_name!r}")
+            console.hint("Check .crossby.yml profiles section")
+            raise typer.Exit(1)
+        # Profile values serve as defaults — explicit CLI flags take precedence
+        if tool is None and prof.tool:
+            tool = prof.tool
+        if model is None and prof.model:
+            model = prof.model
+        if effort is None and prof.effort:
+            effort = prof.effort
+        if yolo is None and prof.yolo is not None:
+            yolo = prof.yolo
 
     # Resolve AI selection
     resolved_tool = resolve_ai_tool(tool, config, command or "default")
@@ -129,11 +156,6 @@ def launch(
     if prompt:
         deliver_prompt_if_needed(adapter, prompt)
 
-    # Build allowed commands from config
-    allowed_commands = (
-        config.permissions.allowed_commands if config.permissions.allowed_commands else None
-    )
-
     # Ensure transcript parent directory exists
     if transcript:
         try:
@@ -149,7 +171,6 @@ def launch(
         prompt=prompt if caps.supports_initial_message else None,
         transcript_path=transcript,
         effort=resolved_effort,
-        allowed_commands=allowed_commands,
         yolo=resolved_yolo,
     )
 

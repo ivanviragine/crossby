@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, HookEntry
+from crossby.models.config import HookEntry
+from crossby.sync.base import SyncData
 from crossby.sync.hooks import (
     ClaudeHooksWriter,
     CopilotHooksWriter,
@@ -38,8 +39,8 @@ BARE_HOOK = HookEntry(
 )
 
 
-def _cfg(*hooks: HookEntry) -> CrossbyConfig:
-    return CrossbyConfig(hooks=list(hooks))
+def _cfg(*hooks: HookEntry) -> SyncData:
+    return SyncData(hooks=list(hooks))
 
 
 def _read_json(path: Path) -> dict:
@@ -120,7 +121,7 @@ class TestClaudeHooksWriter:
     writer = ClaudeHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
         assert result.message == "no hooks config"
 
@@ -248,7 +249,7 @@ class TestCursorHooksWriter:
     writer = CursorHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -323,7 +324,7 @@ class TestCopilotHooksWriter:
     writer = CopilotHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -450,7 +451,7 @@ class TestGeminiHooksWriter:
     writer = GeminiHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -569,16 +570,16 @@ class TestHookEntryModel:
         assert hook.description == "My guard"
 
 
-class TestCrossbyConfigHooksField:
+class TestSyncDataHooksField:
     def test_hooks_defaults_to_empty_list(self) -> None:
-        config = CrossbyConfig()
-        assert config.hooks == []
+        data = SyncData()
+        assert data.hooks == []
 
-    def test_hooks_parsed_from_dict(self) -> None:
-        config = CrossbyConfig(
+    def test_hooks_from_hook_entries(self) -> None:
+        data = SyncData(
             hooks=[
-                {"event": "pre_tool_use", "command": "echo hi", "tools": ["Edit"]},
+                HookEntry(event="pre_tool_use", command="echo hi", tools=["Edit"]),
             ]
         )
-        assert len(config.hooks) == 1
-        assert config.hooks[0].command == "echo hi"
+        assert len(data.hooks) == 1
+        assert data.hooks[0].command == "echo hi"

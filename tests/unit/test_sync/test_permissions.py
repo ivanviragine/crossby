@@ -8,9 +8,8 @@ from pathlib import Path
 import pytest
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, PermissionsConfig
 from crossby.sync import run_sync
-from crossby.sync.base import SyncConcern
+from crossby.sync.base import SyncConcern, SyncData
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
     CursorPermissionWriter,
@@ -19,11 +18,9 @@ from crossby.sync.permissions import (
 )
 
 
-def _make_config(patterns: list[str] | None = None) -> CrossbyConfig:
-    """Build a CrossbyConfig with the given permission patterns."""
-    return CrossbyConfig(
-        permissions=PermissionsConfig(allowed_commands=patterns or []),
-    )
+def _make_data(patterns: list[str] | None = None) -> SyncData:
+    """Build a SyncData with the given permission patterns."""
+    return SyncData(allowed_commands=patterns or [])
 
 
 @pytest.fixture(autouse=True)
@@ -146,16 +143,16 @@ class TestClaudePermissionWriterWrite:
 
 class TestClaudePermissionWriterSync:
     def test_skips_when_no_patterns(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=[]))
+        data = SyncData(allowed_commands=[])
         writer = ClaudePermissionWriter()
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "skipped"
-        assert result.message == "no allowed_commands configured"
+        assert result.message == "no allowed_commands detected"
 
     def test_creates_file(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = ClaudePermissionWriter()
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "created"
         assert (tmp_path / ".claude" / "settings.json").exists()
 
@@ -163,25 +160,25 @@ class TestClaudePermissionWriterSync:
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
         path.write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = ClaudePermissionWriter()
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "updated"
 
     def test_skips_when_already_configured(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
         path.write_text(json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}))
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = ClaudePermissionWriter()
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "skipped"
         assert result.message == "already configured"
 
     def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = ClaudePermissionWriter()
-        result = writer.sync(config, tmp_path, dry_run=True)
+        result = writer.sync(data, tmp_path, dry_run=True)
         assert result.action == "created"
         assert not (tmp_path / ".claude" / "settings.json").exists()
 
@@ -257,16 +254,16 @@ class TestCursorPermissionWriterWrite:
 
 class TestCursorPermissionWriterSync:
     def test_skips_when_no_patterns(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=[]))
+        data = SyncData(allowed_commands=[])
         writer = CursorPermissionWriter()
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "skipped"
-        assert result.message == "no allowed_commands configured"
+        assert result.message == "no allowed_commands detected"
 
     def test_creates_project_config(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = CursorPermissionWriter(scope="project")
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "created"
         assert (tmp_path / ".cursor" / "cli.json").exists()
 
@@ -274,22 +271,22 @@ class TestCursorPermissionWriterSync:
         path = tmp_path / ".cursor" / "cli.json"
         path.parent.mkdir()
         path.write_text(json.dumps({"permissions": {"allow": ["Shell(myapp:*)"]}}))
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = CursorPermissionWriter(scope="project")
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "skipped"
 
     def test_dry_run_does_not_write(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = CursorPermissionWriter(scope="project")
-        result = writer.sync(config, tmp_path, dry_run=True)
+        result = writer.sync(data, tmp_path, dry_run=True)
         assert result.action == "created"
         assert not (tmp_path / ".cursor" / "cli.json").exists()
 
     def test_global_scope_uses_global_config(self, tmp_path: Path) -> None:
-        config = CrossbyConfig(permissions=PermissionsConfig(allowed_commands=["myapp:*"]))
+        data = SyncData(allowed_commands=["myapp:*"])
         writer = CursorPermissionWriter(scope="global")
-        result = writer.sync(config, tmp_path)
+        result = writer.sync(data, tmp_path)
         assert result.action == "created"
         assert _cursor_global(tmp_path).exists()
         assert not (tmp_path / ".cursor" / "cli.json").exists()
@@ -304,21 +301,21 @@ class TestClaudePermissionSyncIdempotency:
     """Verify sync() is idempotent: first call writes, second is a no-op."""
 
     def test_sync_then_sync_is_skipped(self, tmp_path: Path) -> None:
-        config = _make_config(["myapp:*"])
+        data = _make_data(["myapp:*"])
         writer = ClaudePermissionWriter()
-        r1 = writer.sync(config, tmp_path)
+        r1 = writer.sync(data, tmp_path)
         assert r1.action == "created"
-        r2 = writer.sync(config, tmp_path)
+        r2 = writer.sync(data, tmp_path)
         assert r2.action == "skipped"
         assert r2.message == "already configured"
 
     def test_sync_with_additional_patterns(self, tmp_path: Path) -> None:
         writer = ClaudePermissionWriter()
-        r1 = writer.sync(_make_config(["first:*"]), tmp_path)
+        r1 = writer.sync(_make_data(["first:*"]), tmp_path)
         assert r1.action == "created"
-        r2 = writer.sync(_make_config(["first:*", "second:*"]), tmp_path)
+        r2 = writer.sync(_make_data(["first:*", "second:*"]), tmp_path)
         assert r2.action == "updated"
-        r3 = writer.sync(_make_config(["first:*", "second:*"]), tmp_path)
+        r3 = writer.sync(_make_data(["first:*", "second:*"]), tmp_path)
         assert r3.action == "skipped"
 
 
@@ -326,9 +323,9 @@ class TestPermissionsRunSyncIntegration:
     """Test permissions through the run_sync() orchestrator."""
 
     def test_run_sync_creates_both_claude_and_cursor(self, tmp_path: Path) -> None:
-        config = _make_config(["myapp:*"])
+        data = _make_data(["myapp:*"])
         results = run_sync(
-            config,
+            data,
             tmp_path,
             concern=SyncConcern.PERMISSIONS,
             installed_tools=[AIToolID.CLAUDE, AIToolID.CURSOR],
@@ -340,15 +337,15 @@ class TestPermissionsRunSyncIntegration:
         assert (tmp_path / ".cursor" / "cli.json").exists()
 
     def test_run_sync_skips_when_already_configured(self, tmp_path: Path) -> None:
-        config = _make_config(["myapp:*"])
+        data = _make_data(["myapp:*"])
         run_sync(
-            config,
+            data,
             tmp_path,
             concern=SyncConcern.PERMISSIONS,
             installed_tools=[AIToolID.CLAUDE],
         )
         results = run_sync(
-            config,
+            data,
             tmp_path,
             concern=SyncConcern.PERMISSIONS,
             installed_tools=[AIToolID.CLAUDE],

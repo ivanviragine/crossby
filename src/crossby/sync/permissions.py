@@ -15,8 +15,7 @@ from typing import Literal
 import structlog
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
-from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import read_json_file, write_json_file
 
 logger = structlog.get_logger()
@@ -129,19 +128,19 @@ class ClaudePermissionWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        patterns = config.permissions.allowed_commands
+        patterns = data.allowed_commands
         if not patterns:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
-                message="no allowed_commands configured",
+                message="no allowed_commands detected",
             )
 
         settings_path = project_root / ".claude" / "settings.json"
@@ -258,19 +257,19 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        patterns = config.permissions.allowed_commands
+        patterns = data.allowed_commands
         if not patterns:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
-                message="no allowed_commands configured",
+                message="no allowed_commands detected",
             )
 
         scope_root = project_root if self.scope == "project" else None

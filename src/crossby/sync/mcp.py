@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, MCPServerConfig
-from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.models.config import MCPServerConfig
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import SyncAction, read_merge_write_json
 
 
@@ -105,7 +105,7 @@ class _JsonMCPWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
@@ -113,7 +113,7 @@ class _JsonMCPWriter(AbstractSyncWriter):
     ) -> SyncResult:
         dirname, filename = self._config_path_parts
         path = project_root / dirname / filename
-        enabled, disabled = _split_servers(config.mcp_servers)
+        enabled, disabled = _split_servers(data.mcp_servers)
         updates = {name: self._to_entry(s) for name, s in enabled.items()}
         action, message = read_merge_write_json(path, self._mcp_key, updates, disabled, dry_run)
         return SyncResult(
@@ -192,14 +192,14 @@ class CodexMCPWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
         path = project_root / ".codex" / "config.toml"
-        enabled, disabled = _split_servers(config.mcp_servers)
+        enabled, disabled = _split_servers(data.mcp_servers)
         action, message = self._write_toml(path, enabled, disabled, dry_run)
         return SyncResult(
             tool_id=self.tool_id,

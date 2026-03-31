@@ -15,19 +15,12 @@ runner = CliRunner()
 
 
 @pytest.fixture()
-def project_with_config(tmp_path: Path) -> Path:
-    """A project directory with a .crossby.yml and allowed_commands."""
-    config = tmp_path / ".crossby.yml"
-    config.write_text(
-        "version: 1\n"
-        "ai:\n"
-        "  default_tool: claude\n"
-        "permissions:\n"
-        "  allowed_commands:\n"
-        "    - 'myapp:*'\n"
-        "sync:\n"
-        "  auto: true\n"
-        "  tools: []\n",
+def project_with_claude_perms(tmp_path: Path) -> Path:
+    """A project directory with Claude allowlist (source for permissions sync)."""
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}),
         encoding="utf-8",
     )
     return tmp_path
@@ -41,33 +34,12 @@ def _patch_cursor_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 class TestSyncCommandPermissions:
-    def test_sync_permissions_creates_claude_settings(
-        self, project_with_config: Path, monkeypatch: pytest.MonkeyPatch
+    def test_sync_permissions_from_claude(
+        self, project_with_claude_perms: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """crossby sync permissions creates .claude/settings.json for Claude."""
-        monkeypatch.chdir(project_with_config)
+        """crossby sync permissions --from claude creates Cursor config."""
+        monkeypatch.chdir(project_with_claude_perms)
 
-        # Patch detect_installed to return only Claude
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(
-                "crossby.ai_tools.base.AbstractAITool.detect_installed",
-                lambda: ["claude"],
-            )
-            result = runner.invoke(
-                app,
-                ["sync", "permissions", "--path", str(project_with_config)],
-            )
-
-        assert result.exit_code == 0, result.output
-        settings = project_with_config / ".claude" / "settings.json"
-        assert settings.exists()
-        data = json.loads(settings.read_text())
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
-
-    def test_sync_all_creates_files_for_all_installed(
-        self, project_with_config: Path
-    ) -> None:
-        """crossby sync (no concern) runs all writers for installed tools."""
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
                 "crossby.ai_tools.base.AbstractAITool.detect_installed",
@@ -75,66 +47,102 @@ class TestSyncCommandPermissions:
             )
             result = runner.invoke(
                 app,
-                ["sync", "--path", str(project_with_config)],
+                [
+                    "sync", "permissions",
+                    "--from", "claude",
+                    "--to", "cursor",
+                    "--path", str(project_with_claude_perms),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        cursor_config = project_with_claude_perms / ".cursor" / "cli.json"
+        assert cursor_config.exists()
+        data = json.loads(cursor_config.read_text())
+        assert "Shell(myapp:*)" in data["permissions"]["allow"]
+
+    def test_sync_all_from_claude(
+        self, project_with_claude_perms: Path
+    ) -> None:
+        """crossby sync --from claude runs all concerns for installed tools."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                ["sync", "--from", "claude", "--path", str(project_with_claude_perms)],
             )
 
         assert result.exit_code == 0, result.output
 
-        claude_settings = project_with_config / ".claude" / "settings.json"
-        cursor_config = project_with_config / ".cursor" / "cli.json"
-        assert claude_settings.exists()
-        assert cursor_config.exists()
-
-    def test_sync_unknown_concern_exits_1(self, project_with_config: Path) -> None:
+    def test_sync_unknown_concern_exits_1(self, tmp_path: Path) -> None:
         result = runner.invoke(
             app,
-            ["sync", "nonexistent", "--path", str(project_with_config)],
+            ["sync", "nonexistent", "--path", str(tmp_path)],
         )
         assert result.exit_code == 1
         assert "Unknown concern" in result.output
 
-    def test_sync_unknown_tool_exits_1(self, project_with_config: Path) -> None:
+    def test_sync_unknown_from_tool_exits_1(self, tmp_path: Path) -> None:
         result = runner.invoke(
             app,
-            ["sync", "--tool", "nonexistent", "--path", str(project_with_config)],
+            ["sync", "--from", "nonexistent", "--path", str(tmp_path)],
         )
         assert result.exit_code == 1
         assert "Unknown tool" in result.output
 
-    def test_sync_dry_run_does_not_write(self, project_with_config: Path) -> None:
+    def test_sync_unknown_to_tool_exits_1(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["sync", "--from", "claude", "--to", "nonexistent", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 1
+        assert "Unknown tool" in result.output
+
+    def test_sync_dry_run_does_not_write(
+        self, project_with_claude_perms: Path
+    ) -> None:
         """--dry-run reports changes without writing files."""
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
                 "crossby.ai_tools.base.AbstractAITool.detect_installed",
-                lambda: ["claude"],
+                lambda: ["claude", "cursor"],
             )
             result = runner.invoke(
                 app,
-                ["sync", "--dry-run", "--path", str(project_with_config)],
+                [
+                    "sync", "permissions",
+                    "--from", "claude",
+                    "--to", "cursor",
+                    "--dry-run",
+                    "--path", str(project_with_claude_perms),
+                ],
             )
 
         assert result.exit_code == 0, result.output
-        assert not (project_with_config / ".claude" / "settings.json").exists()
+        assert not (project_with_claude_perms / ".cursor" / "cli.json").exists()
 
-    def test_sync_tool_filter_claude(self, project_with_config: Path) -> None:
-        """--tool claude only runs Claude writer."""
-        result = runner.invoke(
-            app,
-            ["sync", "--tool", "claude", "--path", str(project_with_config)],
-        )
-        assert result.exit_code == 0, result.output
-        settings = project_with_config / ".claude" / "settings.json"
-        assert settings.exists()
-        data = json.loads(settings.read_text())
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
-
-    def test_sync_idempotent(self, project_with_config: Path) -> None:
+    def test_sync_idempotent(
+        self, project_with_claude_perms: Path
+    ) -> None:
         """Running sync twice leaves files in the expected state."""
         for _ in range(2):
-            runner.invoke(
-                app,
-                ["sync", "--tool", "claude", "--path", str(project_with_config)],
-            )
-        settings = project_with_config / ".claude" / "settings.json"
-        data = json.loads(settings.read_text())
-        assert data["permissions"]["allow"].count("Bash(myapp:*)") == 1
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                    lambda: ["claude", "cursor"],
+                )
+                runner.invoke(
+                    app,
+                    [
+                        "sync", "permissions",
+                        "--from", "claude",
+                        "--to", "cursor",
+                        "--path", str(project_with_claude_perms),
+                    ],
+                )
+        cursor_config = project_with_claude_perms / ".cursor" / "cli.json"
+        data = json.loads(cursor_config.read_text())
+        assert data["permissions"]["allow"].count("Shell(myapp:*)") == 1
