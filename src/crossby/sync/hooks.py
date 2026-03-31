@@ -1,10 +1,11 @@
 """Hooks sync writers — one per AI tool.
 
-Each writer merges .crossby.yml hooks into the tool's native config format
-using a non-destructive merge strategy (dedup by (event, command)):
+Each writer merges hooks from :class:`~crossby.sync.base.SyncData` (populated
+by readers or the sync wizard) into the tool's native config format using a
+non-destructive merge strategy (dedup by (event, command)):
 - New hooks are appended to the tool's hooks list.
 - Hooks with the same (event, command) are skipped (idempotent).
-- Hooks in the target but NOT in .crossby.yml are preserved.
+- Hooks in the target but NOT in SyncData are preserved.
 """
 
 from __future__ import annotations

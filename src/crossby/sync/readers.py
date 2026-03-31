@@ -155,7 +155,8 @@ def _read_claude_allowlist(project_root: Path) -> list[str]:
     with contextlib.suppress(json.JSONDecodeError, OSError):
         raw = json.loads(settings_path.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
-            allow = raw.get("permissions", {}).get("allow", [])
+            perms = raw.get("permissions")
+            allow = perms.get("allow", []) if isinstance(perms, dict) else []
             if isinstance(allow, list):
                 return [
                     p[5:-1]
@@ -173,7 +174,8 @@ def _read_cursor_allowlist(project_root: Path) -> list[str]:
     with contextlib.suppress(json.JSONDecodeError, OSError):
         raw = json.loads(config_file.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
-            allow = raw.get("permissions", {}).get("allow", [])
+            perms = raw.get("permissions")
+            allow = perms.get("allow", []) if isinstance(perms, dict) else []
             if isinstance(allow, list):
                 return [
                     p[6:-1]
@@ -517,7 +519,7 @@ def build_sync_data(
     rules_source: str | None = None
     if from_tool and from_tool in rules_found:
         rules_source = rules_found[from_tool]
-    elif rules_found:
+    elif not from_tool and rules_found:
         source_tool = suggest_rules_source(rules_found)
         if source_tool:
             rules_source = rules_found[source_tool]
@@ -527,7 +529,7 @@ def build_sync_data(
     agents_source: str | None = None
     if from_tool and from_tool in agents_found:
         agents_source = agents_found[from_tool]
-    elif agents_found:
+    elif not from_tool and agents_found:
         source_tool = suggest_agents_source(agents_found)
         if source_tool:
             agents_source = agents_found[source_tool]

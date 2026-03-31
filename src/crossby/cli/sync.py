@@ -161,7 +161,19 @@ def sync(
 
     # Rules
     if scan.rules.found and (sync_concern is None or sync_concern == SyncConcern.RULES):
-        source = suggest_rules_source(scan.rules.found)
+        if len(scan.rules.found) > 1:
+            tools = list(scan.rules.found)
+            suggested = suggest_rules_source(scan.rules.found)
+            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            idx = prompts.select(
+                "Multiple rules files found — which is the canonical source?",
+                items=[str(t) for t in tools],
+                hints=[scan.rules.found[t] for t in tools],
+                default=default_idx,
+            )
+            source = tools[idx]
+        else:
+            source = suggest_rules_source(scan.rules.found)
         if source:
             source_path = scan.rules.found[source]
             other_tools = [str(t) for t in installed_tools if t != source]
@@ -172,7 +184,19 @@ def sync(
 
     # Agents
     if scan.agents.found and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
-        source = suggest_agents_source(scan.agents.found)
+        if len(scan.agents.found) > 1:
+            tools = list(scan.agents.found)
+            suggested = suggest_agents_source(scan.agents.found)
+            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            idx = prompts.select(
+                "Multiple agents directories found — which is the canonical source?",
+                items=[str(t) for t in tools],
+                hints=[scan.agents.found[t] for t in tools],
+                default=default_idx,
+            )
+            source = tools[idx]
+        else:
+            source = suggest_agents_source(scan.agents.found)
         if source:
             source_path = scan.agents.found[source]
             other_tools = [str(t) for t in installed_tools if t != source]
