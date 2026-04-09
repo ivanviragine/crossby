@@ -60,13 +60,6 @@ def _tools_to_matcher(tools: list[str]) -> str:
     return "|".join(tools)
 
 
-def _tools_to_gemini(tools: list[str]) -> list[str]:
-    """Convert tools list to Gemini format (empty/wildcard → ['.*'])."""
-    if not tools or tools == ["*"]:
-        return [".*"]
-    return tools
-
-
 # ---------------------------------------------------------------------------
 # ClaudeHooksWriter
 # ---------------------------------------------------------------------------
@@ -407,18 +400,23 @@ class CopilotHooksWriter(AbstractSyncWriter):
 
 
 class GeminiHooksWriter(AbstractSyncWriter):
-    """Merges hooks into .gemini/settings.json → hooks[] (flat array).
+    """Merges hooks into .gemini/settings.json → hooks.<EventName>[].
 
     Format::
 
         {
-          "hooks": [
-            {"event": "BeforeTool", "command": "...", "tools": ["Edit", "Write"]}
-          ]
+          "hooks": {
+            "BeforeTool": [
+              {
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command", "command": "..."}]
+              }
+            ]
+          }
         }
 
-    Note: ``event`` is a field value in the entry dict, not an array key.
-    Dedup key: ``(entry.event, entry.command)`` pair.
+    Uses the same nested object-keyed structure as Claude.
+    Dedup key: command value within any entry's inner ``hooks[]``.
     """
 
     tool_id = AIToolID.GEMINI
@@ -454,32 +452,45 @@ class GeminiHooksWriter(AbstractSyncWriter):
             )
 
         existing = file_data or {}
-        hooks_list: list[Any] = existing.get("hooks", [])
-        if not isinstance(hooks_list, list):
-            hooks_list = []
+        hooks_section: dict[str, Any] = existing.get("hooks", {})
+        # Migrate old flat-array format to nested dict
+        if not isinstance(hooks_section, dict):
+            hooks_section = {}
 
         changed = False
-
         for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
-            command = hook.command
+            event_list: list[Any] = hooks_section.get(event_name, [])
+            if not isinstance(event_list, list):
+                event_list = []
 
-            # Dedup: check if (event, command) pair already present
-            already_exists = any(
-                isinstance(entry, dict)
-                and entry.get("event") == event_name
-                and entry.get("command") == command
-                for entry in hooks_list
-            )
+            # Dedup: check if command already exists in any entry's inner hooks[]
+            command = hook.command
+            already_exists = False
+            for entry in event_list:
+                if not isinstance(entry, dict):
+                    continue
+                inner_hooks = entry.get("hooks")
+                if not isinstance(inner_hooks, list):
+                    continue
+                for inner in inner_hooks:
+                    if isinstance(inner, dict) and inner.get("command") == command:
+                        already_exists = True
+                        break
+                    if isinstance(inner, str) and inner == command:
+                        already_exists = True
+                        break
+                if already_exists:
+                    break
 
             if not already_exists:
                 tools = hook.tools or []
                 new_entry: dict[str, Any] = {
-                    "event": event_name,
-                    "command": command,
-                    "tools": _tools_to_gemini(tools),
+                    "matcher": _tools_to_matcher(tools),
+                    "hooks": [{"type": "command", "command": command}],
                 }
-                hooks_list.append(new_entry)
+                event_list.append(new_entry)
+                hooks_section[event_name] = event_list
                 changed = True
 
         if not changed:
@@ -492,7 +503,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
 
         action = "created" if was_new else "updated"
         if not dry_run:
-            existing["hooks"] = hooks_list
+            existing["hooks"] = hooks_section
             write_json_file(path, existing)
 
         return SyncResult(

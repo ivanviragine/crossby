@@ -63,22 +63,21 @@ class TestCopilotAllowedCommands:
 
 
 class TestGeminiAllowedCommands:
-    """Tests for GeminiAdapter.allowed_commands_args()."""
+    """Tests for GeminiAdapter.allowed_commands_args().
 
-    def test_single_pattern(self) -> None:
+    Gemini uses the Policy Engine (TOML files) instead of CLI flags.
+    The method always returns an empty list.
+    """
+
+    def test_returns_empty(self) -> None:
         adapter = GeminiAdapter()
         result = adapter.allowed_commands_args(["crossby:*"])
-        assert result == ["--allowed-tools", "shell(crossby:*)"]
+        assert result == []
 
-    def test_multiple_patterns(self) -> None:
+    def test_returns_empty_with_multiple_patterns(self) -> None:
         adapter = GeminiAdapter()
         result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
-        assert result == [
-            "--allowed-tools",
-            "shell(crossby:*)",
-            "--allowed-tools",
-            "shell(./scripts/check.sh:*)",
-        ]
+        assert result == []
 
 
 class TestCursorAllowedCommands:
