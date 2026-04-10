@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -186,21 +187,30 @@ def _read_cursor_allowlist(project_root: Path) -> list[str]:
 
 
 def _read_gemini_permissions(project_root: Path) -> list[str]:
-    """Read Gemini policy file → canonical patterns."""
+    """Read Gemini policy file → canonical patterns.
+
+    Uses ``tomllib`` for correct TOML parsing.  Only ``allow`` rules for
+    ``run_shell_command`` are returned.
+    """
     policy_file = project_root / ".gemini" / "policies" / "crossby.toml"
     if not policy_file.is_file():
         return []
-    with contextlib.suppress(OSError):
-        content = policy_file.read_text(encoding="utf-8")
+    with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(policy_file.read_text(encoding="utf-8"))
+        rules = data.get("rule", [])
+        if not isinstance(rules, list):
+            return []
         result: list[str] = []
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("commandPrefix"):
-                # Parse: commandPrefix = "binary"
-                _, _, value = line.partition("=")
-                value = value.strip().strip('"')
-                if value:
-                    result.append(value)
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("toolName") != "run_shell_command":
+                continue
+            if rule.get("decision") != "allow":
+                continue
+            prefix = rule.get("commandPrefix")
+            if isinstance(prefix, str) and prefix:
+                result.append(prefix)
         return result
     return []
 

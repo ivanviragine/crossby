@@ -488,7 +488,7 @@ class TestGeminiHooksWriter:
         assert len(data["hooks"]["BeforeTool"]) == 2
 
     def test_migrates_old_flat_array_format(self, tmp_path: Path) -> None:
-        """Old flat-array hooks are replaced with nested format on write."""
+        """Old flat-array hooks are converted to nested format, preserving commands."""
         path = tmp_path / ".gemini" / "settings.json"
         path.parent.mkdir()
         old_format = {
@@ -502,6 +502,14 @@ class TestGeminiHooksWriter:
         # After migration, hooks should be a dict
         assert isinstance(data["hooks"], dict)
         assert "BeforeTool" in data["hooks"]
+        # Both the migrated old hook and the new hook should be present
+        commands = [
+            h["command"]
+            for entry in data["hooks"]["BeforeTool"]
+            for h in entry.get("hooks", [])
+        ]
+        assert "echo old" in commands
+        assert "python3 ./scripts/guard.py" in commands
 
     def test_preserves_other_gemini_settings(self, tmp_path: Path) -> None:
         path = tmp_path / ".gemini" / "settings.json"

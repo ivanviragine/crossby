@@ -316,7 +316,7 @@ def _canonical_to_gemini_rule(pattern: str) -> str:
     not by argument globs.
     """
     binary = pattern.split(":", 1)[0]
-    escaped = binary.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = _escape_toml_value(binary)
     return (
         "[[rule]]\n"
         f'toolName = "run_shell_command"\n'
@@ -324,6 +324,11 @@ def _canonical_to_gemini_rule(pattern: str) -> str:
         f'decision = "allow"\n'
         f"priority = {_GEMINI_POLICY_PRIORITY}\n"
     )
+
+
+def _escape_toml_value(binary: str) -> str:
+    """Escape a binary name for use in a TOML quoted string."""
+    return binary.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _gemini_policy_path(project_root: Path) -> Path:
@@ -347,14 +352,18 @@ class GeminiPermissionWriter(AbstractSyncWriter):
     @staticmethod
     def check(project_root: Path, patterns: list[str]) -> bool:
         """Return True if ALL patterns are present in the managed policy file."""
+        valid = [p for p in patterns if p.strip()]
+        if not valid:
+            return not _gemini_policy_path(project_root).exists()
         policy_file = _gemini_policy_path(project_root)
         if not policy_file.is_file():
             return False
         with contextlib.suppress(OSError):
             content = policy_file.read_text(encoding="utf-8")
-            for pat in patterns:
+            for pat in valid:
                 binary = pat.split(":", 1)[0]
-                if f'commandPrefix = "{binary}"' not in content:
+                escaped = _escape_toml_value(binary)
+                if f'commandPrefix = "{escaped}"' not in content:
                     return False
             return True
         return False
@@ -390,15 +399,25 @@ class GeminiPermissionWriter(AbstractSyncWriter):
         force: bool = False,
     ) -> SyncResult:
         patterns = data.allowed_commands
+        policy_file = _gemini_policy_path(project_root)
+
         if not patterns:
+            if not policy_file.is_file():
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="skipped",
+                    message="no allowed_commands detected",
+                )
+            if not dry_run:
+                self.write(project_root, [])
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="skipped",
-                message="no allowed_commands detected",
+                action="updated",
+                file_path=policy_file,
+                message="removed stale policy",
             )
-
-        policy_file = _gemini_policy_path(project_root)
 
         if self.check(project_root, patterns):
             return SyncResult(

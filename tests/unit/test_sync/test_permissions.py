@@ -489,6 +489,23 @@ class TestGeminiPermissionWriterSync:
         assert result.action == "created"
         assert not _gemini_policy(tmp_path).exists()
 
+    def test_removes_stale_policy(self, tmp_path: Path) -> None:
+        """When allowed_commands is empty but policy file exists, remove it."""
+        writer = GeminiPermissionWriter()
+        writer.sync(SyncData(allowed_commands=["git:*"]), tmp_path)
+        assert _gemini_policy(tmp_path).exists()
+        result = writer.sync(SyncData(allowed_commands=[]), tmp_path)
+        assert result.action == "updated"
+        assert result.message == "removed stale policy"
+        assert not _gemini_policy(tmp_path).exists()
+
+    def test_dry_run_does_not_remove_stale(self, tmp_path: Path) -> None:
+        writer = GeminiPermissionWriter()
+        writer.sync(SyncData(allowed_commands=["git:*"]), tmp_path)
+        result = writer.sync(SyncData(allowed_commands=[]), tmp_path, dry_run=True)
+        assert result.action == "updated"
+        assert _gemini_policy(tmp_path).exists()
+
 
 class TestGeminiPermissionRunSyncIntegration:
     """Test Gemini permissions through run_sync()."""

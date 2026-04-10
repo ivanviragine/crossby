@@ -452,9 +452,29 @@ class GeminiHooksWriter(AbstractSyncWriter):
             )
 
         existing = file_data or {}
-        hooks_section: dict[str, Any] = existing.get("hooks", {})
+        raw_hooks = existing.get("hooks", {})
+        hooks_section: dict[str, Any]
         # Migrate old flat-array format to nested dict
-        if not isinstance(hooks_section, dict):
+        if isinstance(raw_hooks, dict):
+            hooks_section = raw_hooks
+        elif isinstance(raw_hooks, list):
+            hooks_section = {}
+            for legacy_entry in raw_hooks:
+                if not isinstance(legacy_entry, dict):
+                    continue
+                legacy_event = legacy_entry.get("event")
+                command = legacy_entry.get("command")
+                if not isinstance(legacy_event, str) or not isinstance(command, str):
+                    continue
+                tools = legacy_entry.get("tools")
+                if not isinstance(tools, list):
+                    tools = []
+                event_list = hooks_section.setdefault(legacy_event, [])
+                event_list.append({
+                    "matcher": _tools_to_matcher(tools),
+                    "hooks": [{"type": "command", "command": command}],
+                })
+        else:
             hooks_section = {}
 
         changed = False
