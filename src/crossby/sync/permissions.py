@@ -1,8 +1,10 @@
-"""Permission sync writers for Claude and Cursor.
+"""Permission sync writers for Claude, Cursor, and Gemini.
 
 Contains the core allowlist write/check logic.  The legacy module-level
 functions in ``config/claude_allowlist.py`` and ``config/cursor_allowlist.py``
 are backward-compatible shims that delegate here.
+
+Gemini uses a TOML-based Policy Engine instead of JSON allowlists.
 """
 
 from __future__ import annotations
@@ -296,4 +298,146 @@ class CursorPermissionWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=config_path,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gemini
+# ---------------------------------------------------------------------------
+
+_GEMINI_POLICY_PRIORITY = 100
+
+
+def _canonical_to_gemini_rule(pattern: str) -> str:
+    """Convert a canonical ``"cmd:args"`` pattern to a TOML ``[[rule]]`` block.
+
+    Only the binary name (prefix before the first ``:``) is used as the
+    ``commandPrefix`` — Gemini's Policy Engine matches by command prefix,
+    not by argument globs.
+    """
+    binary = pattern.split(":", 1)[0]
+    escaped = _escape_toml_value(binary)
+    return (
+        "[[rule]]\n"
+        f'toolName = "run_shell_command"\n'
+        f'commandPrefix = "{escaped}"\n'
+        f'decision = "allow"\n'
+        f"priority = {_GEMINI_POLICY_PRIORITY}\n"
+    )
+
+
+def _escape_toml_value(binary: str) -> str:
+    """Escape a binary name for use in a TOML quoted string."""
+    return binary.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _gemini_policy_path(project_root: Path) -> Path:
+    return project_root / ".gemini" / "policies" / "crossby.toml"
+
+
+class GeminiPermissionWriter(AbstractSyncWriter):
+    """Sync ``permissions.allowed_commands`` → ``.gemini/policies/crossby.toml``.
+
+    Gemini CLI uses the Policy Engine (TOML files) instead of JSON allowlists
+    or ``--allowed-tools`` CLI flags.  Each canonical command pattern becomes a
+    ``[[rule]]`` block with ``commandPrefix`` set to the binary name.
+
+    The managed policy file is removed when no commands remain, so reused
+    workspaces do not keep stale allow rules.
+    """
+
+    tool_id = AIToolID.GEMINI
+    concern = SyncConcern.PERMISSIONS
+
+    @staticmethod
+    def check(project_root: Path, patterns: list[str]) -> bool:
+        """Return True if ALL patterns are present in the managed policy file."""
+        valid = [p for p in patterns if p.strip()]
+        if not valid:
+            return not _gemini_policy_path(project_root).exists()
+        policy_file = _gemini_policy_path(project_root)
+        if not policy_file.is_file():
+            return False
+        with contextlib.suppress(OSError):
+            content = policy_file.read_text(encoding="utf-8")
+            for pat in valid:
+                binary = pat.split(":", 1)[0]
+                escaped = _escape_toml_value(binary)
+                if f'commandPrefix = "{escaped}"' not in content:
+                    return False
+            return True
+        return False
+
+    @staticmethod
+    def write(project_root: Path, patterns: list[str]) -> None:
+        """Write ``.gemini/policies/crossby.toml``. Overwrites previous content.
+
+        Removes the policy file when *patterns* is empty to prevent stale rules.
+        """
+        policy_file = _gemini_policy_path(project_root)
+
+        valid = [p for p in patterns if p.strip()]
+        if not valid:
+            if policy_file.exists():
+                policy_file.unlink()
+                logger.info("gemini_policy.removed", path=str(policy_file))
+            return
+
+        rules = [_canonical_to_gemini_rule(p) for p in valid]
+        content = "\n".join(rules)
+
+        policy_file.parent.mkdir(parents=True, exist_ok=True)
+        policy_file.write_text(content, encoding="utf-8")
+        logger.info("gemini_policy.written", path=str(policy_file), rules=len(rules))
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        patterns = data.allowed_commands
+        policy_file = _gemini_policy_path(project_root)
+
+        if not patterns:
+            if not policy_file.is_file():
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="skipped",
+                    message="no allowed_commands detected",
+                )
+            if not dry_run:
+                self.write(project_root, [])
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="updated",
+                file_path=policy_file,
+                message="removed stale policy",
+            )
+
+        if self.check(project_root, patterns):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=policy_file,
+                message="already configured",
+            )
+
+        action: Literal["created", "updated"] = (
+            "created" if not policy_file.is_file() else "updated"
+        )
+
+        if not dry_run:
+            self.write(project_root, patterns)
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=policy_file,
         )

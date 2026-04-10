@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -185,9 +186,39 @@ def _read_cursor_allowlist(project_root: Path) -> list[str]:
     return []
 
 
+def _read_gemini_permissions(project_root: Path) -> list[str]:
+    """Read Gemini policy file → canonical patterns.
+
+    Uses ``tomllib`` for correct TOML parsing.  Only ``allow`` rules for
+    ``run_shell_command`` are returned.
+    """
+    policy_file = project_root / ".gemini" / "policies" / "crossby.toml"
+    if not policy_file.is_file():
+        return []
+    with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(policy_file.read_text(encoding="utf-8"))
+        rules = data.get("rule", [])
+        if not isinstance(rules, list):
+            return []
+        result: list[str] = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("toolName") != "run_shell_command":
+                continue
+            if rule.get("decision") != "allow":
+                continue
+            prefix = rule.get("commandPrefix")
+            if isinstance(prefix, str) and prefix:
+                result.append(prefix)
+        return result
+    return []
+
+
 _PERMISSION_READERS: dict[AIToolID, Any] = {
     AIToolID.CLAUDE: _read_claude_allowlist,
     AIToolID.CURSOR: _read_cursor_allowlist,
+    AIToolID.GEMINI: _read_gemini_permissions,
 }
 
 
@@ -196,7 +227,7 @@ def discover_permissions(
 ) -> list[str]:
     """Read allowlist patterns from tool configs.
 
-    Scans Claude and Cursor configs (the only tools with persistent allowlists).
+    Scans Claude, Cursor, and Gemini configs for persistent allowlists.
     Returns deduplicated canonical patterns.
     """
     if from_tool is not None and from_tool not in _PERMISSION_READERS:
@@ -342,13 +373,50 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
 
 
 def _read_gemini_hooks(project_root: Path) -> list[HookEntry]:
-    """Read hooks from .gemini/settings.json."""
+    """Read hooks from .gemini/settings.json.
+
+    Supports both the current nested format (``hooks`` is a dict keyed by event
+    name) and the legacy flat-array format (``hooks`` is a list) for backward
+    compatibility.
+    """
     data = _read_json(project_root / ".gemini" / "settings.json")
     if not data:
         return []
-    hooks_list = data.get("hooks")
-    if not isinstance(hooks_list, list):
-        return []
+    hooks_raw = data.get("hooks")
+    if isinstance(hooks_raw, dict):
+        return _read_gemini_hooks_nested(hooks_raw)
+    if isinstance(hooks_raw, list):
+        return _read_gemini_hooks_flat(hooks_raw)
+    return []
+
+
+def _read_gemini_hooks_nested(hooks_section: dict[str, Any]) -> list[HookEntry]:
+    """Parse the nested object-keyed Gemini hooks format."""
+    result: list[HookEntry] = []
+    for event_name, entries in hooks_section.items():
+        canonical_event = _reverse_event_name(event_name)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            matcher = entry.get("matcher", "")
+            tools = matcher.split("|") if matcher and matcher != ".*" else []
+            inner_hooks = entry.get("hooks", [])
+            if not isinstance(inner_hooks, list):
+                continue
+            for inner in inner_hooks:
+                if isinstance(inner, dict) and "command" in inner:
+                    result.append(HookEntry(
+                        event=canonical_event,
+                        command=inner["command"],
+                        tools=tools,
+                    ))
+    return result
+
+
+def _read_gemini_hooks_flat(hooks_list: list[Any]) -> list[HookEntry]:
+    """Parse the legacy flat-array Gemini hooks format."""
     result: list[HookEntry] = []
     for entry in hooks_list:
         if not isinstance(entry, dict) or "command" not in entry:

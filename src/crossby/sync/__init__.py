@@ -27,7 +27,11 @@ from crossby.sync.hooks import (
     CursorHooksWriter,
     GeminiHooksWriter,
 )
-from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
+from crossby.sync.permissions import (
+    ClaudePermissionWriter,
+    CursorPermissionWriter,
+    GeminiPermissionWriter,
+)
 from crossby.sync.rules import (
     ClaudeRulesWriter,
     CodexRulesWriter,
@@ -41,6 +45,7 @@ from crossby.sync.rules import (
 _registry = SyncRegistry()
 _registry.register(ClaudePermissionWriter())
 _registry.register(CursorPermissionWriter(scope="project"))
+_registry.register(GeminiPermissionWriter())
 _registry.register(ClaudeAgentsWriter())
 _registry.register(CopilotAgentsWriter())
 _registry.register(CursorAgentsWriter())
