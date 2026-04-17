@@ -1,53 +1,68 @@
-"""crossby sync — sync .crossby.yml config to tool-specific files."""
+"""crossby sync — stateless sync wizard that reads directly from tool configs."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from crossby.ui.console import console
 
+if TYPE_CHECKING:
+    from crossby.sync.base import SyncResult
+
 
 def sync(
     concern: str | None = typer.Argument(
         None,
-        help="Sync concern: permissions, rules, mcp, agents. Omit for all.",
+        help="Sync concern: permissions, rules, mcp, agents, hooks. Omit for all.",
     ),
-    tool: str | None = typer.Option(
-        None, "--tool", "-t", help="Sync only for this tool (e.g. claude, cursor)."
+    from_tool: str | None = typer.Option(
+        None, "--from", help="Source tool to read configs from."
+    ),
+    to_tool: str | None = typer.Option(
+        None, "--to", help="Target tool to sync to (default: all installed)."
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview changes without writing any files."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite existing target directories (backs up first)."
+        False, "--force", help="Overwrite existing target files (backs up first)."
     ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
-    """Sync .crossby.yml config to tool-specific files.
+    """Sync AI tool configs across tools — no config file needed.
 
-    By default syncs all concerns for all installed tools.  Use positional
-    CONCERN to restrict to one concern, ``--tool`` to restrict to one tool,
-    or ``--dry-run`` to preview without writing.
+    Reads directly from tool config files (instruction files, MCP servers,
+    hooks, permissions, agent dirs) and ports them to other installed tools.
+
+    In interactive mode (default), presents a wizard showing what was found
+    and asks for confirmation per concern.
 
     Examples::
 
-        crossby sync                        # all concerns, all installed tools
-        crossby sync permissions            # permissions only
-        crossby sync mcp                    # MCP servers only
-        crossby sync --tool claude          # all concerns for Claude only
-        crossby sync --tool claude rules    # rules for Claude only
-        crossby sync --dry-run              # preview all changes
+        crossby sync                          # interactive wizard
+        crossby sync --from claude            # read from Claude, sync to all
+        crossby sync --from claude --to cursor  # Claude → Cursor only
+        crossby sync rules                    # rules concern only
+        crossby sync mcp --from claude        # MCP from Claude only
     """
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.config.loader import load_config
     from crossby.models.ai import AIToolID
     from crossby.sync import run_sync
-    from crossby.sync.base import SyncConcern
+    from crossby.sync.base import SyncConcern, SyncData
+    from crossby.sync.readers import (
+        build_sync_data,
+        discover_hooks,
+        discover_mcp,
+        discover_permissions,
+        scan_project,
+        suggest_agents_source,
+        suggest_rules_source,
+    )
 
     project_root = path.resolve()
-    config = load_config(project_root)
 
     # Validate concern argument
     sync_concern: SyncConcern | None = None
@@ -59,42 +74,208 @@ def sync(
             console.error(f"Unknown concern: {concern!r}. Valid values: {valid}")
             raise typer.Exit(1)
 
-    # Validate tool argument
-    sync_tool: AIToolID | None = None
-    if tool:
+    # Validate from/to arguments
+    source_tool: AIToolID | None = None
+    if from_tool:
         try:
-            sync_tool = AIToolID(tool)
+            source_tool = AIToolID(from_tool)
         except ValueError:
-            console.error(f"Unknown tool: {tool!r}")
+            console.error(f"Unknown tool: {from_tool!r}")
             raise typer.Exit(1)
+
+    target_tool: AIToolID | None = None
+    if to_tool:
+        try:
+            target_tool = AIToolID(to_tool)
+        except ValueError:
+            console.error(f"Unknown tool: {to_tool!r}")
+            raise typer.Exit(1)
+
+    if target_tool is not None and source_tool is None:
+        console.error("--to requires --from; omit --to for the interactive wizard.")
+        raise typer.Exit(1)
+
+    # Detect installed tools
+    installed_tools = AbstractAITool.detect_installed()
+    if not installed_tools:
+        console.error("No AI tools found in PATH.")
+        console.hint("Install at least one AI tool (claude, copilot, gemini, codex, cursor, etc.)")
+        raise typer.Exit(1)
 
     if dry_run:
         console.info("Dry-run mode — no files will be written")
 
-    # Determine installed tools (skip detection when --tool is explicit)
-    installed_tools: list[AIToolID] | None = None
-    if sync_tool is None:
-        installed_tools = AbstractAITool.detect_installed()
-
-    try:
+    # Non-interactive mode: --from is specified
+    if source_tool is not None:
+        data = build_sync_data(project_root, from_tool=source_tool)
+        target_tools = (
+            [target_tool]
+            if target_tool
+            else [t for t in installed_tools if t != source_tool]
+        )
         results = run_sync(
-            config,
+            data,
             project_root,
-            tool_id=sync_tool,
+            tool_id=target_tool,
             concern=sync_concern,
             dry_run=dry_run,
             force=force,
-            installed_tools=installed_tools,
+            installed_tools=target_tools,
         )
-    except ValueError as e:
-        console.error(str(e))
-        raise typer.Exit(1)
+        _display_results(results)
+        if any(r.action == "error" for r in results):
+            raise typer.Exit(1)
+        return
+
+    # Interactive wizard mode
+    scan = scan_project(project_root, installed_tools)
+
+    console.step(f"Detected tools: {', '.join(str(t) for t in installed_tools)}")
+    console.empty()
+    console.step("Scanning configs...")
+    console.detail(f"  Rules:       {scan.rules.summary}")
+    console.detail(f"  Agents:      {scan.agents.summary}")
+    console.detail(f"  MCP:         {scan.mcp.summary}")
+    console.detail(f"  Hooks:       {scan.hooks.summary}")
+    console.detail(f"  Permissions: {scan.permissions.summary}")
+    console.empty()
+
+    # Check if anything was found
+    has_data = any([
+        scan.rules.found,
+        scan.agents.found,
+        scan.mcp.found,
+        scan.hooks.found,
+        scan.permissions.found,
+    ])
+    if not has_data:
+        console.info("No tool configs found to sync.")
+        return
+
+    # Build SyncData from wizard selections
+    from crossby.ui import prompts
+
+    data = SyncData()
+    rules_src_tool: AIToolID | None = None
+    agents_src_tool: AIToolID | None = None
+
+    # Rules
+    if scan.rules.found and (sync_concern is None or sync_concern == SyncConcern.RULES):
+        if len(scan.rules.found) > 1:
+            tools = list(scan.rules.found)
+            suggested = suggest_rules_source(scan.rules.found)
+            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            idx = prompts.select(
+                "Multiple rules files found — which is the canonical source?",
+                items=[str(t) for t in tools],
+                hints=[scan.rules.found[t] for t in tools],
+                default=default_idx,
+            )
+            source = tools[idx]
+        else:
+            source = suggest_rules_source(scan.rules.found)
+        if source:
+            source_path = scan.rules.found[source]
+            other_tools = [str(t) for t in installed_tools if t != source]
+            if other_tools:
+                if prompts.confirm(f"Port rules ({source_path}) to {', '.join(other_tools)}?", default=True):
+                    data.rules_source = source_path
+                    rules_src_tool = source
+
+    # Agents
+    if scan.agents.found and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
+        if len(scan.agents.found) > 1:
+            tools = list(scan.agents.found)
+            suggested = suggest_agents_source(scan.agents.found)
+            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            idx = prompts.select(
+                "Multiple agents directories found — which is the canonical source?",
+                items=[str(t) for t in tools],
+                hints=[scan.agents.found[t] for t in tools],
+                default=default_idx,
+            )
+            source = tools[idx]
+        else:
+            source = suggest_agents_source(scan.agents.found)
+        if source:
+            source_path = scan.agents.found[source]
+            other_tools = [str(t) for t in installed_tools if t != source]
+            if other_tools:
+                if prompts.confirm(f"Port agents ({source_path}) to {', '.join(other_tools)}?", default=True):
+                    data.agents_source = source_path
+                    agents_src_tool = source
+
+    # MCP
+    if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
+        servers = discover_mcp(project_root)
+        if servers:
+            if prompts.confirm(f"Port {len(servers)} MCP server(s) to all tools?", default=True):
+                data.mcp_servers = servers
+
+    # Permissions
+    if scan.permissions.found and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
+        patterns = discover_permissions(project_root)
+        if patterns:
+            if prompts.confirm(f"Port {len(patterns)} permission pattern(s)?", default=True):
+                data.allowed_commands = patterns
+
+    # Hooks
+    if scan.hooks.found and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
+        hooks = discover_hooks(project_root)
+        if hooks:
+            if prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
+                data.hooks = hooks
+
+    # Check if user confirmed anything
+    has_sync = any([
+        data.rules_source,
+        data.agents_source,
+        data.mcp_servers,
+        data.allowed_commands,
+        data.hooks,
+    ])
+    if not has_sync:
+        console.info("Nothing to sync.")
+        return
+
+    # Execute per-concern to avoid writing back to the source tool.
+    # Rules and agents have an explicit source; exclude it from their targets.
+    # MCP, permissions, and hooks are merged from all tools — write to all.
+    results: list[SyncResult] = []
+    if data.rules_source and (sync_concern is None or sync_concern == SyncConcern.RULES):
+        rules_targets = [t for t in installed_tools if t != rules_src_tool]
+        results += run_sync(data, project_root, concern=SyncConcern.RULES,
+                            dry_run=dry_run, force=force, installed_tools=rules_targets)
+    if data.agents_source and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
+        agents_targets = [t for t in installed_tools if t != agents_src_tool]
+        results += run_sync(data, project_root, concern=SyncConcern.AGENTS,
+                            dry_run=dry_run, force=force, installed_tools=agents_targets)
+    if data.mcp_servers and (sync_concern is None or sync_concern == SyncConcern.MCP):
+        results += run_sync(data, project_root, concern=SyncConcern.MCP,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
+    if data.allowed_commands and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
+        results += run_sync(data, project_root, concern=SyncConcern.PERMISSIONS,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
+    if data.hooks and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
+        results += run_sync(data, project_root, concern=SyncConcern.HOOKS,
+                            dry_run=dry_run, force=force, installed_tools=installed_tools)
 
     if not results:
         console.info("No sync writers matched the given filters.")
         return
 
-    # Display results table
+    _display_results(results)
+
+    synced = sum(1 for r in results if r.action in ("created", "updated"))
+    console.empty()
+    console.success(f"Done. {synced} config(s) synced.")
+
+    if any(r.action == "error" for r in results):
+        raise typer.Exit(1)
+
+
+def _display_results(results: list["SyncResult"]) -> None:
+    """Display sync results in a Rich table."""
     from rich.table import Table
 
     table = Table(show_header=True, box=None, padding=(0, 2))
@@ -110,19 +291,19 @@ def sync(
         "error": "[error]error[/]",
     }
 
-    has_error = False
     for r in results:
         styled_action = _action_styles.get(r.action, r.action)
         if r.action == "error":
-            has_error = True
             detail = r.message or ""
         elif r.file_path:
             detail = str(r.file_path)
         else:
             detail = r.message or ""
-        table.add_row(str(r.tool_id) if r.tool_id is not None else "crossby", r.concern.value, styled_action, detail)
+        table.add_row(
+            str(r.tool_id) if r.tool_id is not None else "crossby",
+            r.concern.value,
+            styled_action,
+            detail,
+        )
 
     console.out.print(table)
-
-    if has_error:
-        raise typer.Exit(1)

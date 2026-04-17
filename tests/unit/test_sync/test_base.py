@@ -7,8 +7,7 @@ from pathlib import Path
 import pytest
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
-from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncRegistry, SyncResult
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncRegistry, SyncResult
 
 
 class _FakeWriter(AbstractSyncWriter):
@@ -18,10 +17,10 @@ class _FakeWriter(AbstractSyncWriter):
         self.tool_id = tool_id
         self.concern = concern
         self._action = action
-        self.calls: list[tuple[CrossbyConfig, Path, bool]] = []
+        self.calls: list[tuple[SyncData, Path, bool]] = []
 
-    def sync(self, config: CrossbyConfig, project_root: Path, *, dry_run: bool = False, force: bool = False) -> SyncResult:
-        self.calls.append((config, project_root, dry_run))
+    def sync(self, data: SyncData, project_root: Path, *, dry_run: bool = False, force: bool = False) -> SyncResult:
+        self.calls.append((data, project_root, dry_run))
         return SyncResult(tool_id=self.tool_id, concern=self.concern, action=self._action)  # type: ignore[arg-type]
 
 
@@ -117,13 +116,13 @@ class TestAbstractSyncWriter:
 
     def test_concrete_writer_callable(self, tmp_path: Path) -> None:
         w = _FakeWriter(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
-        config = CrossbyConfig()
-        result = w.sync(config, tmp_path)
+        data = SyncData()
+        result = w.sync(data, tmp_path)
         assert result.action == "skipped"
-        assert w.calls == [(config, tmp_path, False)]
+        assert w.calls == [(data, tmp_path, False)]
 
     def test_dry_run_passed_through(self, tmp_path: Path) -> None:
         w = _FakeWriter(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
-        config = CrossbyConfig()
-        w.sync(config, tmp_path, dry_run=True)
+        data = SyncData()
+        w.sync(data, tmp_path, dry_run=True)
         assert w.calls[0][2] is True

@@ -12,8 +12,7 @@ import yaml
 
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
-from crossby.models.config import AgentsConfig, CrossbyConfig
-from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
+from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
 
@@ -36,7 +35,7 @@ _AGENT_TARGET_PATHS: dict[str, str] = {
 
 
 def update_agents_gitignore(
-    config: CrossbyConfig,
+    data: SyncData,
     project_root: Path,
     *,
     dry_run: bool = False,
@@ -47,17 +46,11 @@ def update_agents_gitignore(
     Returns a SyncResult if a change was made (or would be in dry-run), else None.
     The source directory itself is never gitignored.
     """
-    if not config.agents.enabled or not config.agents.gitignore:
+    if data.agents_source is None or not data.agents_gitignore:
         return None
 
     # Determine which tool target paths to include in the block
-    if config.agents.targets:
-        entries = [
-            _AGENT_TARGET_PATHS[tool_id]
-            for tool_id, enabled in config.agents.targets.items()
-            if enabled and tool_id in _AGENT_TARGET_PATHS
-        ]
-    elif installed_tools is not None:
+    if installed_tools is not None:
         entries = [
             _AGENT_TARGET_PATHS[str(t)]
             for t in installed_tools
@@ -169,18 +162,6 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Target-enabled check
-# ---------------------------------------------------------------------------
-
-
-def _is_target_enabled(agents_cfg: AgentsConfig, tool_id: AIToolID) -> bool:
-    """Return True if this tool should receive the agent sync."""
-    if not agents_cfg.targets:
-        return True  # empty dict = all tools
-    return agents_cfg.targets.get(str(tool_id), False)
-
-
-# ---------------------------------------------------------------------------
 # Base writer
 # ---------------------------------------------------------------------------
 
@@ -193,44 +174,34 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        agents_cfg = config.agents
-
-        if not agents_cfg.enabled:
+        if data.agents_source is None:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
-                message="no agents config",
+                message="no agents source detected",
             )
 
-        if not _is_target_enabled(agents_cfg, self.tool_id):
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                message="not in targets",
-            )
-
-        source_dir = project_root / agents_cfg.source
+        source_dir = project_root / data.agents_source
         if not source_dir.exists():
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="error",
-                message=f"source directory not found: {agents_cfg.source}",
+                message=f"source directory not found: {data.agents_source}",
             )
         if not source_dir.is_dir():
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="error",
-                message=f"source path is not a directory: {agents_cfg.source}",
+                message=f"source path is not a directory: {data.agents_source}",
             )
 
         target_dir = project_root / self._target_rel
@@ -238,7 +209,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         # For copy strategy, explicitly guard against following a symlinked target
         # directory — copies would land in the symlink's destination, potentially
         # outside the project root.
-        if agents_cfg.strategy == "copy" and target_dir.is_symlink():
+        if data.agents_strategy == "copy" and target_dir.is_symlink():
             if not force:
                 return SyncResult(
                     tool_id=self.tool_id,
@@ -271,7 +242,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                         action="error",
                         message=(
                             f"{self._target_rel} exists as a directory. "
-                            f"Migrate its contents to {agents_cfg.source} first, "
+                            f"Migrate its contents to {data.agents_source} first, "
                             "or use --force to back it up and replace it."
                         ),
                     )
@@ -284,7 +255,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 shutil.rmtree(str(target_dir))
                 logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(bak))
 
-        if agents_cfg.strategy == "copy":
+        if data.agents_strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
 
         return self._sync_symlink(
@@ -441,44 +412,34 @@ class CopilotAgentsWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        agents_cfg = config.agents
-
-        if not agents_cfg.enabled:
+        if data.agents_source is None:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
-                message="no agents config",
+                message="no agents source detected",
             )
 
-        if not _is_target_enabled(agents_cfg, self.tool_id):
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                message="not in targets",
-            )
-
-        source_dir = project_root / agents_cfg.source
+        source_dir = project_root / data.agents_source
         if not source_dir.exists():
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="error",
-                message=f"source directory not found: {agents_cfg.source}",
+                message=f"source directory not found: {data.agents_source}",
             )
         if not source_dir.is_dir():
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="error",
-                message=f"source path is not a directory: {agents_cfg.source}",
+                message=f"source path is not a directory: {data.agents_source}",
             )
 
         target_dir = project_root / self._target_rel
@@ -515,7 +476,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                         action="error",
                         message=(
                             f"{self._target_rel} exists as a directory with unmanaged content. "
-                            f"Migrate its contents to {agents_cfg.source} first, "
+                            f"Migrate its contents to {data.agents_source} first, "
                             "or use --force to replace it."
                         ),
                     )
@@ -530,7 +491,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                         backup=str(bak),
                     )
 
-        if agents_cfg.strategy == "copy":
+        if data.agents_strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
 
         return self._sync_symlinks(source_dir, target_dir, dry_run=dry_run, force=force)

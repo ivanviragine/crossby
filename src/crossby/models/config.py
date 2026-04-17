@@ -19,24 +19,15 @@ Matches the .crossby.yml format:
         medium: claude-sonnet-4.6
         complex: claude-sonnet-4.6
         very_complex: claude-opus-4.6
-    permissions:
-      allowed_commands:
-        - "myapp:*"
-        - "./scripts/check.sh:*"
-    mcp_servers:
-      context7:
-        command: npx
-        args: ["-y", "@upstash/context7-mcp"]
-      postgres:
-        transport: http
-        url: "http://localhost:8080/mcp"
-    agents:
-      source: .crossby/agents
-      strategy: symlink
-      gitignore: true
-      targets:
-        claude: true
-        copilot: true
+    profiles:
+      ccyolo:
+        tool: claude
+        yolo: true
+        effort: max
+      quick:
+        tool: cursor
+        model: haiku
+        effort: low
 """
 
 from __future__ import annotations
@@ -111,63 +102,22 @@ class AIConfig(BaseModel):
     commands: dict[str, CommandConfig] = {}
 
 
-class PermissionsConfig(BaseModel):
-    """Permission pre-authorization for AI tool sessions.
+class HookEntry(BaseModel):
+    """A single canonical hook definition (used by sync readers/writers)."""
 
-    Canonical command patterns (e.g. ``"myapp:*"``) are translated to
-    tool-specific allowlist flags at launch time.
-    """
-
-    allowed_commands: list[str] = []
-
-
-class SyncConfig(BaseModel):
-    """Sync behavior configuration (``sync:`` section in .crossby.yml).
-
-    ``auto``: run sync automatically on ``crossby launch`` (default: true).
-    ``tools``: restrict sync to these tool IDs (empty = all installed tools).
-    """
-
-    auto: bool = True
-    tools: list[str] = []
+    event: str
+    command: str
+    tools: list[str] = Field(default_factory=list)
+    description: str = ""
 
 
-class RulesTargetsConfig(BaseModel):
-    """Which tool-specific instruction files to generate."""
+class ProfileConfig(BaseModel):
+    """A saved launch profile (stored in .crossby.yml under ``profiles``)."""
 
-    claude: bool = True
-    cursor: bool = True
-    copilot: bool = True
-    gemini: bool = True
-    codex: bool = True
-
-
-class RulesConfig(BaseModel):
-    """Rules/instructions sync configuration."""
-
-    enabled: bool = False
-    source: str = "AGENTS.md"
-    strategy: Literal["symlink", "copy"] = "symlink"
-    gitignore: bool = True
-    targets: RulesTargetsConfig = RulesTargetsConfig()
-
-
-class AgentsConfig(BaseModel):
-    """Agents sync configuration (``agents:`` section in .crossby.yml).
-
-    ``enabled``: True when an ``agents:`` section exists in ``.crossby.yml``.
-        Writers skip when False (no agents section → nothing to sync).
-    ``source``: canonical agent directory (default: ``.crossby/agents``).
-    ``strategy``: ``"symlink"`` (default) or ``"copy"``.
-    ``gitignore``: manage .gitignore entries for generated dirs (default: true).
-    ``targets``: dict of ``{tool_id: bool}`` — empty dict means all installed tools.
-    """
-
-    enabled: bool = False
-    source: str = ".crossby/agents"
-    strategy: Literal["symlink", "copy"] = "symlink"
-    gitignore: bool = True
-    targets: dict[str, bool] = {}
+    tool: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    yolo: bool | None = None
 
 
 class CrossbyConfig(BaseModel):
@@ -175,17 +125,16 @@ class CrossbyConfig(BaseModel):
 
     This is the validated, structured representation. The config loader
     parses the YAML file and constructs this model.
+
+    Only contains launch preferences (AI defaults, model mappings, profiles).
+    Sync data is read directly from tool configs by ``sync.readers``.
     """
 
     version: int = 1
 
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
-    permissions: PermissionsConfig = PermissionsConfig()
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-    rules: RulesConfig = RulesConfig()
-    sync: SyncConfig = SyncConfig()
-    agents: AgentsConfig = AgentsConfig()
+    profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)
@@ -241,3 +190,7 @@ class CrossbyConfig(BaseModel):
             if cmd_config.yolo is not None:
                 return cmd_config.yolo
         return self.ai.yolo
+
+    def get_profile(self, name: str) -> ProfileConfig | None:
+        """Get a named launch profile."""
+        return self.profiles.get(name)
