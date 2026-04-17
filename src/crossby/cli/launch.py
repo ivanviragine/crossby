@@ -92,12 +92,55 @@ def launch(
         if yolo is None and prof.yolo is not None:
             yolo = prof.yolo
 
+    # Resolve relative transcript path against work_dir so that mkdir and the
+    # subprocess cwd=work_dir agree on where the file lands.
+    if transcript is not None and not transcript.is_absolute():
+        transcript = work_dir / transcript
+
     # Resolve AI selection
     resolved_tool = resolve_ai_tool(tool, config, command or "default")
     if not resolved_tool:
         console.error("No AI tool specified or detected.")
         console.hint("Install an AI tool or specify --tool")
         raise typer.Exit(1)
+
+    # --resume path: short-circuit before model/effort/yolo resolution and
+    # interactive confirmation — those flags are irrelevant when resuming.
+    if resume:
+        try:
+            adapter = AbstractAITool.get(resolved_tool)
+        except (ValueError, KeyError) as e:
+            console.error(str(e))
+            raise typer.Exit(1) from e
+        caps = adapter.capabilities()
+        if not caps.supports_resume:
+            console.error(f"{caps.display_name} does not support session resume.")
+            raise typer.Exit(1)
+        resume_cmd = adapter.build_resume_command(resume)
+        if resume_cmd is None:
+            console.error(
+                f"{caps.display_name}.build_resume_command returned None despite supports_resume=True."
+            )
+            raise typer.Exit(1)
+        console.kv("AI tool", caps.display_name)
+        console.kv("Session", resume)
+        console.empty()
+        if transcript:
+            try:
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                console.error(f"Cannot create transcript directory: {e}")
+                raise typer.Exit(1) from e
+        exit_code = run_with_transcript(resume_cmd, transcript, cwd=work_dir)
+        if exit_code != 0:
+            console.warn(f"AI tool exited with code {exit_code}")
+        if transcript and transcript.exists():
+            usage = adapter.parse_transcript(transcript)
+            if usage.total_tokens:
+                console.kv("Tokens", f"{usage.total_tokens:,}")
+            if usage.session_id:
+                console.kv("Session ID", usage.session_id)
+        raise typer.Exit(exit_code)
 
     try:
         resolved_model = resolve_model(
@@ -148,37 +191,6 @@ def launch(
         console.error(str(e))
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
-
-    # --resume path: build and run the resume command, then exit early
-    if resume:
-        if not caps.supports_resume:
-            console.error(f"{caps.display_name} does not support session resume.")
-            raise typer.Exit(1)
-        resume_cmd = adapter.build_resume_command(resume)
-        if resume_cmd is None:
-            console.error(
-                f"{caps.display_name}.build_resume_command returned None despite supports_resume=True."
-            )
-            raise typer.Exit(1)
-        console.kv("AI tool", caps.display_name)
-        console.kv("Session", resume)
-        console.empty()
-        if transcript:
-            try:
-                transcript.parent.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                console.error(f"Cannot create transcript directory: {e}")
-                raise typer.Exit(1) from e
-        exit_code = run_with_transcript(resume_cmd, transcript, cwd=work_dir)
-        if exit_code != 0:
-            console.warn(f"AI tool exited with code {exit_code}")
-        if transcript and transcript.exists():
-            usage = adapter.parse_transcript(transcript)
-            if usage.total_tokens:
-                console.kv("Tokens", f"{usage.total_tokens:,}")
-            if usage.session_id:
-                console.kv("Session ID", usage.session_id)
-        raise typer.Exit(exit_code)
 
     # Display selection
     console.kv("AI tool", caps.display_name)
