@@ -1,13 +1,13 @@
 # crossby
 
-**One config. Every AI tool.** — sync rules, permissions, and skills across Claude, Copilot, Gemini, Codex, Cursor, and more.
+**One config. Every AI tool** — sync rules, permissions, and skills across Claude, Copilot, Gemini, Codex, Cursor, and more.
 
 ## See it in action
 
 You've set up Claude with custom instructions, skills, and an allowlist. Now share it everywhere:
 
 ```
-$ crossby sync --from claude --all
+$ crossby sync --from claude --all  # output abbreviated
 
 ✓  CLAUDE.md         → .cursorrules              (symlinked)
 ✓  CLAUDE.md         → GEMINI.md                 (symlinked)

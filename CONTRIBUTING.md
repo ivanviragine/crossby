@@ -7,7 +7,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone https://github.com/ivanviragine/crossby
 cd crossby
-uv pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Running Checks
@@ -81,4 +81,4 @@ Breaking changes: append `!` after the type, e.g. `feat!:`, and add a `BREAKING 
 2. Update the version in `pyproject.toml`
 3. Commit: `chore: release vX.Y.Z`
 4. Tag: `git tag vX.Y.Z`
-5. Push the tag — CI publishes to PyPI automatically
+5. Push both: `git push origin main && git push origin vX.Y.Z` — CI publishes to PyPI automatically
