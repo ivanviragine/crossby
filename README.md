@@ -1,23 +1,21 @@
 # crossby
 
-**One config. Every AI tool** — sync rules, permissions, and skills across Claude, Copilot, Gemini, Codex, Cursor, and more.
+**One config. Every AI tool** — sync rules, permissions, MCP servers, hooks, and agents across Claude, Copilot, Gemini, Codex, Cursor, and more.
 
 ## See it in action
 
 You've set up Claude with custom instructions, skills, and an allowlist. Now share it everywhere:
 
 ```
-$ crossby sync --from claude --all  # output abbreviated
+$ crossby sync --from claude  # output illustrative — actual output is a Rich table
 
 ✓  CLAUDE.md         → .cursorrules              (symlinked)
 ✓  CLAUDE.md         → GEMINI.md                 (symlinked)
 ✓  CLAUDE.md         → AGENTS.md                 (symlinked)
-✓  .claude/skills/   → .cursor/skills/            (symlinked)
-✓  .claude/skills/   → .gemini/skills/            (symlinked)
 ✓  .claude/settings.json allowlist → .cursor/cli.json  (converted)
 ```
 
-Every tool now shares the same instructions and skills — automatically kept in sync via symlinks.
+Every tool now shares the same instructions and configs — automatically kept in sync.
 
 ## Installation
 
@@ -33,13 +31,10 @@ pipx install crossby
 
 ```bash
 # Sync configs from Claude to all installed tools
-crossby sync --from claude --all
+crossby sync --from claude
 
 # Sync interactively (wizard mode — review before applying)
 crossby sync
-
-# Initialize a project config
-crossby init
 
 # Launch an AI tool with resolved config
 crossby launch --tool claude --model claude-sonnet-4.6
@@ -77,10 +72,6 @@ models:
     medium: claude-sonnet-4.6
     complex: claude-sonnet-4.6
     very_complex: claude-opus-4.6
-permissions:
-  allowed_commands:
-    - "myapp:*"
-    - "./scripts/check.sh:*"
 ```
 
 ## AI Tool Compatibility
@@ -128,7 +119,7 @@ crossby convert "myapp:*" --from canonical --to gemini
 
 ### Config Sync (`crossby sync`)
 
-Sync portable configs between AI tools — no `crossby init` required. Reads files directly from their standard locations.
+Sync portable configs between AI tools — no project config required. Reads files directly from their standard locations.
 
 ```bash
 # Interactive wizard — select source, targets, review plan, approve
@@ -138,13 +129,13 @@ crossby sync
 crossby sync --from claude --to cursor
 
 # Claude to all installed tools
-crossby sync --from claude --all
+crossby sync --from claude
 
 # Preview without applying
 crossby sync --from claude --to cursor --dry-run
 
-# Sync only specific config types
-crossby sync --from claude --to cursor --instructions --skills
+# Sync only rules concern
+crossby sync rules --from claude --to cursor
 ```
 
 **What gets synced:**
@@ -152,15 +143,15 @@ crossby sync --from claude --to cursor --instructions --skills
 | Config Type | Strategy | Details |
 |---|---|---|
 | Instructions | Symlink | `CLAUDE.md` / `.cursorrules` / `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` |
-| Skills | Symlink | `.claude/skills/` / `.cursor/skills/` / `.gemini/skills/` / `.agents/skills/` / `.github/skills/` |
-| Allowlist | Convert | Claude `Bash()` <-> Cursor `Shell()` format translation |
+| Agents | Symlink | `.claude/agents/` and equivalent per tool |
+| Permissions | Convert | Claude `Bash()` ↔ Cursor `Shell()` format translation |
+| Hooks | Write | Tool-native hook schema per target |
+| MCP Servers | Merge | `.claude/mcp.json` and equivalent per tool |
 
 **What gets detected but can't be synced yet:**
 
 | Config Type | Reason |
 |---|---|
-| Hooks | Different schema per tool — not yet supported |
-| MCP servers | Claude-specific, no cross-tool equivalent |
 | Custom commands | Claude-specific slash commands |
 
 Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).

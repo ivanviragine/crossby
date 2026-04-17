@@ -17,7 +17,7 @@ uv sync --extra dev
 | `./scripts/test.sh` | Run the full test suite |
 | `./scripts/check.sh` | Lint (ruff) + type check (mypy strict) |
 | `./scripts/fmt.sh` | Auto-format with ruff |
-| `./scripts/check-all.sh` | Format + lint + type check + tests |
+| `./scripts/check-all.sh` | Tests + lint + format check + type check |
 
 Run `./scripts/check-all.sh` before submitting a PR.
 
@@ -26,7 +26,7 @@ Run `./scripts/check-all.sh` before submitting a PR.
 ```
 src/crossby/
 ├── cli/          # Typer CLI commands (entry point: cli/main.py:cli_main)
-├── services/     # High-level operations (sync orchestration, config resolution)
+├── services/     # High-level services (AI tool resolution, prompt delivery)
 ├── ai_tools/     # Per-tool adapters (Claude, Copilot, Gemini, Codex, …)
 ├── sync/         # Sync writers — translate and write config to each tool
 ├── config/       # .crossby.yml loading and Pydantic models
@@ -38,7 +38,7 @@ src/crossby/
 
 ```
 CLI command
-  → service (e.g. run_sync, resolve_config)
+  → service (e.g. run_sync)
     → ai_tools adapter (AbstractAITool — auto-registered via __init_subclass__)
       → sync writer (AbstractSyncWriter, keyed by (tool_id, concern) in SyncRegistry)
 ```
@@ -81,4 +81,4 @@ Breaking changes: append `!` after the type, e.g. `feat!:`, and add a `BREAKING 
 2. Update the version in `pyproject.toml`
 3. Commit: `chore: release vX.Y.Z`
 4. Tag: `git tag vX.Y.Z`
-5. Push both: `git push origin main && git push origin vX.Y.Z` — CI publishes to PyPI automatically
+5. Push both: `git push origin main && git push origin vX.Y.Z`
