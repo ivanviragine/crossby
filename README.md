@@ -1,31 +1,44 @@
-# CROSSBY
+# crossby
 
-**Cross-platform Bridge for Your AI agents** — a Python CLI toolkit for managing AI coding tools across platforms.
+**One config. Every AI tool.** — sync rules, permissions, and skills across Claude, Copilot, Gemini, Codex, Cursor, and more.
 
-CROSSBY provides:
+## See it in action
 
-- **AI Tool Adapters**: Unified interface for Claude, Copilot, Gemini, Codex, Cursor, OpenCode, and more
-- **Configuration Resolution**: Read, merge, and translate config hierarchies across AI tools
-- **Agent Launching**: Universal launcher with model selection, effort levels, and YOLO mode
-- **Session Stats**: Token usage extraction from session transcripts
-- **Permission Management**: Cross-tool allowlist and hook configuration
+You've set up Claude with custom instructions, skills, and an allowlist. Now share it everywhere:
+
+```
+$ crossby sync --from claude --all
+
+✓  CLAUDE.md         → .cursorrules              (symlinked)
+✓  CLAUDE.md         → GEMINI.md                 (symlinked)
+✓  CLAUDE.md         → AGENTS.md                 (symlinked)
+✓  .claude/skills/   → .cursor/skills/            (symlinked)
+✓  .claude/skills/   → .gemini/skills/            (symlinked)
+✓  .claude/settings.json allowlist → .cursor/cli.json  (converted)
+```
+
+Every tool now shares the same instructions and skills — automatically kept in sync via symlinks.
 
 ## Installation
 
 ```bash
 pip install crossby
+# or
+uv tool install crossby
+# or
+pipx install crossby
 ```
 
 ## Quick Start
 
 ```bash
-# Sync configs from Claude to all other installed tools
+# Sync configs from Claude to all installed tools
 crossby sync --from claude --all
 
-# Sync configs interactively (wizard mode)
+# Sync interactively (wizard mode — review before applying)
 crossby sync
 
-# Initialize config in your project
+# Initialize a project config
 crossby init
 
 # Launch an AI tool with resolved config
@@ -43,7 +56,7 @@ crossby convert "Bash(myapp:*)" --from claude --to cursor
 
 ## Configuration
 
-CROSSBY reads `.crossby.yml` from your project root:
+Add a `.crossby.yml` to your project root to configure defaults:
 
 ```yaml
 version: 1
@@ -113,16 +126,6 @@ crossby convert "Bash(myapp:*)" --from claude --to cursor
 crossby convert "myapp:*" --from canonical --to gemini
 ```
 
-### Session Preservation & Resume
-
-| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
-|---|---|---|---|---|---|---|
-| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
-| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
-| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
-
-Session IDs are extracted from transcripts automatically when `--transcript` is used.
-
 ### Config Sync (`crossby sync`)
 
 Sync portable configs between AI tools — no `crossby init` required. Reads files directly from their standard locations.
@@ -162,6 +165,16 @@ crossby sync --from claude --to cursor --instructions --skills
 
 Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
 
+### Session Preservation & Resume
+
+| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
+|---|---|---|---|---|---|---|
+| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
+| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
+| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
+
+Session IDs are extracted from transcripts automatically when `--transcript` is used.
+
 ### Transcript Parsing (`crossby stats`)
 
 | Feature | Claude | Copilot | Gemini | Codex |
@@ -184,14 +197,9 @@ These methods are available on each adapter for programmatic use but are not exp
 | Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
 | Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
 
-## Development
+## Contributing
 
-```bash
-pip install -e ".[dev]"
-./scripts/test.sh       # Run tests
-./scripts/check.sh      # Lint + type check
-./scripts/fmt.sh        # Auto-format
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, and how to submit changes.
 
 ## License
 
