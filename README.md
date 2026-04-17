@@ -4,7 +4,7 @@
 
 ## See it in action
 
-You've set up Claude with custom instructions, skills, and an allowlist. Now share it everywhere:
+You've set up Claude with custom instructions, agents, and permissions. Now share it everywhere:
 
 ```
 $ crossby sync --from claude  # output illustrative — actual output is a Rich table
@@ -12,7 +12,7 @@ $ crossby sync --from claude  # output illustrative — actual output is a Rich 
 ✓  CLAUDE.md         → .cursorrules              (symlinked)
 ✓  CLAUDE.md         → GEMINI.md                 (symlinked)
 ✓  CLAUDE.md         → AGENTS.md                 (symlinked)
-✓  .claude/settings.json allowlist → .cursor/cli.json  (converted)
+✓  .claude/settings.json permissions → .cursor/cli.json  (converted)
 ```
 
 Every tool now shares the same instructions and configs — automatically kept in sync.
@@ -146,13 +146,7 @@ crossby sync rules --from claude --to cursor
 | Agents | Symlink | `.claude/agents/` and equivalent per tool |
 | Permissions | Convert | Claude `Bash()` ↔ Cursor `Shell()` format translation |
 | Hooks | Write | Tool-native hook schema per target |
-| MCP Servers | Merge | `.claude/mcp.json` and equivalent per tool |
-
-**What gets detected but can't be synced yet:**
-
-| Config Type | Reason |
-|---|---|
-| Custom commands | Claude-specific slash commands |
+| MCP Servers | Merge | Claude `.claude/settings.json` → `mcpServers` and equivalent per-tool MCP config paths |
 
 Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
 
