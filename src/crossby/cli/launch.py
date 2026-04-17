@@ -192,6 +192,10 @@ def launch(
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
+    if trusted_dirs and not caps.supports_trusted_dirs:
+        console.error(f"{caps.display_name} does not support --trusted-dir.")
+        raise typer.Exit(1)
+
     # Display selection
     console.kv("AI tool", caps.display_name)
     if resolved_model:

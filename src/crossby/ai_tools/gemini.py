@@ -31,6 +31,7 @@ class GeminiAdapter(AbstractAITool):
             supports_headless=True,
             supports_yolo=True,
             supports_resume=True,
+            supports_trusted_dirs=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:

@@ -46,6 +46,7 @@ class ClaudeAdapter(AbstractAITool):
             supports_effort=True,
             supports_yolo=True,
             supports_resume=True,
+            supports_trusted_dirs=True,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:

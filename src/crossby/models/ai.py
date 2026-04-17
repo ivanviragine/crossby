@@ -77,6 +77,7 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_effort: bool = False
     supports_yolo: bool = False
     supports_resume: bool = False
+    supports_trusted_dirs: bool = False
 
 
 class TokenUsage(BaseModel):

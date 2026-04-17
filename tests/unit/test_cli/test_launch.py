@@ -25,6 +25,44 @@ def _mock_adapter() -> MagicMock:
     return mock
 
 
+class TestTranscriptRelativePath:
+    """Relative --transcript path is resolved against work_dir before use."""
+
+    def test_relative_transcript_resolved_against_work_dir(self, tmp_path: Path) -> None:
+        """crossby launch /proj --transcript deep/session.txt creates /proj/deep/ and passes
+        the absolute path to adapter.launch."""
+        work_dir = tmp_path / "proj"
+        work_dir.mkdir()
+        (work_dir / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+
+        mock_adapter = MagicMock()
+        mock_adapter.launch.return_value = 0
+        mock_adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+        )
+        mock_adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(work_dir), "--tool", "claude", "--transcript", "deep/session.txt"],
+            )
+
+        assert result.exit_code == 0, result.output
+        expected_transcript = work_dir / "deep" / "session.txt"
+        assert expected_transcript.parent.is_dir()
+        _, kwargs = mock_adapter.launch.call_args
+        assert kwargs.get("transcript_path") == expected_transcript
+
+
 class TestTranscriptParentDir:
     """Fix 3: transcript parent directory is created before launch."""
 
@@ -217,13 +255,14 @@ class TestResumeFlag:
 class TestTrustedDirFlag:
     """--trusted-dir passes directories through to adapter.launch."""
 
-    def _make_adapter(self) -> MagicMock:
+    def _make_adapter(self, supports_trusted_dirs: bool = True) -> MagicMock:
         adapter = MagicMock()
         adapter.launch.return_value = 0
         adapter.capabilities.return_value = MagicMock(
             display_name="Claude Code",
             supports_resume=False,
             supports_initial_message=True,
+            supports_trusted_dirs=supports_trusted_dirs,
         )
         adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
         return adapter
@@ -282,6 +321,27 @@ class TestTrustedDirFlag:
         mock_adapter.launch.assert_called_once()
         _, kwargs = mock_adapter.launch.call_args
         assert set(kwargs.get("trusted_dirs", [])) == {"/a", "/b"}
+
+    def test_trusted_dir_unsupported_tool_exits_1(self, tmp_path: Path) -> None:
+        """--trusted-dir with a tool that lacks supports_trusted_dirs exits 1."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: cursor\n")
+        mock_adapter = self._make_adapter(supports_trusted_dirs=False)
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("cursor", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "cursor", "--trusted-dir", "/tmp/plan"],
+            )
+
+        assert result.exit_code == 1
+        assert "does not support --trusted-dir" in result.output
 
 
 class TestProfileFlag:
