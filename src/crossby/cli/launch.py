@@ -47,6 +47,7 @@ def launch(
         resolve_yolo,
     )
     from crossby.services.prompt_delivery import deliver_prompt_if_needed
+    from crossby.utils.process import run_with_transcript
 
     work_dir = path.resolve()
     config = load_config(work_dir)
@@ -128,7 +129,9 @@ def launch(
             raise typer.Exit(1)
         resume_cmd = adapter.build_resume_command(resume)
         if resume_cmd is None:
-            console.error(f"{caps.display_name} does not support session resume.")
+            console.error(
+                f"{caps.display_name}.build_resume_command returned None despite supports_resume=True."
+            )
             raise typer.Exit(1)
         console.kv("AI tool", caps.display_name)
         console.kv("Session", resume)
@@ -139,8 +142,6 @@ def launch(
             except OSError as e:
                 console.error(f"Cannot create transcript directory: {e}")
                 raise typer.Exit(1) from e
-        from crossby.utils.process import run_with_transcript
-
         exit_code = run_with_transcript(resume_cmd, transcript, cwd=work_dir)
         if exit_code != 0:
             console.warn(f"AI tool exited with code {exit_code}")
@@ -185,7 +186,7 @@ def launch(
         model=resolved_model,
         prompt=prompt if caps.supports_initial_message else None,
         transcript_path=transcript,
-        trusted_dirs=trusted_dirs or None,
+        trusted_dirs=trusted_dirs if trusted_dirs else None,
         effort=resolved_effort,
         allowed_commands=allowed_commands,
         yolo=resolved_yolo,

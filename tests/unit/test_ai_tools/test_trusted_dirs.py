@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.codex import CodexAdapter
+from crossby.ai_tools.copilot import CopilotAdapter
 from crossby.ai_tools.gemini import GeminiAdapter
 
 
@@ -37,3 +38,9 @@ class TestTrustedDirsLaunchCommand:
         assert "--include-directories" in cmd
         assert "/tmp/plan" in cmd
         assert cmd[cmd.index("/tmp/plan") - 1] == "--include-directories"
+
+    def test_copilot_trusted_dir_uses_add_dir(self) -> None:
+        cmd = CopilotAdapter().build_launch_command(trusted_dirs=["/tmp/plan"])
+        assert "--add-dir" in cmd
+        assert "/tmp/plan" in cmd
+        assert cmd[cmd.index("/tmp/plan") - 1] == "--add-dir"

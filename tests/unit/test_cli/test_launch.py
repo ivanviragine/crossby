@@ -138,7 +138,67 @@ class TestResumeFlag:
             )
 
         assert result.exit_code == 1
-        assert "does not support" in result.output.lower() or "resume" in result.output.lower()
+        assert "does not support session resume" in result.output
+
+    def test_resume_build_command_returns_none_exits_1(self, tmp_path: Path) -> None:
+        """Adapter claims supports_resume but build_resume_command returns None → exits 1."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = self._make_adapter(supports_resume=True)
+        mock_adapter.build_resume_command.return_value = None
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "claude", "--resume", "abc-123"]
+            )
+
+        assert result.exit_code == 1
+        assert "build_resume_command returned None" in result.output
+
+    def test_resume_with_transcript(self, tmp_path: Path) -> None:
+        """--resume + --transcript creates transcript dir and parses the transcript."""
+        config_file = tmp_path / ".crossby.yml"
+        config_file.write_text("version: 1\nai:\n  default_tool: claude\n")
+        transcript = tmp_path / "deep" / "session.txt"
+        mock_adapter = self._make_adapter(supports_resume=True)
+        mock_adapter.parse_transcript.return_value = MagicMock(
+            total_tokens=1000, session_id="abc-123"
+        )
+        # Make the transcript file exist so parse_transcript is triggered
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text("")
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "claude",
+                    "--resume",
+                    "abc-123",
+                    "--transcript",
+                    str(transcript),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert transcript.parent.is_dir()
+        mock_adapter.parse_transcript.assert_called_once_with(transcript)
 
 
 class TestTrustedDirFlag:
