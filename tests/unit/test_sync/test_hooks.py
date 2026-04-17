@@ -6,13 +6,13 @@ import json
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig, HookEntry
+from crossby.models.config import HookEntry
+from crossby.sync.base import SyncData
 from crossby.sync.hooks import (
     ClaudeHooksWriter,
     CopilotHooksWriter,
     CursorHooksWriter,
     GeminiHooksWriter,
-    _tools_to_gemini,
     _tools_to_matcher,
     _translate_event,
     _translate_tools,
@@ -38,8 +38,8 @@ BARE_HOOK = HookEntry(
 )
 
 
-def _cfg(*hooks: HookEntry) -> CrossbyConfig:
-    return CrossbyConfig(hooks=list(hooks))
+def _cfg(*hooks: HookEntry) -> SyncData:
+    return SyncData(hooks=list(hooks))
 
 
 def _read_json(path: Path) -> dict:
@@ -100,17 +100,6 @@ class TestToolsToMatcher:
         assert _tools_to_matcher(["*"]) == ".*"
 
 
-class TestToolsToGemini:
-    def test_two_tools(self) -> None:
-        assert _tools_to_gemini(["Edit", "Write"]) == ["Edit", "Write"]
-
-    def test_empty_tools(self) -> None:
-        assert _tools_to_gemini([]) == [".*"]
-
-    def test_wildcard(self) -> None:
-        assert _tools_to_gemini(["*"]) == [".*"]
-
-
 # ---------------------------------------------------------------------------
 # ClaudeHooksWriter
 # ---------------------------------------------------------------------------
@@ -120,7 +109,7 @@ class TestClaudeHooksWriter:
     writer = ClaudeHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
         assert result.message == "no hooks config"
 
@@ -248,7 +237,7 @@ class TestCursorHooksWriter:
     writer = CursorHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -323,7 +312,7 @@ class TestCopilotHooksWriter:
     writer = CopilotHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -450,7 +439,7 @@ class TestGeminiHooksWriter:
     writer = GeminiHooksWriter()
 
     def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(CrossbyConfig(), tmp_path)
+        result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "skipped"
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
@@ -459,36 +448,36 @@ class TestGeminiHooksWriter:
         path = tmp_path / ".gemini" / "settings.json"
         assert path.exists()
         data = _read_json(path)
-        hooks = data["hooks"]
-        assert len(hooks) == 1
-        assert hooks[0]["event"] == "BeforeTool"
-        assert hooks[0]["command"] == "python3 ./scripts/guard.py"
-        assert hooks[0]["tools"] == ["Edit", "Write"]
+        assert isinstance(data["hooks"], dict)
+        before_tool = data["hooks"]["BeforeTool"]
+        assert len(before_tool) == 1
+        assert before_tool[0]["matcher"] == "Edit|Write"
+        assert before_tool[0]["hooks"] == [
+            {"type": "command", "command": "python3 ./scripts/guard.py"}
+        ]
 
-    def test_empty_tools_become_wildcard(self, tmp_path: Path) -> None:
+    def test_empty_tools_uses_wildcard_matcher(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg(BARE_HOOK), tmp_path)
         data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert data["hooks"][0]["tools"] == [".*"]
+        assert data["hooks"]["BeforeTool"][0]["matcher"] == ".*"
 
-    def test_hooks_flat_array_not_nested(self, tmp_path: Path) -> None:
-        """Gemini stores hooks as a flat array, not nested by event key."""
+    def test_hooks_nested_object_not_flat_array(self, tmp_path: Path) -> None:
+        """Gemini stores hooks as a nested object keyed by event name."""
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert isinstance(data["hooks"], list)
-        assert "preToolUse" not in data["hooks"][0]
-
-    def test_event_is_field_value(self, tmp_path: Path) -> None:
-        """Gemini encodes event as a field value in the entry dict."""
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert data["hooks"][0]["event"] == "BeforeTool"
+        assert isinstance(data["hooks"], dict)
+        assert "BeforeTool" in data["hooks"]
 
     def test_merges_into_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".gemini" / "settings.json"
         path.parent.mkdir()
+        existing_entry = {
+            "matcher": ".*",
+            "hooks": [{"type": "command", "command": "echo old"}],
+        }
         existing = {
             "mcpServers": {"ctx": {"command": "npx"}},
-            "hooks": [{"event": "BeforeTool", "command": "echo old", "tools": [".*"]}],
+            "hooks": {"BeforeTool": [existing_entry]},
         }
         path.write_text(json.dumps(existing), encoding="utf-8")
 
@@ -496,12 +485,36 @@ class TestGeminiHooksWriter:
 
         data = _read_json(path)
         assert data["mcpServers"] == existing["mcpServers"]
-        assert len(data["hooks"]) == 2
+        assert len(data["hooks"]["BeforeTool"]) == 2
+
+    def test_migrates_old_flat_array_format(self, tmp_path: Path) -> None:
+        """Old flat-array hooks are converted to nested format, preserving commands."""
+        path = tmp_path / ".gemini" / "settings.json"
+        path.parent.mkdir()
+        old_format = {
+            "hooks": [{"event": "BeforeTool", "command": "echo old", "tools": [".*"]}],
+        }
+        path.write_text(json.dumps(old_format), encoding="utf-8")
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        data = _read_json(path)
+        # After migration, hooks should be a dict
+        assert isinstance(data["hooks"], dict)
+        assert "BeforeTool" in data["hooks"]
+        # Both the migrated old hook and the new hook should be present
+        commands = [
+            h["command"]
+            for entry in data["hooks"]["BeforeTool"]
+            for h in entry.get("hooks", [])
+        ]
+        assert "echo old" in commands
+        assert "python3 ./scripts/guard.py" in commands
 
     def test_preserves_other_gemini_settings(self, tmp_path: Path) -> None:
         path = tmp_path / ".gemini" / "settings.json"
         path.parent.mkdir()
-        path.write_text(json.dumps({"theme": "dark", "hooks": []}), encoding="utf-8")
+        path.write_text(json.dumps({"theme": "dark", "hooks": {}}), encoding="utf-8")
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         data = _read_json(path)
         assert data["theme"] == "dark"
@@ -511,14 +524,23 @@ class TestGeminiHooksWriter:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "skipped"
 
-    def test_dedup_by_event_and_command(self, tmp_path: Path) -> None:
+    def test_dedup_by_command(self, tmp_path: Path) -> None:
+        """Same command with different tools is still a duplicate."""
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        different_tools_hook = HookEntry(
+            event="pre_tool_use",
+            command="python3 ./scripts/guard.py",
+            tools=["Bash"],
+        )
+        result = self.writer.sync(_cfg(different_tools_hook), tmp_path)
+        assert result.action == "skipped"
+
+    def test_different_events_not_deduped(self, tmp_path: Path) -> None:
         """Same command for different events is NOT a duplicate."""
         hook2 = HookEntry(event="post_tool_use", command="python3 ./scripts/guard.py", tools=[])
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         result = self.writer.sync(_cfg(hook2), tmp_path)
         assert result.action == "updated"
-        data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert len(data["hooks"]) == 2
 
     def test_dry_run_no_write(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path, dry_run=True)
@@ -569,16 +591,16 @@ class TestHookEntryModel:
         assert hook.description == "My guard"
 
 
-class TestCrossbyConfigHooksField:
+class TestSyncDataHooksField:
     def test_hooks_defaults_to_empty_list(self) -> None:
-        config = CrossbyConfig()
-        assert config.hooks == []
+        data = SyncData()
+        assert data.hooks == []
 
-    def test_hooks_parsed_from_dict(self) -> None:
-        config = CrossbyConfig(
+    def test_hooks_from_hook_entries(self) -> None:
+        data = SyncData(
             hooks=[
-                {"event": "pre_tool_use", "command": "echo hi", "tools": ["Edit"]},
+                HookEntry(event="pre_tool_use", command="echo hi", tools=["Edit"]),
             ]
         )
-        assert len(config.hooks) == 1
-        assert config.hooks[0].command == "echo hi"
+        assert len(data.hooks) == 1
+        assert data.hooks[0].command == "echo hi"

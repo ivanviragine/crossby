@@ -1,15 +1,17 @@
-"""Sync framework base — SyncConcern, SyncResult, AbstractSyncWriter, SyncRegistry."""
+"""Sync framework base — SyncConcern, SyncData, SyncResult, AbstractSyncWriter, SyncRegistry."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
+
+if TYPE_CHECKING:
+    from crossby.models.config import HookEntry, MCPServerConfig
 
 
 class SyncConcern(StrEnum):
@@ -20,6 +22,35 @@ class SyncConcern(StrEnum):
     MCP = "mcp"
     AGENTS = "agents"
     HOOKS = "hooks"
+
+
+@dataclass
+class SyncData:
+    """Sync input data — populated by readers, consumed by writers.
+
+    Replaces ``CrossbyConfig`` in the sync layer.  Each field group
+    corresponds to one :class:`SyncConcern`.  A ``None`` source means
+    "nothing to sync for this concern" and the writer will skip.
+    """
+
+    # Rules concern
+    rules_source: str | None = None  # relative path to canonical instruction file
+    rules_strategy: Literal["symlink", "copy"] = "symlink"
+    rules_gitignore: bool = True
+
+    # Agents concern
+    agents_source: str | None = None  # relative path to canonical agents directory
+    agents_strategy: Literal["symlink", "copy"] = "symlink"
+    agents_gitignore: bool = True
+
+    # MCP servers concern
+    mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+
+    # Permissions concern
+    allowed_commands: list[str] = field(default_factory=list)
+
+    # Hooks concern
+    hooks: list[HookEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -47,16 +78,16 @@ class AbstractSyncWriter(ABC):
     @abstractmethod
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        """Sync config to tool-specific files.
+        """Sync data to tool-specific files.
 
         Args:
-            config: Loaded CrossbyConfig.
+            data: Sync input data (from readers or wizard).
             project_root: Project root directory.
             dry_run: If True, compute the result without writing any files.
             force: If True, overwrite existing target files/directories (with

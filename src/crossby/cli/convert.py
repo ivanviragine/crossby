@@ -17,7 +17,6 @@ def _get_to_canonical(tool: str) -> object:
         "claude": "Bash(",
         "cursor": "Shell(",
         "copilot": "shell(",
-        "gemini": "shell(",
     }
     prefix = wrappers.get(tool)
     if not prefix:
@@ -41,7 +40,6 @@ def _get_from_canonical(tool: str) -> object:
     translators["claude"] = canonical_to_claude
     translators["cursor"] = canonical_to_cursor
 
-    # Copilot and Gemini use the same shell() format
     def _to_shell(pattern: str) -> str:
         parts = pattern.split(":", 1)
         binary = parts[0]
@@ -49,7 +47,6 @@ def _get_from_canonical(tool: str) -> object:
         return f"shell({binary}:{args})" if args else f"shell({binary})"
 
     translators["copilot"] = _to_shell
-    translators["gemini"] = _to_shell
 
     return translators.get(tool)
 
@@ -81,6 +78,13 @@ def convert(
     # Step 1: Convert to canonical format
     if from_tool == "canonical":
         canonical = pattern
+    elif from_tool == "gemini":
+        console.error(
+            "Gemini CLI no longer uses --allowed-tools flags. "
+            "Permissions are managed via .gemini/policies/crossby.toml "
+            "(written automatically by 'crossby sync')."
+        )
+        raise typer.Exit(1)
     else:
         strip_fn = _get_to_canonical(from_tool)
         canonical = strip_fn(pattern) if strip_fn and callable(strip_fn) else pattern
@@ -88,6 +92,13 @@ def convert(
     # Step 2: Convert from canonical to target format
     if to_tool == "canonical":
         result = canonical
+    elif to_tool == "gemini":
+        console.error(
+            "Gemini CLI no longer uses --allowed-tools flags. "
+            "Permissions are managed via .gemini/policies/crossby.toml "
+            "(written automatically by 'crossby sync')."
+        )
+        raise typer.Exit(1)
     else:
         translate_fn = _get_from_canonical(to_tool)
         result = translate_fn(canonical) if translate_fn and callable(translate_fn) else canonical

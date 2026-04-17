@@ -1,10 +1,11 @@
 """Hooks sync writers — one per AI tool.
 
-Each writer merges .crossby.yml hooks into the tool's native config format
-using a non-destructive merge strategy (dedup by (event, command)):
+Each writer merges hooks from :class:`~crossby.sync.base.SyncData` (populated
+by readers or the sync wizard) into the tool's native config format using a
+non-destructive merge strategy (dedup by (event, command)):
 - New hooks are appended to the tool's hooks list.
 - Hooks with the same (event, command) are skipped (idempotent).
-- Hooks in the target but NOT in .crossby.yml are preserved.
+- Hooks in the target but NOT in SyncData are preserved.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import CrossbyConfig
+from crossby.sync.base import SyncData
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
 from crossby.sync.json_utils import read_json_file, write_json_file
 
@@ -59,13 +60,6 @@ def _tools_to_matcher(tools: list[str]) -> str:
     return "|".join(tools)
 
 
-def _tools_to_gemini(tools: list[str]) -> list[str]:
-    """Convert tools list to Gemini format (empty/wildcard → ['.*'])."""
-    if not tools or tools == ["*"]:
-        return [".*"]
-    return tools
-
-
 # ---------------------------------------------------------------------------
 # ClaudeHooksWriter
 # ---------------------------------------------------------------------------
@@ -95,13 +89,13 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -110,7 +104,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".claude" / "settings.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -122,13 +116,13 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
         changed = False
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -208,13 +202,13 @@ class CursorHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -223,7 +217,7 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".cursor" / "hooks.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -235,10 +229,10 @@ class CursorHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         changed = False
 
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = existing.get(event_name, [])
             if not isinstance(event_list, list):
@@ -311,13 +305,13 @@ class CopilotHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -326,7 +320,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".github" / "hooks" / "hooks.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -338,7 +332,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
+        existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
@@ -346,7 +340,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
         changed = False
         warnings_msgs: list[str] = []
 
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -406,18 +400,23 @@ class CopilotHooksWriter(AbstractSyncWriter):
 
 
 class GeminiHooksWriter(AbstractSyncWriter):
-    """Merges hooks into .gemini/settings.json → hooks[] (flat array).
+    """Merges hooks into .gemini/settings.json → hooks.<EventName>[].
 
     Format::
 
         {
-          "hooks": [
-            {"event": "BeforeTool", "command": "...", "tools": ["Edit", "Write"]}
-          ]
+          "hooks": {
+            "BeforeTool": [
+              {
+                "matcher": "Edit|Write",
+                "hooks": [{"type": "command", "command": "..."}]
+              }
+            ]
+          }
         }
 
-    Note: ``event`` is a field value in the entry dict, not an array key.
-    Dedup key: ``(entry.event, entry.command)`` pair.
+    Uses the same nested object-keyed structure as Claude.
+    Dedup key: command value within any entry's inner ``hooks[]``.
     """
 
     tool_id = AIToolID.GEMINI
@@ -425,13 +424,13 @@ class GeminiHooksWriter(AbstractSyncWriter):
 
     def sync(
         self,
-        config: CrossbyConfig,
+        data: SyncData,
         project_root: Path,
         *,
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not config.hooks:
+        if not data.hooks:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -440,7 +439,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".gemini" / "settings.json"
-        data, error, was_new = read_json_file(path)
+        file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
             warnings.warn(msg, stacklevel=2)
@@ -452,33 +451,66 @@ class GeminiHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
-        existing = data or {}
-        hooks_list: list[Any] = existing.get("hooks", [])
-        if not isinstance(hooks_list, list):
-            hooks_list = []
+        existing = file_data or {}
+        raw_hooks = existing.get("hooks", {})
+        hooks_section: dict[str, Any]
+        # Migrate old flat-array format to nested dict
+        if isinstance(raw_hooks, dict):
+            hooks_section = raw_hooks
+        elif isinstance(raw_hooks, list):
+            hooks_section = {}
+            for legacy_entry in raw_hooks:
+                if not isinstance(legacy_entry, dict):
+                    continue
+                legacy_event = legacy_entry.get("event")
+                command = legacy_entry.get("command")
+                if not isinstance(legacy_event, str) or not isinstance(command, str):
+                    continue
+                tools = legacy_entry.get("tools")
+                if not isinstance(tools, list):
+                    tools = []
+                event_list = hooks_section.setdefault(legacy_event, [])
+                event_list.append({
+                    "matcher": _tools_to_matcher(tools),
+                    "hooks": [{"type": "command", "command": command}],
+                })
+        else:
+            hooks_section = {}
 
         changed = False
-
-        for hook in config.hooks:
+        for hook in data.hooks:
             event_name = _translate_event(hook.event, self.tool_id)
-            command = hook.command
+            event_list: list[Any] = hooks_section.get(event_name, [])
+            if not isinstance(event_list, list):
+                event_list = []
 
-            # Dedup: check if (event, command) pair already present
-            already_exists = any(
-                isinstance(entry, dict)
-                and entry.get("event") == event_name
-                and entry.get("command") == command
-                for entry in hooks_list
-            )
+            # Dedup: check if command already exists in any entry's inner hooks[]
+            command = hook.command
+            already_exists = False
+            for entry in event_list:
+                if not isinstance(entry, dict):
+                    continue
+                inner_hooks = entry.get("hooks")
+                if not isinstance(inner_hooks, list):
+                    continue
+                for inner in inner_hooks:
+                    if isinstance(inner, dict) and inner.get("command") == command:
+                        already_exists = True
+                        break
+                    if isinstance(inner, str) and inner == command:
+                        already_exists = True
+                        break
+                if already_exists:
+                    break
 
             if not already_exists:
                 tools = hook.tools or []
                 new_entry: dict[str, Any] = {
-                    "event": event_name,
-                    "command": command,
-                    "tools": _tools_to_gemini(tools),
+                    "matcher": _tools_to_matcher(tools),
+                    "hooks": [{"type": "command", "command": command}],
                 }
-                hooks_list.append(new_entry)
+                event_list.append(new_entry)
+                hooks_section[event_name] = event_list
                 changed = True
 
         if not changed:
@@ -491,7 +523,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
 
         action = "created" if was_new else "updated"
         if not dry_run:
-            existing["hooks"] = hooks_list
+            existing["hooks"] = hooks_section
             write_json_file(path, existing)
 
         return SyncResult(

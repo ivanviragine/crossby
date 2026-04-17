@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from crossby.models.config import CrossbyConfig, MCPServerConfig
+from crossby.models.config import MCPServerConfig
+from crossby.sync.base import SyncData
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
     CopilotMCPWriter,
@@ -40,9 +41,9 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _cfg(servers: dict[str, MCPServerConfig]) -> CrossbyConfig:
-    """Build a minimal CrossbyConfig with the given mcp_servers."""
-    return CrossbyConfig(mcp_servers=servers)
+def _cfg(servers: dict[str, MCPServerConfig]) -> SyncData:
+    """Build a minimal SyncData with the given mcp_servers."""
+    return SyncData(mcp_servers=servers)
 
 
 # ---------------------------------------------------------------------------
