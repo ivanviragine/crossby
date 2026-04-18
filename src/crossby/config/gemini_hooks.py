@@ -26,4 +26,4 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
         guard_path: Path to the guard script to run before file writes.
     """
     hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
-    _ = GeminiHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+    GeminiHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)

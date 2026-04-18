@@ -26,4 +26,4 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
         guard_path: Path to the guard script to run before file writes.
     """
     hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
-    _ = CursorHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+    CursorHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)

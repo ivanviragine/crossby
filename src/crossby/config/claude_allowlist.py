@@ -14,14 +14,13 @@ import contextlib
 import json
 from pathlib import Path
 
+from crossby.models.config import HookEntry
+from crossby.sync.base import SyncData
+from crossby.sync.hooks import ClaudeHooksWriter
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
     canonical_to_claude,
 )
-
-from crossby.models.config import HookEntry
-from crossby.sync.base import SyncData
-from crossby.sync.hooks import ClaudeHooksWriter
 
 # Re-export for callers that import canonical_to_claude from here.
 __all__ = [
@@ -99,4 +98,4 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
         guard_path: Path to the guard script to run before file writes.
     """
     hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
-    _ = ClaudeHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+    ClaudeHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
