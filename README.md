@@ -1,32 +1,40 @@
-# CROSSBY
+# crossby
 
-**Cross-platform Bridge for Your AI agents** — a Python CLI toolkit for managing AI coding tools across platforms.
+**One config. Every AI tool** — sync rules, permissions, MCP servers, hooks, and agents across Claude, Copilot, Gemini, Codex, Cursor, and more.
 
-CROSSBY provides:
+## See it in action
 
-- **AI Tool Adapters**: Unified interface for Claude, Copilot, Gemini, Codex, Cursor, OpenCode, and more
-- **Configuration Resolution**: Read, merge, and translate config hierarchies across AI tools
-- **Agent Launching**: Universal launcher with model selection, effort levels, and YOLO mode
-- **Session Stats**: Token usage extraction from session transcripts
-- **Permission Management**: Cross-tool allowlist and hook configuration
+You've set up Claude with custom instructions, agents, and permissions. Now share it everywhere:
+
+```
+$ crossby sync --from claude  # output illustrative — actual output is a Rich table
+
+✓  CLAUDE.md         → .cursorrules              (symlinked)
+✓  CLAUDE.md         → GEMINI.md                 (symlinked)
+✓  CLAUDE.md         → AGENTS.md                 (symlinked)
+✓  .claude/settings.json permissions → .cursor/cli.json  (converted)
+```
+
+Every tool now shares the same instructions and configs — automatically kept in sync.
 
 ## Installation
 
 ```bash
 pip install crossby
+# or
+uv tool install crossby
+# or
+pipx install crossby
 ```
 
 ## Quick Start
 
 ```bash
-# Sync configs from Claude to all other installed tools
-crossby sync --from claude --all
+# Sync configs from Claude to all installed tools
+crossby sync --from claude
 
-# Sync configs interactively (wizard mode)
+# Sync interactively (wizard mode — review before applying)
 crossby sync
-
-# Initialize config in your project
-crossby init
 
 # Launch an AI tool with resolved config
 crossby launch --tool claude --model claude-sonnet-4.6
@@ -43,7 +51,7 @@ crossby convert "Bash(myapp:*)" --from claude --to cursor
 
 ## Configuration
 
-CROSSBY reads `.crossby.yml` from your project root:
+Add a `.crossby.yml` to your project root to configure defaults:
 
 ```yaml
 version: 1
@@ -64,10 +72,6 @@ models:
     medium: claude-sonnet-4.6
     complex: claude-sonnet-4.6
     very_complex: claude-opus-4.6
-permissions:
-  allowed_commands:
-    - "myapp:*"
-    - "./scripts/check.sh:*"
 ```
 
 ## AI Tool Compatibility
@@ -115,19 +119,9 @@ crossby convert "Bash(myapp:*)" --from claude --to cursor
 crossby convert "myapp:*" --from canonical --to gemini
 ```
 
-### Session Preservation & Resume
-
-| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
-|---|---|---|---|---|---|---|
-| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
-| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
-| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
-
-Session IDs are extracted from transcripts automatically when `--transcript` is used.
-
 ### Config Sync (`crossby sync`)
 
-Sync portable configs between AI tools — no `crossby init` required. Reads files directly from their standard locations.
+Sync portable configs between AI tools — no project config required. Reads files directly from their standard locations.
 
 ```bash
 # Interactive wizard — select source, targets, review plan, approve
@@ -137,13 +131,13 @@ crossby sync
 crossby sync --from claude --to cursor
 
 # Claude to all installed tools
-crossby sync --from claude --all
+crossby sync --from claude
 
 # Preview without applying
 crossby sync --from claude --to cursor --dry-run
 
-# Sync only specific config types
-crossby sync --from claude --to cursor --instructions --skills
+# Sync only rules concern
+crossby sync rules --from claude --to cursor
 ```
 
 **What gets synced:**
@@ -151,18 +145,22 @@ crossby sync --from claude --to cursor --instructions --skills
 | Config Type | Strategy | Details |
 |---|---|---|
 | Instructions | Symlink | `CLAUDE.md` / `.cursorrules` / `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` |
-| Skills | Symlink | `.claude/skills/` / `.cursor/skills/` / `.gemini/skills/` / `.agents/skills/` / `.github/skills/` |
-| Allowlist | Convert | Claude `Bash()` <-> Cursor `Shell()` format translation |
-
-**What gets detected but can't be synced yet:**
-
-| Config Type | Reason |
-|---|---|
-| Hooks | Different schema per tool — not yet supported |
-| MCP servers | Claude-specific, no cross-tool equivalent |
-| Custom commands | Claude-specific slash commands |
+| Agents | Symlink | `.claude/agents/` and equivalent per tool |
+| Permissions | Convert | Claude `Bash()` ↔ Cursor `Shell()` format translation |
+| Hooks | Write | Tool-native hook schema per target |
+| MCP Servers | Merge | Claude `.claude/settings.json` → `mcpServers` and equivalent per-tool MCP config paths |
 
 Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
+
+### Session Preservation & Resume
+
+| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
+|---|---|---|---|---|---|---|
+| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
+| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
+| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
+
+Session IDs are extracted from transcripts automatically when `--transcript` is used.
 
 ### Transcript Parsing (`crossby stats`)
 
@@ -186,14 +184,9 @@ These methods are available on each adapter for programmatic use but are not exp
 | Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
 | Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
 
-## Development
+## Contributing
 
-```bash
-pip install -e ".[dev]"
-./scripts/test.sh       # Run tests
-./scripts/check.sh      # Lint + type check
-./scripts/fmt.sh        # Auto-format
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, and how to submit changes.
 
 ## License
 
