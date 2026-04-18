@@ -34,7 +34,9 @@ def configure_json_allowlist(
     # allowlist_util → crossby.sync (package __init__) → permissions → allowlist_util
     from crossby.sync.json_utils import read_json_file, write_json_file
 
-    data, _error, _was_new = read_json_file(config_path)
+    data, error, _was_new = read_json_file(config_path)
+    if error is not None:
+        logger.warning("allowlist_util.read_error", path=str(config_path), error=error)
     existing: dict[str, object] = data if data is not None else {}
 
     permissions = existing.setdefault("permissions", {})

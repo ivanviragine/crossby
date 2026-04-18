@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
+from unittest.mock import patch
 
 from crossby.config.allowlist_util import configure_json_allowlist
 
@@ -18,18 +17,21 @@ def _shell(p: str) -> str:
     return f"Shell({p})"
 
 
+_WRITE_TARGET = "crossby.sync.json_utils.write_json_file"
+
+
 class TestEmptyPatternsShortCircuit:
     def test_no_op_when_patterns_empty(self, tmp_path: Path) -> None:
         config = tmp_path / "settings.json"
         configure_json_allowlist(config, [], pattern_converter=_bash)
         assert not config.exists()
 
-    def test_no_op_does_not_touch_existing_file(self, tmp_path: Path) -> None:
+    def test_no_op_does_not_write_existing_file(self, tmp_path: Path) -> None:
         config = tmp_path / "settings.json"
         config.write_text('{"other": 1}\n', encoding="utf-8")
-        mtime_before = config.stat().st_mtime
-        configure_json_allowlist(config, [], pattern_converter=_bash)
-        assert config.stat().st_mtime == mtime_before
+        with patch(_WRITE_TARGET) as mock_write:
+            configure_json_allowlist(config, [], pattern_converter=_bash)
+            mock_write.assert_not_called()
 
 
 class TestFreshFileCreation:
@@ -54,13 +56,6 @@ class TestFreshFileCreation:
         data = json.loads(config.read_text(encoding="utf-8"))
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
         assert "Bash(./scripts/run.sh:*)" in data["permissions"]["allow"]
-
-    def test_custom_log_event_used(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        config = tmp_path / "settings.json"
-        configure_json_allowlist(
-            config, ["myapp:*"], pattern_converter=_bash, log_event="custom.event"
-        )
-        assert any("custom.event" in r.message for r in caplog.records) or True
 
 
 class TestIdempotency:
@@ -93,9 +88,9 @@ class TestIdempotency:
         config = tmp_path / "settings.json"
         existing = {"permissions": {"allow": ["Bash(myapp:*)"]}}
         config.write_text(json.dumps(existing) + "\n", encoding="utf-8")
-        mtime_before = config.stat().st_mtime
-        configure_json_allowlist(config, ["myapp:*"], pattern_converter=_bash)
-        assert config.stat().st_mtime == mtime_before
+        with patch(_WRITE_TARGET) as mock_write:
+            configure_json_allowlist(config, ["myapp:*"], pattern_converter=_bash)
+            mock_write.assert_not_called()
 
 
 class TestCorruptedJsonRecovery:
