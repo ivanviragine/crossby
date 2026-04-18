@@ -1,8 +1,9 @@
 """JSON read-modify-write utilities for sync writers.
 
 Provides atomic read-modify-write with consistent formatting (2-space indent,
-sorted keys) and safe malformed-file handling.  Used by both MCP and
-permissions sync modules.
+sorted keys) and safe malformed-file handling.  Used by MCP and hooks sync
+modules, with ``read_json_file`` and ``write_json_file`` re-exported here as a
+sync-layer compatibility shim.
 
 ``read_json_file`` and ``write_json_file`` live in ``crossby.config.json_utils``
 (a neutral, import-side-effect-free module) and are re-exported here for
@@ -15,8 +16,8 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from crossby.config.json_utils import read_json_file  # noqa: F401
-from crossby.config.json_utils import write_json_file  # noqa: F401
+from crossby.config.json_utils import read_json_file
+from crossby.config.json_utils import write_json_file
 
 SyncAction = Literal["created", "updated", "skipped", "error"]
 
