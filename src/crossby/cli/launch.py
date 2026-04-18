@@ -31,8 +31,8 @@ def launch(
     resume: str | None = typer.Option(
         None, "--resume", help="Resume a previous session by ID."
     ),
-    trusted_dirs: list[str] = typer.Option(
-        [], "--trusted-dir", help="Pre-authorize a directory (repeatable)."
+    trusted_dirs: list[str] | None = typer.Option(
+        None, "--trusted-dir", help="Pre-authorize a directory (repeatable)."
     ),
 ) -> None:
     """Launch an AI tool with resolved configuration.
@@ -106,7 +106,11 @@ def launch(
 
     # --resume path: short-circuit before model/effort/yolo resolution and
     # interactive confirmation — those flags are irrelevant when resuming.
-    if resume:
+    if resume is not None:
+        resume = resume.strip()
+        if not resume:
+            console.error("--resume requires a non-empty session ID.")
+            raise typer.Exit(1)
         try:
             adapter = AbstractAITool.get(resolved_tool)
         except (ValueError, KeyError) as e:
@@ -136,7 +140,7 @@ def launch(
             console.warn(f"AI tool exited with code {exit_code}")
         if transcript and transcript.exists():
             usage = adapter.parse_transcript(transcript)
-            if usage.total_tokens:
+            if usage.total_tokens is not None:
                 console.kv("Tokens", f"{usage.total_tokens:,}")
             if usage.session_id:
                 console.kv("Session ID", usage.session_id)
@@ -192,7 +196,8 @@ def launch(
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
-    if trusted_dirs and not caps.supports_trusted_dirs:
+    normalized_trusted_dirs = list(trusted_dirs) if trusted_dirs else None
+    if normalized_trusted_dirs and not caps.supports_trusted_dirs:
         console.error(f"{caps.display_name} does not support --trusted-dir.")
         raise typer.Exit(1)
 
@@ -224,7 +229,7 @@ def launch(
         model=resolved_model,
         prompt=prompt if caps.supports_initial_message else None,
         transcript_path=transcript,
-        trusted_dirs=trusted_dirs if trusted_dirs else None,
+        trusted_dirs=normalized_trusted_dirs,
         effort=resolved_effort,
         yolo=resolved_yolo,
     )
@@ -235,7 +240,7 @@ def launch(
     # Parse transcript if captured
     if transcript and transcript.exists():
         usage = adapter.parse_transcript(transcript)
-        if usage.total_tokens:
+        if usage.total_tokens is not None:
             console.kv("Tokens", f"{usage.total_tokens:,}")
         if usage.session_id:
             console.kv("Session ID", usage.session_id)
