@@ -1,39 +1,27 @@
 """JSON read-modify-write utilities for sync writers.
 
 Provides atomic read-modify-write with consistent formatting (2-space indent,
-sorted keys) and safe malformed-file handling.  Used by both MCP and
-permissions sync modules.
+sorted keys) and safe malformed-file handling.  Used by MCP and hooks sync
+modules, with ``read_json_file`` and ``write_json_file`` re-exported here as a
+sync-layer compatibility shim.
+
+``read_json_file`` and ``write_json_file`` live in ``crossby.config.json_utils``
+(a neutral, import-side-effect-free module) and are re-exported here for
+backward compatibility with sync-layer callers.
 """
 
 from __future__ import annotations
 
-import json
 import warnings
 from pathlib import Path
 from typing import Any, Literal
 
+from crossby.config.json_utils import read_json_file
+from crossby.config.json_utils import write_json_file
+
 SyncAction = Literal["created", "updated", "skipped", "error"]
 
-
-def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]:
-    """Read a JSON file, returning (data, error_message, was_new).
-
-    Returns:
-        (dict, None, False) on success for an existing file.
-        (None, error_message, False) if file is malformed.
-        ({}, None, True) if file does not exist.
-    """
-    if not path.exists():
-        return {}, None, True
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        return None, f"contains invalid JSON: {e}", False
-    except (OSError, UnicodeDecodeError) as e:
-        return None, f"could not be read: {e}", False
-    if not isinstance(raw, dict):
-        return None, "root value is not a JSON object", False
-    return raw, None, False
+__all__ = ["SyncAction", "read_json_file", "write_json_file", "read_merge_write_json"]
 
 
 def read_merge_write_json(
@@ -94,16 +82,3 @@ def read_merge_write_json(
     existing[key] = section
     write_json_file(path, existing)
     return ("created" if was_new else "updated"), ""
-
-
-def write_json_file(path: Path, data: dict[str, Any]) -> None:
-    """Atomic write of a JSON dict with consistent formatting.
-
-    Uses 2-space indent, sorted keys, and a tmp+replace pattern to avoid
-    partial writes on crash.
-    """
-    json_text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json_text, encoding="utf-8")
-    tmp.replace(path)
