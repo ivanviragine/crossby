@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 from crossby.config.claude_allowlist import configure_plan_hooks as claude_configure_plan_hooks
@@ -253,7 +254,8 @@ class TestGeminiConfigurePlanHooks:
                         "hooks": [{"type": "command", "command": "/usr/local/bin/existing"}],
                     }
                 ]
-            }
+            },
+            "theme": "dark",
         }
         settings_path.write_text(json.dumps(existing), encoding="utf-8")
 
@@ -261,6 +263,7 @@ class TestGeminiConfigurePlanHooks:
         gemini_configure_plan_hooks(tmp_path, guard)
 
         data = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert data["theme"] == "dark"
         commands = [
             inner["command"]
             for entry in data["hooks"]["BeforeTool"]
@@ -269,3 +272,44 @@ class TestGeminiConfigurePlanHooks:
         ]
         assert "/usr/local/bin/existing" in commands
         assert str(guard) in commands
+
+
+# ---------------------------------------------------------------------------
+# Error path: malformed JSON emits warnings.warn, does not raise
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedJsonWarns:
+    """Malformed config files surface as warnings, not exceptions."""
+
+    def _write_bad_json(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{bad json!!", encoding="utf-8")
+
+    def test_claude_warns_on_bad_json(self, tmp_path: Path) -> None:
+        self._write_bad_json(tmp_path / ".claude" / "settings.json")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            claude_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        assert any("invalid JSON" in str(warning.message) for warning in w)
+
+    def test_cursor_warns_on_bad_json(self, tmp_path: Path) -> None:
+        self._write_bad_json(tmp_path / ".cursor" / "hooks.json")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cursor_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        assert any("invalid JSON" in str(warning.message) for warning in w)
+
+    def test_copilot_warns_on_bad_json(self, tmp_path: Path) -> None:
+        self._write_bad_json(tmp_path / ".github" / "hooks" / "hooks.json")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            copilot_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        assert any("invalid JSON" in str(warning.message) for warning in w)
+
+    def test_gemini_warns_on_bad_json(self, tmp_path: Path) -> None:
+        self._write_bad_json(tmp_path / ".gemini" / "settings.json")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            gemini_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        assert any("invalid JSON" in str(warning.message) for warning in w)

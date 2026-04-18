@@ -23,9 +23,12 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
     Write). This is a known Copilot limitation and cannot be worked around
     without Copilot adding tool-filter support.
 
+    If ``.github/hooks/hooks.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
     Args:
         worktree_path: Root of the worktree (directory that contains ``.github/``).
-        guard_path: Absolute path to the guard script to run before tool calls.
+        guard_path: Path to the guard script to run before tool calls.
     """
     # tools=[] intentionally omitted: Copilot has no per-tool filter.
     hook = HookEntry(event="pre_tool_use", tools=[], command=str(guard_path))

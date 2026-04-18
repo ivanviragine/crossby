@@ -91,9 +91,12 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
     tools. Idempotent — calling twice does not duplicate the entry. Preserves
     any existing hooks already in the file.
 
+    If ``.claude/settings.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
     Args:
         worktree_path: Root of the worktree (directory that contains ``.claude/``).
-        guard_path: Absolute path to the guard script to run before file writes.
+        guard_path: Path to the guard script to run before file writes.
     """
     hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
     _ = ClaudeHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
