@@ -16,9 +16,9 @@ from typing import Literal
 
 import structlog
 
+from crossby.config.allowlist_util import configure_json_allowlist
 from crossby.models.ai import AIToolID
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.json_utils import read_json_file, write_json_file
 
 logger = structlog.get_logger()
 
@@ -102,31 +102,12 @@ class ClaudePermissionWriter(AbstractSyncWriter):
     def write(project_root: Path, patterns: list[str]) -> None:
         """Add patterns to .claude/settings.json. Idempotent, non-destructive."""
         settings_path = project_root / ".claude" / "settings.json"
-
-        data, _error, _was_new = read_json_file(settings_path)
-        existing: dict[str, object] = data if data is not None else {}
-
-        permissions = existing.setdefault("permissions", {})
-        if not isinstance(permissions, dict):
-            permissions = {}
-            existing["permissions"] = permissions
-
-        allow_list = permissions.setdefault("allow", [])
-        if not isinstance(allow_list, list):
-            allow_list = []
-            permissions["allow"] = allow_list
-
-        changed = False
-        for pat in [canonical_to_claude(p) for p in patterns]:
-            if pat not in allow_list:
-                allow_list.append(pat)
-                changed = True
-
-        if not changed:
-            return
-
-        write_json_file(settings_path, existing)
-        logger.info("claude_allowlist.configured", path=str(settings_path))
+        configure_json_allowlist(
+            settings_path,
+            patterns,
+            pattern_converter=canonical_to_claude,
+            log_event="claude_allowlist.configured",
+        )
 
     def sync(
         self,
@@ -227,35 +208,12 @@ class CursorPermissionWriter(AbstractSyncWriter):
         patterns: list[str] | None = None,
     ) -> None:
         """Add patterns to the Cursor CLI allowlist. Idempotent."""
-        if not patterns:
-            return
-
-        config_file = _cursor_config_path(project_root)
-
-        data, _error, _was_new = read_json_file(config_file)
-        existing: dict[str, object] = data if data is not None else {}
-
-        permissions = existing.setdefault("permissions", {})
-        if not isinstance(permissions, dict):
-            permissions = {}
-            existing["permissions"] = permissions
-
-        allow_list = permissions.setdefault("allow", [])
-        if not isinstance(allow_list, list):
-            allow_list = []
-            permissions["allow"] = allow_list
-
-        changed = False
-        for pat in [canonical_to_cursor(p) for p in patterns]:
-            if pat not in allow_list:
-                allow_list.append(pat)
-                changed = True
-
-        if not changed:
-            return
-
-        write_json_file(config_file, existing)
-        logger.info("cursor_allowlist.configured", path=str(config_file))
+        configure_json_allowlist(
+            _cursor_config_path(project_root),
+            patterns or [],
+            pattern_converter=canonical_to_cursor,
+            log_event="cursor_allowlist.configured",
+        )
 
     def sync(
         self,
