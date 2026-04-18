@@ -17,7 +17,7 @@ def _shell(p: str) -> str:
     return f"Shell({p})"
 
 
-_WRITE_TARGET = "crossby.sync.json_utils.write_json_file"
+_WRITE_TARGET = "crossby.config.json_utils.write_json_file"
 
 
 class TestEmptyPatternsShortCircuit:

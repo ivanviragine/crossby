@@ -11,6 +11,8 @@ from typing import Callable
 
 import structlog
 
+from crossby.config.json_utils import read_json_file, write_json_file
+
 logger = structlog.get_logger()
 
 
@@ -30,10 +32,6 @@ def configure_json_allowlist(
     if not patterns:
         return
 
-    # Lazy import to avoid a circular dependency:
-    # allowlist_util → crossby.sync (package __init__) → permissions → allowlist_util
-    from crossby.sync.json_utils import read_json_file, write_json_file
-
     data, error, _was_new = read_json_file(config_path)
     if error is not None:
         logger.warning("allowlist_util.read_error", path=str(config_path), error=error)
@@ -50,7 +48,7 @@ def configure_json_allowlist(
         permissions["allow"] = allow_list
 
     changed = False
-    for pat in [pattern_converter(p) for p in patterns]:
+    for pat in (pattern_converter(p) for p in patterns):
         if pat not in allow_list:
             allow_list.append(pat)
             changed = True
