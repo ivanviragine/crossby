@@ -37,7 +37,7 @@ _SCRAPE_PATTERNS: dict[str, str] = {
 # Values are substrings to search for in `--help` / `-h` output.
 _EXPECTED_FLAGS: dict[str, dict[str, str]] = {
     "codex": {
-        "yolo": "--approval-mode",
+        "yolo": "--yolo",
         "ask_for_approval": "--ask-for-approval",
         "headless": "exec",
         "model_reasoning_effort": "model_reasoning_effort",
@@ -420,8 +420,12 @@ def main() -> int:
 
     from crossby.ui import prompts
 
+    if not sys.stdin.isatty():
+        console.error(f"Differences found. Please update {JSON_PATH} manually.")
+        return 1
+
     msg = f"\nWould you like to use an AI agent to auto-correct {JSON_PATH.name}?"
-    if not prompts.confirm(msg, default=True):
+    if not prompts.confirm(msg, default=False):
         console.error(f"Differences found. Please update {JSON_PATH} manually.")
         return 1
 
