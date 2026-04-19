@@ -13,7 +13,7 @@ from crossby.models.ai import (
     EffortLevel,
 )
 
-# Codex uses "xhigh" for our "max" level
+# Codex uses "xhigh" for both our XHIGH and MAX levels
 _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.LOW: "low",
     EffortLevel.MEDIUM: "medium",
