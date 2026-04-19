@@ -361,9 +361,8 @@ def main() -> int:
         k: set(v) for k, v in registry_raw.items() if not k.startswith("_")
     }
 
-    found: dict[str, set[str]] = {}
     with console.status("Probing external AI providers..."):
-        found = {
+        found: dict[str, set[str]] = {
             "claude": probe_claude(),
             "cursor": probe_cursor(),
             "copilot": probe_copilot(),
@@ -478,11 +477,10 @@ def main() -> int:
             if isinstance(parsed, dict) and "structured_output" in parsed:
                 return json.dumps(parsed["structured_output"], indent=2)
             # Or it might just be the direct object itself
-            is_dict = isinstance(parsed, dict)
-            providers = ["claude", "cursor", "copilot", "gemini", "codex", "opencode"]
-            has_providers = any(k in parsed for k in providers)
-            if is_dict and has_providers:
-                return json.dumps(parsed, indent=2)
+            if isinstance(parsed, dict):
+                providers = ["claude", "cursor", "copilot", "gemini", "codex", "opencode"]
+                if any(k in parsed for k in providers):
+                    return json.dumps(parsed, indent=2)
             return None
 
         # Strategy 1: The whole thing might be valid JSON
@@ -493,8 +491,8 @@ def main() -> int:
         except ValueError:
             pass
 
-        # Strategy 2: Remove markdown formatting
-        cleaned = re.sub(r"^```(?:json)?\n?", "", text, flags=re.MULTILINE)
+        # Strategy 2: Remove markdown formatting (leading and trailing fence only)
+        cleaned = re.sub(r"^```(?:json)?\n", "", text, count=1)
         cleaned = re.sub(r"\n```$", "", cleaned)
         try:
             parsed = json.loads(cleaned)
