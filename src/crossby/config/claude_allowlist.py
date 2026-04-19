@@ -27,6 +27,7 @@ __all__ = [
     "canonical_to_claude",
     "configure_allowlist",
     "configure_plan_hooks",
+    "configure_worktree_hooks",
     "is_allowlist_configured",
     "read_allowlist",
 ]
@@ -85,6 +86,24 @@ def configure_allowlist(
 
 def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
     """Install a plan-mode write-guard hook into .claude/settings.json.
+
+    Registers ``guard_path`` as a ``PreToolUse`` hook scoped to Edit and Write
+    tools. Idempotent — calling twice does not duplicate the entry. Preserves
+    any existing hooks already in the file.
+
+    If ``.claude/settings.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
+    Args:
+        worktree_path: Root of the worktree (directory that contains ``.claude/``).
+        guard_path: Path to the guard script to run before file writes.
+    """
+    hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
+    ClaudeHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+
+
+def configure_worktree_hooks(worktree_path: Path, guard_path: Path) -> None:
+    """Install a worktree-isolation write-guard hook into .claude/settings.json.
 
     Registers ``guard_path`` as a ``PreToolUse`` hook scoped to Edit and Write
     tools. Idempotent — calling twice does not duplicate the entry. Preserves
