@@ -23,6 +23,9 @@ logger = structlog.get_logger()
 # "-thinking" to these would produce invalid IDs.
 _EFFORT_LEVEL_SUFFIXES = frozenset({"-low", "-medium", "-high", "-xhigh", "-max"})
 
+# Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
+_NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
+
 
 class CursorAdapter(AbstractAITool):
     """Adapter for Cursor CLI (``agent`` binary).
@@ -77,8 +80,9 @@ class CursorAdapter(AbstractAITool):
         if (
             effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
             and model
+            and model not in _NO_THINKING_MODELS
             and not model.endswith("-thinking")
-            and not any(model.endswith(s) for s in _EFFORT_LEVEL_SUFFIXES)
+            and not model.endswith(tuple(_EFFORT_LEVEL_SUFFIXES))
         ):
             return f"{model}-thinking"
         return model
