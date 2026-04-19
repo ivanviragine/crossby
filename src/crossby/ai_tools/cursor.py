@@ -18,6 +18,11 @@ from crossby.models.ai import (
 
 logger = structlog.get_logger()
 
+# Cursor model IDs that already encode an effort level in their name — e.g.
+# "claude-opus-4-7-high", "claude-opus-4-7-thinking-xhigh". Appending
+# "-thinking" to these would produce invalid IDs.
+_EFFORT_LEVEL_SUFFIXES = frozenset({"-low", "-medium", "-high", "-xhigh", "-max"})
+
 
 class CursorAdapter(AbstractAITool):
     """Adapter for Cursor CLI (``agent`` binary).
@@ -64,11 +69,16 @@ class CursorAdapter(AbstractAITool):
         return ["--force"]
 
     def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
-        """For high/xhigh/max effort, append ``-thinking`` to the model ID."""
+        """For high/xhigh/max effort, append ``-thinking`` to the model ID.
+
+        Models that already encode effort (e.g. ``-high``, ``-xhigh``) or
+        thinking mode (``-thinking``) in their name are returned unchanged.
+        """
         if (
             effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
             and model
             and not model.endswith("-thinking")
+            and not any(model.endswith(s) for s in _EFFORT_LEVEL_SUFFIXES)
         ):
             return f"{model}-thinking"
         return model
