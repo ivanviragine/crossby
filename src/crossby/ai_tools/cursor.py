@@ -9,6 +9,7 @@ from typing import ClassVar
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.data import get_models_for_tool
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -76,6 +77,12 @@ class CursorAdapter(AbstractAITool):
 
         Models that already encode effort (e.g. ``-high``, ``-xhigh``) or
         thinking mode (``-thinking``) in their name are returned unchanged.
+
+        The constructed ``<model>-thinking`` ID is validated against the
+        bundled Cursor model registry. If the registry has no matching
+        entry (e.g. the model has no thinking variant, or is unknown to
+        crossby), the original ``model`` is returned unchanged so the
+        Cursor CLI receives a valid ID.
         """
         if (
             effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
@@ -84,7 +91,9 @@ class CursorAdapter(AbstractAITool):
             and not model.endswith("-thinking")
             and not model.endswith(tuple(_EFFORT_LEVEL_SUFFIXES))
         ):
-            return f"{model}-thinking"
+            candidate = f"{model}-thinking"
+            if candidate in get_models_for_tool(AIToolID.CURSOR):
+                return candidate
         return model
 
     def preserve_session_data(self, working_dir: Path, main_checkout_path: Path) -> bool:

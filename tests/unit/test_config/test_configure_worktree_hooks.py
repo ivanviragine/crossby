@@ -39,7 +39,9 @@ class TestClaudeConfigureWorktreeHooks:
         assert isinstance(pre_tool, list)
         assert len(pre_tool) == 1
         entry = pre_tool[0]
-        assert entry["matcher"] == "Edit|Write"
+        # Matcher covers Edit, Write, and NotebookEdit — .ipynb writes go
+        # through NotebookEdit and must not bypass the worktree-isolation guard.
+        assert entry["matcher"] == "Edit|Write|NotebookEdit"
         assert entry["hooks"] == [{"type": "command", "command": str(guard)}]
 
     def test_idempotent(self, tmp_path: Path) -> None:
@@ -109,8 +111,11 @@ class TestCursorConfigureWorktreeHooks:
         entry = pre_tool[0]
         assert entry["command"] == str(guard)
         assert entry["event"] == "preToolUse"
+        # Tools cover Edit, Write, and Delete — worktree isolation must
+        # also block deletions via Cursor's Delete tool.
         assert "Edit" in entry["tools"]
         assert "Write" in entry["tools"]
+        assert "Delete" in entry["tools"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
         guard = _guard(tmp_path)
