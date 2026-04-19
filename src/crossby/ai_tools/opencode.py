@@ -78,5 +78,5 @@ class OpenCodeAdapter(AbstractAITool):
 
     def effort_args(self, effort: EffortLevel) -> list[str]:
         """OpenCode uses ``--variant <level>`` (max maps to high)."""
-        mapped = "high" if effort == EffortLevel.MAX else effort.value
+        mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]

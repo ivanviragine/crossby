@@ -66,7 +66,7 @@ class CursorAdapter(AbstractAITool):
     def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
         """For high/max effort, append ``-thinking`` to the model ID."""
         if (
-            effort in (EffortLevel.HIGH, EffortLevel.MAX)
+            effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
             and model
             and not model.endswith("-thinking")
         ):

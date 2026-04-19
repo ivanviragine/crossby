@@ -18,6 +18,7 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.LOW: "low",
     EffortLevel.MEDIUM: "medium",
     EffortLevel.HIGH: "high",
+    EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
 
