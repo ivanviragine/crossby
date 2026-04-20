@@ -4,7 +4,8 @@ Each writer merges hooks from :class:`~crossby.sync.base.SyncData` (populated
 by readers or the sync wizard) into the tool's native config format using a
 non-destructive merge strategy (dedup by (event, command)):
 - New hooks are appended to the tool's hooks list.
-- Hooks with the same (event, command) are skipped (idempotent).
+- Hooks with the same (event, command) are merged — the matcher/tools list is
+  widened if the desired coverage has grown (upgrade-safe).
 - Hooks in the target but NOT in SyncData are preserved.
 """
 
@@ -81,7 +82,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
           }
         }
 
-    Dedup key: command value within any entry's inner ``hooks[]``.
+    Merge key: command value within any entry's inner ``hooks[]``.
+    When the command matches, the ``matcher`` is widened if the desired
+    tool coverage has grown (upgrade-safe).
     """
 
     tool_id = AIToolID.CLAUDE
@@ -128,8 +131,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             if not isinstance(event_list, list):
                 event_list = []
 
-            # Dedup: check if command already exists in any entry's inner hooks[]
+            # Dedup by command; widen matcher if tool coverage has grown.
             command = hook.command
+            desired_matcher = _tools_to_matcher(hook.tools or [])
             already_exists = False
             for entry in event_list:
                 if not isinstance(entry, dict):
@@ -137,20 +141,21 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 inner_hooks = entry.get("hooks")
                 if not isinstance(inner_hooks, list):
                     continue
-                for inner in inner_hooks:
-                    if isinstance(inner, dict) and inner.get("command") == command:
-                        already_exists = True
-                        break
-                    if isinstance(inner, str) and inner == command:
-                        already_exists = True
-                        break
-                if already_exists:
+                found_in_entry = any(
+                    (isinstance(inner, dict) and inner.get("command") == command)
+                    or (isinstance(inner, str) and inner == command)
+                    for inner in inner_hooks
+                )
+                if found_in_entry:
+                    already_exists = True
+                    if entry.get("matcher") != desired_matcher:
+                        entry["matcher"] = desired_matcher
+                        changed = True
                     break
 
             if not already_exists:
-                tools = hook.tools or []
                 new_entry: dict[str, Any] = {
-                    "matcher": _tools_to_matcher(tools),
+                    "matcher": desired_matcher,
                     "hooks": [{"type": "command", "command": command}],
                 }
                 event_list.append(new_entry)
@@ -194,7 +199,9 @@ class CursorHooksWriter(AbstractSyncWriter):
           ]
         }
 
-    Dedup key: ``entry.command`` within the event's array.
+    Merge key: ``entry.command`` within the event's array.
+    When the command matches, the ``tools`` list is widened if the desired
+    coverage has grown (upgrade-safe).
     """
 
     tool_id = AIToolID.CURSOR
@@ -238,19 +245,26 @@ class CursorHooksWriter(AbstractSyncWriter):
             if not isinstance(event_list, list):
                 event_list = []
 
-            # Dedup: check if command already present
+            # Dedup by command; widen tools list if coverage has grown.
             command = hook.command
-            already_exists = any(
-                isinstance(entry, dict) and entry.get("command") == command
-                for entry in event_list
-            )
+            desired_tools = _translate_tools(hook.tools or [], self.tool_id)
+            already_exists = False
+            for entry in event_list:
+                if not isinstance(entry, dict) or entry.get("command") != command:
+                    continue
+                already_exists = True
+                existing_tools: list[str] = entry.get("tools") or []
+                missing = [t for t in desired_tools if t not in existing_tools]
+                if missing:
+                    entry["tools"] = existing_tools + missing
+                    changed = True
+                break
 
             if not already_exists:
-                tools = _translate_tools(hook.tools or [], self.tool_id)
                 new_entry: dict[str, Any] = {
                     "event": event_name,
                     "command": command,
-                    "tools": tools,
+                    "tools": desired_tools,
                 }
                 event_list.append(new_entry)
                 existing[event_name] = event_list
