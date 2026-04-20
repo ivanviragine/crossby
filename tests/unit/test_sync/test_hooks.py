@@ -189,8 +189,8 @@ class TestClaudeHooksWriter:
         data = _read_json(tmp_path / ".claude" / "settings.json")
         assert len(data["hooks"]["PreToolUse"]) == 2
 
-    def test_dedup_by_command_not_matcher(self, tmp_path: Path) -> None:
-        """Same command with different tools is still a duplicate."""
+    def test_dedup_by_command_updates_matcher(self, tmp_path: Path) -> None:
+        """Same command with different tools updates the matcher (no duplicate entry)."""
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         different_tools_hook = HookEntry(
             event="pre_tool_use",
@@ -198,7 +198,12 @@ class TestClaudeHooksWriter:
             tools=["Bash"],
         )
         result = self.writer.sync(_cfg(different_tools_hook), tmp_path)
-        assert result.action == "skipped"
+        assert result.action == "updated"
+        path = tmp_path / ".claude" / "settings.json"
+        data = _read_json(path)
+        pre_tool = data["hooks"]["PreToolUse"]
+        assert len(pre_tool) == 1, "should not add a duplicate entry"
+        assert pre_tool[0]["matcher"] == "Bash"
 
     def test_updated_action_on_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".claude" / "settings.json"
@@ -208,7 +213,10 @@ class TestClaudeHooksWriter:
         assert result.action == "updated"
 
     def test_legacy_string_hook_dedup(self, tmp_path: Path) -> None:
-        """Legacy string entries in inner hooks[] are recognized as duplicates."""
+        """Legacy string entries in inner hooks[] are recognized as duplicates.
+
+        No new entry is added, but the matcher is updated if it differs.
+        """
         path = tmp_path / ".claude" / "settings.json"
         path.parent.mkdir()
         # Simulate a legacy config where the inner hooks entry is a plain string
@@ -223,9 +231,11 @@ class TestClaudeHooksWriter:
 
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
 
-        assert result.action == "skipped"
+        # Matcher widened from ".*" to "Edit|Write" — no duplicate entry added
+        assert result.action == "updated"
         data = _read_json(path)
         assert len(data["hooks"]["PreToolUse"]) == 1
+        assert data["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write"
 
 
 # ---------------------------------------------------------------------------

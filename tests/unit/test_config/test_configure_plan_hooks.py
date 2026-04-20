@@ -39,7 +39,9 @@ class TestClaudeConfigurePlanHooks:
         assert isinstance(pre_tool, list)
         assert len(pre_tool) == 1
         entry = pre_tool[0]
-        assert entry["matcher"] == "Edit|Write"
+        # Matcher covers Edit, Write, and NotebookEdit — .ipynb writes go
+        # through NotebookEdit and must not bypass the plan-mode guard.
+        assert entry["matcher"] == "Edit|Write|NotebookEdit"
         assert entry["hooks"] == [{"type": "command", "command": str(guard)}]
 
     def test_idempotent(self, tmp_path: Path) -> None:
@@ -87,6 +89,30 @@ class TestClaudeConfigurePlanHooks:
         assert "/usr/local/bin/existing" in commands
         assert str(guard) in commands
 
+    def test_upgrades_existing_matcher(self, tmp_path: Path) -> None:
+        guard = _guard(tmp_path)
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        # Simulate an older install that only had Edit|Write (missing NotebookEdit)
+        old_config = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": str(guard)}],
+                    }
+                ]
+            }
+        }
+        settings_path.write_text(json.dumps(old_config), encoding="utf-8")
+
+        claude_configure_plan_hooks(tmp_path, guard)
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        pre_tool = data["hooks"]["PreToolUse"]
+        assert len(pre_tool) == 1, "should not add a duplicate entry"
+        assert pre_tool[0]["matcher"] == "Edit|Write|NotebookEdit"
+
 
 # ---------------------------------------------------------------------------
 # Cursor
@@ -109,8 +135,11 @@ class TestCursorConfigurePlanHooks:
         entry = pre_tool[0]
         assert entry["command"] == str(guard)
         assert entry["event"] == "preToolUse"
+        # Tools cover Edit, Write, and Delete — plan mode must not allow
+        # the worktree filesystem to be mutated via Cursor's Delete tool.
         assert "Edit" in entry["tools"]
         assert "Write" in entry["tools"]
+        assert "Delete" in entry["tools"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
         guard = _guard(tmp_path)
@@ -138,6 +167,26 @@ class TestCursorConfigurePlanHooks:
         commands = [e["command"] for e in data["preToolUse"] if isinstance(e, dict)]
         assert "/usr/local/bin/existing" in commands
         assert str(guard) in commands
+
+    def test_upgrades_existing_tools(self, tmp_path: Path) -> None:
+        guard = _guard(tmp_path)
+        hooks_path = tmp_path / ".cursor" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        # Simulate an older install that only had Edit|Write (missing Delete)
+        old_config = {
+            "preToolUse": [
+                {"event": "preToolUse", "command": str(guard), "tools": ["Edit", "Write"]},
+            ]
+        }
+        hooks_path.write_text(json.dumps(old_config), encoding="utf-8")
+
+        cursor_configure_plan_hooks(tmp_path, guard)
+
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+        entries = data["preToolUse"]
+        matching = [e for e in entries if isinstance(e, dict) and e.get("command") == str(guard)]
+        assert len(matching) == 1, "should not add a duplicate entry"
+        assert "Delete" in matching[0]["tools"]
 
 
 # ---------------------------------------------------------------------------
