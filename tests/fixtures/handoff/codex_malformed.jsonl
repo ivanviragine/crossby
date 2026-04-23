@@ -1,0 +1,4 @@
+{"timestamp":"2026-03-03T16:46:21.252Z","type":"session_meta","payload":{"id":"malformed","timestamp":"2026-03-03T16:46:21.206Z","cwd":"/Users/tester/proj"}}
+{"timestamp":"2026-03-03T16:46:25.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Before bad line."}]}}
+not json at all
+{"timestamp":"2026-03-03T16:46:30.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"After bad line."}]}}

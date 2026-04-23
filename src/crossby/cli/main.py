@@ -35,6 +35,7 @@ def main(
 
 # Register subcommands
 from crossby.cli.convert import convert  # noqa: E402
+from crossby.cli.handoff import handoff  # noqa: E402
 from crossby.cli.launch import launch  # noqa: E402
 from crossby.cli.stats import stats  # noqa: E402
 from crossby.cli.sync import sync  # noqa: E402
@@ -43,6 +44,7 @@ app.command()(launch)
 app.command()(sync)
 app.command()(convert)
 app.command()(stats)
+app.command()(handoff)
 
 
 def cli_main() -> None:

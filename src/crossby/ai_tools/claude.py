@@ -10,6 +10,8 @@ from typing import Any, ClassVar
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import claude as claude_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -52,6 +54,12 @@ class ClaudeAdapter(AbstractAITool):
     def build_resume_command(self, session_id: str) -> list[str] | None:
         """Resume a Claude session: ``claude --resume <session_id>``."""
         return ["claude", "--resume", session_id]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return claude_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return claude_reader.read_session(ref)
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Claude accepts the initial message as a positional argument."""

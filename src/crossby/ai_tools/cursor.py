@@ -10,6 +10,8 @@ import structlog
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.data import get_models_for_tool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import cursor as cursor_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -59,6 +61,12 @@ class CursorAdapter(AbstractAITool):
     def initial_message_args(self, prompt: str) -> list[str]:
         """Cursor accepts the initial message as a positional argument."""
         return [prompt]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return cursor_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return cursor_reader.read_session(ref)
 
     def is_model_compatible(self, model: str) -> bool:
         """Cursor accepts all model IDs."""

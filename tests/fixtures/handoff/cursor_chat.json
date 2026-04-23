@@ -1,0 +1,7 @@
+{
+  "messages": [
+    {"role": "user", "content": "Refactor the payment flow.", "timestamp": "2026-02-10T12:00:00Z"},
+    {"role": "assistant", "content": "Reading payment.py to understand the current flow.", "timestamp": "2026-02-10T12:00:05Z"},
+    {"role": "assistant", "content": "The refactor should extract the stripe adapter.", "timestamp": "2026-02-10T12:00:15Z"}
+  ]
+}
