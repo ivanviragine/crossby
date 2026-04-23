@@ -130,7 +130,10 @@ def handoff(
         )
         raise typer.Exit(1)
 
-    summarizer_id = _parse_tool_id(summarizer_tool, "summarizer-tool") if summarizer_tool else source_id
+    if summarizer_tool:
+        summarizer_id = _parse_tool_id(summarizer_tool, "summarizer-tool")
+    else:
+        summarizer_id = source_id
     summarizer_adapter = AbstractAITool.get(summarizer_id)
     summarizer = HandoffSummarizer(summarizer_adapter, token_budget=token_budget)
 

@@ -47,10 +47,27 @@ def locate_sessions(project_path: Path) -> list[SessionRef]:
 
     refs: list[SessionRef] = []
     for json_file in sorted(encoded_dir.rglob("*.json")):
+        if not _has_chat_shape(json_file):
+            continue
         ref = _session_ref_from_file(json_file, project_path.resolve())
         if ref is not None:
             refs.append(ref)
     return refs
+
+
+def _has_chat_shape(path: Path) -> bool:
+    """Return True iff ``path`` parses as JSON with a recognisable chat shape.
+
+    Non-chat JSON files can live alongside chat files in Cursor's project
+    directory; returning them as session refs would let the latest-session
+    picker select a file whose transcript is empty. Filtering here keeps
+    the picker pointed at readable chats.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(_extract_messages(data))
 
 
 def read_session(ref: SessionRef) -> ConversationTranscript:

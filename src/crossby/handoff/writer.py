@@ -27,7 +27,7 @@ class HandoffWriter:
         return path
 
     def _default_path(self, created_at: datetime) -> Path:
-        stamp = created_at.strftime("%Y%m%dT%H%M%S")
+        stamp = created_at.strftime("%Y%m%dT%H%M%S%f")
         return self.output_dir / f"HANDOFF-{stamp}.md"
 
 
