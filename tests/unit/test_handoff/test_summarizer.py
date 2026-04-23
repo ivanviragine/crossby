@@ -138,6 +138,34 @@ def test_summarize_raises_when_output_is_unparseable() -> None:
                 )
 
 
+def test_summarize_raises_when_subprocess_times_out() -> None:
+    tool = _make_summarizer_tool()
+    summarizer = HandoffSummarizer(tool, timeout_seconds=7)
+    timeout_exc = subprocess.TimeoutExpired(cmd=["fake"], timeout=7)
+
+    with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
+        with patch("crossby.handoff.summarizer.subprocess.run", side_effect=timeout_exc):
+            with pytest.raises(SummarizerParseError, match="7s"):
+                summarizer.summarize(
+                    _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+                )
+
+
+def test_summarize_raises_when_subprocess_oserror() -> None:
+    tool = _make_summarizer_tool()
+    summarizer = HandoffSummarizer(tool)
+
+    with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
+        with patch(
+            "crossby.handoff.summarizer.subprocess.run",
+            side_effect=OSError("fork failed"),
+        ):
+            with pytest.raises(SummarizerParseError, match="fork failed"):
+                summarizer.summarize(
+                    _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+                )
+
+
 def test_summarize_raises_when_tool_exits_nonzero() -> None:
     tool = _make_summarizer_tool()
     summarizer = HandoffSummarizer(tool)

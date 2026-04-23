@@ -40,9 +40,15 @@ def truncate_transcript(
     multi-megabyte tool result), the returned transcript will be larger
     than the budget. This is preferable to returning an empty transcript,
     which the summarizer could not work with.
+
+    Raises ``ValueError`` if ``token_budget`` is not positive — callers
+    must pick a real budget; silently returning an unbounded transcript
+    would defeat the purpose of truncation.
     """
     if token_budget <= 0:
-        return transcript
+        raise ValueError(
+            f"token_budget must be positive, got {token_budget}"
+        )
 
     kept: list[ConversationTurn] = []
     running = 0

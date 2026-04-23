@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
@@ -84,3 +86,11 @@ def test_truncate_preserves_prior_truncated_flag() -> None:
     result = truncate_transcript(transcript, token_budget=1_000)
 
     assert result.truncated is True
+
+
+@pytest.mark.parametrize("bad_budget", [0, -1, -500])
+def test_truncate_rejects_non_positive_budget(bad_budget: int) -> None:
+    transcript = ConversationTranscript(session_ref=_ref(), turns=[_turn("user", "hi")])
+
+    with pytest.raises(ValueError, match="token_budget"):
+        truncate_transcript(transcript, token_budget=bad_budget)

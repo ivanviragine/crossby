@@ -80,3 +80,20 @@ def test_locate_sessions_missing_dir_is_empty(
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
     assert cursor_reader.locate_sessions(Path("/nope")) == []
+
+
+def test_locate_sessions_includes_empty_chat_file(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    project = Path("/Users/tester/proj")
+    encoded = "Users-tester-proj"
+    session_dir = fake_home / ".cursor" / "projects" / encoded
+    session_dir.mkdir(parents=True)
+    shutil.copy(fixtures_dir / "cursor_empty.json", session_dir / "empty.json")
+
+    refs = cursor_reader.locate_sessions(project)
+    assert len(refs) == 1
+    assert refs[0].session_id == "empty"

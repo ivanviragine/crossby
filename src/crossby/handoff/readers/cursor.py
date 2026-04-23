@@ -62,12 +62,29 @@ def _has_chat_shape(path: Path) -> bool:
     directory; returning them as session refs would let the latest-session
     picker select a file whose transcript is empty. Filtering here keeps
     the picker pointed at readable chats.
+
+    Structural check only: a chat file with zero messages (e.g.
+    ``{"messages": []}``) still counts as chat-shaped — the CLI handles
+    empty transcripts downstream.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return bool(_extract_messages(data))
+    if isinstance(data, dict):
+        if isinstance(data.get("messages"), list):
+            return True
+        chat = data.get("chat")
+        if isinstance(chat, dict) and isinstance(chat.get("messages"), list):
+            return True
+        chats = data.get("chats")
+        if isinstance(chats, list) and any(
+            isinstance(c, dict) and isinstance(c.get("messages"), list) for c in chats
+        ):
+            return True
+    if isinstance(data, list):
+        return all(isinstance(m, dict) for m in data)
+    return False
 
 
 def read_session(ref: SessionRef) -> ConversationTranscript:

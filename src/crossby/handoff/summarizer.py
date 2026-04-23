@@ -148,13 +148,22 @@ class HandoffSummarizer:
             tool=str(self.summarizer_tool.TOOL_ID),
             json_schema=bool(json_schema),
         )
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SummarizerParseError(
+                f"Summarizer tool timed out after {self.timeout_seconds}s."
+            ) from exc
+        except OSError as exc:
+            raise SummarizerParseError(
+                f"Summarizer tool failed to run: {exc}"
+            ) from exc
         if result.returncode != 0:
             raise SummarizerParseError(
                 f"Summarizer tool exited {result.returncode}: {result.stderr.strip()}"
