@@ -32,8 +32,11 @@ _SCAN_ORDER = [
 def detect_skills_source(root: Path) -> Path | None:
     """Find the first real (non-symlinked) skills directory.
 
-    Scans ``.claude/skills/``, ``.gemini/skills/``, ``.agents/skills/``
-    in order.  Returns None if no real skills directory exists.
+    Scans all five tool locations in order: ``.claude/skills/``,
+    ``.gemini/skills/``, ``.agents/skills/``, ``.cursor/skills/``,
+    ``.github/skills/``.  The first three are checked first (highest
+    priority); CURSOR and COPILOT are checked last.  Returns None if
+    no real skills directory exists.
     """
     for tool_id in _SCAN_ORDER:
         rel = SKILLS_DIR[tool_id]

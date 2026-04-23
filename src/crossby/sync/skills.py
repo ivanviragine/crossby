@@ -47,6 +47,14 @@ def update_skills_gitignore(
     else:
         entries = list(SKILLS_DIR.values())
 
+    # Never gitignore the canonical source directory itself.
+    source_dir = Path(data.skills_source)
+    try:
+        source_entry = source_dir.relative_to(project_root).as_posix()
+    except ValueError:
+        source_entry = source_dir.as_posix()
+    entries = [entry for entry in entries if Path(entry).as_posix() != source_entry]
+
     if not entries:
         return None
 
@@ -277,8 +285,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
 def _copy_skills_dir(source_dir: Path, target_dir: Path) -> None:
     """Copy skills directory structure from source to target (one subdir per skill)."""
-    target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(str(source_dir), str(target_dir), dirs_exist_ok=True)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    shutil.copytree(str(source_dir), str(target_dir))
 
 
 # ---------------------------------------------------------------------------
