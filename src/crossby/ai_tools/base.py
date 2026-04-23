@@ -11,7 +11,10 @@ import shutil
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from crossby.handoff.models import ConversationTranscript, SessionRef
 
 import structlog
 
@@ -24,6 +27,7 @@ from crossby.models.ai import (
     TokenUsage,
 )
 from crossby.models.config import ComplexityModelMapping
+
 
 logger = structlog.get_logger()
 
@@ -185,6 +189,26 @@ class AbstractAITool(ABC):
     def is_model_compatible(self, model: str) -> bool:
         """Check if a model ID is valid for this tool."""
         return True  # Default: allow all. Override per tool.
+
+    # Session handoff — concrete readers own per-tool cwd matching.
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        """Return all session refs this tool has recorded for ``project_path``.
+
+        Default: no handoff support — concrete adapters override.
+        """
+        raise NotImplementedError(
+            f"{self.TOOL_ID} does not support session handoff"
+        )
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        """Parse the session pointed to by ``ref`` into a ConversationTranscript.
+
+        Default: no handoff support — concrete adapters override.
+        """
+        raise NotImplementedError(
+            f"{self.TOOL_ID} does not support session handoff"
+        )
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Get CLI args to pass an initial message for an interactive session.

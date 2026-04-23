@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {"role": "user", "content": "Valid turn."},
+    {"role": "user"},
+    {"no_role": true, "content": "Should be skipped"},
+    {"role": "assistant", "content": "Another valid turn."}
+  ]
+}

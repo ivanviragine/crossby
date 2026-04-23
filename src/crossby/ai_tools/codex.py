@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import codex as codex_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -46,6 +49,12 @@ class CodexAdapter(AbstractAITool):
     def build_resume_command(self, session_id: str) -> list[str] | None:
         """Resume a Codex session: ``codex resume <session_id>``."""
         return ["codex", "resume", session_id]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return codex_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return codex_reader.read_session(ref)
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Codex accepts the initial message as a positional argument."""

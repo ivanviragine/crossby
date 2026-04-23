@@ -47,6 +47,9 @@ crossby stats /path/to/transcript.txt
 
 # Convert allowlist patterns between tools
 crossby convert "Bash(myapp:*)" --from claude --to cursor
+
+# Hand off the current session from one AI CLI to another
+crossby handoff --from claude --to codex
 ```
 
 ## Configuration
@@ -183,6 +186,46 @@ These methods are available on each adapter for programmatic use but are not exp
 | Trusted dirs | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
 | Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
 | Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
+
+## Session Handoff
+
+Carry context from one AI CLI to another without re-explaining. `crossby handoff` reads the latest session of the source tool, asks an LLM to summarize it into a structured handoff document, writes `.crossby/handoffs/HANDOFF-<timestamp>.md`, and launches the target tool with the file **path** (not content) as the initial prompt — so the handoff fits comfortably under OS argv limits regardless of transcript size.
+
+```bash
+# Most common: latest Claude session → Codex
+crossby handoff --from claude --to codex
+
+# Write the file but skip the launch (review before switching tools)
+crossby handoff --from cursor --to copilot --no-launch
+
+# Pick a specific session by id instead of the most recent one
+crossby handoff --from codex --to claude --session-id 019cb497-ec14-7453-9224
+```
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `--from` | Source tool to read the session from (claude, cursor, codex, copilot). |
+| `--to` | Target tool to launch with the handoff as its initial prompt. |
+| `--session-id` | Override the latest-session heuristic with a specific session id. |
+| `--output` | Write the handoff file to this path instead of `.crossby/handoffs/HANDOFF-<timestamp>.md`. |
+| `--no-launch` | Write the handoff file but do not launch the target. |
+| `--summarizer-tool` | Tool to run the summarization pass. Defaults to the source tool. |
+| `--token-budget` | Approximate token budget for the transcript before truncation (default `32000`). |
+| `--path` | Project root directory (default: current directory). |
+
+Run without `--from`/`--to` to use the interactive wizard, which lists installed tools and lets you pick.
+
+### Supported sources
+
+| Tool | Source (read) | Target (launch) |
+|---|---|---|
+| Claude | ✓ (`~/.claude/projects/<encoded>/<id>.jsonl`) | ✓ |
+| Cursor | ✓ (`~/.cursor/projects/<encoded>/chat.json`) | ✓ |
+| Codex | ✓ (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) | ✓ |
+| Copilot | ✓ (`~/.copilot/session-state/<id>/events.jsonl`) | ✓ |
+| Gemini, OpenCode, Antigravity, VS Code | — (not yet supported) | ✓ |
 
 ## Contributing
 
