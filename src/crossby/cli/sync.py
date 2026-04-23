@@ -60,6 +60,7 @@ def sync(
         scan_project,
         suggest_agents_source,
         suggest_rules_source,
+        suggest_skills_source,
     )
 
     project_root = path.resolve()
@@ -72,7 +73,7 @@ def sync(
         except ValueError:
             valid = ", ".join(c.value for c in SyncConcern)
             console.error(f"Unknown concern: {concern!r}. Valid values: {valid}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     # Validate from/to arguments
     source_tool: AIToolID | None = None
@@ -81,7 +82,7 @@ def sync(
             source_tool = AIToolID(from_tool)
         except ValueError:
             console.error(f"Unknown tool: {from_tool!r}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     target_tool: AIToolID | None = None
     if to_tool:
@@ -89,7 +90,7 @@ def sync(
             target_tool = AIToolID(to_tool)
         except ValueError:
             console.error(f"Unknown tool: {to_tool!r}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     if target_tool is not None and source_tool is None:
         console.error("--to requires --from; omit --to for the interactive wizard.")
@@ -104,6 +105,8 @@ def sync(
 
     if dry_run:
         console.info("Dry-run mode — no files will be written")
+
+    results: list[SyncResult] = []
 
     # Non-interactive mode: --from is specified
     if source_tool is not None:
@@ -135,6 +138,7 @@ def sync(
     console.step("Scanning configs...")
     console.detail(f"  Rules:       {scan.rules.summary}")
     console.detail(f"  Agents:      {scan.agents.summary}")
+    console.detail(f"  Skills:      {scan.skills.summary}")
     console.detail(f"  MCP:         {scan.mcp.summary}")
     console.detail(f"  Hooks:       {scan.hooks.summary}")
     console.detail(f"  Permissions: {scan.permissions.summary}")
@@ -144,6 +148,7 @@ def sync(
     has_data = any([
         scan.rules.found,
         scan.agents.found,
+        scan.skills.found,
         scan.mcp.found,
         scan.hooks.found,
         scan.permissions.found,
@@ -158,13 +163,15 @@ def sync(
     data = SyncData()
     rules_src_tool: AIToolID | None = None
     agents_src_tool: AIToolID | None = None
+    skills_src_tool: AIToolID | None = None
 
     # Rules
     if scan.rules.found and (sync_concern is None or sync_concern == SyncConcern.RULES):
+        source: AIToolID | None
         if len(scan.rules.found) > 1:
             tools = list(scan.rules.found)
             suggested = suggest_rules_source(scan.rules.found)
-            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            default_idx = tools.index(suggested) if suggested in tools else 0
             idx = prompts.select(
                 "Multiple rules files found — which is the canonical source?",
                 items=[str(t) for t in tools],
@@ -177,17 +184,18 @@ def sync(
         if source:
             source_path = scan.rules.found[source]
             other_tools = [str(t) for t in installed_tools if t != source]
-            if other_tools:
-                if prompts.confirm(f"Port rules ({source_path}) to {', '.join(other_tools)}?", default=True):
-                    data.rules_source = source_path
-                    rules_src_tool = source
+            question = f"Port rules ({source_path}) to {', '.join(other_tools)}?"
+            if other_tools and prompts.confirm(question, default=True):
+                data.rules_source = source_path
+                rules_src_tool = source
 
     # Agents
     if scan.agents.found and (sync_concern is None or sync_concern == SyncConcern.AGENTS):
+        source = None
         if len(scan.agents.found) > 1:
             tools = list(scan.agents.found)
             suggested = suggest_agents_source(scan.agents.found)
-            default_idx = tools.index(suggested) if suggested is not None and suggested in tools else 0
+            default_idx = tools.index(suggested) if suggested in tools else 0
             idx = prompts.select(
                 "Multiple agents directories found — which is the canonical source?",
                 items=[str(t) for t in tools],
@@ -200,36 +208,62 @@ def sync(
         if source:
             source_path = scan.agents.found[source]
             other_tools = [str(t) for t in installed_tools if t != source]
-            if other_tools:
-                if prompts.confirm(f"Port agents ({source_path}) to {', '.join(other_tools)}?", default=True):
-                    data.agents_source = source_path
-                    agents_src_tool = source
+            question = f"Port agents ({source_path}) to {', '.join(other_tools)}?"
+            if other_tools and prompts.confirm(question, default=True):
+                data.agents_source = source_path
+                agents_src_tool = source
+
+    # Skills
+    if scan.skills.found and (sync_concern is None or sync_concern == SyncConcern.SKILLS):
+        source = None
+        if len(scan.skills.found) > 1:
+            tools = list(scan.skills.found)
+            suggested = suggest_skills_source(scan.skills.found)
+            default_idx = tools.index(suggested) if suggested in tools else 0
+            idx = prompts.select(
+                "Multiple skills directories found — which is the canonical source?",
+                items=[str(t) for t in tools],
+                hints=[scan.skills.found[t] for t in tools],
+                default=default_idx,
+            )
+            source = tools[idx]
+        else:
+            source = suggest_skills_source(scan.skills.found)
+        if source:
+            source_path = scan.skills.found[source]
+            other_tools = [str(t) for t in installed_tools if t != source]
+            question = f"Port skills ({source_path}) to {', '.join(other_tools)}?"
+            if other_tools and prompts.confirm(question, default=True):
+                data.skills_source = source_path
+                skills_src_tool = source
 
     # MCP
     if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
         servers = discover_mcp(project_root)
-        if servers:
-            if prompts.confirm(f"Port {len(servers)} MCP server(s) to all tools?", default=True):
-                data.mcp_servers = servers
+        if servers and prompts.confirm(
+            f"Port {len(servers)} MCP server(s) to all tools?", default=True
+        ):
+            data.mcp_servers = servers
 
     # Permissions
     if scan.permissions.found and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
         patterns = discover_permissions(project_root)
-        if patterns:
-            if prompts.confirm(f"Port {len(patterns)} permission pattern(s)?", default=True):
-                data.allowed_commands = patterns
+        if patterns and prompts.confirm(
+            f"Port {len(patterns)} permission pattern(s)?", default=True
+        ):
+            data.allowed_commands = patterns
 
     # Hooks
     if scan.hooks.found and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
         hooks = discover_hooks(project_root)
-        if hooks:
-            if prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
-                data.hooks = hooks
+        if hooks and prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
+            data.hooks = hooks
 
     # Check if user confirmed anything
     has_sync = any([
         data.rules_source,
         data.agents_source,
+        data.skills_source,
         data.mcp_servers,
         data.allowed_commands,
         data.hooks,
@@ -241,7 +275,7 @@ def sync(
     # Execute per-concern to avoid writing back to the source tool.
     # Rules and agents have an explicit source; exclude it from their targets.
     # MCP, permissions, and hooks are merged from all tools — write to all.
-    results: list[SyncResult] = []
+    results = []
     if data.rules_source and (sync_concern is None or sync_concern == SyncConcern.RULES):
         rules_targets = [t for t in installed_tools if t != rules_src_tool]
         results += run_sync(data, project_root, concern=SyncConcern.RULES,
@@ -250,6 +284,10 @@ def sync(
         agents_targets = [t for t in installed_tools if t != agents_src_tool]
         results += run_sync(data, project_root, concern=SyncConcern.AGENTS,
                             dry_run=dry_run, force=force, installed_tools=agents_targets)
+    if data.skills_source and (sync_concern is None or sync_concern == SyncConcern.SKILLS):
+        skills_targets = [t for t in installed_tools if t != skills_src_tool]
+        results += run_sync(data, project_root, concern=SyncConcern.SKILLS,
+                            dry_run=dry_run, force=force, installed_tools=skills_targets)
     if data.mcp_servers and (sync_concern is None or sync_concern == SyncConcern.MCP):
         results += run_sync(data, project_root, concern=SyncConcern.MCP,
                             dry_run=dry_run, force=force, installed_tools=installed_tools)
@@ -274,7 +312,7 @@ def sync(
         raise typer.Exit(1)
 
 
-def _display_results(results: list["SyncResult"]) -> None:
+def _display_results(results: list[SyncResult]) -> None:
     """Display sync results in a Rich table."""
     from rich.table import Table
 

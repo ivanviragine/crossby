@@ -14,10 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from crossby.config.skills import _SCAN_ORDER as _SKILLS_SCAN_ORDER
+from crossby.config.skills import SKILLS_DIR, count_skills
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync.base import SyncData
-
 
 # ---------------------------------------------------------------------------
 # Rules reader
@@ -109,6 +110,41 @@ def suggest_agents_source(found: dict[AIToolID, str]) -> AIToolID | None:
     if not found:
         return None
     for tool_id in _AGENTS_PRIORITY:
+        if tool_id in found:
+            return tool_id
+    return next(iter(found))
+
+
+# ---------------------------------------------------------------------------
+# Skills reader
+# ---------------------------------------------------------------------------
+
+# _SKILLS_SCAN_ORDER is imported from config.skills._SCAN_ORDER.
+# The order matters: CLAUDE → GEMINI → CODEX → CURSOR → COPILOT.
+# CLAUDE is preferred as the canonical source when multiple tools have skills dirs.
+# CURSOR and COPILOT are last since they are usually the symlink targets, not sources.
+
+
+def detect_skills(project_root: Path) -> dict[AIToolID, str]:
+    """Find existing skills directories across all tools.
+
+    Returns a dict of tool → relative directory path for each tool that has one.
+    Distinct from config.skills.detect_skills_source(), which returns a single
+    absolute Path | None for the non-symlinked source.
+    """
+    found: dict[AIToolID, str] = {}
+    for tool_id, rel_path in SKILLS_DIR.items():
+        path = project_root / rel_path
+        if path.is_dir():
+            found[tool_id] = rel_path
+    return found
+
+
+def suggest_skills_source(found: dict[AIToolID, str]) -> AIToolID | None:
+    """Suggest which tool's skills directory should be the canonical source."""
+    if not found:
+        return None
+    for tool_id in _SKILLS_SCAN_ORDER:
         if tool_id in found:
             return tool_id
     return next(iter(found))
@@ -335,7 +371,11 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
             if not isinstance(entry, dict) or "command" not in entry:
                 continue
             tools_raw = entry.get("tools", [])
-            tools = [_reverse_tool_name(t) for t in tools_raw] if isinstance(tools_raw, list) else []
+            tools = (
+                [_reverse_tool_name(t) for t in tools_raw]
+                if isinstance(tools_raw, list)
+                else []
+            )
             result.append(HookEntry(
                 event=canonical_event,
                 command=entry["command"],
@@ -490,6 +530,7 @@ class ProjectScan:
     installed_tools: list[AIToolID]
     rules: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     agents: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
+    skills: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     mcp: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     permissions: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     hooks: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
@@ -515,6 +556,15 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
         count = sum(1 for _ in dir_path.glob("*.md")) if dir_path.is_dir() else 0
         agents_details[tool_id] = f"{rel_path} ({count} file{'s' if count != 1 else ''})"
     agents_summary = ", ".join(agents_details.values()) if agents_details else "none found"
+
+    # Skills — count_skills reuses the same SKILL.md-bearing-subdir logic as detection.py
+    skills_found = detect_skills(project_root)
+    skills_details: dict[AIToolID, str] = {}
+    for tool_id, rel_path in skills_found.items():
+        dir_path = project_root / rel_path
+        n = count_skills(dir_path)
+        skills_details[tool_id] = f"{rel_path} ({n} skill{'s' if n != 1 else ''})"
+    skills_summary = ", ".join(skills_details.values()) if skills_details else "none found"
 
     # MCP — scan per tool
     from crossby.sync.mcp_discovery import discover_mcp_servers
@@ -562,6 +612,7 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
         installed_tools=installed_tools,
         rules=ConcernScan(found=rules_found, summary=rules_summary),
         agents=ConcernScan(found=dict(agents_found), summary=agents_summary),
+        skills=ConcernScan(found=dict(skills_found), summary=skills_summary),
         mcp=ConcernScan(found=dict(mcp_by_tool), summary=mcp_summary),
         permissions=ConcernScan(found=dict(perm_by_tool), summary=perm_summary),
         hooks=ConcernScan(found=dict(hooks_by_tool), summary=hooks_summary),
@@ -602,6 +653,16 @@ def build_sync_data(
         if source_tool:
             agents_source = agents_found[source_tool]
 
+    # Skills
+    skills_found = detect_skills(project_root)
+    skills_source: str | None = None
+    if from_tool and from_tool in skills_found:
+        skills_source = skills_found[from_tool]
+    elif not from_tool and skills_found:
+        source_tool = suggest_skills_source(skills_found)
+        if source_tool:
+            skills_source = skills_found[source_tool]
+
     # MCP, permissions, hooks
     mcp_servers = discover_mcp(project_root, from_tool=from_tool)
     allowed_commands = discover_permissions(project_root, from_tool=from_tool)
@@ -610,6 +671,7 @@ def build_sync_data(
     return SyncData(
         rules_source=rules_source,
         agents_source=agents_source,
+        skills_source=skills_source,
         mcp_servers=mcp_servers,
         allowed_commands=allowed_commands,
         hooks=hooks,
