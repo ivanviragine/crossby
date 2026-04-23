@@ -10,7 +10,6 @@ from typer.testing import CliRunner
 
 from crossby.cli.main import app
 
-
 runner = CliRunner()
 
 
@@ -146,3 +145,119 @@ class TestSyncCommandPermissions:
         cursor_config = project_with_claude_perms / ".cursor" / "cli.json"
         data = json.loads(cursor_config.read_text())
         assert data["permissions"]["allow"].count("Shell(myapp:*)") == 1
+
+
+@pytest.fixture()
+def project_with_claude_skills(tmp_path: Path) -> Path:
+    """A project directory with Claude skills as source."""
+    skills_dir = tmp_path / ".claude" / "skills"
+    skills_dir.mkdir(parents=True)
+    skill = skills_dir / "my-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# my-skill\n", encoding="utf-8")
+    return tmp_path
+
+
+class TestSyncCommandSkills:
+    def test_sync_skills_from_claude_to_cursor(
+        self, project_with_claude_skills: Path
+    ) -> None:
+        """crossby sync skills --from claude --to cursor creates symlink."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync", "skills",
+                    "--from", "claude",
+                    "--to", "cursor",
+                    "--path", str(project_with_claude_skills),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        cursor_skills = project_with_claude_skills / ".cursor" / "skills"
+        assert cursor_skills.is_symlink()
+
+    def test_sync_skills_concern_filter_non_interactive(
+        self, project_with_claude_skills: Path
+    ) -> None:
+        """--concern skills filters to only skills writers."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync", "skills",
+                    "--from", "claude",
+                    "--path", str(project_with_claude_skills),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert (project_with_claude_skills / ".cursor" / "skills").is_symlink()
+
+    def test_sync_skills_dry_run(self, project_with_claude_skills: Path) -> None:
+        """--dry-run does not create skill symlinks."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync", "skills",
+                    "--from", "claude",
+                    "--to", "cursor",
+                    "--dry-run",
+                    "--path", str(project_with_claude_skills),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert not (project_with_claude_skills / ".cursor" / "skills").exists()
+
+    def test_sync_skills_idempotent(self, project_with_claude_skills: Path) -> None:
+        """Running sync skills twice is a no-op on second run."""
+        for _ in range(2):
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                    lambda: ["claude", "cursor"],
+                )
+                result = runner.invoke(
+                    app,
+                    [
+                        "sync", "skills",
+                        "--from", "claude",
+                        "--to", "cursor",
+                        "--path", str(project_with_claude_skills),
+                    ],
+                )
+            assert result.exit_code == 0, result.output
+
+        target = project_with_claude_skills / ".cursor" / "skills"
+        assert target.is_symlink()
+
+    def test_wizard_shows_skills_in_scan_output(
+        self, project_with_claude_skills: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wizard mode shows Skills line in scan output."""
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        monkeypatch.setattr("crossby.ui.prompts.confirm", lambda *a, **kw: False)
+        result = runner.invoke(
+            app,
+            ["sync", "--path", str(project_with_claude_skills)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Skills:" in result.output

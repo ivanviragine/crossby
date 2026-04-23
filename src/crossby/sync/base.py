@@ -21,6 +21,7 @@ class SyncConcern(StrEnum):
     RULES = "rules"
     MCP = "mcp"
     AGENTS = "agents"
+    SKILLS = "skills"
     HOOKS = "hooks"
 
 
@@ -42,6 +43,11 @@ class SyncData:
     agents_source: str | None = None  # relative path to canonical agents directory
     agents_strategy: Literal["symlink", "copy"] = "symlink"
     agents_gitignore: bool = True
+
+    # Skills concern
+    skills_source: str | None = None  # relative path to canonical skills directory
+    skills_strategy: Literal["symlink", "copy"] = "symlink"
+    skills_gitignore: bool = True
 
     # MCP servers concern
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)

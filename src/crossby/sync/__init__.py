@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from crossby.models.ai import AIToolID
-from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
 from crossby.sync.agents import (
     ClaudeAgentsWriter,
     CodexAgentsWriter,
@@ -14,18 +13,19 @@ from crossby.sync.agents import (
     GeminiAgentsWriter,
     update_agents_gitignore,
 )
+from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
+from crossby.sync.hooks import (
+    ClaudeHooksWriter,
+    CopilotHooksWriter,
+    CursorHooksWriter,
+    GeminiHooksWriter,
+)
 from crossby.sync.mcp import (
     ClaudeMCPWriter,
     CodexMCPWriter,
     CopilotMCPWriter,
     CursorMCPWriter,
     GeminiMCPWriter,
-)
-from crossby.sync.hooks import (
-    ClaudeHooksWriter,
-    CopilotHooksWriter,
-    CursorHooksWriter,
-    GeminiHooksWriter,
 )
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
@@ -39,6 +39,14 @@ from crossby.sync.rules import (
     CursorRulesWriter,
     GeminiRulesWriter,
     update_rules_gitignore,
+)
+from crossby.sync.skills import (
+    ClaudeSkillsWriter,
+    CodexSkillsWriter,
+    CopilotSkillsWriter,
+    CursorSkillsWriter,
+    GeminiSkillsWriter,
+    update_skills_gitignore,
 )
 
 # Global default registry — one writer per (tool, concern) pair.
@@ -65,6 +73,11 @@ _registry.register(ClaudeHooksWriter())
 _registry.register(CursorHooksWriter())
 _registry.register(CopilotHooksWriter())
 _registry.register(GeminiHooksWriter())
+_registry.register(ClaudeSkillsWriter())
+_registry.register(CursorSkillsWriter())
+_registry.register(CodexSkillsWriter())
+_registry.register(GeminiSkillsWriter())
+_registry.register(CopilotSkillsWriter())
 
 
 def run_sync(
@@ -114,10 +127,11 @@ def run_sync(
     results: list[SyncResult] = []
     agents_writers_ran = False
     rules_writers_ran = False
+    skills_writers_ran = False
     for writer in writers:
         try:
             result = writer.sync(data, project_root, dry_run=dry_run, force=force)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             result = SyncResult(
                 tool_id=writer.tool_id,
                 concern=writer.concern,
@@ -129,6 +143,8 @@ def run_sync(
             agents_writers_ran = True
         if writer.concern == SyncConcern.RULES:
             rules_writers_ran = True
+        if writer.concern == SyncConcern.SKILLS:
+            skills_writers_ran = True
 
     # After all agents writers, update .gitignore managed block once.
     # Skip when a specific tool filter is active to avoid cross-tool side effects
@@ -154,14 +170,25 @@ def run_sync(
         if gi_result is not None:
             results.append(gi_result)
 
+    # After all skills writers, update .gitignore managed block once.
+    if skills_writers_ran and tool_id is None:
+        gi_result = update_skills_gitignore(
+            data,
+            project_root,
+            dry_run=dry_run,
+            installed_tools=installed_tools,
+        )
+        if gi_result is not None:
+            results.append(gi_result)
+
     return results
 
 
 __all__ = [
-    "run_sync",
     "SyncConcern",
     "SyncData",
     "SyncRegistry",
     "SyncResult",
     "_registry",
+    "run_sync",
 ]
