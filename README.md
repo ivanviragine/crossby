@@ -42,6 +42,12 @@ Requires Python 3.11+.
 ## Quick start
 
 ```bash
+# Don't know where to start? Run crossby with no args for an interactive menu.
+crossby
+
+# Scaffold a .crossby.yml with your defaults (launch, sync, handoff).
+crossby init
+
 # Sync your setup to every installed tool (replace codex with claude, cursor, gemini, copilot…)
 crossby sync --from codex
 
@@ -60,6 +66,8 @@ crossby handoff --from claude --to codex
 # Parse a session transcript for token usage
 crossby stats /path/to/transcript.txt
 ```
+
+Every command with missing arguments drops into a "Proceed / Change X" review so you can accept the resolved defaults with one keystroke or tweak any single value before it runs.
 
 ## What gets synced
 
@@ -103,7 +111,7 @@ Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the
 
 ## Optional: `.crossby.yml`
 
-Drop a `.crossby.yml` in your project root to set defaults and save launch profiles:
+Run `crossby init` to scaffold this file interactively, or hand-author it to set defaults and save launch profiles:
 
 ```yaml
 version: 1
@@ -122,11 +130,21 @@ profiles:
     tool: cursor
     model: haiku
     effort: low
+
+sync_defaults:                    # fed into `crossby sync`
+  from: claude
+  to: cursor
+
+handoff_defaults:                 # fed into `crossby handoff`
+  from: claude
+  to: codex
+  prompt_preset: default
+  token_budget: 32000
 ```
 
 Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
 
-`crossby sync` does **not** require this file — it reads directly from each tool's standard paths. The config is only consulted by `crossby launch` for defaults and profiles.
+`sync_defaults` and `handoff_defaults` feed the interactive prompts for those commands — CLI flags still win, and you always get the "Proceed / Change X" review before anything runs. `crossby sync` does **not** require this file — it reads directly from each tool's standard paths.
 
 ## Supported tools
 

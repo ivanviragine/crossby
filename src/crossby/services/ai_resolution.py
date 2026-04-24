@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import structlog
 
@@ -228,100 +229,100 @@ def confirm_ai_selection(
     """Interactively confirm (and optionally change) the resolved AI tool/model/effort/yolo.
 
     Fires only when stdin is a TTY and at least one of the flags was not
-    explicitly provided by the caller.  When all flags are explicit, this
+    explicitly provided by the caller. When all flags are explicit, this
     is a no-op.
 
     Returns the (tool, model, effort, yolo) tuple after any user-driven changes.
     """
-    from crossby.ui import prompts
-    from crossby.ui.console import console
+    from crossby.services.confirm import ConfirmField, confirm_defaults
 
-    # Skip when non-TTY, no tool resolved, or all flags were explicit.
-    all_explicit = tool_explicit and model_explicit and effort_explicit and yolo_explicit
-    if not prompts.is_tty() or resolved_tool is None or all_explicit:
+    # No tool resolved → nothing to confirm; the caller handles the error.
+    if resolved_tool is None:
         return resolved_tool, resolved_model, resolved_effort, resolved_yolo
 
-    tool = resolved_tool
-    model = resolved_model
-    effort = resolved_effort
-    yolo = resolved_yolo
+    installed = AbstractAITool.detect_installed()
 
-    while True:
-        # Build menu dynamically based on which flags were NOT explicit.
-        menu_items: list[str] = ["Proceed"]
-        installed = AbstractAITool.detect_installed()
-        can_change_tool = not tool_explicit and len(installed) > 1
-        if can_change_tool:
-            menu_items.append("Change AI tool")
-        if not model_explicit:
-            menu_items.append("Change model")
-
-        # Show "Change effort" only when the tool supports it
-        tool_supports_effort = False
-        tool_supports_yolo = False
+    def _caps_for(tool_value: str | None) -> tuple[bool, bool]:
+        """Return ``(supports_effort, supports_yolo)`` for *tool_value*."""
+        if not tool_value:
+            return False, False
         try:
-            adapter = AbstractAITool.get(AIToolID(tool))
-            caps = adapter.capabilities()
-            tool_supports_effort = caps.supports_effort
-            tool_supports_yolo = caps.supports_yolo
+            adapter = AbstractAITool.get(AIToolID(tool_value))
         except (ValueError, KeyError):
-            pass
-        if not effort_explicit and tool_supports_effort:
-            menu_items.append("Change effort")
-        if not yolo_explicit and tool_supports_yolo:
-            label = "Turn off YOLO mode" if yolo else "Turn on YOLO mode"
-            menu_items.append(label)
+            return False, False
+        caps = adapter.capabilities()
+        return caps.supports_effort, caps.supports_yolo
 
-        # No actionable changes available → let the caller print the final state.
-        if len(menu_items) == 1:
-            break
+    def _tool_change(current: Any, state: dict[str, Any]) -> dict[str, Any]:
+        tool_names = [str(t) for t in installed]
+        current_idx = tool_names.index(current) if current in tool_names else 0
+        new_idx = _select_tool(tool_names, current_idx)
+        new_tool = tool_names[new_idx]
+        if new_tool == current:
+            return {"tool": current}
+        new_model = _prompt_model_selection(new_tool)
+        supports_effort, supports_yolo = _caps_for(new_tool)
+        updates: dict[str, Any] = {"tool": new_tool, "model": new_model}
+        if state.get("effort") is not None and not supports_effort:
+            updates["effort"] = None
+        if state.get("yolo") and not supports_yolo:
+            updates["yolo"] = False
+        return updates
 
-        # Display current selection before prompting so the user knows
-        # what they're about to confirm or change.
-        console.kv("AI tool", tool)
-        if model:
-            console.kv("Model", model)
-        if effort:
-            console.kv("Effort", effort.value)
-        if yolo:
-            console.kv("YOLO mode", "on")
+    def _model_change(_current: Any, state: dict[str, Any]) -> dict[str, Any]:
+        return {"model": _prompt_model_selection(state["tool"])}
 
-        idx = prompts.select("Confirm AI selection", menu_items)
-        choice = menu_items[idx]
+    def _effort_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"effort": _prompt_effort_selection(current)}
 
-        if choice == "Proceed":
-            break
+    def _yolo_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"yolo": not bool(current)}
 
-        if choice == "Change AI tool":
-            tool_names = [str(t) for t in installed]
-            current_idx = tool_names.index(tool) if tool in tool_names else 0
-            new_idx = prompts.select("Select AI tool", tool_names, default=current_idx)
-            new_tool = tool_names[new_idx]
-            if new_tool != tool:
-                tool = new_tool
-                model = _prompt_model_selection(tool)
-                # Clear stale effort/yolo when the new tool doesn't support them.
-                try:
-                    new_adapter = AbstractAITool.get(AIToolID(tool))
-                    new_caps = new_adapter.capabilities()
-                    if effort is not None and not new_caps.supports_effort:
-                        effort = None
-                    if yolo and not new_caps.supports_yolo:
-                        yolo = False
-                except (ValueError, KeyError):
-                    effort = None
-                    yolo = False
+    fields = [
+        ConfirmField(
+            name="tool",
+            label="AI tool",
+            current_value=resolved_tool,
+            explicit=tool_explicit or len(installed) <= 1,
+            change_fn=_tool_change,
+            menu_label=lambda _v: "Change AI tool",
+        ),
+        ConfirmField(
+            name="model",
+            label="Model",
+            current_value=resolved_model,
+            explicit=model_explicit,
+            change_fn=_model_change,
+        ),
+        ConfirmField(
+            name="effort",
+            label="Effort",
+            current_value=resolved_effort,
+            explicit=effort_explicit,
+            change_fn=_effort_change,
+            visible_when=lambda state: _caps_for(state.get("tool"))[0],
+            render_value=lambda v: v.value if v else None,
+        ),
+        ConfirmField(
+            name="yolo",
+            label="YOLO mode",
+            current_value=resolved_yolo,
+            explicit=yolo_explicit,
+            change_fn=_yolo_change,
+            visible_when=lambda state: _caps_for(state.get("tool"))[1],
+            render_value=lambda v: "on" if v else None,
+            menu_label=lambda v: "Turn off YOLO mode" if v else "Turn on YOLO mode",
+        ),
+    ]
 
-        elif choice == "Change model":
-            model = _prompt_model_selection(tool)
+    result = confirm_defaults(fields, title="Confirm AI selection")
+    return result["tool"], result["model"], result["effort"], result["yolo"]
 
-        elif choice == "Change effort":
-            effort = _prompt_effort_selection(effort)
 
-        elif choice in ("Turn on YOLO mode", "Turn off YOLO mode"):
-            yolo = not yolo
+def _select_tool(tool_names: list[str], current_idx: int) -> int:
+    from crossby.ui import prompts
 
-    return tool, model, effort, yolo
+    return prompts.select("Select AI tool", tool_names, default=current_idx)
 
 
 def _prompt_model_selection(tool: str) -> str | None:
