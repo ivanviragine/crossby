@@ -79,6 +79,7 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_yolo: bool = False
     supports_resume: bool = False
     supports_trusted_dirs: bool = False
+    supports_plan_mode: bool = False
 
 
 class TokenUsage(BaseModel):

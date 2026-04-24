@@ -15,6 +15,9 @@ def launch(
     model: str | None = typer.Option(None, "--model", "-m", help="Model to use."),
     effort: str | None = typer.Option(None, "--effort", "-e", help="Effort level."),
     yolo: bool | None = typer.Option(None, "--yolo", help="Skip permission prompts."),
+    plan: bool = typer.Option(
+        False, "--plan", help="Start in the tool's native plan/approval mode."
+    ),
     command: str | None = typer.Option(
         None, "--command", "-c", help="Command name for config lookup."
     ),
@@ -201,6 +204,10 @@ def launch(
         console.error(f"{caps.display_name} does not support --trusted-dir.")
         raise typer.Exit(1)
 
+    if plan and not caps.supports_plan_mode:
+        console.error(f"{caps.display_name} does not support --plan.")
+        raise typer.Exit(1)
+
     # Display selection
     console.kv("AI tool", caps.display_name)
     if resolved_model:
@@ -209,6 +216,8 @@ def launch(
         console.kv("Effort", resolved_effort.value)
     if resolved_yolo:
         console.kv("YOLO mode", "on")
+    if plan:
+        console.kv("Plan mode", "on")
     console.empty()
 
     # Deliver prompt if tool doesn't support initial messages
@@ -232,6 +241,7 @@ def launch(
         trusted_dirs=normalized_trusted_dirs,
         effort=resolved_effort,
         yolo=resolved_yolo,
+        plan_mode=plan,
     )
 
     if exit_code != 0:

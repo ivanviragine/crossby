@@ -56,6 +56,7 @@ class CursorAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_yolo=True,
+            supports_plan_mode=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:

@@ -33,6 +33,7 @@ class CopilotAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            supports_plan_mode=True,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
@@ -57,6 +58,10 @@ class CopilotAdapter(AbstractAITool):
     def is_model_compatible(self, model: str) -> bool:
         """Copilot accepts all model IDs."""
         return True
+
+    def plan_mode_args(self) -> list[str]:
+        """Copilot supports ``--plan`` (GA'd Jan 2026)."""
+        return ["--plan"]
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Copilot uses --add-dir for plan directory access."""

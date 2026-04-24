@@ -137,6 +137,7 @@ class AbstractAITool(ABC):
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
+        plan_mode: bool = False,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -167,6 +168,7 @@ class AbstractAITool(ABC):
         cmd = self.build_launch_command(
             model=model,
             initial_message=prompt,
+            plan_mode=plan_mode,
             trusted_dirs=trusted_dirs,
             effort=effort,
             allowed_commands=allowed_commands,
