@@ -240,6 +240,14 @@ def confirm_ai_selection(
     if resolved_tool is None:
         return resolved_tool, resolved_model, resolved_effort, resolved_yolo
 
+    # Preserve non-interactive and all-explicit fast paths before any adapter
+    # detection, since detect_installed() probes every registered tool.
+    if not os.isatty(0):
+        return resolved_tool, resolved_model, resolved_effort, resolved_yolo
+
+    if tool_explicit and model_explicit and effort_explicit and yolo_explicit:
+        return resolved_tool, resolved_model, resolved_effort, resolved_yolo
+
     installed = AbstractAITool.detect_installed()
 
     def _caps_for(tool_value: str | None) -> tuple[bool, bool]:

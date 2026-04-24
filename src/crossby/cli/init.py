@@ -148,9 +148,17 @@ def _build_review_fields(
     """Build ConfirmFields for the final review step."""
     from crossby.services.confirm import ConfirmField
 
+    tool_field_titles = {
+        "sync_from": "Sync default source",
+        "sync_to": "Sync default target",
+        "handoff_from": "Handoff default source",
+        "handoff_to": "Handoff default target",
+    }
+
     def _tool_change_fn(field_name: str) -> Any:
         def _change(_current: Any, _state: dict[str, Any]) -> dict[str, Any]:
-            return {field_name: _pick_tool_or_none(f"Change {field_name}", tool_names)}
+            prompt_title = tool_field_titles.get(field_name, field_name)
+            return {field_name: _pick_tool_or_none(prompt_title, tool_names)}
 
         return _change
 

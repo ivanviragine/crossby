@@ -106,7 +106,7 @@ def sync(
     target_tool = resolve_sync_to(to_tool, config)
     sync_concern = resolve_sync_concern(concern, config)
 
-    if target_tool is not None and source_tool is None:
+    if to_explicit and not from_explicit:
         console.error("--to requires --from; omit --to for the interactive wizard.")
         raise typer.Exit(1)
 
@@ -133,8 +133,10 @@ def sync(
 
     results: list[SyncResult] = []
 
-    # Non-interactive mode: --from is specified
-    if source_tool is not None:
+    # Non-interactive mode: --from is specified on the CLI. A config default
+    # alone does *not* bypass the per-concern wizard — only an explicit --from
+    # (or an explicit change via the confirm-defaults loop) does.
+    if from_explicit and source_tool is not None:
         data = build_sync_data(project_root, from_tool=source_tool)
         target_tools = (
             [target_tool]
@@ -390,7 +392,7 @@ def _confirm_sync_defaults(
             current_value=source_tool,
             explicit=from_explicit,
             change_fn=_change_from,
-            render_value=lambda v: str(v) if v is not None else "(auto)",
+            render_value=lambda v: str(v) if v is not None else "(choose in wizard)",
         ),
         ConfirmField(
             name="to",
