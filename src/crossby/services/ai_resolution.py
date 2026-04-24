@@ -247,15 +247,6 @@ def confirm_ai_selection(
     yolo = resolved_yolo
 
     while True:
-        # Display current selection
-        console.kv("AI tool", tool)
-        if model:
-            console.kv("Model", model)
-        if effort:
-            console.kv("Effort", effort.value)
-        if yolo:
-            console.kv("YOLO mode", "on")
-
         # Build menu dynamically based on which flags were NOT explicit.
         menu_items: list[str] = ["Proceed"]
         installed = AbstractAITool.detect_installed()
@@ -281,8 +272,19 @@ def confirm_ai_selection(
             label = "Turn off YOLO mode" if yolo else "Turn on YOLO mode"
             menu_items.append(label)
 
+        # No actionable changes available → let the caller print the final state.
         if len(menu_items) == 1:
             break
+
+        # Display current selection before prompting so the user knows
+        # what they're about to confirm or change.
+        console.kv("AI tool", tool)
+        if model:
+            console.kv("Model", model)
+        if effort:
+            console.kv("Effort", effort.value)
+        if yolo:
+            console.kv("YOLO mode", "on")
 
         idx = prompts.select("Confirm AI selection", menu_items)
         choice = menu_items[idx]
