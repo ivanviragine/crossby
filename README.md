@@ -1,23 +1,33 @@
 # crossby
 
-**One config. Every AI tool** — sync rules, permissions, MCP servers, hooks, and agents across Claude, Copilot, Gemini, Codex, Cursor, and more.
+**One config. Every AI tool.**
 
-## See it in action
-
-You've set up Claude with custom instructions, agents, and permissions. Now share it everywhere:
+Stop re-writing your rules, permissions, and agents for every CLI. `crossby` syncs them across Claude, Copilot, Gemini, Codex, Cursor, OpenCode, VS Code, and Antigravity — and lets you hand off a live session from one tool to another without losing context.
 
 ```
-$ crossby sync --from claude  # output illustrative — actual output is a Rich table
+$ crossby sync --from codex
 
-✓  CLAUDE.md         → .cursorrules              (symlinked)
-✓  CLAUDE.md         → GEMINI.md                 (symlinked)
-✓  CLAUDE.md         → AGENTS.md                 (symlinked)
-✓  .claude/settings.json permissions → .cursor/cli.json  (converted)
+✓  rules         AGENTS.md         →  CLAUDE.md, GEMINI.md, .cursorrules, +1 more
+✓  agents        .agents/          →  .claude/agents/, .cursor/agents/, +2 more
+✓  skills        .agents/skills/   →  .claude/skills/, .cursor/skills/, +2 more
+✓  permissions                     →  translated for Claude, Cursor, Gemini
+✓  hooks                           →  written for Claude, Cursor, Copilot, Gemini
+✓  mcp servers                     →  merged into Claude, Cursor, Codex, Copilot, Gemini
 ```
 
-Every tool now shares the same instructions and configs — automatically kept in sync.
+Already on Claude? `crossby sync --from claude` works the same way — any tool can be the source.
 
-## Installation
+---
+
+## Why crossby?
+
+- **Every new tool inherits your setup.** Install a new AI CLI tomorrow and one `crossby sync` gives it your rules, agents, permissions, hooks, and MCP servers — translated into whatever format that tool expects.
+- **Pick any tool as your source.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, Copilot instructions — whatever you already write in becomes canonical. No migration, no lock-in.
+- **One set of launch flags for every tool.** `--model`, `--effort`, `--yolo`, `--plan`, `--resume` — crossby handles the per-tool translation. Unsupported flags raise errors instead of silently disappearing.
+- **Cross-tool session handoff.** Mid-session in one CLI and want to continue in another? `crossby handoff` summarizes the transcript and hands it off — so you never re-explain what you're doing.
+- **Stateless by default.** Works without a config file: `crossby sync` reads directly from each tool's standard paths. Drop in a `.crossby.yml` only when you want saved profiles or defaults.
+
+## Install
 
 ```bash
 pip install crossby
@@ -27,34 +37,73 @@ uv tool install crossby
 pipx install crossby
 ```
 
-## Quick Start
+Requires Python 3.11+.
+
+## Quick start
 
 ```bash
-# Sync configs from Claude to all installed tools
-crossby sync --from claude
+# Sync your setup to every installed tool (replace codex with claude, cursor, gemini, copilot…)
+crossby sync --from codex
 
-# Sync interactively (wizard mode — review before applying)
+# Or launch the interactive wizard
 crossby sync
 
-# Launch an AI tool with resolved config
-crossby launch --tool claude --model claude-sonnet-4.6
+# Launch a saved profile (e.g. Claude + Sonnet + high effort + YOLO — see below)
+crossby launch ccyolo
 
-# Show resolved configuration
-crossby config show
+# …or spell it out with unified flags
+crossby launch --tool claude --model claude-sonnet-4.6 --effort high --yolo
 
-# Parse session transcript for token usage
-crossby stats /path/to/transcript.txt
-
-# Convert allowlist patterns between tools
-crossby convert "Bash(myapp:*)" --from claude --to cursor
-
-# Hand off the current session from one AI CLI to another
+# Hand the current session off to another tool
 crossby handoff --from claude --to codex
+
+# Parse a session transcript for token usage
+crossby stats /path/to/transcript.txt
 ```
 
-## Configuration
+## What gets synced
 
-Add a `.crossby.yml` to your project root to configure defaults:
+| Config      | Strategy | Notes                                                                                        |
+| ----------- | -------- | -------------------------------------------------------------------------------------------- |
+| Rules       | Symlink  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md` |
+| Agents      | Symlink  | Each tool's agents directory ↔ equivalent per tool                                           |
+| Skills      | Symlink  | `.claude/skills/` ↔ `.agents/skills/` ↔ `.gemini/skills/` ↔ `.cursor/skills/` ↔ `.github/skills/` |
+| Permissions | Convert  | Canonical ↔ `Bash()` / `Shell()` / `shell()` format per tool                                 |
+| Hooks       | Write    | Per-tool native hook schema                                                                  |
+| MCP servers | Merge    | Source tool's MCP config → each target tool's MCP config                                     |
+
+Before writing anything, `crossby sync` scans the source tool and shows a plan — what it can port, what it can't, and why. Use `--dry-run` to preview without applying.
+
+> Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool.
+
+## Session handoff
+
+```bash
+# Hand off the latest session from the source tool
+crossby handoff --from claude --to codex
+
+# Or pick a specific session by id
+crossby handoff --from claude --to codex --session-id 019cb497-ec14-7453-9224
+
+# Write the handoff file but don't launch — review before switching tools
+crossby handoff --from cursor --to copilot --no-launch
+
+# Use the bundled Claude Code "compact" prompt instead of the default summary
+crossby handoff --from claude --to codex --prompt-preset cc-compact
+
+# Or supply your own summarization prompt
+crossby handoff --from claude --to codex --prompt ./my-prompt.md
+```
+
+`crossby` reads the chosen session from the source tool, asks an LLM to summarize it into a structured handoff document, writes it to `.crossby/handoffs/HANDOFF-<timestamp>.md`, and launches the target with the file **path** (not its contents) as the initial prompt — so it fits under OS argv limits regardless of transcript size.
+
+The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
+
+Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Gemini, OpenCode, Antigravity, VS Code.
+
+## Optional: `.crossby.yml`
+
+Drop a `.crossby.yml` in your project root to set defaults and save launch profiles:
 
 ```yaml
 version: 1
@@ -62,174 +111,45 @@ ai:
   default_tool: claude
   default_model: claude-sonnet-4.6
   effort: medium
-  commands:
-    plan:
-      tool: claude
-      model: claude-opus-4.6
-      effort: high
-    implement:
-      tool: copilot
-models:
-  claude:
-    easy: claude-haiku-4.5
-    medium: claude-sonnet-4.6
-    complex: claude-sonnet-4.6
-    very_complex: claude-opus-4.6
+
+profiles:
+  ccyolo:                         # → crossby launch ccyolo
+    tool: claude
+    model: claude-sonnet-4.6
+    effort: high
+    yolo: true
+  quick:                          # → crossby launch quick
+    tool: cursor
+    model: haiku
+    effort: low
 ```
 
-## AI Tool Compatibility
+Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
 
-Crossby translates its unified CLI flags into each tool's native syntax. A dash (—) means the tool does not support that feature. Crossby raises an error if you pass an explicit flag that the selected tool doesn't support (e.g. `--yolo` with OpenCode).
+`crossby sync` does **not** require this file — it reads directly from each tool's standard paths. The config is only consulted by `crossby launch` for defaults and profiles.
 
-### Launch Flags
+## Supported tools
 
-| Crossby Flag | Claude | Copilot | Gemini | Codex | OpenCode | Cursor | VS Code | Antigravity |
-|---|---|---|---|---|---|---|---|---|
-| Binary | `claude` | `copilot` | `gemini` | `codex` | `opencode` | `agent` | `code` | `antigravity` |
-| `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | `--model` | — | — |
-| `--yolo` | `--dangerously-skip-permissions` | `--yolo` | `--yolo` | `--yolo` | — | `--force` | — | — |
-| `--effort` | `--effort <level>` | — | — | `-c model_reasoning_effort="…"` | `--variant <level>` | model suffix (`-thinking`) | — | — |
-| `--prompt` | positional arg | `-i <prompt>` | positional arg | positional arg | `--prompt <prompt>` | positional arg | — | — |
-| `--transcript` | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | `script` wrapper | — | — |
-| `--resume` | `--resume <id>` | `--resume=<id>` | `--resume <id>` | `codex resume <id>` (subcommand) | `-s <id>` | — | — | — |
-| `--trusted-dir` | `--add-dir` | `--add-dir` | `--include-directories` | `--sandbox workspace-write --add-dir` | — | — | — | — |
+| Tool        | Sync | Launch | Handoff (source) | Handoff (target) |
+| ----------- | ---- | ------ | ---------------- | ---------------- |
+| Claude      | ✓    | ✓      | ✓                | ✓                |
+| Copilot     | ✓    | ✓      | ✓                | ✓                |
+| Gemini      | ✓    | ✓      | —                | ✓                |
+| Codex       | ✓    | ✓      | ✓                | ✓                |
+| Cursor      | ✓    | ✓      | ✓                | ✓                |
+| OpenCode    | ✓    | ✓      | —                | ✓                |
+| VS Code     | ✓    | ✓      | —                | ✓                |
+| Antigravity | ✓    | ✓      | —                | ✓                |
 
-### Effort Level Mapping
+Per-tool flag mappings and adapter details live in [CONTRIBUTING.md](CONTRIBUTING.md#tool-reference).
 
-| Crossby Level | Claude | Codex | OpenCode | Cursor |
-|---|---|---|---|---|
-| `low` | `low` | `low` | `low` | — |
-| `medium` | `medium` | `medium` | `medium` | — |
-| `high` | `high` | `high` | `high` | `<model>-thinking` |
-| `max` | `max` | `xhigh` | `high` | `<model>-thinking` |
+## Documentation
 
-### Permission & Allowlist Configuration
-
-Crossby writes canonical command patterns (e.g. `myapp:*`) into each tool's native config format.
-
-| Feature | Claude | Copilot | Gemini | Cursor |
-|---|---|---|---|---|
-| Config file | `.claude/settings.json` | `.github/hooks/hooks.json` | `.gemini/settings.json` | `.cursor/cli.json` |
-| Allowlist format | `Bash(cmd:args)` | `shell(cmd:args)` | `shell(cmd:args)` | `Shell(cmd:args)` |
-| Launch flag | `--allowedTools` | `--allow-tool` | `--allowed-tools` | — (config-file only) |
-| Hook config | `hooks.PreToolUse` | `hooks.preToolUse` | `hooks.BeforeTool` | `preToolUse` in hooks.json |
-| Hook guard matcher | `Edit\|Write\|NotebookEdit` | `Write\|Delete` | file-write tools | `Write\|Delete` |
-
-Use `crossby convert` to translate patterns between formats:
-
-```bash
-crossby convert "Bash(myapp:*)" --from claude --to cursor
-crossby convert "myapp:*" --from canonical --to gemini
-```
-
-### Config Sync (`crossby sync`)
-
-Sync portable configs between AI tools — no project config required. Reads files directly from their standard locations.
-
-```bash
-# Interactive wizard — select source, targets, review plan, approve
-crossby sync
-
-# Direct mode — Claude to Cursor
-crossby sync --from claude --to cursor
-
-# Claude to all installed tools
-crossby sync --from claude
-
-# Preview without applying
-crossby sync --from claude --to cursor --dry-run
-
-# Sync only rules concern
-crossby sync rules --from claude --to cursor
-```
-
-**What gets synced:**
-
-| Config Type | Strategy | Details |
-|---|---|---|
-| Instructions | Symlink | `CLAUDE.md` / `.cursorrules` / `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` |
-| Agents | Symlink | `.claude/agents/` and equivalent per tool |
-| Permissions | Convert | Claude `Bash()` ↔ Cursor `Shell()` format translation |
-| Hooks | Write | Tool-native hook schema per target |
-| MCP Servers | Merge | Claude `.claude/settings.json` → `mcpServers` and equivalent per-tool MCP config paths |
-
-Before syncing, crossby scans the source tool and shows everything it found — what can be ported and what can't (with reasons).
-
-### Session Preservation & Resume
-
-| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
-|---|---|---|---|---|---|---|
-| Resume command | `claude --resume <id>` | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
-| Session data path | `~/.claude/projects/` | — | — | — | — | `~/.cursor/projects/` |
-| Session data preserved | Yes (worktree → main) | — | — | — | — | Yes (worktree → main) |
-
-Session IDs are extracted from transcripts automatically when `--transcript` is used.
-
-### Transcript Parsing (`crossby stats`)
-
-| Feature | Claude | Copilot | Gemini | Codex |
-|---|---|---|---|---|
-| Total tokens | Yes | Yes | Yes | Yes |
-| Input / output breakdown | Yes | Yes | Yes | Yes |
-| Cached tokens | Yes | Yes | Yes | Yes |
-| Per-model breakdown | — | Yes | Yes | — |
-| Premium requests | — | Yes | — | — |
-| Session ID extraction | Yes | Yes | Yes | Yes |
-
-### Library API
-
-These methods are available on each adapter for programmatic use but are not exposed through the crossby CLI.
-
-| Feature | Claude | Copilot | Gemini | Codex | OpenCode | Cursor |
-|---|---|---|---|---|---|---|
-| Approval mode | `--permission-mode plan` | — | `--approval-mode plan` | — | — | `--mode plan` |
-| Trusted dirs | `--add-dir` | `--add-dir` | `--include-directories` | `--add-dir` | — | — |
-| Structured output | `--output-format json --json-schema …` | — | `--output-format json` | — | — | — |
-| Model format | dashed (`claude-haiku-4-5`) | dotted (`claude-haiku-4.5`) | as-is | as-is | `provider/model` | as-is |
-
-## Session Handoff
-
-Carry context from one AI CLI to another without re-explaining. `crossby handoff` reads the latest session of the source tool, asks an LLM to summarize it into a structured handoff document, writes `.crossby/handoffs/HANDOFF-<timestamp>.md`, and launches the target tool with the file **path** (not content) as the initial prompt — so the handoff fits comfortably under OS argv limits regardless of transcript size.
-
-```bash
-# Most common: latest Claude session → Codex
-crossby handoff --from claude --to codex
-
-# Write the file but skip the launch (review before switching tools)
-crossby handoff --from cursor --to copilot --no-launch
-
-# Pick a specific session by id instead of the most recent one
-crossby handoff --from codex --to claude --session-id 019cb497-ec14-7453-9224
-```
-
-### Flags
-
-| Flag | Description |
-|---|---|
-| `--from` | Source tool to read the session from (claude, cursor, codex, copilot). |
-| `--to` | Target tool to launch with the handoff as its initial prompt. |
-| `--session-id` | Override the latest-session heuristic with a specific session id. |
-| `--output` | Write the handoff file to this path instead of `.crossby/handoffs/HANDOFF-<timestamp>.md`. |
-| `--no-launch` | Write the handoff file but do not launch the target. |
-| `--summarizer-tool` | Tool to run the summarization pass. Defaults to the source tool. |
-| `--token-budget` | Approximate token budget for the transcript before truncation (default `32000`). |
-| `--path` | Project root directory (default: current directory). |
-
-Run without `--from`/`--to` to use the interactive wizard, which lists installed tools and lets you pick.
-
-### Supported sources
-
-| Tool | Source (read) | Target (launch) |
-|---|---|---|
-| Claude | ✓ (`~/.claude/projects/<encoded>/<id>.jsonl`) | ✓ |
-| Cursor | ✓ (`~/.cursor/projects/<encoded>/chat.json`) | ✓ |
-| Codex | ✓ (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) | ✓ |
-| Copilot | ✓ (`~/.copilot/session-state/<id>/events.jsonl`) | ✓ |
-| Gemini, OpenCode, Antigravity, VS Code | — (not yet supported) | ✓ |
+- [CONTRIBUTING.md](CONTRIBUTING.md) — architecture, how to add a new tool, per-tool flag reference, release process.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, and how to submit changes.
+Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and architecture.
 
 ## License
 
