@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -20,10 +21,6 @@ _UNSUPPORTED_REASONS = {
     "antigravity": "Antigravity sessions are not on disk in a readable form.",
     "vscode": "VS Code chat sessions are not exposed on disk.",
 }
-
-_INITIAL_PROMPT_TEMPLATE = (
-    "Read the handoff context at {path} and continue the work described there."
-)
 
 # Safety cap: the target's CLI argument must stay well under OS argv limits.
 # macOS ARG_MAX is ~256KB; 4KB is a comfortable ceiling for a path-based prompt.
@@ -54,6 +51,14 @@ def handoff(
     token_budget: int = typer.Option(
         32_000, "--token-budget", help="Approximate token budget for the transcript."
     ),
+    prompt: Path | None = typer.Option(
+        None, "--prompt", help="Path to a custom summarization prompt (.md)."
+    ),
+    prompt_preset: str = typer.Option(
+        "default",
+        "--prompt-preset",
+        help="Bundled prompt preset: default | cc-compact.",
+    ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
     """Carry session context from one AI CLI to another via a handoff file.
@@ -66,6 +71,13 @@ def handoff(
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.handoff.picker import pick_latest_session
+    from crossby.handoff.prompts import (
+        PRESETS,
+        PromptNotFoundError,
+        load_launch_template,
+        load_preset,
+        load_user_prompt,
+    )
     from crossby.handoff.summarizer import (
         HandoffSummarizer,
         SummarizerParseError,
@@ -75,6 +87,22 @@ def handoff(
     from crossby.models.ai import AIToolID
 
     project_root = path.resolve()
+
+    # --- Resolve the summarization prompt ---------------------------------
+    try:
+        prompt_template, prompt_source, structured = _resolve_prompt(
+            prompt=prompt,
+            prompt_preset=prompt_preset,
+            load_preset=load_preset,
+            load_user_prompt=load_user_prompt,
+            presets=PRESETS,
+        )
+    except PromptNotFoundError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
+    except _InvalidPromptFlagsError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
 
     # --- Interactive wizard fills in missing flags -------------------------
     if from_tool is None or to_tool is None:
@@ -135,21 +163,40 @@ def handoff(
     else:
         summarizer_id = source_id
     summarizer_adapter = AbstractAITool.get(summarizer_id)
-    summarizer = HandoffSummarizer(summarizer_adapter, token_budget=token_budget)
+    summarizer = HandoffSummarizer(
+        summarizer_adapter,
+        prompt_template=prompt_template,
+        token_budget=token_budget,
+    )
 
     def _warn_truncation(total: int, kept: int) -> None:
         console.warn(
             f"Transcript truncated: kept {kept} of {total} turns to fit token budget."
         )
 
+    from crossby.handoff.models import HandoffDocument, RawHandoff
+
+    doc: HandoffDocument | RawHandoff
     try:
-        console.step(f"Summarizing with {summarizer_id} (budget={token_budget} tokens)...")
-        doc = summarizer.summarize(
-            transcript,
-            source_tool=source_id,
-            target_tool=target_id,
-            on_truncate=_warn_truncation,
+        console.step(
+            f"Summarizing with {summarizer_id} "
+            f"(budget={token_budget} tokens, prompt={prompt_source})..."
         )
+        if structured:
+            doc = summarizer.summarize_structured(
+                transcript,
+                source_tool=source_id,
+                target_tool=target_id,
+                on_truncate=_warn_truncation,
+            )
+        else:
+            doc = summarizer.summarize_raw(
+                transcript,
+                source_tool=source_id,
+                target_tool=target_id,
+                prompt_source=prompt_source,
+                on_truncate=_warn_truncation,
+            )
     except SummarizerToolNotInstalled as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
@@ -168,15 +215,20 @@ def handoff(
 
     # --- Launch target ---------------------------------------------------
     target_adapter = AbstractAITool.get(target_id)
-    prompt = _INITIAL_PROMPT_TEMPLATE.format(path=handoff_path)
-    encoded_len = len(prompt.encode("utf-8"))
+    try:
+        launch_template = load_launch_template()
+    except PromptNotFoundError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
+    initial_message = launch_template.format(path=handoff_path)
+    encoded_len = len(initial_message.encode("utf-8"))
     if encoded_len > _MAX_INITIAL_MESSAGE_BYTES:
         console.error(
             f"Initial-message prompt is {encoded_len} bytes, exceeding safety cap "
             f"of {_MAX_INITIAL_MESSAGE_BYTES}. This should never happen — please file a bug."
         )
         raise typer.Exit(1)
-    args = target_adapter.initial_message_args(prompt)
+    args = target_adapter.initial_message_args(initial_message)
     if not args:
         console.warn(
             f"{target_id} has no initial-message support; handoff file written but "
@@ -185,7 +237,7 @@ def handoff(
         )
         return
 
-    cmd = target_adapter.build_launch_command(initial_message=prompt)
+    cmd = target_adapter.build_launch_command(initial_message=initial_message)
     console.step(f"Launching {target_id}: {shlex.join(cmd)}")
     try:
         result = subprocess.run(cmd, cwd=project_root, check=False)
@@ -194,6 +246,41 @@ def handoff(
         raise typer.Exit(1) from None
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
+
+
+class _InvalidPromptFlagsError(ValueError):
+    """Raised when ``--prompt`` / ``--prompt-preset`` flag combinations are invalid."""
+
+
+def _resolve_prompt(
+    prompt: Path | None,
+    prompt_preset: str,
+    load_preset: Callable[[str], str],
+    load_user_prompt: Callable[[Path], str],
+    presets: dict[str, str],
+) -> tuple[str, str, bool]:
+    """Return ``(prompt_template, prompt_source, structured)``.
+
+    ``structured`` is True only for the ``default`` preset; any custom prompt
+    or non-default preset takes the raw-passthrough path.
+    """
+    custom_prompt_given = prompt is not None
+    non_default_preset = prompt_preset != "default"
+    if custom_prompt_given and non_default_preset:
+        raise _InvalidPromptFlagsError(
+            "--prompt and --prompt-preset are mutually exclusive."
+        )
+    if custom_prompt_given:
+        assert prompt is not None
+        resolved = prompt.resolve()
+        return load_user_prompt(resolved), str(resolved), False
+    if prompt_preset not in presets:
+        valid = ", ".join(sorted(presets))
+        raise _InvalidPromptFlagsError(
+            f"Unknown --prompt-preset {prompt_preset!r}. Valid presets: {valid}."
+        )
+    structured = prompt_preset == "default"
+    return load_preset(prompt_preset), prompt_preset, structured
 
 
 def _parse_tool_id(value: str, flag: str):  # type: ignore[no-untyped-def]

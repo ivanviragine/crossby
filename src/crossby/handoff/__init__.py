@@ -11,6 +11,7 @@ from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
     HandoffDocument,
+    RawHandoff,
     SessionRef,
     ToolCall,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ConversationTurn",
     "HandoffDocument",
     "HandoffWriter",
+    "RawHandoff",
     "SessionRef",
     "ToolCall",
     "pick_latest_session",

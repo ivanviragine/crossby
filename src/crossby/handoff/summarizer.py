@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from datetime import datetime, timezone
 from collections.abc import Callable
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
     HandoffDocument,
+    RawHandoff,
     SessionRef,
 )
 from crossby.handoff.truncate import approx_tokens, truncate_transcript
@@ -47,25 +48,6 @@ _HANDOFF_JSON_SCHEMA: dict[str, Any] = {
     },
 }
 
-_PROMPT_HEADER = (
-    "You are generating a structured handoff document so another AI coding CLI "
-    "can continue work without losing context.\n\n"
-    "Produce exactly these sections. For JSON output, return a single JSON "
-    "object with the keys listed below and no prose around it. For markdown, "
-    "use the exact headings shown and bulleted lists under list-valued "
-    "sections.\n\n"
-    "Sections:\n"
-    "- current_task (string)\n"
-    "- key_decisions (list of strings)\n"
-    "- modified_files (list of file paths)\n"
-    "- blockers (list of strings)\n"
-    "- next_steps (list of strings)\n"
-    "- critical_context (string)\n\n"
-    "Markdown headings must be exactly: '## Current Task', '## Key Decisions', "
-    "'## Modified Files', '## Blockers', '## Next Steps', '## Critical Context'.\n"
-)
-
-
 class SummarizerToolNotInstalled(RuntimeError):
     """Raised when the chosen summarizer tool is not in PATH."""
 
@@ -75,16 +57,18 @@ class SummarizerParseError(RuntimeError):
 
 
 class HandoffSummarizer:
-    """LLM-backed summarizer that produces a :class:`HandoffDocument`."""
+    """LLM-backed summarizer that produces a :class:`HandoffDocument` or :class:`RawHandoff`."""
 
     def __init__(
         self,
         summarizer_tool: AbstractAITool,
+        prompt_template: str,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         model: str | None = None,
     ) -> None:
         self.summarizer_tool = summarizer_tool
+        self.prompt_template = prompt_template
         self.token_budget = token_budget
         self.timeout_seconds = timeout_seconds
         self.model = model
@@ -99,31 +83,58 @@ class HandoffSummarizer:
                 "crossby detected."
             )
 
-    def summarize(
+    def summarize_structured(
         self,
         transcript: ConversationTranscript,
         source_tool: AIToolID,
         target_tool: AIToolID,
         on_truncate: Callable[[int, int], None] | None = None,
     ) -> HandoffDocument:
-        """Summarize ``transcript`` into a HandoffDocument."""
-        self.ensure_installed()
-
-        prepared = truncate_transcript(transcript, self.token_budget)
-        if prepared.truncated and not transcript.truncated and on_truncate is not None:
-            on_truncate(len(transcript.turns), len(prepared.turns))
-
+        """Summarize ``transcript`` into a parsed :class:`HandoffDocument`."""
+        prepared = self._prepare(transcript, on_truncate)
         prompt = self._build_prompt(prepared)
         json_schema = _HANDOFF_JSON_SCHEMA if self._supports_json() else None
         raw = self._invoke_tool(prompt, json_schema)
         payload = self._parse_output(raw)
         return self._build_document(payload, prepared.session_ref, source_tool, target_tool)
 
+    def summarize_raw(
+        self,
+        transcript: ConversationTranscript,
+        source_tool: AIToolID,
+        target_tool: AIToolID,
+        prompt_source: str,
+        on_truncate: Callable[[int, int], None] | None = None,
+    ) -> RawHandoff:
+        """Summarize ``transcript`` and return the tool's raw output unchanged."""
+        prepared = self._prepare(transcript, on_truncate)
+        prompt = self._build_prompt(prepared)
+        raw = self._invoke_tool(prompt, None)
+        return RawHandoff(
+            source_tool=source_tool,
+            target_tool=target_tool,
+            session_ref=prepared.session_ref,
+            body=raw.strip(),
+            prompt_source=prompt_source,
+            created_at=datetime.now(tz=UTC),
+        )
+
+    def _prepare(
+        self,
+        transcript: ConversationTranscript,
+        on_truncate: Callable[[int, int], None] | None,
+    ) -> ConversationTranscript:
+        self.ensure_installed()
+        prepared = truncate_transcript(transcript, self.token_budget)
+        if prepared.truncated and not transcript.truncated and on_truncate is not None:
+            on_truncate(len(transcript.turns), len(prepared.turns))
+        return prepared
+
     def _supports_json(self) -> bool:
         return bool(self.summarizer_tool.structured_output_args(_HANDOFF_JSON_SCHEMA))
 
     def _build_prompt(self, transcript: ConversationTranscript) -> str:
-        lines = [_PROMPT_HEADER, ""]
+        lines = [self.prompt_template, ""]
         if transcript.truncated:
             lines.append(
                 "Note: transcript was truncated — earlier turns were dropped to fit "

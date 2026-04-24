@@ -69,3 +69,14 @@ class HandoffDocument(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
     critical_context: str = ""
     created_at: datetime = Field(default_factory=_utc_now)
+
+
+class RawHandoff(BaseModel):
+    """An unparsed handoff — the summarizer's raw output under a custom prompt."""
+
+    source_tool: AIToolID
+    target_tool: AIToolID
+    session_ref: SessionRef
+    body: str
+    prompt_source: str
+    created_at: datetime = Field(default_factory=_utc_now)

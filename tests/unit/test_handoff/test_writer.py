@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from crossby.handoff.models import HandoffDocument, SessionRef
-from crossby.handoff.writer import HandoffWriter, render_markdown
+from crossby.handoff.models import HandoffDocument, RawHandoff, SessionRef
+from crossby.handoff.writer import HandoffWriter, render_markdown, render_markdown_raw
 from crossby.models.ai import AIToolID
 
 
@@ -80,3 +80,42 @@ def test_writer_respects_explicit_output_path(tmp_path: Path) -> None:
     path = writer.write(_doc(), output_path=target)
     assert path == target
     assert target.exists()
+
+
+def _raw(**overrides: object) -> RawHandoff:
+    data: dict[str, object] = {
+        "source_tool": AIToolID.CLAUDE,
+        "target_tool": AIToolID.CODEX,
+        "session_ref": SessionRef(
+            tool_id=AIToolID.CLAUDE,
+            session_id="abc",
+            path=Path("/tmp/abc.jsonl"),
+            started_at=datetime(2026, 3, 1, 10, 0, 0),
+            cwd=Path("/Users/tester/proj"),
+        ),
+        "body": "<analysis>chosen approach</analysis>\n<summary>done</summary>",
+        "prompt_source": "cc-compact",
+        "created_at": datetime(2026, 3, 1, 12, 0, 0),
+    }
+    data.update(overrides)
+    return RawHandoff.model_validate(data)
+
+
+def test_render_markdown_raw_includes_metadata_and_body() -> None:
+    rendered = render_markdown_raw(_raw())
+    assert "# Handoff: claude → codex (raw)" in rendered
+    assert "- **Prompt**: cc-compact" in rendered
+    assert "<analysis>chosen approach</analysis>" in rendered
+    # None of the structured section headings should appear.
+    assert "## Current Task" not in rendered
+    assert "## Key Decisions" not in rendered
+
+
+def test_writer_writes_rawhandoff(tmp_path: Path) -> None:
+    writer = HandoffWriter(tmp_path)
+    path = writer.write(_raw())
+    assert path.exists()
+    assert path.is_relative_to(tmp_path / ".crossby" / "handoffs")
+    content = path.read_text(encoding="utf-8")
+    assert "(raw)" in content
+    assert "cc-compact" in content

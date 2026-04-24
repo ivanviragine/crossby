@@ -201,3 +201,95 @@ def test_handoff_errors_when_session_id_not_found(
         )
     assert result.exit_code == 1
     assert "does-not-exist" in result.output
+
+
+def _make_raw_subprocess_run(launched: dict[str, object], summary: str):  # type: ignore[no-untyped-def]
+    """Fake subprocess.run that returns free-form text for summarizer, captures launch."""
+
+    def _run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        binary = cmd[0] if cmd else ""
+        if binary == "claude":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=summary, stderr=""
+            )
+        launched["cmd"] = list(cmd)
+        launched["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    return _run
+
+
+def test_handoff_with_cc_compact_preset_writes_raw_body(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    launched: dict[str, object] = {}
+    raw_summary = "<analysis>trace</analysis>\n<summary>ship it</summary>"
+    fake_run = _make_raw_subprocess_run(launched, raw_summary)
+
+    runner = CliRunner()
+    with patch.object(
+        AbstractAITool,
+        "detect_installed",
+        return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+    ):
+        with patch("subprocess.run", side_effect=fake_run):
+            result = runner.invoke(
+                app,
+                [
+                    "handoff",
+                    "--from", "claude",
+                    "--to", "codex",
+                    "--path", str(project_root),
+                    "--no-launch",
+                    "--prompt-preset", "cc-compact",
+                ],
+            )
+
+    assert result.exit_code == 0, result.output
+    handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text(encoding="utf-8")
+    assert "(raw)" in body
+    assert "**Prompt**: cc-compact" in body
+    assert raw_summary in body
+    # None of the structured headings should appear — raw mode skips schema.
+    assert "## Current Task" not in body
+
+
+def test_handoff_errors_when_prompt_and_preset_both_set(tmp_path: Path) -> None:
+    custom = tmp_path / "custom.md"
+    custom.write_text("my prompt", encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "handoff",
+            "--from", "claude",
+            "--to", "codex",
+            "--prompt", str(custom),
+            "--prompt-preset", "cc-compact",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
+def test_handoff_errors_when_custom_prompt_missing(tmp_path: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "handoff",
+            "--from", "claude",
+            "--to", "codex",
+            "--prompt", str(tmp_path / "nonexistent.md"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()

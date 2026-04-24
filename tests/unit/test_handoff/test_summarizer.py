@@ -16,6 +16,7 @@ from crossby.handoff.models import (
     ConversationTurn,
     SessionRef,
 )
+from crossby.handoff.models import RawHandoff
 from crossby.handoff.summarizer import (
     HandoffSummarizer,
     SummarizerParseError,
@@ -55,7 +56,7 @@ def _make_summarizer_tool(
 
 def test_ensure_installed_raises_when_tool_missing() -> None:
     tool = _make_summarizer_tool()
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
     with patch.object(AbstractAITool, "detect_installed", return_value=[]):
         with pytest.raises(SummarizerToolNotInstalled):
             summarizer.ensure_installed()
@@ -63,7 +64,7 @@ def test_ensure_installed_raises_when_tool_missing() -> None:
 
 def test_summarize_parses_json_payload() -> None:
     tool = _make_summarizer_tool(json_schema_args=["--output-format", "json"])
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
     json_stdout = (
         '{"current_task": "Refactor auth", '
         '"key_decisions": ["drop cache"], '
@@ -76,7 +77,7 @@ def test_summarize_parses_json_payload() -> None:
 
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc) as run:
-            doc = summarizer.summarize(
+            doc = summarizer.summarize_structured(
                 _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
             )
 
@@ -95,7 +96,7 @@ def test_summarize_parses_json_payload() -> None:
 
 def test_summarize_falls_back_to_markdown_when_no_json_support() -> None:
     tool = _make_summarizer_tool(json_schema_args=[])  # no JSON flags
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
     markdown = (
         "## Current Task\nShip the thing.\n\n"
         "## Key Decisions\n- use stripe\n- drop cache\n\n"
@@ -108,7 +109,7 @@ def test_summarize_falls_back_to_markdown_when_no_json_support() -> None:
 
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc):
-            doc = summarizer.summarize(
+            doc = summarizer.summarize_structured(
                 _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
             )
 
@@ -125,7 +126,7 @@ def test_summarize_falls_back_to_markdown_when_no_json_support() -> None:
 
 def test_summarize_raises_when_output_is_unparseable() -> None:
     tool = _make_summarizer_tool()
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
     fake_proc = subprocess.CompletedProcess(
         args=[], returncode=0, stdout="plain text with no structure", stderr=""
     )
@@ -133,27 +134,27 @@ def test_summarize_raises_when_output_is_unparseable() -> None:
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc):
             with pytest.raises(SummarizerParseError):
-                summarizer.summarize(
+                summarizer.summarize_structured(
                     _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
                 )
 
 
 def test_summarize_raises_when_subprocess_times_out() -> None:
     tool = _make_summarizer_tool()
-    summarizer = HandoffSummarizer(tool, timeout_seconds=7)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT", timeout_seconds=7)
     timeout_exc = subprocess.TimeoutExpired(cmd=["fake"], timeout=7)
 
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", side_effect=timeout_exc):
             with pytest.raises(SummarizerParseError, match="7s"):
-                summarizer.summarize(
+                summarizer.summarize_structured(
                     _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
                 )
 
 
 def test_summarize_raises_when_subprocess_oserror() -> None:
     tool = _make_summarizer_tool()
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
 
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch(
@@ -161,14 +162,14 @@ def test_summarize_raises_when_subprocess_oserror() -> None:
             side_effect=OSError("fork failed"),
         ):
             with pytest.raises(SummarizerParseError, match="fork failed"):
-                summarizer.summarize(
+                summarizer.summarize_structured(
                     _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
                 )
 
 
 def test_summarize_raises_when_tool_exits_nonzero() -> None:
     tool = _make_summarizer_tool()
-    summarizer = HandoffSummarizer(tool)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
     fake_proc = subprocess.CompletedProcess(
         args=[], returncode=2, stdout="", stderr="boom"
     )
@@ -176,7 +177,7 @@ def test_summarize_raises_when_tool_exits_nonzero() -> None:
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc):
             with pytest.raises(SummarizerParseError, match="boom"):
-                summarizer.summarize(
+                summarizer.summarize_structured(
                     _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
                 )
 
@@ -184,7 +185,7 @@ def test_summarize_raises_when_tool_exits_nonzero() -> None:
 def test_summarize_calls_on_truncate_when_transcript_trimmed() -> None:
     tool = _make_summarizer_tool()
     # Tiny budget forces truncation.
-    summarizer = HandoffSummarizer(tool, token_budget=5)
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT", token_budget=5)
     big_turns = [
         ConversationTurn(role="user", content="x" * 400) for _ in range(4)
     ]
@@ -202,7 +203,7 @@ def test_summarize_calls_on_truncate_when_transcript_trimmed() -> None:
 
     with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
         with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc):
-            summarizer.summarize(
+            summarizer.summarize_structured(
                 transcript,
                 source_tool=AIToolID.CLAUDE,
                 target_tool=AIToolID.CODEX,
@@ -236,6 +237,31 @@ def test_parse_markdown_sections_extracts_bullets_and_text() -> None:
     assert payload["blockers"] == ["legacy dep"]
     assert payload["next_steps"] == ["ship"]
     assert payload["critical_context"] == "mind the cache"
+
+
+def test_summarize_raw_returns_rawhandoff_and_skips_json_schema() -> None:
+    tool = _make_summarizer_tool(json_schema_args=["--output-format", "json"])
+    summarizer = HandoffSummarizer(tool, prompt_template="CUSTOM")
+    free_form = "  <analysis>...</analysis>\n<summary>...</summary>  "
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=free_form, stderr=""
+    )
+
+    with patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]):
+        with patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc):
+            doc = summarizer.summarize_raw(
+                _transcript(),
+                source_tool=AIToolID.CLAUDE,
+                target_tool=AIToolID.CODEX,
+                prompt_source="cc-compact",
+            )
+
+    assert isinstance(doc, RawHandoff)
+    assert doc.body == free_form.strip()
+    assert doc.prompt_source == "cc-compact"
+    # Raw mode must never pass a json_schema — the fixed schema doesn't fit custom prompts.
+    _, kwargs = tool.build_launch_command.call_args
+    assert kwargs["json_schema"] is None
 
 
 # Suppress unused-import linter complaints in some configs.
