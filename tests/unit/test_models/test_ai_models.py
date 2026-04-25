@@ -305,9 +305,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("gemini")
         assert adapter.plan_mode_args() == ["--approval-mode", "plan"]
 
-    def test_copilot_no_plan_mode(self) -> None:
+    def test_copilot_plan_mode(self) -> None:
         adapter = AbstractAITool.get("copilot")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--plan"]
 
     def test_codex_no_plan_mode(self) -> None:
         adapter = AbstractAITool.get("codex")

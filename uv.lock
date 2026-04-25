@@ -156,19 +156,16 @@ dependencies = [
     { name = "questionary" },
     { name = "rich" },
     { name = "structlog" },
+    { name = "tomli-w" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
-codex = [
-    { name = "tomli-w" },
-]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "tomli-w" },
     { name = "types-pyyaml" },
 ]
 
@@ -184,12 +181,11 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "structlog", specifier = ">=24.0" },
-    { name = "tomli-w", marker = "extra == 'codex'", specifier = ">=1.0" },
-    { name = "tomli-w", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "tomli-w", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
 ]
-provides-extras = ["codex", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "iniconfig"

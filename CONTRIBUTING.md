@@ -23,7 +23,7 @@ uv sync --extra dev
 
 Run `./scripts/check-all.sh` before opening a PR.
 
-A handful of Codex MCP tests require the optional `tomli-w` dependency. It's already included in the `dev` extra, so `uv sync --extra dev` is sufficient.
+`tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
 ## Architecture
 

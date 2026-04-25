@@ -17,6 +17,7 @@ from crossby.sync.hooks import (
     _translate_event,
     _translate_tools,
 )
+from crossby.sync.readers import discover_hooks
 
 
 # ---------------------------------------------------------------------------
@@ -614,3 +615,70 @@ class TestSyncDataHooksField:
         )
         assert len(data.hooks) == 1
         assert data.hooks[0].command == "echo hi"
+
+
+# ---------------------------------------------------------------------------
+# discover_hooks — cross-tool union of tool scopes
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_hook(root: Path, command: str, matcher: str) -> None:
+    path = root / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": matcher,
+                        "hooks": [{"type": "command", "command": command}],
+                    }
+                ],
+            }
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_cursor_hook(root: Path, command: str, tools: list[str]) -> None:
+    path = root / ".cursor" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "preToolUse": [
+                {"command": command, "tools": tools},
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+
+class TestDiscoverHooksUnion:
+    def test_same_command_different_tool_scopes_unioned(self, tmp_path: Path) -> None:
+        _write_claude_hook(tmp_path, "python3 guard.py", "Edit")
+        _write_cursor_hook(tmp_path, "python3 guard.py", ["edit", "write"])
+
+        hooks = discover_hooks(tmp_path)
+
+        assert len(hooks) == 1
+        assert hooks[0].event == "pre_tool_use"
+        assert hooks[0].command == "python3 guard.py"
+        assert set(hooks[0].tools) == {"Edit", "Write"}
+
+    def test_empty_tools_means_all_and_wins(self, tmp_path: Path) -> None:
+        # Claude matcher ".*" → empty canonical tools (means all).
+        _write_claude_hook(tmp_path, "python3 guard.py", ".*")
+        _write_cursor_hook(tmp_path, "python3 guard.py", ["edit"])
+
+        hooks = discover_hooks(tmp_path)
+
+        assert len(hooks) == 1
+        assert hooks[0].tools == []
+
+    def test_distinct_commands_not_merged(self, tmp_path: Path) -> None:
+        _write_claude_hook(tmp_path, "python3 guard.py", "Edit")
+        _write_cursor_hook(tmp_path, "python3 other.py", ["write"])
+
+        hooks = discover_hooks(tmp_path)
+
+        assert len(hooks) == 2

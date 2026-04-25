@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,31 +82,52 @@ def _detect_skills(
 def _detect_allowlist(
     tool_id: AIToolID, root: Path, items: list[DetectedConfig]
 ) -> None:
-    patterns: list[str] = []
+    n = 0
 
     if tool_id == AIToolID.CLAUDE:
-        patterns = _read_json_list(
+        n = len(_read_json_list(
             root / ".claude" / "settings.json",
             ["permissions", "allow"],
             prefix="Bash(",
-        )
+        ))
     elif tool_id == AIToolID.CURSOR:
-        patterns = _read_json_list(
+        n = len(_read_json_list(
             root / ".cursor" / "cli.json",
             ["permissions", "allow"],
             prefix="Shell(",
-        )
+        ))
+    elif tool_id == AIToolID.GEMINI:
+        n = _count_gemini_shell_allow_rules(root / ".gemini" / "policies" / "crossby.toml")
 
-    if not patterns:
+    if n == 0:
         return
 
-    n = len(patterns)
     label = "1 pattern" if n == 1 else f"{n} patterns"
     items.append(DetectedConfig(
         config_type="allowlist",
         detail=label,
         portable=True,
     ))
+
+
+def _count_gemini_shell_allow_rules(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        rules = data.get("rule", [])
+        if not isinstance(rules, list):
+            return 0
+        return sum(
+            1
+            for r in rules
+            if isinstance(r, dict)
+            and r.get("toolName") == "run_shell_command"
+            and r.get("decision") == "allow"
+            and isinstance(r.get("commandPrefix"), str)
+            and r["commandPrefix"]
+        )
+    return 0
 
 
 def _detect_hooks(
@@ -134,7 +156,9 @@ def _detect_hooks(
 
     elif tool_id == AIToolID.GEMINI:
         hooks = _read_json_key(root / ".gemini" / "settings.json", "hooks")
-        if isinstance(hooks, list):
+        if isinstance(hooks, dict):
+            count = sum(len(v) for v in hooks.values() if isinstance(v, list))
+        elif isinstance(hooks, list):
             count = len(hooks)
 
     if count == 0:
@@ -151,19 +175,44 @@ def _detect_hooks(
 def _detect_mcp_servers(
     tool_id: AIToolID, root: Path, items: list[DetectedConfig]
 ) -> None:
-    if tool_id != AIToolID.CLAUDE:
+    n = 0
+
+    if tool_id == AIToolID.CLAUDE:
+        n = _count_json_dict(root / ".claude" / "settings.json", "mcpServers")
+    elif tool_id == AIToolID.CURSOR:
+        n = _count_json_dict(root / ".cursor" / "mcp.json", "mcpServers")
+    elif tool_id == AIToolID.COPILOT:
+        n = _count_json_dict(root / ".vscode" / "mcp.json", "servers")
+    elif tool_id == AIToolID.GEMINI:
+        n = _count_json_dict(root / ".gemini" / "settings.json", "mcpServers")
+    elif tool_id == AIToolID.CODEX:
+        n = _count_codex_mcp_servers(root / ".codex" / "config.toml")
+
+    if n == 0:
         return
-    servers = _read_json_key(root / ".claude" / "settings.json", "mcpServers")
-    if not isinstance(servers, dict) or not servers:
-        return
-    n = len(servers)
+
     label = "1 MCP server" if n == 1 else f"{n} MCP servers"
     items.append(DetectedConfig(
         config_type="mcp_servers",
         detail=label,
-        portable=False,
-        reason="tool-specific, no cross-tool equivalent yet",
+        portable=True,
     ))
+
+
+def _count_json_dict(path: Path, key: str) -> int:
+    value = _read_json_key(path, key)
+    return len(value) if isinstance(value, dict) else 0
+
+
+def _count_codex_mcp_servers(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        section = data.get("mcp_servers", {})
+        if isinstance(section, dict):
+            return len(section)
+    return 0
 
 
 def _detect_custom_commands(

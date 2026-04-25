@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import yaml
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
@@ -431,3 +432,96 @@ class TestProfileFlag:
 
         assert result.exit_code == 0, result.output
         adapter.launch.assert_called_once()
+
+
+class TestPlanFlag:
+    """`--plan` forwards plan_mode=True to the adapter when supported."""
+
+    def _launch_with_plan(
+        self,
+        tmp_path: Path,
+        tool: str,
+        *,
+        supports_plan_mode: bool,
+    ) -> tuple[MagicMock, Any]:
+        (tmp_path / ".crossby.yml").write_text(
+            f"version: 1\nai:\n  default_tool: {tool}\n"
+        )
+        adapter = MagicMock()
+        adapter.launch.return_value = 0
+        adapter.capabilities.return_value = MagicMock(
+            display_name=tool.title(),
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=supports_plan_mode,
+        )
+        adapter.parse_transcript.return_value = MagicMock(
+            total_tokens=None, session_id=None
+        )
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=(tool, None, None, False),
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", tool, "--plan"]
+            )
+        return adapter, result
+
+    def test_plan_flag_forwards_to_copilot(self, tmp_path: Path) -> None:
+        adapter, result = self._launch_with_plan(
+            tmp_path, "copilot", supports_plan_mode=True
+        )
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("plan_mode") is True
+
+    def test_plan_flag_forwards_to_claude(self, tmp_path: Path) -> None:
+        adapter, result = self._launch_with_plan(
+            tmp_path, "claude", supports_plan_mode=True
+        )
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("plan_mode") is True
+
+    def test_plan_flag_forwards_to_gemini(self, tmp_path: Path) -> None:
+        adapter, result = self._launch_with_plan(
+            tmp_path, "gemini", supports_plan_mode=True
+        )
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("plan_mode") is True
+
+    def test_plan_flag_rejected_when_unsupported(self, tmp_path: Path) -> None:
+        adapter, result = self._launch_with_plan(
+            tmp_path, "codex", supports_plan_mode=False
+        )
+        assert result.exit_code == 1, result.output
+        adapter.launch.assert_not_called()
+
+    def test_no_plan_flag_forwards_false(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\nai:\n  default_tool: claude\n"
+        )
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False),
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude"])
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("plan_mode") is False

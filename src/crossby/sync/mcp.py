@@ -216,28 +216,9 @@ class CodexMCPWriter(AbstractSyncWriter):
         disabled: set[str],
         dry_run: bool,
     ) -> tuple[SyncAction, str]:
-        try:
-            import tomli_w
-        except ImportError:
-            msg = (
-                "tomli-w is not installed — skipping Codex MCP sync. "
-                "Install it with: pip install tomli-w"
-            )
-            warnings.warn(msg, stacklevel=3)
-            return "skipped", msg
+        import tomllib
 
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                msg = (
-                    "Neither tomllib (Python 3.11+) nor tomli is available — "
-                    "skipping Codex MCP sync. Install tomli: pip install tomli"
-                )
-                warnings.warn(msg, stacklevel=3)
-                return "error", msg
+        import tomli_w
 
         was_new = not path.exists()
         existing: dict[str, Any] = {}

@@ -151,7 +151,7 @@ crossby --help      # should list: launch, sync, convert, stats, handoff
 - [ ] Run any command in a directory with a malformed `.crossby.yml` (e.g. unclosed string) — verify a clean error, not a traceback
 - [ ] `crossby sync` in an empty directory with no AI tool configs — should say there's nothing to sync, not crash
 - [ ] `crossby launch --tool claude` when `claude` is not on PATH — should error with an install hint, not crash
-- [ ] `crossby sync --from claude` when Claude's `.claude/settings.json` contains an MCP server without `tomli-w` installed (for Codex target) — verify behavior matches the known issue (either clean skip or clear error)
+- [ ] `crossby sync --from claude` when Claude's `.claude/settings.json` contains an MCP server and Codex is a target — confirms Codex `config.toml` is written (tomli-w is a base dep, no optional-skip path)
 
 ---
 

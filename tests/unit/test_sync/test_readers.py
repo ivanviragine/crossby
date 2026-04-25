@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import structlog
 
 from crossby.models.ai import AIToolID
 from crossby.sync.readers import (
     build_sync_data,
     detect_skills,
+    discover_mcp,
     scan_project,
     suggest_skills_source,
 )
@@ -198,3 +202,59 @@ class TestScanProjectSkills:
         scan = scan_project(tmp_path, [AIToolID.CLAUDE, AIToolID.CURSOR])
         assert AIToolID.CLAUDE in scan.skills.found
         assert AIToolID.CURSOR in scan.skills.found
+
+
+# ---------------------------------------------------------------------------
+# discover_mcp — conflict surfacing
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverMCPConflicts:
+    def test_same_name_in_two_tools_warns_and_keeps_first_seen(
+        self, tmp_path: Path
+    ) -> None:
+        claude_path = tmp_path / ".claude" / "settings.json"
+        claude_path.parent.mkdir()
+        claude_path.write_text(
+            json.dumps({
+                "mcpServers": {
+                    "ctx": {"command": "npx", "args": ["claude-ctx"]},
+                }
+            }),
+            encoding="utf-8",
+        )
+        cursor_path = tmp_path / ".cursor" / "mcp.json"
+        cursor_path.parent.mkdir()
+        cursor_path.write_text(
+            json.dumps({
+                "mcpServers": {
+                    "ctx": {"command": "npx", "args": ["cursor-ctx"]},
+                }
+            }),
+            encoding="utf-8",
+        )
+
+        with structlog.testing.capture_logs() as logs:
+            servers = discover_mcp(tmp_path)
+
+        assert "ctx" in servers
+        assert servers["ctx"].args == ["claude-ctx"]
+        conflict_logs = [e for e in logs if e.get("event") == "mcp.conflict"]
+        assert len(conflict_logs) == 1
+        assert conflict_logs[0]["name"] == "ctx"
+        assert conflict_logs[0]["kept_from"] == "claude"
+        assert conflict_logs[0]["ignored_from"] == "cursor"
+
+    def test_no_conflict_no_warning(self, tmp_path: Path) -> None:
+        claude_path = tmp_path / ".claude" / "settings.json"
+        claude_path.parent.mkdir()
+        claude_path.write_text(
+            json.dumps({"mcpServers": {"a": {"command": "x"}}}),
+            encoding="utf-8",
+        )
+
+        with structlog.testing.capture_logs() as logs:
+            servers = discover_mcp(tmp_path)
+
+        assert "a" in servers
+        assert [e for e in logs if e.get("event") == "mcp.conflict"] == []

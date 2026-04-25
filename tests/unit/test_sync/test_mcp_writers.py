@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from unittest import mock
 
 from crossby.models.config import MCPServerConfig
 from crossby.sync.base import SyncData
@@ -421,13 +419,6 @@ class TestCodexMCPWriter:
         result = self.writer.sync(_cfg({"x": STDIO_SERVER}), tmp_path)
         assert result.action == "error"
         assert path.read_text() == original
-
-    def test_missing_tomli_w_graceful_skip(self, tmp_path: Path) -> None:
-        """CodexMCPWriter gracefully skips if tomli-w is not installed."""
-        with mock.patch.dict(sys.modules, {"tomli_w": None}):
-            result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-        assert result.action == "skipped"
-        assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)

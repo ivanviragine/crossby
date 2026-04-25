@@ -14,11 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from crossby.config.skills import _SCAN_ORDER as _SKILLS_SCAN_ORDER
 from crossby.config.skills import SKILLS_DIR, count_skills
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync.base import SyncData
+
+logger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
 # Rules reader
@@ -168,6 +172,17 @@ def discover_mcp(
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
     discovery = discover_mcp_servers(project_root)
+    for name, kept_from, ignored_from in discovery.conflicts:
+        logger.warning(
+            "mcp.conflict",
+            name=name,
+            kept_from=kept_from,
+            ignored_from=ignored_from,
+            hint=(
+                f"MCP server {name!r} is defined in both {kept_from!r} and "
+                f"{ignored_from!r}; keeping the {kept_from!r} definition"
+            ),
+        )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
         if from_tool is not None and discovered.source_tool != str(from_tool):
@@ -490,12 +505,12 @@ def discover_hooks(
 ) -> list[HookEntry]:
     """Read hooks from tool configs.
 
-    Returns deduplicated canonical hook entries (dedup by event+command).
+    When the same ``(event, command)`` is defined by multiple tools, tool
+    scopes are unioned — an empty ``tools`` list means "all tools" and wins.
     """
     if from_tool is not None and from_tool not in _HOOK_READERS:
         return []
-    seen: set[tuple[str, str]] = set()
-    result: list[HookEntry] = []
+    merged: dict[tuple[str, str], HookEntry] = {}
     readers = (
         {from_tool: _HOOK_READERS[from_tool]}
         if from_tool and from_tool in _HOOK_READERS
@@ -504,10 +519,21 @@ def discover_hooks(
     for reader_fn in readers.values():
         for hook in reader_fn(project_root):
             key = (hook.event, hook.command)
-            if key not in seen:
-                seen.add(key)
-                result.append(hook)
-    return result
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = hook
+                continue
+            if not existing.tools or not hook.tools:
+                unioned: list[str] = []
+            else:
+                unioned = list(dict.fromkeys([*existing.tools, *hook.tools]))
+            merged[key] = HookEntry(
+                event=existing.event,
+                command=existing.command,
+                tools=unioned,
+                description=existing.description or hook.description,
+            )
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------
