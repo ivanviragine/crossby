@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
-    from crossby.sync.base import SyncResult
+    from crossby.models.ai import AIToolID
+    from crossby.sync.base import SyncConcern, SyncResult
 
 
 def sync(
@@ -49,7 +50,13 @@ def sync(
         crossby sync mcp --from claude        # MCP from Claude only
     """
     from crossby.ai_tools.base import AbstractAITool
+    from crossby.config.loader import load_config
     from crossby.models.ai import AIToolID
+    from crossby.services.sync_resolution import (
+        resolve_sync_concern,
+        resolve_sync_from,
+        resolve_sync_to,
+    )
     from crossby.sync import run_sync
     from crossby.sync.base import SyncConcern, SyncData
     from crossby.sync.readers import (
@@ -64,35 +71,42 @@ def sync(
     )
 
     project_root = path.resolve()
+    config = load_config(project_root)
 
-    # Validate concern argument
-    sync_concern: SyncConcern | None = None
-    if concern:
+    concern_explicit = concern is not None
+    from_explicit = from_tool is not None
+    to_explicit = to_tool is not None
+
+    # Validate explicit CLI values with friendly error messages before
+    # handing off to the resolvers (which raise raw ValueError).
+    if concern is not None:
         try:
-            sync_concern = SyncConcern(concern)
+            SyncConcern(concern)
         except ValueError:
             valid = ", ".join(c.value for c in SyncConcern)
             console.error(f"Unknown concern: {concern!r}. Valid values: {valid}")
             raise typer.Exit(1) from None
-
-    # Validate from/to arguments
-    source_tool: AIToolID | None = None
-    if from_tool:
+    if from_tool is not None:
         try:
-            source_tool = AIToolID(from_tool)
+            AIToolID(from_tool)
         except ValueError:
             console.error(f"Unknown tool: {from_tool!r}")
             raise typer.Exit(1) from None
-
-    target_tool: AIToolID | None = None
-    if to_tool:
+    if to_tool is not None:
         try:
-            target_tool = AIToolID(to_tool)
+            AIToolID(to_tool)
         except ValueError:
             console.error(f"Unknown tool: {to_tool!r}")
             raise typer.Exit(1) from None
 
-    if target_tool is not None and source_tool is None:
+    # Resolve CLI → config → auto-detect. Auto-detect is *off* for sync_from
+    # because today's "crossby sync" with no flags falls through to the
+    # per-concern wizard — auto-detect would silently change that.
+    source_tool = resolve_sync_from(from_tool, config, auto_detect=False)
+    target_tool = resolve_sync_to(to_tool, config)
+    sync_concern = resolve_sync_concern(concern, config)
+
+    if to_explicit and not from_explicit:
         console.error("--to requires --from; omit --to for the interactive wizard.")
         raise typer.Exit(1)
 
@@ -103,13 +117,26 @@ def sync(
         console.hint("Install at least one AI tool (claude, copilot, gemini, codex, cursor, etc.)")
         raise typer.Exit(1)
 
+    # Let users review resolved defaults via the shared Proceed / Change loop.
+    source_tool, target_tool, sync_concern = _confirm_sync_defaults(
+        source_tool=source_tool,
+        target_tool=target_tool,
+        sync_concern=sync_concern,
+        installed_tools=installed_tools,
+        from_explicit=from_explicit,
+        to_explicit=to_explicit,
+        concern_explicit=concern_explicit,
+    )
+
     if dry_run:
         console.info("Dry-run mode — no files will be written")
 
     results: list[SyncResult] = []
 
-    # Non-interactive mode: --from is specified
-    if source_tool is not None:
+    # Non-interactive mode: --from is specified on the CLI. A config default
+    # alone does *not* bypass the per-concern wizard — only an explicit --from
+    # (or an explicit change via the confirm-defaults loop) does.
+    if from_explicit and source_tool is not None:
         data = build_sync_data(project_root, from_tool=source_tool)
         target_tools = (
             [target_tool]
@@ -310,6 +337,83 @@ def sync(
 
     if any(r.action == "error" for r in results):
         raise typer.Exit(1)
+
+
+def _confirm_sync_defaults(
+    *,
+    source_tool: AIToolID | None,
+    target_tool: AIToolID | None,
+    sync_concern: SyncConcern | None,
+    installed_tools: list[AIToolID],
+    from_explicit: bool,
+    to_explicit: bool,
+    concern_explicit: bool,
+) -> tuple[AIToolID | None, AIToolID | None, SyncConcern | None]:
+    """Show resolved sync defaults and let the user Proceed or Change.
+
+    Returns ``(source_tool, target_tool, sync_concern)`` after any user edits.
+    A no-op on non-TTY stdin (handled inside ``confirm_defaults``).
+    """
+    from crossby.services.confirm import ConfirmField, confirm_defaults
+    from crossby.ui import prompts
+
+    tool_names = [str(t) for t in installed_tools]
+
+    def _change_from(current: AIToolID | None, _state: dict[str, Any]) -> dict[str, Any]:
+        current_name = str(current) if current is not None else tool_names[0]
+        default_idx = tool_names.index(current_name) if current_name in tool_names else 0
+        idx = prompts.select("Source tool", tool_names, default=default_idx)
+        return {"from": AIToolID(tool_names[idx])}
+
+    def _change_to(current: AIToolID | None, state: dict[str, Any]) -> dict[str, Any]:
+        _ = current
+        source = state.get("from")
+        choices = ["(all installed)", *[n for n in tool_names if AIToolID(n) != source]]
+        idx = prompts.select("Target tool", choices)
+        if idx == 0:
+            return {"to": None}
+        return {"to": AIToolID(choices[idx])}
+
+    def _change_concern(
+        current: SyncConcern | None, _state: dict[str, Any]
+    ) -> dict[str, Any]:
+        _ = current
+        concerns = [c.value for c in SyncConcern]
+        choices = ["(all concerns)", *concerns]
+        idx = prompts.select("Concern", choices)
+        if idx == 0:
+            return {"concern": None}
+        return {"concern": SyncConcern(choices[idx])}
+
+    fields = [
+        ConfirmField(
+            name="from",
+            label="Source tool",
+            current_value=source_tool,
+            explicit=from_explicit,
+            change_fn=_change_from,
+            render_value=lambda v: str(v) if v is not None else "(choose in wizard)",
+        ),
+        ConfirmField(
+            name="to",
+            label="Target tool",
+            current_value=target_tool,
+            explicit=to_explicit,
+            change_fn=_change_to,
+            render_value=lambda v: str(v) if v is not None else "all installed",
+        ),
+        ConfirmField(
+            name="concern",
+            label="Concern",
+            current_value=sync_concern,
+            explicit=concern_explicit,
+            change_fn=_change_concern,
+            render_value=lambda v: v.value if v is not None else "all",
+        ),
+    ]
+
+    result = confirm_defaults(fields, title="Confirm sync defaults")
+    return result["from"], result["to"], result["concern"]
 
 
 def _display_results(results: list[SyncResult]) -> None:

@@ -6,6 +6,7 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -70,6 +71,7 @@ def handoff(
         crossby handoff --from codex --to claude --session-id 019cb497-ec14-...
     """
     from crossby.ai_tools.base import AbstractAITool
+    from crossby.config.loader import load_config
     from crossby.handoff.picker import pick_latest_session
     from crossby.handoff.prompts import (
         PRESETS,
@@ -84,9 +86,18 @@ def handoff(
         SummarizerToolNotInstalled,
     )
     from crossby.handoff.writer import HandoffWriter
-    from crossby.models.ai import AIToolID
+    from crossby.services.handoff_resolution import (
+        resolve_handoff_preset,
+        resolve_handoff_token_budget,
+    )
 
     project_root = path.resolve()
+
+    # Apply .crossby.yml handoff_defaults for preset + token_budget before
+    # the prompt is resolved and the wizard runs.
+    config = load_config(project_root)
+    prompt_preset = resolve_handoff_preset(prompt_preset, config)
+    token_budget = resolve_handoff_token_budget(token_budget, config)
 
     # --- Resolve the summarization prompt ---------------------------------
     try:
@@ -299,8 +310,20 @@ def _run_wizard(
     to_tool: str | None,
     project_root: Path,
 ) -> tuple[str, str] | None:
-    """Prompt for missing ``--from``/``--to`` values."""
+    """Prompt for missing ``--from``/``--to`` values via ``confirm_defaults``.
+
+    Reads ``handoff_defaults`` from ``.crossby.yml`` via
+    :mod:`crossby.services.handoff_resolution`, shows resolved values with
+    Proceed / Change entries, then runs a final cancel-able confirm prompt
+    (``confirm_defaults`` itself has no cancel path).
+    """
     from crossby.ai_tools.base import AbstractAITool
+    from crossby.config.loader import load_config
+    from crossby.services.confirm import ConfirmField, confirm_defaults
+    from crossby.services.handoff_resolution import (
+        resolve_handoff_from,
+        resolve_handoff_to,
+    )
     from crossby.ui import prompts
 
     installed = [str(t) for t in AbstractAITool.detect_installed()]
@@ -308,27 +331,78 @@ def _run_wizard(
         console.error("No AI tools detected in PATH. Install a supported tool first.")
         return None
 
-    console.step(f"Handoff wizard — project root: {project_root}")
-    console.detail(f"Detected tools: {', '.join(installed)}")
-
     sources = [t for t in installed if t not in _UNSUPPORTED_SOURCES]
     if not sources:
         console.error("None of the installed tools are supported as handoff sources yet.")
         return None
 
-    if from_tool is None:
-        idx = prompts.select("Source tool (read session from)?", items=sources)
-        from_tool = sources[idx]
+    console.step(f"Handoff wizard — project root: {project_root}")
+    console.detail(f"Detected tools: {', '.join(installed)}")
 
-    if to_tool is None:
-        targets = [t for t in installed if t != from_tool]
+    config = load_config(project_root)
+    resolved_from = resolve_handoff_from(from_tool, config)
+    resolved_to = resolve_handoff_to(to_tool, config)
+
+    # Drop resolved values that aren't installed / aren't supported as sources.
+    from_value = str(resolved_from) if resolved_from is not None else None
+    if from_value not in sources:
+        from_value = sources[0]
+    to_value = str(resolved_to) if resolved_to is not None else None
+    targets_for_default = [t for t in installed if t != from_value]
+    if to_value is None or to_value == from_value or to_value not in installed:
+        to_value = targets_for_default[0] if targets_for_default else None
+    if to_value is None:
+        console.error("No alternate installed tool to hand off to.")
+        return None
+
+    def _change_from(current: str, _state: dict[str, Any]) -> dict[str, Any]:
+        default_idx = sources.index(current) if current in sources else 0
+        idx = prompts.select(
+            "Source tool (read session from)?", items=sources, default=default_idx
+        )
+        new_from = sources[idx]
+        updates: dict[str, Any] = {"from": new_from}
+        targets = [t for t in installed if t != new_from]
+        if _state.get("to") == new_from or _state.get("to") not in targets:
+            updates["to"] = targets[0] if targets else None
+        return updates
+
+    def _change_to(current: str, state: dict[str, Any]) -> dict[str, Any]:
+        targets = [t for t in installed if t != state.get("from")]
         if not targets:
-            console.error("No alternate installed tool to hand off to.")
-            return None
-        idx = prompts.select("Target tool (launch with handoff prompt)?", items=targets)
-        to_tool = targets[idx]
+            return {"to": current}
+        default_idx = targets.index(current) if current in targets else 0
+        idx = prompts.select(
+            "Target tool (launch with handoff prompt)?",
+            items=targets,
+            default=default_idx,
+        )
+        return {"to": targets[idx]}
 
-    if not prompts.confirm(f"Hand off {from_tool} → {to_tool}?", default=True):
+    fields = [
+        ConfirmField(
+            name="from",
+            label="Source tool",
+            current_value=from_value,
+            explicit=from_tool is not None,
+            change_fn=_change_from,
+        ),
+        ConfirmField(
+            name="to",
+            label="Target tool",
+            current_value=to_value,
+            explicit=to_tool is not None,
+            change_fn=_change_to,
+        ),
+    ]
+
+    result = confirm_defaults(fields, title="Confirm handoff")
+    final_from = result["from"]
+    final_to = result["to"]
+
+    # Preserve the explicit cancel step — confirm_defaults has no cancel path.
+    if not prompts.confirm(f"Hand off {final_from} → {final_to}?", default=True):
         console.info("Cancelled.")
         return None
-    return from_tool, to_tool
+
+    return final_from, final_to

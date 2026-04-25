@@ -28,13 +28,24 @@ Matches the .crossby.yml format:
         tool: cursor
         model: haiku
         effort: low
+    sync_defaults:
+      from: claude
+      to: null
+      concern: null
+    handoff_defaults:
+      from: claude
+      to: codex
+      prompt_preset: default
+      token_budget: 32000
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from crossby.models.ai import AIToolID
 
 
 class MCPServerConfig(BaseModel):
@@ -120,6 +131,39 @@ class ProfileConfig(BaseModel):
     yolo: bool | None = None
 
 
+class SyncDefaults(BaseModel):
+    """Defaults for ``crossby sync`` — all fields optional.
+
+    The YAML key is ``sync_defaults`` (not ``sync``, which is a
+    deprecated-and-ignored legacy key handled by the loader).
+
+    The ``from:`` YAML key maps to the Python field ``from_tool``
+    because ``from`` is a reserved keyword.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_tool: AIToolID | None = Field(default=None, alias="from")
+    to: AIToolID | None = None
+    concern: str | None = None
+
+
+class HandoffDefaults(BaseModel):
+    """Defaults for ``crossby handoff`` — all fields optional.
+
+    See :class:`SyncDefaults` for the ``from`` / ``from_tool`` alias note.
+    ``prompt_preset`` is validated by the loader (not on this model) to
+    avoid a circular import with ``crossby.handoff.prompts``.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_tool: AIToolID | None = Field(default=None, alias="from")
+    to: AIToolID | None = None
+    prompt_preset: str | None = None
+    token_budget: int | None = None
+
+
 class CrossbyConfig(BaseModel):
     """Full configuration from .crossby.yml.
 
@@ -135,6 +179,8 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
+    sync_defaults: SyncDefaults = Field(default_factory=SyncDefaults)
+    handoff_defaults: HandoffDefaults = Field(default_factory=HandoffDefaults)
 
     # Resolved values (set after loading, not in YAML)
     config_path: str | None = Field(default=None, exclude=True)
@@ -194,3 +240,31 @@ class CrossbyConfig(BaseModel):
     def get_profile(self, name: str) -> ProfileConfig | None:
         """Get a named launch profile."""
         return self.profiles.get(name)
+
+    def get_sync_from(self) -> AIToolID | None:
+        """Get the default source tool for ``crossby sync``."""
+        return self.sync_defaults.from_tool
+
+    def get_sync_to(self) -> AIToolID | None:
+        """Get the default target tool for ``crossby sync`` (``None`` = all installed)."""
+        return self.sync_defaults.to
+
+    def get_sync_concern(self) -> str | None:
+        """Get the default sync concern (``None`` = all concerns)."""
+        return self.sync_defaults.concern
+
+    def get_handoff_from(self) -> AIToolID | None:
+        """Get the default source tool for ``crossby handoff``."""
+        return self.handoff_defaults.from_tool
+
+    def get_handoff_to(self) -> AIToolID | None:
+        """Get the default target tool for ``crossby handoff``."""
+        return self.handoff_defaults.to
+
+    def get_handoff_preset(self) -> str | None:
+        """Get the default summarization prompt preset for ``crossby handoff``."""
+        return self.handoff_defaults.prompt_preset
+
+    def get_handoff_token_budget(self) -> int | None:
+        """Get the default token budget for ``crossby handoff``."""
+        return self.handoff_defaults.token_budget

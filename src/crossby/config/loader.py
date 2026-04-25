@@ -8,12 +8,16 @@ from typing import Any
 
 import yaml
 
+from pydantic import ValidationError
+
 from crossby.models.config import (
     AIConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
+    HandoffDefaults,
     ProfileConfig,
+    SyncDefaults,
 )
 
 CONFIG_FILENAME = ".crossby.yml"
@@ -166,14 +170,58 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             yolo=profile_raw.get("yolo"),
         )
 
+    # Parse sync_defaults / handoff_defaults sections
+    sync_defaults = _parse_sync_defaults(raw.get("sync_defaults"))
+    handoff_defaults = _parse_handoff_defaults(raw.get("handoff_defaults"))
+
     return CrossbyConfig(
         version=version,
         ai=ai,
         models=models,
         profiles=profiles,
+        sync_defaults=sync_defaults,
+        handoff_defaults=handoff_defaults,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )
+
+
+def _parse_sync_defaults(raw: Any) -> SyncDefaults:
+    """Parse the ``sync_defaults`` section. Accepts ``from:`` alias."""
+    if raw is None:
+        return SyncDefaults()
+    if not isinstance(raw, dict):
+        raise ConfigError("'sync_defaults' must be a mapping")
+    try:
+        return SyncDefaults.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid 'sync_defaults': {exc}") from exc
+
+
+def _parse_handoff_defaults(raw: Any) -> HandoffDefaults:
+    """Parse the ``handoff_defaults`` section and validate ``prompt_preset``."""
+    if raw is None:
+        return HandoffDefaults()
+    if not isinstance(raw, dict):
+        raise ConfigError("'handoff_defaults' must be a mapping")
+    try:
+        defaults = HandoffDefaults.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid 'handoff_defaults': {exc}") from exc
+
+    # Validate prompt_preset against the handoff preset registry here (not on
+    # the model) to avoid a circular import between models/config.py and
+    # handoff/prompts.py.
+    if defaults.prompt_preset is not None:
+        from crossby.handoff.prompts import PRESETS
+
+        if defaults.prompt_preset not in PRESETS:
+            valid = ", ".join(sorted(PRESETS))
+            raise ConfigError(
+                f"Invalid 'handoff_defaults.prompt_preset': "
+                f"{defaults.prompt_preset!r}. Valid presets: {valid}."
+            )
+    return defaults
 
 
 def _parse_command_config(raw: dict[str, Any] | None) -> CommandConfig:

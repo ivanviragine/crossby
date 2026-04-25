@@ -204,7 +204,9 @@ def launch(
         console.error(f"{caps.display_name} does not support --trusted-dir.")
         raise typer.Exit(1)
 
-    if plan and not caps.supports_plan_mode:
+    # YOLO supersedes plan_mode in build_launch_command(), so don't error on
+    # tools that support YOLO but not plan mode when both flags are set.
+    if plan and not caps.supports_plan_mode and not resolved_yolo:
         console.error(f"{caps.display_name} does not support --plan.")
         raise typer.Exit(1)
 

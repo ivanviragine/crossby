@@ -5,7 +5,7 @@ Run through each feature below before going public. Start in a scratch project (
 ```bash
 # Prep: install from local source so you test the current code, not an old PyPI build
 uv tool install --from . crossby --force
-crossby --version   # should print the version from pyproject.toml (currently 0.2.3)
+crossby --version   # prints crossby.__version__ (currently 0.2.3); must be kept in sync with pyproject.toml on every release
 crossby --help      # should list: launch, sync, convert, stats, handoff
 ```
 
