@@ -128,6 +128,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     if not isinstance(commands_raw, dict):
         raise ConfigError("'ai.commands' must be a mapping")
     for cmd_name, cmd_raw in commands_raw.items():
+        if not isinstance(cmd_raw, dict):
+            raise ConfigError(f"'ai.commands.{cmd_name}' must be a mapping")
         commands[cmd_name] = _parse_command_config(cmd_raw)
     ai = AIConfig(
         default_tool=ai_raw.get("default_tool"),
@@ -145,13 +147,14 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         raise ConfigError("'models' must be a mapping")
     models: dict[str, ComplexityModelMapping] = {}
     for tool_name, mapping_raw in models_raw.items():
-        if isinstance(mapping_raw, dict):
-            models[tool_name] = ComplexityModelMapping(
-                easy=mapping_raw.get("easy"),
-                medium=mapping_raw.get("medium"),
-                complex=mapping_raw.get("complex"),
-                very_complex=mapping_raw.get("very_complex"),
-            )
+        if not isinstance(mapping_raw, dict):
+            raise ConfigError(f"'models.{tool_name}' must be a mapping")
+        models[tool_name] = ComplexityModelMapping(
+            easy=mapping_raw.get("easy"),
+            medium=mapping_raw.get("medium"),
+            complex=mapping_raw.get("complex"),
+            very_complex=mapping_raw.get("very_complex"),
+        )
 
     # Parse profiles section
     profiles_raw = raw.get("profiles")
@@ -224,9 +227,13 @@ def _parse_handoff_defaults(raw: Any) -> HandoffDefaults:
     return defaults
 
 
-def _parse_command_config(raw: dict[str, Any] | None) -> CommandConfig:
-    """Parse a per-command AI config section."""
-    if not raw or not isinstance(raw, dict):
+def _parse_command_config(raw: dict[str, Any]) -> CommandConfig:
+    """Parse a per-command AI config section.
+
+    The caller enforces that ``raw`` is a mapping; an empty dict is allowed
+    and yields a ``CommandConfig`` with all-default fields.
+    """
+    if not raw:
         return CommandConfig()
     return CommandConfig(
         tool=raw.get("tool"),

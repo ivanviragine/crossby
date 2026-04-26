@@ -161,7 +161,7 @@ class HandoffDefaults(BaseModel):
     from_tool: AIToolID | None = Field(default=None, alias="from")
     to: AIToolID | None = None
     prompt_preset: str | None = None
-    token_budget: int | None = None
+    token_budget: int | None = Field(default=None, gt=0)
 
 
 class CrossbyConfig(BaseModel):

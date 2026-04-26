@@ -133,10 +133,12 @@ def sync(
 
     results: list[SyncResult] = []
 
-    # Non-interactive mode: --from is specified on the CLI. A config default
-    # alone does *not* bypass the per-concern wizard — only an explicit --from
-    # (or an explicit change via the confirm-defaults loop) does.
-    if from_explicit and source_tool is not None:
+    # Non-interactive mode: a confirmed source bypasses the per-concern wizard.
+    # ``source_tool`` may come from --from, ``sync_defaults.from`` in
+    # ``.crossby.yml``, or the user's Proceed/Change choice in the confirm
+    # loop above. The "no source anywhere" case still falls through to the
+    # interactive wizard so the existing zero-config UX is preserved.
+    if source_tool is not None:
         data = build_sync_data(project_root, from_tool=source_tool)
         target_tools = (
             [target_tool]

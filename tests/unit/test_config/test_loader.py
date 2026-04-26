@@ -114,6 +114,22 @@ class TestLoadConfig:
         with pytest.raises(ConfigError):
             load_config(tmp_path)
 
+    def test_command_entry_as_scalar_raises(self, tmp_path):
+        """``ai.commands.plan: 123`` must raise — parallel to ``profiles.<name>``."""
+        (tmp_path / ".crossby.yml").write_text(
+            "ai:\n  commands:\n    plan: 123\n"
+        )
+        with pytest.raises(ConfigError, match=r"'ai\.commands\.plan' must be a mapping"):
+            load_config(tmp_path)
+
+    def test_models_entry_as_scalar_raises(self, tmp_path):
+        """``models.claude: 123`` must raise — was silently dropped before."""
+        (tmp_path / ".crossby.yml").write_text(
+            "models:\n  claude: 123\n"
+        )
+        with pytest.raises(ConfigError, match=r"'models\.claude' must be a mapping"):
+            load_config(tmp_path)
+
     def test_ai_as_list_raises(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text("ai:\n  - bad\n")
         with pytest.raises(ConfigError):
@@ -227,6 +243,21 @@ class TestHandoffDefaults:
     def test_list_raises(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text("handoff_defaults:\n  - bad\n")
         with pytest.raises(ConfigError, match="'handoff_defaults' must be a mapping"):
+            load_config(tmp_path)
+
+    def test_zero_token_budget_raises(self, tmp_path):
+        """``token_budget: 0`` must be rejected at config-load time."""
+        (tmp_path / ".crossby.yml").write_text(
+            "handoff_defaults:\n  token_budget: 0\n"
+        )
+        with pytest.raises(ConfigError, match="Invalid 'handoff_defaults'"):
+            load_config(tmp_path)
+
+    def test_negative_token_budget_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text(
+            "handoff_defaults:\n  token_budget: -100\n"
+        )
+        with pytest.raises(ConfigError, match="Invalid 'handoff_defaults'"):
             load_config(tmp_path)
 
 
