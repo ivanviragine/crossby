@@ -293,3 +293,174 @@ def test_handoff_errors_when_custom_prompt_missing(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "not found" in result.output.lower()
+
+
+def test_handoff_custom_prompt_with_config_preset_succeeds(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """``--prompt custom.md`` must win over a configured non-default preset.
+
+    Regression for #44: previously the resolver overwrote ``prompt_preset``
+    with the configured ``cc-compact`` *before* ``_resolve_prompt`` ran, so
+    the mutual-exclusivity check fired even though the user only set ``--prompt``.
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    (project_root / ".crossby.yml").write_text(
+        "version: 1\nhandoff_defaults:\n  prompt_preset: cc-compact\n",
+        encoding="utf-8",
+    )
+
+    custom = tmp_path / "custom.md"
+    custom.write_text("Custom prompt body — {transcript}", encoding="utf-8")
+
+    launched: dict[str, object] = {}
+    fake_run = _make_raw_subprocess_run(launched, "raw summary text")
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from", "claude",
+                "--to", "codex",
+                "--path", str(project_root),
+                "--no-launch",
+                "--prompt", str(custom),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "mutually exclusive" not in result.output
+    handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text(encoding="utf-8")
+    # Custom prompt takes the raw-passthrough path; the resolved prompt source
+    # in the handoff body should reference the custom file, not "cc-compact".
+    assert str(custom.resolve()) in body
+    assert "cc-compact" not in body
+
+
+def test_handoff_explicit_default_preset_overrides_config(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """``--prompt-preset default`` must override a configured non-default preset."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    (project_root / ".crossby.yml").write_text(
+        "version: 1\nhandoff_defaults:\n  prompt_preset: cc-compact\n",
+        encoding="utf-8",
+    )
+
+    launched: dict[str, object] = {}
+    fake_run = _make_unified_subprocess_run(launched)
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from", "claude",
+                "--to", "codex",
+                "--path", str(project_root),
+                "--no-launch",
+                "--prompt-preset", "default",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text(encoding="utf-8")
+    # Default preset goes through the structured path; cc-compact would not.
+    assert "## Current Task" in body
+    assert "(raw)" not in body
+
+
+def test_handoff_explicit_default_token_budget_overrides_config(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """``--token-budget 32000`` must override a configured non-default budget."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    (project_root / ".crossby.yml").write_text(
+        "version: 1\nhandoff_defaults:\n  token_budget: 16000\n",
+        encoding="utf-8",
+    )
+
+    launched: dict[str, object] = {}
+    fake_run = _make_unified_subprocess_run(launched)
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from", "claude",
+                "--to", "codex",
+                "--path", str(project_root),
+                "--no-launch",
+                "--token-budget", "32000",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    # The summarizer step prints the active budget — the explicit CLI value
+    # must beat the configured 16000.
+    assert "budget=32000" in result.output
+    assert "budget=16000" not in result.output
+
+
+def test_handoff_token_budget_zero_produces_friendly_error(tmp_path: Path) -> None:
+    """``--token-budget 0`` exits cleanly instead of raising a ValueError."""
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "handoff",
+            "--from", "claude",
+            "--to", "codex",
+            "--path", str(tmp_path),
+            "--token-budget", "0",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "must be positive" in result.output
+    # No traceback — friendly errors do not bubble exceptions out.
+    assert "Traceback" not in result.output

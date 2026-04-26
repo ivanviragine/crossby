@@ -229,3 +229,25 @@ class TestPickTokenBudget:
             "crossby.ui.prompts.input_prompt", lambda *_a, **_kw: "16000"
         )
         assert _pick_token_budget() == 16_000
+
+    def test_zero_input_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``token_budget: 0`` is invalid — warn and treat as unset."""
+        from crossby.cli.init import _pick_token_budget
+
+        monkeypatch.setattr(
+            "crossby.ui.prompts.input_prompt", lambda *_a, **_kw: "0"
+        )
+        assert _pick_token_budget() is None
+
+    def test_negative_input_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative ``token_budget`` is invalid — warn and treat as unset."""
+        from crossby.cli.init import _pick_token_budget
+
+        monkeypatch.setattr(
+            "crossby.ui.prompts.input_prompt", lambda *_a, **_kw: "-100"
+        )
+        assert _pick_token_budget() is None

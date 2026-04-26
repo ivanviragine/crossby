@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from crossby.cli.main import app
+from crossby.models.ai import AIToolID
+from crossby.sync.base import SyncConcern, SyncData
 
 runner = CliRunner()
 
@@ -261,3 +264,59 @@ class TestSyncCommandSkills:
         )
         assert result.exit_code == 0, result.output
         assert "Skills:" in result.output
+
+
+class TestSyncDefaultsBypassWizard:
+    """Sync respects ``sync_defaults`` from ``.crossby.yml`` without the wizard.
+
+    Regression for #44 — previously, plain ``crossby sync`` with a config
+    default fell through to the per-concern wizard and synced **all** tools
+    instead of using the configured source/target/concern.
+    """
+
+    def test_config_defaults_drive_non_interactive_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_yaml = (
+            "version: 1\n"
+            "sync_defaults:\n"
+            "  from: cursor\n"
+            "  to: gemini\n"
+            "  concern: permissions\n"
+        )
+        (tmp_path / ".crossby.yml").write_text(config_yaml, encoding="utf-8")
+
+        captured: dict[str, Any] = {}
+
+        def fake_build_sync_data(
+            project_root: Path, from_tool: AIToolID | None = None
+        ) -> SyncData:
+            captured["build_from"] = from_tool
+            captured["build_root"] = project_root
+            return SyncData()
+
+        def fake_run_sync(
+            data: SyncData,
+            project_root: Path,
+            **kwargs: Any,
+        ) -> list[Any]:
+            captured["run_kwargs"] = kwargs
+            return []
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(
+                lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.GEMINI]
+            ),
+        )
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr("crossby.sync.readers.build_sync_data", fake_build_sync_data)
+        monkeypatch.setattr("crossby.sync.run_sync", fake_run_sync)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert captured["build_from"] is AIToolID.CURSOR
+        assert captured["run_kwargs"]["concern"] is SyncConcern.PERMISSIONS
+        assert captured["run_kwargs"]["installed_tools"] == [AIToolID.GEMINI]
+        assert captured["run_kwargs"]["tool_id"] is AIToolID.GEMINI

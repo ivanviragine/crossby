@@ -358,10 +358,16 @@ def _pick_token_budget() -> int | None:
     if not raw:
         return None
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         console.warn(f"Not an integer ({raw!r}); leaving token budget unset.")
         return None
+    if value <= 0:
+        console.warn(
+            f"Token budget must be positive (got {value}); leaving token budget unset."
+        )
+        return None
+    return value
 
 
 def _render_init_yaml(answers: dict[str, Any]) -> str:

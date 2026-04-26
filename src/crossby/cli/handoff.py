@@ -49,16 +49,18 @@ def handoff(
         "--summarizer-tool",
         help="Tool to run the summarization pass (defaults to the source tool).",
     ),
-    token_budget: int = typer.Option(
-        32_000, "--token-budget", help="Approximate token budget for the transcript."
+    token_budget: int | None = typer.Option(
+        None,
+        "--token-budget",
+        help="Approximate token budget for the transcript (default: 32000).",
     ),
     prompt: Path | None = typer.Option(
         None, "--prompt", help="Path to a custom summarization prompt (.md)."
     ),
-    prompt_preset: str = typer.Option(
-        "default",
+    prompt_preset: str | None = typer.Option(
+        None,
         "--prompt-preset",
-        help="Bundled prompt preset: default | cc-compact.",
+        help="Bundled prompt preset: default | cc-compact (default: default).",
     ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
@@ -93,17 +95,23 @@ def handoff(
 
     project_root = path.resolve()
 
-    # Apply .crossby.yml handoff_defaults for preset + token_budget before
-    # the prompt is resolved and the wizard runs.
+    # Capture before resolution so a config-injected preset doesn't trip the mutual-exclusivity check.
     config = load_config(project_root)
+    user_set_preset = prompt_preset is not None
     prompt_preset = resolve_handoff_preset(prompt_preset, config)
     token_budget = resolve_handoff_token_budget(token_budget, config)
+    if token_budget <= 0:
+        console.error(
+            f"--token-budget must be positive (got {token_budget})."
+        )
+        raise typer.Exit(1)
 
     # --- Resolve the summarization prompt ---------------------------------
     try:
         prompt_template, prompt_source, structured = _resolve_prompt(
             prompt=prompt,
             prompt_preset=prompt_preset,
+            user_set_preset=user_set_preset,
             load_preset=load_preset,
             load_user_prompt=load_user_prompt,
             presets=PRESETS,
@@ -266,6 +274,8 @@ class _InvalidPromptFlagsError(ValueError):
 def _resolve_prompt(
     prompt: Path | None,
     prompt_preset: str,
+    *,
+    user_set_preset: bool,
     load_preset: Callable[[str], str],
     load_user_prompt: Callable[[Path], str],
     presets: dict[str, str],
@@ -274,10 +284,14 @@ def _resolve_prompt(
 
     ``structured`` is True only for the ``default`` preset; any custom prompt
     or non-default preset takes the raw-passthrough path.
+
+    ``user_set_preset`` indicates whether the user actively passed
+    ``--prompt-preset``. The flag has to be computed at the call site (before
+    resolution) because ``prompt_preset`` here may have been injected by
+    config, which must not trip the mutual-exclusivity check.
     """
     custom_prompt_given = prompt is not None
-    non_default_preset = prompt_preset != "default"
-    if custom_prompt_given and non_default_preset:
+    if custom_prompt_given and user_set_preset:
         raise _InvalidPromptFlagsError(
             "--prompt and --prompt-preset are mutually exclusive."
         )

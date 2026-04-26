@@ -1,8 +1,9 @@
 """Tests for ``crossby.services.handoff_resolution`` resolvers.
 
-The CLI-default handling for ``prompt_preset`` and ``token_budget`` is
-asymmetric — the flags have real default values (``"default"`` / ``32000``)
-that should *not* override config. Tests pin that contract.
+The contract for ``prompt_preset`` and ``token_budget`` is None-based:
+``None`` means "the user did not pass this flag," so config wins. Any
+non-None value (including the fallback string/int) is treated as an
+explicit user choice and overrides config.
 """
 
 from __future__ import annotations
@@ -46,46 +47,53 @@ class TestResolveHandoffFromTo:
 
 
 class TestResolveHandoffPreset:
-    def test_cli_default_lets_config_win(self) -> None:
-        """Flag left at the CLI default → use config value if present."""
+    def test_none_lets_config_win(self) -> None:
+        """Flag not provided (None) → use config value if present."""
         cfg = CrossbyConfig(
             handoff_defaults=HandoffDefaults(prompt_preset="cc-compact")
         )
-        assert resolve_handoff_preset("default", cfg) == "cc-compact"
+        assert resolve_handoff_preset(None, cfg) == "cc-compact"
+
+    def test_explicit_default_overrides_config(self) -> None:
+        """User passing ``--prompt-preset default`` must override the config."""
+        cfg = CrossbyConfig(
+            handoff_defaults=HandoffDefaults(prompt_preset="cc-compact")
+        )
+        assert resolve_handoff_preset("default", cfg) == "default"
 
     def test_explicit_non_default_overrides_config(self) -> None:
         cfg = CrossbyConfig(
             handoff_defaults=HandoffDefaults(prompt_preset="cc-compact")
         )
-        assert resolve_handoff_preset("default", cfg, cli_default="default") == "cc-compact"
-        assert resolve_handoff_preset("other", cfg, cli_default="default") == "other"
+        assert resolve_handoff_preset("other", cfg) == "other"
 
-    def test_falls_back_to_cli_default(self) -> None:
-        cfg = CrossbyConfig()
-        assert resolve_handoff_preset("default", cfg) == "default"
-
-    def test_none_from_cli_uses_config_or_default(self) -> None:
+    def test_falls_back_to_default_when_unset(self) -> None:
         cfg = CrossbyConfig()
         assert resolve_handoff_preset(None, cfg) == "default"
 
+    def test_custom_fallback(self) -> None:
+        cfg = CrossbyConfig()
+        assert resolve_handoff_preset(None, cfg, fallback="cc-compact") == "cc-compact"
+
 
 class TestResolveHandoffTokenBudget:
-    def test_cli_default_lets_config_win(self) -> None:
+    def test_none_lets_config_win(self) -> None:
         cfg = CrossbyConfig(handoff_defaults=HandoffDefaults(token_budget=16_000))
-        assert resolve_handoff_token_budget(32_000, cfg) == 16_000
+        assert resolve_handoff_token_budget(None, cfg) == 16_000
+
+    def test_explicit_default_overrides_config(self) -> None:
+        """User passing ``--token-budget 32000`` must override the config."""
+        cfg = CrossbyConfig(handoff_defaults=HandoffDefaults(token_budget=16_000))
+        assert resolve_handoff_token_budget(32_000, cfg) == 32_000
 
     def test_explicit_non_default_overrides_config(self) -> None:
         cfg = CrossbyConfig(handoff_defaults=HandoffDefaults(token_budget=16_000))
         assert resolve_handoff_token_budget(8_000, cfg) == 8_000
 
-    def test_falls_back_to_cli_default(self) -> None:
-        cfg = CrossbyConfig()
-        assert resolve_handoff_token_budget(32_000, cfg) == 32_000
-
-    def test_none_input_uses_config_or_default(self) -> None:
-        cfg = CrossbyConfig(handoff_defaults=HandoffDefaults(token_budget=16_000))
-        assert resolve_handoff_token_budget(None, cfg) == 16_000
-
-    def test_none_input_and_no_config_uses_default(self) -> None:
+    def test_falls_back_to_default_when_unset(self) -> None:
         cfg = CrossbyConfig()
         assert resolve_handoff_token_budget(None, cfg) == 32_000
+
+    def test_custom_fallback(self) -> None:
+        cfg = CrossbyConfig()
+        assert resolve_handoff_token_budget(None, cfg, fallback=8_000) == 8_000
