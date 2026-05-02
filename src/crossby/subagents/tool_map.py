@@ -42,9 +42,6 @@ CANONICAL_TOOLS: dict[str, dict[str, str]] = {
     },
 }
 
-# Tools that have a documented `tools:` allowlist field at all.
-TOOLS_WITH_ALLOWLIST: frozenset[str] = frozenset({"claude", "copilot", "gemini"})
-
 
 def to_canonical(name: str, tool: str) -> str:
     """Translate a tool-specific tool name to canonical form.

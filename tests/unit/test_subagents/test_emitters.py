@@ -133,3 +133,33 @@ class TestEmitCodex:
         ir = _ir(name="my-worker")
         emission, _ = emit_codex(ir)
         assert emission.suggested_filename == "my-worker.toml"
+
+    def test_empty_body_warns(self) -> None:
+        """Codex requires developer_instructions; empty body should surface a warning."""
+        ir = SubagentIR(name="x", description="d", body="")
+        emission, warnings = emit_codex(ir)
+        assert any(w.field == "body" and w.severity == WarningSeverity.LOSSY for w in warnings)
+        agent = tomllib.loads(emission.agent_toml)
+        assert agent["developer_instructions"] == ""
+
+
+class TestEmitPreservesEmptyTools:
+    """Cross-emitter: explicit empty tools list survives round-trip."""
+
+    def test_claude_emits_empty_list(self) -> None:
+        ir = _ir(tools=[])
+        out, _ = emit_claude(ir)
+        fm = _frontmatter(out)
+        assert fm["tools"] == []
+
+    def test_copilot_emits_empty_list(self) -> None:
+        ir = _ir(tools=[])
+        out, _ = emit_copilot(ir)
+        fm = _frontmatter(out)
+        assert fm["tools"] == []
+
+    def test_gemini_emits_empty_list(self) -> None:
+        ir = _ir(tools=[])
+        out, _ = emit_gemini(ir)
+        fm = _frontmatter(out)
+        assert fm["tools"] == []

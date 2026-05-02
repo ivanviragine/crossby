@@ -56,6 +56,28 @@ class TestParseClaude:
         ir, _ = parse_claude(text)
         assert ir.disallowed_tools == ["bash"]
 
+    def test_explicit_empty_tools_preserved(self) -> None:
+        """`tools: []` (explicit empty) must NOT collapse to None.
+
+        Claude/Copilot/Gemini docs treat an empty list as "no tools" while
+        an omitted field means "inherit all" — they're semantically distinct.
+        """
+        text = "---\nname: a\ndescription: x\ntools: []\n---\nbody\n"
+        ir, _ = parse_claude(text)
+        assert ir.tools == []
+
+    def test_omitted_tools_is_none(self) -> None:
+        text = "---\nname: a\ndescription: x\n---\nbody\n"
+        ir, _ = parse_claude(text)
+        assert ir.tools is None
+
+    def test_crlf_line_endings(self) -> None:
+        """Frontmatter parsing tolerates Windows-style line endings."""
+        text = "---\r\nname: a\r\ndescription: x\r\n---\r\nbody\r\n"
+        ir, _ = parse_claude(text)
+        assert ir.name == "a"
+        assert ir.description == "x"
+
 
 class TestParseGemini:
     def test_basic(self) -> None:

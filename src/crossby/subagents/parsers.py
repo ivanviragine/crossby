@@ -45,7 +45,13 @@ def parse(
 
 
 def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    """Split YAML frontmatter from markdown body. Empty dict if no frontmatter."""
+    """Split YAML frontmatter from markdown body. Empty dict if no frontmatter.
+
+    Accepts both LF and CRLF line endings — the tools we read from include
+    files that have round-tripped through Windows editors.
+    """
+    # Normalise line endings so the prefix/delimiter checks below are simple.
+    content = content.replace("\r\n", "\n")
     if not content.startswith("---\n"):
         return {}, content
     end = content.find("\n---\n", 4)
@@ -60,16 +66,32 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return raw, content[end + 5 :]
 
 
+_MISSING = object()
+
+
 def _normalize_tools(value: Any) -> list[str] | None:
-    """Frontmatter ``tools`` can be a YAML list or a comma-separated string."""
-    if value is None:
+    """Frontmatter ``tools`` can be a YAML list or a comma-separated string.
+
+    ``None`` is returned only when the field is genuinely absent.  An explicit
+    empty list (``tools: []``) or an empty/whitespace string is returned as
+    ``[]`` — Claude, Copilot, and Gemini all treat that as "no tools" rather
+    than "inherit all", and we must not collapse the two into the same IR
+    state.
+    """
+    if value is _MISSING or value is None:
         return None
     if isinstance(value, str):
-        items = [t.strip() for t in value.split(",") if t.strip()]
-        return items or None
+        return [t.strip() for t in value.split(",") if t.strip()]
     if isinstance(value, list):
         return [str(t) for t in value]
     return None
+
+
+def _get_tools(fm: dict[str, Any], key: str = "tools") -> list[str] | None:
+    """Distinguish absent vs explicit empty so allowlist semantics survive."""
+    if key not in fm:
+        return None
+    return _normalize_tools(fm[key])
 
 
 def _name_from_path(source_path: Path | None, fallback: str = "agent") -> str:
@@ -112,8 +134,8 @@ def parse_claude(
     fm, body = _split_frontmatter(content)
     warnings: list[ConversionWarning] = []
 
-    raw_tools = _normalize_tools(fm.get("tools"))
-    raw_disallowed = _normalize_tools(fm.get("disallowedTools"))
+    raw_tools = _get_tools(fm, "tools")
+    raw_disallowed = _get_tools(fm, "disallowedTools")
 
     extras = {k: v for k, v in fm.items() if k not in _CLAUDE_KNOWN_FIELDS}
 
@@ -122,9 +144,11 @@ def parse_claude(
         description=fm.get("description"),
         body=body,
         model=fm.get("model"),
-        tools=[to_canonical(t, "claude") for t in raw_tools] if raw_tools else None,
+        tools=[to_canonical(t, "claude") for t in raw_tools] if raw_tools is not None else None,
         disallowed_tools=(
-            [to_canonical(t, "claude") for t in raw_disallowed] if raw_disallowed else None
+            [to_canonical(t, "claude") for t in raw_disallowed]
+            if raw_disallowed is not None
+            else None
         ),
         mcp_servers=fm.get("mcpServers"),
         max_turns=fm.get("maxTurns"),
@@ -192,7 +216,7 @@ def parse_gemini(
 ) -> tuple[SubagentIR, list[ConversionWarning]]:
     fm, body = _split_frontmatter(content)
     warnings: list[ConversionWarning] = []
-    raw_tools = _normalize_tools(fm.get("tools"))
+    raw_tools = _get_tools(fm, "tools")
     extras = {k: v for k, v in fm.items() if k not in _GEMINI_KNOWN_FIELDS}
 
     if fm.get("kind") == "remote":
@@ -212,7 +236,7 @@ def parse_gemini(
         description=fm.get("description"),
         body=body,
         model=fm.get("model"),
-        tools=[to_canonical(t, "gemini") for t in raw_tools] if raw_tools else None,
+        tools=[to_canonical(t, "gemini") for t in raw_tools] if raw_tools is not None else None,
         mcp_servers=fm.get("mcpServers"),
         temperature=fm.get("temperature"),
         max_turns=fm.get("max_turns"),
@@ -246,7 +270,7 @@ def parse_copilot(
     content: str, source_path: Path | None = None
 ) -> tuple[SubagentIR, list[ConversionWarning]]:
     fm, body = _split_frontmatter(content)
-    raw_tools = _normalize_tools(fm.get("tools"))
+    raw_tools = _get_tools(fm, "tools")
     extras = {k: v for k, v in fm.items() if k not in _COPILOT_KNOWN_FIELDS}
 
     ir = SubagentIR(
@@ -254,7 +278,7 @@ def parse_copilot(
         description=fm.get("description"),
         body=body,
         model=fm.get("model"),
-        tools=[to_canonical(t, "copilot") for t in raw_tools] if raw_tools else None,
+        tools=[to_canonical(t, "copilot") for t in raw_tools] if raw_tools is not None else None,
         mcp_servers=fm.get("mcp-servers"),
         target=fm.get("target"),
         user_invocable=fm.get("user-invocable"),

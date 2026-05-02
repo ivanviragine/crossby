@@ -99,9 +99,3 @@ class SubagentIR(BaseModel):
     # Escape hatch — fields the parser couldn't classify but wants to preserve.
     # Emitters only round-trip these into the same source tool.
     extras: dict[str, Any] = Field(default_factory=dict)
-
-    def with_warnings(
-        self, warnings: list[ConversionWarning] | None = None
-    ) -> tuple[SubagentIR, list[ConversionWarning]]:
-        """Convenience helper for parsers that build IR + warnings together."""
-        return self, warnings or []

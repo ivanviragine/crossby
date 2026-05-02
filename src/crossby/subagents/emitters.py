@@ -256,11 +256,9 @@ def emit_gemini(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 
 def emit_copilot(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
     warnings: list[ConversionWarning] = []
-    fm: dict[str, Any] = {}
-    if ir.name:
-        fm["name"] = ir.name
-    # Copilot requires description
-    fm["description"] = ir.description or ir.name
+    # Copilot requires description; fall back to name when the IR carries none
+    # so the file still validates against Copilot's parser.
+    fm: dict[str, Any] = {"name": ir.name, "description": ir.description or ir.name}
     if not ir.description:
         warnings.append(
             _warn_lossy(
@@ -314,12 +312,14 @@ def emit_copilot(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 
 
 def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
-    """Emit a Codex agent file plus an optional config.toml fragment.
+    """Emit a Codex agent file plus a config.toml registration fragment.
 
     Codex's system prompt lives in ``developer_instructions`` rather than a
     markdown body, and Codex has no per-agent tool allowlist — those fields
-    surface as warnings.  The config fragment is rendered as a top-level
-    ``[agents.<name>]`` table the user can append to ``~/.codex/config.toml``.
+    surface as warnings.  The fragment is informational: it shows the
+    ``[agents.<name>]`` table the user can append to ``~/.codex/config.toml``
+    if they want to register the agent globally (Codex also auto-discovers
+    agent files in ``~/.codex/agents/``).
     """
     warnings: list[ConversionWarning] = []
 
@@ -327,6 +327,14 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
         "name": ir.name,
         "developer_instructions": ir.body or "",
     }
+    if not ir.body:
+        warnings.append(
+            _warn_lossy(
+                "body",
+                "Codex requires `developer_instructions`; emitting an empty string. "
+                "Add a system prompt before using this agent.",
+            )
+        )
     if ir.description is not None:
         agent["description"] = ir.description
     else:

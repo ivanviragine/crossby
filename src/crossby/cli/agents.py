@@ -16,7 +16,12 @@ from pathlib import Path
 
 import typer
 
-from crossby.subagents import SUPPORTED_TOOLS, CodexEmission
+from crossby.subagents import (
+    SUPPORTED_TOOLS,
+    CodexEmission,
+    ConversionWarning,
+    WarningSeverity,
+)
 from crossby.subagents import convert as _convert
 from crossby.ui.console import console
 
@@ -119,11 +124,11 @@ def _resolve_target(output: Path, agent_name: str, extension: str) -> Path:
     return output
 
 
-def _emit_warnings(warnings: list) -> None:  # type: ignore[type-arg]
+def _emit_warnings(warnings: list[ConversionWarning]) -> None:
     if not warnings:
         return
     for w in warnings:
-        if w.severity.value == "dropped":
+        if w.severity is WarningSeverity.DROPPED:
             console.warn(str(w))
         else:
             console.info(str(w))
