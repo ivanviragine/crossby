@@ -32,9 +32,10 @@ Run `./scripts/check-all.sh` before opening a PR.
 ```
 src/crossby/
 ├── cli/          # Typer commands (entry point: cli/main.py:cli_main)
-├── services/     # High-level orchestrators (sync, launch, handoff)
+├── services/    # High-level orchestrators (sync, launch, handoff)
 ├── ai_tools/     # Per-tool adapters (Claude, Copilot, Gemini, Codex, …)
 ├── sync/         # Sync writers — translate and write config per tool
+├── subagents/    # Subagent format translation (canonical IR + parsers/emitters)
 ├── handoff/      # Session readers, summarizer, prompt loader, handoff writer
 ├── config/       # .crossby.yml loading and Pydantic models
 ├── models/       # Shared data models (AIToolID, capabilities, …)
@@ -42,6 +43,27 @@ src/crossby/
 ├── ui/           # Rich/questionary UI components
 └── logging/      # structlog configuration
 ```
+
+### Subagent format translation
+
+`src/crossby/subagents/` translates a single subagent definition between
+Claude Code, Cursor, Gemini, Copilot, and Codex.  The architecture is a
+canonical intermediate representation (`SubagentIR`) with one parser and one
+emitter per tool — no pairwise converters.  Tool-specific fields that don't
+generalize live in `SubagentIR.extras` and are only re-emitted when the
+target tool matches the original source.
+
+Lossy translations surface as `ConversionWarning(severity=lossy|dropped)`
+rather than silent drops — Cursor (no tool allowlist), Codex (only
+`sandbox_mode`), and Copilot's required `description` are the main offenders.
+
+Codex is the asymmetric case: its emitter returns a `CodexEmission`
+containing both the agent `.toml` body and a `[agents.<name>]` fragment for
+`~/.codex/config.toml`.  Orchestration features (`/fleet`, `/multitask`,
+Gemini's A2A `kind: remote`, Codex `max_depth`) are out of scope and
+documented as not translatable.
+
+CLI: `crossby agents convert --from <tool> --to <tool> <input>`.
 
 ### Request Flow
 
