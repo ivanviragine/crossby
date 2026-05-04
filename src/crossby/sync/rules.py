@@ -16,6 +16,11 @@ from crossby.models.ai import AIToolID
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
+from crossby.sync.instruction_markers import (
+    is_neutral_for_target,
+    manual_fix_notes_for_target,
+)
+from crossby.sync.manual_fix import append_manual_fix_block
 
 logger = structlog.get_logger()
 
@@ -106,7 +111,12 @@ def _is_managed(target_path: Path, source_path: Path) -> bool:
     return False
 
 
-def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
+def _is_up_to_date(
+    target_path: Path,
+    source_path: Path,
+    strategy: str,
+    target_tool: AIToolID,
+) -> bool:
     """Check if the target is already up to date with the configured strategy."""
     if strategy == "symlink":
         if not target_path.is_symlink():
@@ -131,17 +141,32 @@ def _is_up_to_date(target_path: Path, source_path: Path, strategy: str) -> bool:
             target_body = after_header[1:]
         else:
             target_body = after_header
-        source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        expected_body = _render_copy_body(source_text, target_tool)
+        expected_hash = hashlib.sha256(expected_body.encode("utf-8")).hexdigest()
         target_hash = hashlib.sha256(target_body.encode("utf-8")).hexdigest()
-        return source_hash == target_hash
+        return expected_hash == target_hash
 
     return False
 
 
-def _write_copy(source_path: Path, target_path: Path) -> None:
-    """Copy source to target with managed header."""
-    content = source_path.read_text(encoding="utf-8")
-    target_path.write_text(MANAGED_HEADER + "\n" + content, encoding="utf-8")
+def _render_copy_body(source_text: str, target_tool: AIToolID) -> str:
+    """Body that should be written below MANAGED_HEADER for ``target_tool``.
+
+    When source content references surfaces that belong to a different tool
+    (e.g. a Claude ``CLAUDE.md`` mentioning ``ExitPlanMode`` being copied to
+    ``GEMINI.md``), append a manual-fix block enumerating the lossy edges.
+    """
+    notes = manual_fix_notes_for_target(source_text, target_tool)
+    if not notes:
+        return source_text
+    return append_manual_fix_block(source_text, notes)
+
+
+def _write_copy(source_path: Path, target_path: Path, target_tool: AIToolID) -> None:
+    """Copy source to target with managed header and optional manual-fix block."""
+    source_text = source_path.read_text(encoding="utf-8")
+    body = _render_copy_body(source_text, target_tool)
+    target_path.write_text(MANAGED_HEADER + "\n" + body, encoding="utf-8")
 
 
 def _backup_file(target_path: Path) -> None:
@@ -223,6 +248,22 @@ class _BaseRulesWriter(AbstractSyncWriter):
                 message="source and target resolve to the same file",
             )
 
+        # Decide effective strategy. Symlink is the configured default, but
+        # we force a copy whenever the source mentions surfaces specific to a
+        # tool other than ``self.tool_id`` — that way every target gets a
+        # locally-edited file with a manual-fix block instead of silently
+        # propagating Claude/Gemini/etc-only semantics.
+        effective_strategy = data.rules_strategy
+        force_copy_reason: str | None = None
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            source_text = ""
+        if source_text and not is_neutral_for_target(source_text, self.tool_id):
+            if effective_strategy == "symlink":
+                force_copy_reason = "foreign markers in source"
+            effective_strategy = "copy"
+
         # Check existing target
         target_existed = target_path.exists() or target_path.is_symlink()
         if target_existed:
@@ -238,7 +279,9 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     )
                 if not dry_run:
                     _backup_file(target_path)
-            elif _is_up_to_date(target_path, source_path, data.rules_strategy):
+            elif _is_up_to_date(
+                target_path, source_path, effective_strategy, self.tool_id
+            ):
                 _warn_if_git_tracked(project_root, self._target_rel)
                 return SyncResult(
                     tool_id=self.tool_id,
@@ -251,12 +294,17 @@ class _BaseRulesWriter(AbstractSyncWriter):
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
 
         if dry_run:
+            dry_run_message = f"(dry-run: would sync via {effective_strategy})"
+            if force_copy_reason:
+                dry_run_message = (
+                    f"(dry-run: would sync via copy — {force_copy_reason})"
+                )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action=action,
                 file_path=target_path,
-                message=f"(dry-run: would sync via {data.rules_strategy})",
+                message=dry_run_message,
             )
 
         # Ensure parent directory exists
@@ -266,7 +314,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
         if target_existed:
             target_path.unlink()
 
-        if data.rules_strategy == "symlink":
+        if effective_strategy == "symlink":
             try:
                 ok = create_symlink(source_path, target_path)
             except OSError:
@@ -277,7 +325,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     tool=str(self.tool_id),
                     target=self._target_rel,
                 )
-                _write_copy(source_path, target_path)
+                _write_copy(source_path, target_path, self.tool_id)
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
@@ -286,7 +334,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     message="copy (symlink failed)",
                 )
         else:
-            _write_copy(source_path, target_path)
+            _write_copy(source_path, target_path, self.tool_id)
 
         _warn_if_git_tracked(project_root, self._target_rel)
 
@@ -295,6 +343,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=target_path,
+            message=force_copy_reason,
         )
 
 

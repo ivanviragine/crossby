@@ -335,3 +335,112 @@ class TestDisabledRules:
         data = SyncData()  # rules_source=None by default
         result = ClaudeRulesWriter().sync(data, project)
         assert result.action == "skipped"
+
+
+class TestForeignMarkerForceCopy:
+    """When source content references another tool's surfaces, the writer
+    should switch from symlink to copy and embed a manual-fix block.
+    """
+
+    def test_claude_only_content_forces_copy_to_gemini(self, tmp_path: Path):
+        # CLAUDE.md mentions ExitPlanMode → not neutral for a Gemini target.
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nUse ExitPlanMode when planning is done.\n"
+        )
+        data = _make_data(source="CLAUDE.md", strategy="symlink")
+
+        result = GeminiRulesWriter().sync(data, tmp_path)
+
+        target = tmp_path / "GEMINI.md"
+        assert result.action == "created"
+        assert target.is_file()
+        assert not target.is_symlink()
+        text = target.read_text()
+        assert text.startswith(MANAGED_HEADER)
+        assert "ExitPlanMode" in text
+        assert "<!-- crossby:manual-fix:start -->" in text
+        assert "<!-- crossby:manual-fix:end -->" in text
+        assert result.message == "foreign markers in source"
+
+    def test_neutral_content_still_symlinks(self, tmp_path: Path):
+        # Plain content stays on the configured (symlink) strategy.
+        (tmp_path / "CLAUDE.md").write_text("# Rules\nBe helpful.\n")
+        data = _make_data(source="CLAUDE.md", strategy="symlink")
+
+        result = GeminiRulesWriter().sync(data, tmp_path)
+
+        target = tmp_path / "GEMINI.md"
+        assert result.action == "created"
+        assert target.is_symlink()
+        assert "<!-- crossby:manual-fix" not in target.read_text()
+
+    def test_claude_target_keeps_native_content_as_symlink(self, tmp_path: Path):
+        # The same Claude-only content is fine for Claude itself.
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nUse ExitPlanMode when planning is done.\n"
+        )
+        # Self-symlink is guarded against; use a different filename.
+        (tmp_path / "AGENTS.md").write_text(
+            "# Rules\nUse ExitPlanMode when planning is done.\n"
+        )
+        data = _make_data(source="AGENTS.md", strategy="symlink")
+
+        result = ClaudeRulesWriter().sync(data, tmp_path)
+
+        target = tmp_path / "CLAUDE.md"
+        # The pre-existing CLAUDE.md is unmanaged → skipped without --force.
+        assert result.action == "skipped"
+        # The pre-existing CLAUDE.md is preserved (no foreign-markers copy
+        # was injected over it).
+        assert "<!-- crossby:manual-fix" not in target.read_text()
+
+    def test_idempotent_on_force_copy(self, tmp_path: Path):
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nUse ExitPlanMode when planning is done.\n"
+        )
+        data = _make_data(source="CLAUDE.md", strategy="symlink")
+
+        first = GeminiRulesWriter().sync(data, tmp_path)
+        second = GeminiRulesWriter().sync(data, tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+        assert second.message == "already linked"
+
+    def test_re_translation_replaces_block_after_source_change(
+        self, tmp_path: Path
+    ):
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nUse ExitPlanMode.\n"
+        )
+        data = _make_data(source="CLAUDE.md", strategy="symlink")
+
+        GeminiRulesWriter().sync(data, tmp_path)
+
+        # User edits the source — different Claude-only marker.
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nSet permissionMode to acceptEdits.\n"
+        )
+
+        result = GeminiRulesWriter().sync(data, tmp_path)
+        text = (tmp_path / "GEMINI.md").read_text()
+
+        assert result.action == "updated"
+        assert "permissionMode" in text
+        # The previous run's content is gone.
+        assert "ExitPlanMode" not in text
+        # Exactly one manual-fix block.
+        assert text.count("<!-- crossby:manual-fix:start -->") == 1
+
+    def test_dry_run_reports_foreign_markers(self, tmp_path: Path):
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Rules\nUse ExitPlanMode.\n"
+        )
+        data = _make_data(source="CLAUDE.md", strategy="symlink")
+
+        result = GeminiRulesWriter().sync(data, tmp_path, dry_run=True)
+
+        assert result.action == "created"
+        assert "would sync via copy" in (result.message or "")
+        assert "foreign markers" in (result.message or "")
+        # No file written.
+        assert not (tmp_path / "GEMINI.md").exists()
