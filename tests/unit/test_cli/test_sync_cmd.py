@@ -320,3 +320,46 @@ class TestSyncDefaultsBypassWizard:
         assert captured["run_kwargs"]["concern"] is SyncConcern.PERMISSIONS
         assert captured["run_kwargs"]["installed_tools"] == [AIToolID.GEMINI]
         assert captured["run_kwargs"]["tool_id"] is AIToolID.GEMINI
+
+
+class TestValidateTarget:
+    """``crossby sync --validate-target`` runs every validator without writing."""
+
+    def test_clean_project_exit_zero(self, tmp_path: Path) -> None:
+        (tmp_path / "AGENTS.md").write_text("# Project\nBe helpful.\n", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            ["sync", "--validate-target", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        # The OK rows should appear in the output table.
+        assert "ok" in result.output
+
+    def test_invalid_codex_toml_exit_one(self, tmp_path: Path) -> None:
+        codex = tmp_path / ".codex" / "config.toml"
+        codex.parent.mkdir()
+        codex.write_text("[[ broken", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            ["sync", "--validate-target", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 1, result.output
+
+    def test_missing_skill_field_exit_one(self, tmp_path: Path) -> None:
+        skill_md = tmp_path / ".claude" / "skills" / "broken" / "SKILL.md"
+        skill_md.parent.mkdir(parents=True)
+        # Frontmatter without name/description.
+        skill_md.write_text("---\nfoo: bar\n---\nBody.", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            ["sync", "--validate-target", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 1, result.output
+
+    def test_empty_project_no_findings(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["sync", "--validate-target", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 0
+        assert "Nothing to validate" in result.output

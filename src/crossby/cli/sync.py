@@ -12,6 +12,7 @@ from crossby.ui.console import console
 if TYPE_CHECKING:
     from crossby.models.ai import AIToolID
     from crossby.sync.base import SyncConcern, SyncResult
+    from crossby.sync.validate import ValidationFinding
 
 
 def sync(
@@ -30,6 +31,11 @@ def sync(
     ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite existing target files (backs up first)."
+    ),
+    validate_target: bool = typer.Option(
+        False,
+        "--validate-target",
+        help="Re-parse synced files and report structural issues; no writes.",
     ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
@@ -72,6 +78,15 @@ def sync(
 
     project_root = path.resolve()
     config = load_config(project_root)
+
+    if validate_target:
+        from crossby.sync.validate import has_errors, validate_target as _do_validate
+
+        findings = _do_validate(project_root)
+        _display_validation(findings)
+        if has_errors(findings):
+            raise typer.Exit(1)
+        return
 
     concern_explicit = concern is not None
     from_explicit = from_tool is not None
@@ -451,3 +466,44 @@ def _display_results(results: list[SyncResult]) -> None:
         )
 
     console.out.print(table)
+
+
+def _display_validation(findings: list[ValidationFinding]) -> None:
+    """Render validation findings as a Rich table."""
+    from rich.table import Table
+
+    typed_findings: list[ValidationFinding] = list(findings)
+    if not typed_findings:
+        console.info("Nothing to validate — no synced files found under the project.")
+        return
+
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("Tool", style="dim")
+    table.add_column("Concern")
+    table.add_column("Level")
+    table.add_column("Path")
+    table.add_column("Detail", style="dim")
+
+    level_styles = {
+        "ok": "[success]ok[/]",
+        "warning": "[warn]warning[/]",
+        "error": "[error]error[/]",
+    }
+
+    for finding in typed_findings:
+        table.add_row(
+            str(finding.tool_id) if finding.tool_id is not None else "crossby",
+            finding.concern.value if finding.concern is not None else "",
+            level_styles.get(finding.level, finding.level),
+            str(finding.path),
+            finding.detail,
+        )
+
+    console.out.print(table)
+    error_count = sum(1 for f in typed_findings if f.level == "error")
+    warn_count = sum(1 for f in typed_findings if f.level == "warning")
+    ok_count = sum(1 for f in typed_findings if f.level == "ok")
+    console.empty()
+    console.detail(
+        f"  {ok_count} ok · {warn_count} warning · {error_count} error"
+    )
