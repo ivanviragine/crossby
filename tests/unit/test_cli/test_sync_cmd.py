@@ -363,3 +363,89 @@ class TestValidateTarget:
         )
         assert result.exit_code == 0
         assert "Nothing to validate" in result.output
+
+
+class TestPlanAndDoctor:
+    """``crossby sync --plan`` and ``--doctor`` are pre-write inspection modes."""
+
+    def test_mutually_exclusive_with_validate_target(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "sync",
+                "--plan",
+                "--validate-target",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "mutually exclusive" in result.output
+
+    def test_plan_with_no_source_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No tools detected → auto-detect can't resolve a source.
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: [],
+        )
+        result = runner.invoke(
+            app,
+            ["sync", "--plan", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 1
+        assert "needs a source tool" in result.output
+
+    def test_plan_writes_nothing(
+        self,
+        project_with_claude_perms: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(project_with_claude_perms)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "--plan",
+                    "--from",
+                    "claude",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Migration plan" in result.output
+        # No cursor allowlist file should have been written.
+        assert not (project_with_claude_perms / ".cursor" / "cli.json").exists()
+
+    def test_doctor_renders_readiness(
+        self,
+        project_with_claude_perms: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(project_with_claude_perms)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "--doctor",
+                    "--from",
+                    "claude",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+        # readiness=high means exit 0; medium/low may or may not — just verify the section.
+        assert "Crossby doctor" in result.output
+        assert "readiness:" in result.output

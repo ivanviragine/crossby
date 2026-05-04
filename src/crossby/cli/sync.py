@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 
@@ -36,6 +36,16 @@ def sync(
         False,
         "--validate-target",
         help="Re-parse synced files and report structural issues; no writes.",
+    ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Show a stage-by-concern dry-run summary; no writes.",
+    ),
+    doctor: bool = typer.Option(
+        False,
+        "--doctor",
+        help="Show a readiness summary (plan + validate-target); no writes.",
     ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
@@ -79,6 +89,14 @@ def sync(
     project_root = path.resolve()
     config = load_config(project_root)
 
+    # Pre-write inspection modes are mutually exclusive.
+    inspect_modes = sum(1 for flag in (validate_target, plan, doctor) if flag)
+    if inspect_modes > 1:
+        console.error(
+            "--validate-target, --plan, and --doctor are mutually exclusive."
+        )
+        raise typer.Exit(1)
+
     if validate_target:
         from crossby.sync.validate import has_errors, validate_target as _do_validate
 
@@ -86,6 +104,17 @@ def sync(
         _display_validation(findings)
         if has_errors(findings):
             raise typer.Exit(1)
+        return
+
+    if plan or doctor:
+        _run_inspection(
+            project_root=project_root,
+            config=config,
+            from_tool=from_tool,
+            to_tool=to_tool,
+            concern=concern,
+            mode="doctor" if doctor else "plan",
+        )
         return
 
     concern_explicit = concern is not None
@@ -507,3 +536,74 @@ def _display_validation(findings: list[ValidationFinding]) -> None:
     console.detail(
         f"  {ok_count} ok · {warn_count} warning · {error_count} error"
     )
+
+
+def _run_inspection(
+    *,
+    project_root: Path,
+    config: Any,
+    from_tool: str | None,
+    to_tool: str | None,
+    concern: str | None,
+    mode: Literal["plan", "doctor"],
+) -> None:
+    """Run a dry-run sync and print a plan or doctor summary."""
+    from crossby.ai_tools.base import AbstractAITool
+    from crossby.models.ai import AIToolID
+    from crossby.services.sync_resolution import (
+        resolve_sync_concern,
+        resolve_sync_from,
+        resolve_sync_to,
+    )
+    from crossby.sync import run_sync
+    from crossby.sync.base import SyncConcern
+    from crossby.sync.plan import (
+        build_doctor,
+        render_doctor,
+        render_plan,
+        summarize_plan,
+    )
+    from crossby.sync.readers import build_sync_data
+    from crossby.sync.validate import validate_target as _do_validate
+
+    source = resolve_sync_from(from_tool, config, auto_detect=True)
+    target = resolve_sync_to(to_tool, config)
+    sync_concern = resolve_sync_concern(concern, config)
+
+    if source is None:
+        console.error(
+            "--plan/--doctor needs a source tool. Pass --from <tool> or set "
+            "sync_defaults.from in .crossby.yml."
+        )
+        raise typer.Exit(1)
+
+    installed_tools = AbstractAITool.detect_installed()
+    if not installed_tools:
+        console.error("No AI tools found in PATH.")
+        raise typer.Exit(1)
+
+    target_tools = (
+        [target] if target else [t for t in installed_tools if t != source]
+    )
+    data = build_sync_data(project_root, from_tool=source)
+    results = run_sync(
+        data,
+        project_root,
+        tool_id=target,
+        concern=sync_concern,
+        dry_run=True,
+        force=False,
+        installed_tools=target_tools,
+    )
+
+    summary = summarize_plan(results)
+    plan_text = render_plan(summary)
+    console.out.print(plan_text)
+
+    if mode == "doctor":
+        validation = _do_validate(project_root)
+        report = build_doctor(summary, validation)
+        console.empty()
+        console.out.print(render_doctor(report))
+        if report.readiness == "low":
+            raise typer.Exit(1)
