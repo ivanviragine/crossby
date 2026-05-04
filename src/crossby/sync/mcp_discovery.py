@@ -60,6 +60,8 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
         result["args"] = entry["args"]
     if "env" in entry and entry["env"]:
         result["env"] = entry["env"]
+    if "headers" in entry and entry["headers"]:
+        result["headers"] = entry["headers"]
     if "url" in entry:
         result["url"] = entry["url"]
 

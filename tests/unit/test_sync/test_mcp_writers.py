@@ -446,3 +446,63 @@ class TestCodexMCPWriter:
         entry = data["mcp_servers"]["api"]
         assert entry["url"] == "http://localhost:8080/mcp"
         assert entry["transport"] == "http"
+
+    def test_bearer_authorization_rewritten(self, tmp_path: Path) -> None:
+        """Authorization: Bearer ${TOKEN} → bearer_token_env_var = "TOKEN"."""
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        server = MCPServerConfig(
+            transport="http",
+            url="https://api.example.com/mcp",
+            headers={"Authorization": "Bearer ${API_TOKEN}"},
+        )
+        self.writer.sync(_cfg({"svc": server}), tmp_path)
+        data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        entry = data["mcp_servers"]["svc"]
+        assert entry["bearer_token_env_var"] == "API_TOKEN"
+        # No raw Authorization header should be left.
+        assert "http_headers" not in entry or "Authorization" not in entry.get(
+            "http_headers", {}
+        )
+
+    def test_env_var_headers_rewritten(self, tmp_path: Path) -> None:
+        """${VAR} headers → env_http_headers; literal headers stay."""
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        server = MCPServerConfig(
+            transport="http",
+            url="https://api.example.com/mcp",
+            headers={
+                "X-Tenant": "${TENANT_ID}",
+                "X-Project": "northstar",
+            },
+        )
+        self.writer.sync(_cfg({"svc": server}), tmp_path)
+        data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        entry = data["mcp_servers"]["svc"]
+        assert entry["env_http_headers"] == {"X-Tenant": "TENANT_ID"}
+        assert entry["http_headers"] == {"X-Project": "northstar"}
+
+    def test_env_self_reference_rewritten_to_env_vars(self, tmp_path: Path) -> None:
+        """env: {KEY: "${KEY}"} → env_vars = ["KEY"]."""
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        server = MCPServerConfig(
+            command="npx",
+            args=["-y", "@example/mcp"],
+            env={"API_TOKEN": "${API_TOKEN}", "DEBUG": "true"},
+        )
+        self.writer.sync(_cfg({"svc": server}), tmp_path)
+        data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        entry = data["mcp_servers"]["svc"]
+        assert entry["env_vars"] == ["API_TOKEN"]
+        assert entry["env"] == {"DEBUG": "true"}

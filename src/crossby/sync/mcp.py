@@ -45,6 +45,8 @@ def _to_http_entry(server: MCPServerConfig) -> dict[str, Any]:
     entry: dict[str, Any] = {"url": server.url, "transport": server.transport}
     if server.env:
         entry["env"] = server.env
+    if server.headers:
+        entry["headers"] = server.headers
     return entry
 
 
@@ -66,11 +68,24 @@ def _to_copilot_entry(server: MCPServerConfig) -> dict[str, Any]:
         entry["url"] = server.url
     if server.env:
         entry["env"] = server.env
+    if server.headers:
+        entry["headers"] = server.headers
     return entry
 
 
 def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
-    """Convert a server to the TOML entry format (Codex)."""
+    """Convert a server to the TOML entry format (Codex).
+
+    Applies Codex-specific transport rewrites: ``Authorization: Bearer
+    ${VAR}`` collapses into ``bearer_token_env_var``; ``${VAR}`` headers
+    move to ``env_http_headers``; ``KEY = "${KEY}"`` env entries move to
+    ``env_vars``. Literal headers/env entries stay verbatim.
+    """
+    from crossby.sync.mcp_transports import (
+        rewrite_env_for_codex,
+        rewrite_headers_for_codex,
+    )
+
     entry: dict[str, Any] = {}
     if server.command is not None:
         entry["command"] = server.command
@@ -79,8 +94,23 @@ def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
     if server.url is not None:
         entry["url"] = server.url
         entry["transport"] = server.transport
+
     if server.env:
-        entry["env"] = dict(server.env)
+        env_rewrite = rewrite_env_for_codex(server.env)
+        if env_rewrite.env:
+            entry["env"] = env_rewrite.env
+        if env_rewrite.env_vars:
+            entry["env_vars"] = env_rewrite.env_vars
+
+    if server.headers:
+        header_rewrite = rewrite_headers_for_codex(server.headers)
+        if header_rewrite.bearer_token_env_var is not None:
+            entry["bearer_token_env_var"] = header_rewrite.bearer_token_env_var
+        if header_rewrite.http_headers:
+            entry["http_headers"] = header_rewrite.http_headers
+        if header_rewrite.env_http_headers:
+            entry["env_http_headers"] = header_rewrite.env_http_headers
+
     return entry
 
 

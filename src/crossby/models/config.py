@@ -53,11 +53,18 @@ class MCPServerConfig(BaseModel):
 
     A server must have either ``command`` (stdio transport) or ``url``
     (http/sse transport) — not both, not neither.
+
+    ``headers`` is the source-shaped HTTP-header map (as Claude/Cursor
+    write it, with ``${VAR}`` literals preserved). The Codex writer
+    refactors this into ``bearer_token_env_var`` / ``http_headers`` /
+    ``env_http_headers`` at render time; other writers preserve the
+    literal shape.
     """
 
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
     transport: Literal["stdio", "http", "sse"] = "stdio"
     url: str | None = None
     enabled: bool = True
