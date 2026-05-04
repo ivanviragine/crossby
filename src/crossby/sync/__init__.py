@@ -181,6 +181,17 @@ def run_sync(
         if gi_result is not None:
             results.append(gi_result)
 
+    # Plugin discovery — append manual-fix rows when scoped to all tools or
+    # when the user explicitly asked for the plugins concern. We don't run
+    # for narrow --tool runs because plugins aren't a per-target output.
+    if (
+        tool_id is None
+        and (concern is None or concern == SyncConcern.PLUGINS)
+    ):
+        from crossby.sync.plugins import report_plugins
+
+        results.extend(report_plugins(project_root))
+
     return results
 
 

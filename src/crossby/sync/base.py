@@ -23,6 +23,7 @@ class SyncConcern(StrEnum):
     AGENTS = "agents"
     SKILLS = "skills"
     HOOKS = "hooks"
+    PLUGINS = "plugins"
 
 
 @dataclass
