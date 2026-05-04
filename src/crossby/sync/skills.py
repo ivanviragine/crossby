@@ -5,10 +5,22 @@ A real target directory is treated as "managed" (safe to replace without --force
 empty OR every immediate child is a subdirectory containing a SKILL.md file.
 Skills are organised as one-directory-per-skill, not as flat .md files — using the
 agents rule (all children are .md files) would wrongly reject legitimate skills trees.
+
+Strategies:
+- ``symlink`` (default): the source skills tree is symlinked into the tool's path so
+  edits propagate everywhere. Requires every tool to accept the same SKILL.md shape.
+- ``copy``: physical copy of the tree. No content rewriting.
+- ``translate``: per-skill copy that runs each ``SKILL.md`` through
+  :func:`crossby.sync.agent_models.translate_skill_for_target`, appending a
+  ``crossby:manual-fix`` block when the source declares fields the target tool
+  doesn't natively honour (e.g. Claude ``allowed-tools`` for a Codex target).
+  Support directories (``scripts/``, ``references/``, ``assets/``) are copied
+  verbatim.
 """
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -18,6 +30,11 @@ import structlog
 from crossby.config.linker import create_symlink
 from crossby.config.skills import SKILLS_DIR
 from crossby.models.ai import AIToolID
+from crossby.sync.agent_models import (
+    parse_markdown_skill,
+    render_markdown_skill,
+    translate_skill_for_target,
+)
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
@@ -141,9 +158,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         except OSError:
             pass
 
-        # For copy strategy, guard against following a symlinked target directory —
-        # copies would land in the symlink's destination, potentially outside the project.
-        if data.skills_strategy == "copy" and target_dir.is_symlink():
+        # For copy/translate strategies, guard against following a symlinked target
+        # directory — writes would land in the symlink's destination, potentially
+        # outside the project.
+        if data.skills_strategy in {"copy", "translate"} and target_dir.is_symlink():
             if not force:
                 return SyncResult(
                     tool_id=self.tool_id,
@@ -151,7 +169,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     action="error",
                     message=(
                         f"{self._target_rel} is a symlinked directory. "
-                        "Refusing to copy skills into a symlink target. "
+                        "Refusing to write skills into a symlink target. "
                         "Remove the symlink or re-run with --force to replace it."
                     ),
                 )
@@ -174,7 +192,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             "or use --force to back it up and replace it."
                         ),
                     )
-                # Managed fallback directory: re-sync via copy for idempotent re-runs.
+                # Managed fallback directory: re-sync via the configured strategy
+                # so subsequent runs preserve translate/copy semantics.
+                if data.skills_strategy == "translate":
+                    return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             dir_was_cleared = True
             if not dry_run:
@@ -182,6 +203,9 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 shutil.copytree(str(target_dir), str(bak))
                 shutil.rmtree(str(target_dir))
                 logger.info("skills.dir_backed_up", original=str(target_dir), backup=str(bak))
+
+        if data.skills_strategy == "translate":
+            return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
 
         if data.skills_strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
@@ -282,6 +306,98 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
+    def _sync_translate(
+        self, source_dir: Path, target_dir: Path, *, dry_run: bool
+    ) -> SyncResult:
+        """Per-skill copy with target-aware SKILL.md rewriting.
+
+        For each ``<skill>/`` under ``source_dir``: parse SKILL.md, run it
+        through :func:`translate_skill_for_target` for ``self.tool_id``, render
+        with any manual-fix block appended, and write to
+        ``<target_dir>/<skill>/SKILL.md``. Support directories (``scripts/``,
+        ``references/``, ``assets/``) are copied verbatim. Hash-based
+        idempotency. Stale skill subdirectories whose source disappeared are
+        removed.
+        """
+        skill_dirs = [
+            child
+            for child in sorted(source_dir.iterdir())
+            if child.is_dir() and (child / "SKILL.md").is_file()
+        ]
+        if not skill_dirs:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="no skills to translate",
+            )
+
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
+
+        if dry_run:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action=action,
+                file_path=target_dir,
+                message="translate (dry-run)",
+            )
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        wanted_names = {skill_dir.name for skill_dir in skill_dirs}
+        # Stale cleanup
+        if target_dir.is_dir():
+            for child in target_dir.iterdir():
+                if child.is_dir() and child.name not in wanted_names:
+                    shutil.rmtree(child)
+                    logger.info("skills.stale_removed", path=str(child))
+
+        skipped_all = True
+        for skill_dir in skill_dirs:
+            target_skill = target_dir / skill_dir.name
+            target_skill.mkdir(parents=True, exist_ok=True)
+
+            source_skill_md = skill_dir / "SKILL.md"
+            target_skill_md = target_skill / "SKILL.md"
+            definition = parse_markdown_skill(
+                source_skill_md.read_text(encoding="utf-8"),
+                fallback_name=skill_dir.name,
+            )
+            translated = translate_skill_for_target(definition, self.tool_id)
+            rendered = render_markdown_skill(translated)
+
+            if target_skill_md.is_file():
+                if (
+                    hashlib.sha256(target_skill_md.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    # SKILL.md unchanged — but support dirs may still need a refresh.
+                    _refresh_skill_support_dirs(skill_dir, target_skill)
+                    continue
+
+            skipped_all = False
+            target_skill_md.write_text(rendered, encoding="utf-8")
+            _refresh_skill_support_dirs(skill_dir, target_skill)
+
+        if skipped_all and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already translated",
+            )
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=target_dir,
+            message="translated",
+        )
+
 
 def _copy_skills_dir(source_dir: Path, target_dir: Path) -> None:
     """Copy skills directory structure from source to target (one subdir per skill)."""
@@ -289,6 +405,26 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> None:
     if target_dir.exists():
         shutil.rmtree(target_dir)
     shutil.copytree(str(source_dir), str(target_dir))
+
+
+_SUPPORT_DIRS = ("scripts", "references", "assets")
+
+
+def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> None:
+    """Mirror ``scripts/``, ``references/``, ``assets/`` from source to target.
+
+    Idempotent: replaces the target subdir if it exists. Missing source subdirs
+    are also removed from target so deleted support dirs propagate.
+    """
+    for subdir in _SUPPORT_DIRS:
+        source_sub = source_skill / subdir
+        target_sub = target_skill / subdir
+        if source_sub.is_dir():
+            if target_sub.exists():
+                shutil.rmtree(target_sub)
+            shutil.copytree(str(source_sub), str(target_sub))
+        elif target_sub.exists():
+            shutil.rmtree(target_sub)
 
 
 # ---------------------------------------------------------------------------

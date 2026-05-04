@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -32,7 +33,7 @@ _BLOCK_END = f"# <<< crossby {_GITIGNORE_BLOCK_ID} <<<"
 
 def _data(
     source: str = ".crossby/skills",
-    strategy: Literal["symlink", "copy"] = "symlink",
+    strategy: Literal["symlink", "copy", "translate"] = "symlink",
     gitignore: bool = True,
 ) -> SyncData:
     return SyncData(
@@ -490,3 +491,132 @@ class TestRunSyncSkills:
 
         gitignore_results = [r for r in results if r.message == "gitignore"]
         assert not gitignore_results
+
+
+# ---------------------------------------------------------------------------
+# Translate strategy
+# ---------------------------------------------------------------------------
+
+
+class TestTranslateStrategy:
+    """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
+
+    def _make_skill_with_frontmatter(
+        self,
+        source_dir: Path,
+        name: str,
+        *,
+        allowed_tools: list[str] | None = None,
+        body: str = "Body.",
+    ) -> Path:
+        skill_dir = source_dir / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        lines = ["---", f"name: {name}", "description: A skill."]
+        if allowed_tools:
+            lines.append("allowed-tools:")
+            for tool in allowed_tools:
+                lines.append(f"  - {tool}")
+        lines.extend(["---", body, ""])
+        (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
+        return skill_dir
+
+    def test_writes_skill_md_with_no_lossy_fields_for_claude_target(
+        self, tmp_path: Path
+    ) -> None:
+        # Claude target with allowed-tools — no manual-fix block expected.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill", allowed_tools=["Read"])
+
+        result = ClaudeSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        out = tmp_path / ".claude" / "skills" / "my-skill" / "SKILL.md"
+        text = out.read_text(encoding="utf-8")
+        assert "name: my-skill" in text
+        assert "<!-- crossby:manual-fix" not in text
+
+    def test_emits_manual_fix_for_non_claude_target(self, tmp_path: Path) -> None:
+        # Codex target with allowed-tools — manual-fix block expected.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill", allowed_tools=["Read"])
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        out = tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md"
+        text = out.read_text(encoding="utf-8")
+        assert "<!-- crossby:manual-fix:start -->" in text
+        assert "allowed-tools" in text
+
+    def test_no_lossy_fields_no_manual_fix_anywhere(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        assert "<!-- crossby:manual-fix" not in text
+
+    def test_support_dirs_copied(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "helper.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (skill / "references").mkdir()
+        (skill / "references" / "doc.md").write_text("doc", encoding="utf-8")
+
+        ClaudeSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        target = tmp_path / ".claude" / "skills" / "my-skill"
+        assert (target / "scripts" / "helper.sh").is_file()
+        assert (target / "references" / "doc.md").is_file()
+
+    def test_idempotent_translate(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill", allowed_tools=["Read"])
+
+        first = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+
+    def test_stale_skill_dir_removed(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "keep")
+        self._make_skill_with_frontmatter(source, "drop")
+        ClaudeSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        # Remove one source skill.
+        shutil.rmtree(source / "drop")
+
+        ClaudeSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert (tmp_path / ".claude" / "skills" / "keep").is_dir()
+        assert not (tmp_path / ".claude" / "skills" / "drop").exists()
+
+    def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+
+        result = ClaudeSkillsWriter().sync(
+            _data(strategy="translate"), tmp_path, dry_run=True
+        )
+        assert result.action in {"created", "updated"}
+        assert "dry-run" in (result.message or "")
+        assert not (tmp_path / ".claude" / "skills").exists()
+
+    def test_re_translate_after_source_change(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        # Now add allowed-tools to source — manual-fix should appear.
+        self._make_skill_with_frontmatter(
+            source, "my-skill", allowed_tools=["Read", "Bash"]
+        )
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        # Exactly one manual-fix block, with the latest content.
+        assert text.count("<!-- crossby:manual-fix:start -->") == 1
+        assert "Bash" in text

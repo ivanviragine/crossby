@@ -46,7 +46,7 @@ class SyncData:
 
     # Skills concern
     skills_source: str | None = None  # relative path to canonical skills directory
-    skills_strategy: Literal["symlink", "copy"] = "symlink"
+    skills_strategy: Literal["symlink", "copy", "translate"] = "symlink"
     skills_gitignore: bool = True
 
     # MCP servers concern
