@@ -84,7 +84,7 @@ _AGENT_DIRS: dict[AIToolID, str] = {
     AIToolID.COPILOT: ".github/agents",
     AIToolID.CURSOR: ".cursor/agents",
     AIToolID.GEMINI: ".gemini/agents",
-    AIToolID.CODEX: ".agents",
+    AIToolID.CODEX: ".codex/agents",
 }
 
 _AGENTS_PRIORITY: list[AIToolID] = [

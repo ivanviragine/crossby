@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -12,6 +13,11 @@ import yaml
 
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
+from crossby.sync.agent_models import (
+    parse_markdown_agent,
+    parse_toml_agent,
+    render_toml_agent,
+)
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
@@ -24,13 +30,15 @@ logger = structlog.get_logger()
 
 _GITIGNORE_BLOCK_ID = "agents sync"
 
-# Per-tool agent directory paths (relative to project root)
+# Per-tool agent directory paths (relative to project root).
+# Codex uses ``.codex/agents`` for custom-agent TOML files (per Codex docs);
+# ``.agents/skills/`` is a *skills* directory, handled by sync/skills.py.
 _AGENT_TARGET_PATHS: dict[str, str] = {
     "claude": ".claude/agents",
     "copilot": ".github/agents",
     "cursor": ".cursor/agents",
     "gemini": ".gemini/agents",
-    "codex": ".agents",
+    "codex": ".codex/agents",
 }
 
 
@@ -391,11 +399,182 @@ class GeminiAgentsWriter(_BaseAgentsWriter):
     _target_rel = ".gemini/agents"
 
 
-class CodexAgentsWriter(_BaseAgentsWriter):
-    """Sync agents → .agents/"""
+class CodexAgentsWriter(AbstractSyncWriter):
+    """Sync agents → .codex/agents/<name>.toml.
+
+    Codex agents use a TOML schema (``name``, ``description``,
+    ``developer_instructions`` plus optional ``model``,
+    ``model_reasoning_effort``, ``sandbox_mode``). When the source is a
+    different tool (Claude/Cursor/Gemini/Copilot all use markdown +
+    YAML frontmatter), we translate per file via
+    :mod:`crossby.sync.agent_models`. Lossy fields (``permissionMode:
+    plan``, ``allowed-tools``, etc.) become a ``crossby:manual-fix``
+    block at the end of the rendered ``developer_instructions``.
+
+    Idempotent: identical rendered TOML produces ``action="skipped"``.
+    Stale cleanup: ``.toml`` files whose source ``.md`` is gone are
+    removed, matching the behaviour of CopilotAgentsWriter for
+    ``.agent.md`` files.
+    """
 
     tool_id = AIToolID.CODEX
-    _target_rel = ".agents"
+    concern = SyncConcern.AGENTS
+    _target_rel = ".codex/agents"
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        if data.agents_source is None:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="no agents source detected",
+            )
+
+        source_dir = project_root / data.agents_source
+        if not source_dir.exists() or not source_dir.is_dir():
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=f"source directory not found: {data.agents_source}",
+            )
+
+        target_dir = project_root / self._target_rel
+
+        if target_dir.is_symlink():
+            if not force:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=(
+                        f"{self._target_rel} exists as a symlink. "
+                        "Remove it or rerun with --force to replace it."
+                    ),
+                )
+            if not dry_run:
+                target_dir.unlink()
+                logger.info("agents.symlink_replaced", path=str(target_dir))
+
+        # When a real directory exists with non-managed content, refuse without --force.
+        if target_dir.is_dir():
+            unmanaged = [
+                f
+                for f in target_dir.iterdir()
+                if not (f.name.endswith(".toml") and f.is_file())
+            ]
+            if unmanaged and not force:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=(
+                        f"{self._target_rel} contains unmanaged content; "
+                        f"migrate it first or rerun with --force."
+                    ),
+                )
+            if unmanaged and force and not dry_run:
+                bak = backup_path(target_dir)
+                shutil.copytree(str(target_dir), str(bak))
+                shutil.rmtree(str(target_dir))
+                logger.info(
+                    "agents.dir_backed_up",
+                    original=str(target_dir),
+                    backup=str(bak),
+                )
+
+        return self._translate_all(
+            source_dir, target_dir, dry_run=dry_run
+        )
+
+    def _source_files(self, source_dir: Path) -> list[Path]:
+        # Source can be either Codex TOML (round-trip) or markdown agents.
+        return sorted(
+            [p for p in source_dir.glob("*.md") if p.is_file()]
+            + [p for p in source_dir.glob("*.toml") if p.is_file()]
+        )
+
+    def _render_for_target(self, source: Path) -> str:
+        if source.suffix == ".toml":
+            definition = parse_toml_agent(
+                source.read_text(encoding="utf-8"), fallback_name=source.stem
+            )
+        else:
+            definition = parse_markdown_agent(
+                source.read_text(encoding="utf-8"), fallback_name=source.stem
+            )
+        return render_toml_agent(definition)
+
+    def _translate_all(
+        self, source_dir: Path, target_dir: Path, *, dry_run: bool
+    ) -> SyncResult:
+        sources = self._source_files(source_dir)
+        if not sources:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="no agents to translate",
+            )
+
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
+        wrote_any = False
+        skipped_all = True
+
+        if not dry_run:
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Stale cleanup — remove .toml outputs whose source is gone.
+        if not dry_run and target_dir.is_dir():
+            wanted = {f"{src.stem}.toml" for src in sources}
+            for existing in target_dir.glob("*.toml"):
+                if existing.name not in wanted:
+                    existing.unlink()
+                    logger.info("agents.stale_removed", path=str(existing))
+
+        for src in sources:
+            rendered = self._render_for_target(src)
+            dest = target_dir / f"{src.stem}.toml"
+            if dest.is_file():
+                try:
+                    if (
+                        hashlib.sha256(dest.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+                        == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                    ):
+                        continue
+                except OSError:
+                    pass
+            skipped_all = False
+            if not dry_run:
+                dest.write_text(rendered, encoding="utf-8")
+            wrote_any = True
+
+        if skipped_all and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already translated",
+            )
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=target_dir,
+            message="translated to TOML"
+            + (" (dry-run)" if dry_run and wrote_any else ""),
+        )
 
 
 class CopilotAgentsWriter(AbstractSyncWriter):

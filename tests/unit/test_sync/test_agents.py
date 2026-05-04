@@ -326,12 +326,14 @@ class TestRelativeSymlinkPaths:
             (ClaudeAgentsWriter, ".claude/agents"),
             (CursorAgentsWriter, ".cursor/agents"),
             (GeminiAgentsWriter, ".gemini/agents"),
-            (CodexAgentsWriter, ".agents"),
         ],
     )
     def test_symlink_is_relative(
         self, tmp_path: Path, writer_cls: type, target_rel: str
     ) -> None:
+        # CodexAgentsWriter intentionally does not symlink — it translates
+        # markdown agents into TOML at .codex/agents/<name>.toml. See
+        # TestCodexAgentsTranslate below.
         _make_source(tmp_path, ["a.md"])
         w = writer_cls()
         data = _data()
@@ -839,3 +841,185 @@ class TestRunSyncAgents:
 
         actions = [r.action for r in results]
         assert "created" in actions  # force allowed the backup+replace
+
+
+# ---------------------------------------------------------------------------
+# CodexAgentsWriter translates markdown → TOML
+# ---------------------------------------------------------------------------
+
+
+class TestCodexAgentsTranslate:
+    """CodexAgentsWriter writes per-file TOML to .codex/agents/, not a symlink."""
+
+    def _claude_agent(
+        self,
+        source_dir: Path,
+        name: str,
+        *,
+        body: str = "Do work.",
+        permission_mode: str | None = None,
+        tools: list[str] | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> None:
+        lines = [
+            "---",
+            f"name: {name}",
+            "description: A test agent.",
+        ]
+        if model is not None:
+            lines.append(f"model: {model}")
+        if effort is not None:
+            lines.append(f"effort: {effort}")
+        if permission_mode is not None:
+            lines.append(f"permissionMode: {permission_mode}")
+        if tools:
+            lines.append("tools:")
+            for tool in tools:
+                lines.append(f"  - {tool}")
+        lines.append("---")
+        lines.append(body)
+        (source_dir / f"{name}.md").write_text("\n".join(lines) + "\n")
+
+    def test_writes_toml_files_under_codex_agents(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "release-lead")
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+
+        assert result.action == "created"
+        out = tmp_path / ".codex" / "agents" / "release-lead.toml"
+        assert out.is_file()
+        parsed = tomllib.loads(out.read_text(encoding="utf-8"))
+        assert parsed["name"] == "release-lead"
+        assert parsed["description"] == "A test agent."
+        assert "Do work." in parsed["developer_instructions"]
+
+    def test_old_dot_agents_path_is_not_touched(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        assert not (tmp_path / ".agents").exists(), (
+            "old codex path .agents/ must not be created — that's the skills root"
+        )
+
+    def test_translates_permission_mode_to_sandbox(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x", permission_mode="acceptEdits")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        out = tmp_path / ".codex" / "agents" / "x.toml"
+        parsed = tomllib.loads(out.read_text(encoding="utf-8"))
+        assert parsed["sandbox_mode"] == "workspace-write"
+
+    def test_unmapped_permission_mode_emits_manual_fix(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x", permission_mode="plan")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        assert "sandbox_mode" not in parsed
+        assert "Manual migration required" in parsed["developer_instructions"]
+        assert "permissionMode: plan" in parsed["developer_instructions"]
+
+    def test_tools_become_manual_fix(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x", tools=["Read", "Bash"])
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        instr = parsed["developer_instructions"]
+        assert "Source `tools` allow-list" in instr
+
+    def test_model_and_effort_translated(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(
+            source, "x", model="claude-sonnet-4.6", effort="high"
+        )
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        assert parsed["model"] == "gpt-5.4-mini"
+        # Sonnet HIGH bumps to XHIGH per family-aware mapping.
+        assert parsed["model_reasoning_effort"] == "xhigh"
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x")
+
+        first = CodexAgentsWriter().sync(_data(), tmp_path)
+        second = CodexAgentsWriter().sync(_data(), tmp_path)
+
+        assert first.action == "created"
+        assert second.action == "skipped"
+
+    def test_stale_toml_removed(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "keep")
+        self._claude_agent(source, "drop")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        # Remove one source file.
+        (source / "drop.md").unlink()
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+        assert result.action in {"created", "updated", "skipped"}
+        assert (tmp_path / ".codex" / "agents" / "keep.toml").is_file()
+        assert not (tmp_path / ".codex" / "agents" / "drop.toml").exists()
+
+    def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "x")
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path, dry_run=True)
+
+        assert result.action in {"created", "updated"}
+        assert not (tmp_path / ".codex" / "agents" / "x.toml").exists()
+
+    def test_codex_source_round_trip(self, tmp_path: Path) -> None:
+        """When source is already TOML, parse and re-render so the output stays
+        canonical (and any older format quirks are normalised)."""
+        import tomllib
+        import tomli_w
+
+        source = _make_source(tmp_path, [])
+        # Simulate an existing .codex/agents/x.toml as the canonical source.
+        (source / "x.toml").write_text(
+            tomli_w.dumps({
+                "name": "x",
+                "description": "y",
+                "developer_instructions": "Do work.",
+            }),
+            encoding="utf-8",
+        )
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+        assert result.action in {"created", "updated"}
+        out = tmp_path / ".codex" / "agents" / "x.toml"
+        parsed = tomllib.loads(out.read_text(encoding="utf-8"))
+        assert parsed["name"] == "x"
+        assert "Do work." in parsed["developer_instructions"]
+
+    def test_no_source_files_skipped(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, [])
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+        assert result.action == "skipped"
+        assert "no agents to translate" in (result.message or "")
