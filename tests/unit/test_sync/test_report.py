@@ -1,0 +1,130 @@
+"""Tests for sync report rendering and persistence."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from crossby.models.ai import AIToolID
+from crossby.sync.base import SyncConcern, SyncResult
+from crossby.sync.report import (
+    REPORT_PATH,
+    classify_status,
+    render_markdown_table,
+    render_persistent_report,
+    write_persistent_report,
+)
+
+
+def _r(
+    action: str = "created",
+    message: str | None = None,
+    concern: SyncConcern = SyncConcern.RULES,
+    tool_id: AIToolID | None = AIToolID.CLAUDE,
+    file_path: Path | None = Path("CLAUDE.md"),
+) -> SyncResult:
+    return SyncResult(
+        tool_id=tool_id,
+        concern=concern,
+        action=action,  # type: ignore[arg-type]
+        file_path=file_path,
+        message=message,
+    )
+
+
+class TestClassifyStatus:
+    def test_created_added(self) -> None:
+        assert classify_status(_r(action="created")) == "Added"
+
+    def test_updated_added(self) -> None:
+        assert classify_status(_r(action="updated")) == "Added"
+
+    def test_check_before_using_on_foreign_markers(self) -> None:
+        assert (
+            classify_status(_r(action="created", message="foreign markers in source"))
+            == "Check before using"
+        )
+
+    def test_check_before_using_on_translated(self) -> None:
+        assert (
+            classify_status(_r(action="updated", message="translated"))
+            == "Check before using"
+        )
+
+    def test_skipped_when_no_source_is_not_added(self) -> None:
+        assert (
+            classify_status(_r(action="skipped", message="no rules source detected"))
+            == "Not Added"
+        )
+
+    def test_skipped_when_already_in_place_is_added(self) -> None:
+        assert (
+            classify_status(_r(action="skipped", message="already linked")) == "Added"
+        )
+
+    def test_error_is_not_added(self) -> None:
+        assert classify_status(_r(action="error", message="boom")) == "Not Added"
+
+
+class TestRenderMarkdownTable:
+    def test_empty_when_no_results(self) -> None:
+        assert render_markdown_table([]) == ""
+
+    def test_renders_header(self) -> None:
+        out = render_markdown_table([_r()])
+        assert "| Status | Item | Notes |" in out
+        assert "| --- | --- | --- |" in out
+
+    def test_uses_singular_concern_label(self) -> None:
+        out = render_markdown_table([_r(concern=SyncConcern.AGENTS)])
+        assert "`Agent`" in out
+
+    def test_status_value_quoted(self) -> None:
+        out = render_markdown_table([_r(action="created", message="x")])
+        assert "`Added`" in out
+
+    def test_pipes_in_messages_escaped(self) -> None:
+        out = render_markdown_table(
+            [_r(action="created", message="contains | pipe")]
+        )
+        assert r"\|" in out
+
+    def test_em_dash_for_empty_message(self) -> None:
+        out = render_markdown_table([_r(action="created", message=None)])
+        assert "—" in out
+
+
+class TestRenderPersistentReport:
+    def test_includes_timestamp_and_project_name(self) -> None:
+        ts = datetime(2026, 5, 4, 12, 0, 0, tzinfo=timezone.utc)
+        out = render_persistent_report(
+            [_r()], project_name="northstar", timestamp=ts
+        )
+        assert "2026-05-04T12:00:00Z" in out
+        assert "northstar" in out
+
+    def test_no_rows_says_nothing_was_synced(self) -> None:
+        out = render_persistent_report([], project_name="x")
+        assert "No sync rows" in out
+
+
+class TestWritePersistentReport:
+    def test_writes_to_default_path(self, tmp_path: Path) -> None:
+        path = write_persistent_report([_r()], tmp_path)
+        assert path == tmp_path / REPORT_PATH
+        assert path.is_file()
+        body = path.read_text(encoding="utf-8")
+        assert "crossby sync report" in body
+        assert "Status" in body
+
+    def test_creates_parent_dir(self, tmp_path: Path) -> None:
+        # .crossby/ may not exist yet.
+        write_persistent_report([_r()], tmp_path)
+        assert (tmp_path / ".crossby").is_dir()
+
+    def test_overwrites_on_re_run(self, tmp_path: Path) -> None:
+        write_persistent_report([_r(action="created")], tmp_path)
+        write_persistent_report([_r(action="updated")], tmp_path)
+        body = (tmp_path / REPORT_PATH).read_text(encoding="utf-8")
+        # Only the second run's row should be present.
+        assert body.count("Added") == 1

@@ -47,6 +47,16 @@ def sync(
         "--doctor",
         help="Show a readiness summary (plan + validate-target); no writes.",
     ),
+    report_format: str = typer.Option(
+        "table",
+        "--report-format",
+        help="Format for the on-screen result table: 'table' (Rich) or 'markdown-table'.",
+    ),
+    no_persist_report: bool = typer.Option(
+        False,
+        "--no-persist-report",
+        help="Skip writing .crossby/sync-report.md after the run.",
+    ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
     """Sync AI tool configs across tools — no config file needed.
@@ -198,7 +208,9 @@ def sync(
             force=force,
             installed_tools=target_tools,
         )
-        _display_results(results)
+        _display_results(results, report_format=report_format)
+        if not dry_run and not no_persist_report:
+            _persist_report(results, project_root)
         if any(r.action == "error" for r in results):
             raise typer.Exit(1)
         return
@@ -375,11 +387,14 @@ def sync(
         console.info("No sync writers matched the given filters.")
         return
 
-    _display_results(results)
+    _display_results(results, report_format=report_format)
 
     synced = sum(1 for r in results if r.action in ("created", "updated"))
     console.empty()
     console.success(f"Done. {synced} config(s) synced.")
+
+    if not dry_run and not no_persist_report:
+        _persist_report(results, project_root)
 
     if any(r.action == "error" for r in results):
         raise typer.Exit(1)
@@ -462,8 +477,18 @@ def _confirm_sync_defaults(
     return result["from"], result["to"], result["concern"]
 
 
-def _display_results(results: list[SyncResult]) -> None:
-    """Display sync results in a Rich table."""
+def _display_results(
+    results: list[SyncResult], *, report_format: str = "table"
+) -> None:
+    """Display sync results in a Rich table or as a portable markdown table."""
+    if report_format == "markdown-table":
+        from crossby.sync.report import render_markdown_table
+
+        rendered = render_markdown_table(results)
+        if rendered:
+            console.out.print(rendered)
+        return
+
     from rich.table import Table
 
     table = Table(show_header=True, box=None, padding=(0, 2))
@@ -495,6 +520,16 @@ def _display_results(results: list[SyncResult]) -> None:
         )
 
     console.out.print(table)
+
+
+def _persist_report(results: list[SyncResult], project_root: Path) -> None:
+    """Write .crossby/sync-report.md after a real (non-dry-run) sync."""
+    from crossby.sync.report import write_persistent_report
+
+    if not results:
+        return
+    path = write_persistent_report(results, project_root)
+    console.detail(f"  report: {path.relative_to(project_root)}")
 
 
 def _display_validation(findings: list[ValidationFinding]) -> None:
