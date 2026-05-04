@@ -251,3 +251,81 @@ class TestPickTokenBudget:
             "crossby.ui.prompts.input_prompt", lambda *_a, **_kw: "-100"
         )
         assert _pick_token_budget() is None
+
+
+class TestInitInstallSkill:
+    """``crossby init --install-skill`` copies the runbook into installed tools."""
+
+    def test_install_skill_writes_per_tool_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.sync.skill_install import SKILL_NAME
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: [AIToolID.CLAUDE, AIToolID.CODEX],
+        )
+        result = runner.invoke(
+            app,
+            [
+                "init",
+                "--non-interactive",
+                "--install-skill",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".crossby.yml").is_file()
+        assert (tmp_path / ".claude" / "skills" / SKILL_NAME / "SKILL.md").is_file()
+        assert (tmp_path / ".agents" / "skills" / SKILL_NAME / "SKILL.md").is_file()
+
+    def test_install_skill_idempotent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: [AIToolID.CLAUDE],
+        )
+        runner.invoke(
+            app,
+            [
+                "init",
+                "--non-interactive",
+                "--install-skill",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        result = runner.invoke(
+            app,
+            [
+                "init",
+                "--non-interactive",
+                "--install-skill",
+                "--force",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Second run should report skill skipped (already installed).
+        assert "skill skipped" in result.output
+
+    def test_init_without_flag_does_not_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: [AIToolID.CLAUDE],
+        )
+        runner.invoke(
+            app,
+            ["init", "--non-interactive", "--path", str(tmp_path)],
+        )
+        assert not (tmp_path / ".claude" / "skills").exists()

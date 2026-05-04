@@ -34,14 +34,20 @@ def init(
         "--non-interactive",
         help="Write a minimal default file with no prompting (CI-safe).",
     ),
+    install_skill: bool = typer.Option(
+        False,
+        "--install-skill",
+        help="Install the bundled crossby-sync runbook into every installed tool's skills dir.",
+    ),
 ) -> None:
     """Create a ``.crossby.yml`` in the project root.
 
     Examples::
 
-        crossby init                     # walk the interactive wizard
-        crossby init --non-interactive   # write a minimal default file
-        crossby init --force             # overwrite an existing file
+        crossby init                       # walk the interactive wizard
+        crossby init --non-interactive     # write a minimal default file
+        crossby init --force               # overwrite an existing file
+        crossby init --install-skill       # also install the agent runbook
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.config.loader import parse_config_file
@@ -81,6 +87,31 @@ def init(
         raise typer.Exit(1) from exc
 
     console.success(f"Wrote {target}")
+
+    if install_skill:
+        _install_skill_bundle(project_root, installed)
+
+
+def _install_skill_bundle(project_root: Path, installed: list) -> None:  # type: ignore[type-arg]
+    """Copy the bundled crossby-sync skill into every installed tool's skills dir."""
+    from crossby.sync.skill_install import install_for_tools
+
+    if not installed:
+        console.info("No AI tools detected in PATH — skipping skill install.")
+        return
+
+    results = install_for_tools(project_root, installed)
+    if not results:
+        console.info("No skills directories to install into — skipping.")
+        return
+
+    for r in results:
+        relative = (
+            r.target_dir.relative_to(project_root)
+            if r.target_dir.is_relative_to(project_root)
+            else r.target_dir
+        )
+        console.detail(f"  skill {r.action}: {relative}")
 
 
 def _non_interactive_defaults(installed: list) -> dict[str, Any]:  # type: ignore[type-arg]
