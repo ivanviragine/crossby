@@ -620,3 +620,94 @@ class TestTranslateStrategy:
         # Exactly one manual-fix block, with the latest content.
         assert text.count("<!-- crossby:manual-fix:start -->") == 1
         assert "Bash" in text
+
+
+# ---------------------------------------------------------------------------
+# Translate strategy: Claude slash commands → skills
+# ---------------------------------------------------------------------------
+
+
+class TestTranslateClaudeSlashCommands:
+    """When syncing claude → other tool with translate strategy, .claude/commands/
+    files become single-file skills under the target's skills dir."""
+
+    def test_command_appears_as_skill_in_codex_target(self, tmp_path: Path) -> None:
+        # Set up a regular skill at the source plus a Claude command.
+        source = _make_source(tmp_path, [])
+        skill = source / "my-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: my-skill\ndescription: A skill.\n---\nBody.\n",
+            encoding="utf-8",
+        )
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text(
+            "---\ndescription: Code review.\n---\nReview the diff.\n",
+            encoding="utf-8",
+        )
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        # Regular skill present.
+        assert (tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md").is_file()
+        # Slash-command-derived skill present with the namespaced name.
+        cmd_skill = tmp_path / ".agents" / "skills" / "claude-command-review" / "SKILL.md"
+        assert cmd_skill.is_file()
+        text = cmd_skill.read_text(encoding="utf-8")
+        assert "Code review." in text
+        assert "Command Template" in text
+        assert "Review the diff." in text
+        # Slash-command manual-fix note included.
+        assert "<!-- crossby:manual-fix:start -->" in text
+        assert "Claude slash command" in text
+
+    def test_no_command_skill_for_claude_target(self, tmp_path: Path) -> None:
+        # Claude target should NOT receive a converted command skill — it
+        # already owns the original command.
+        _make_source(tmp_path, ["my-skill"])
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("---\ndescription: x\n---\nBody.", encoding="utf-8")
+
+        result = ClaudeSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        assert not (tmp_path / ".claude" / "skills" / "claude-command-review").exists()
+
+    def test_command_runtime_caveats_in_manual_fix(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, [])
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("Run with $ARGUMENTS and !`git diff`.", encoding="utf-8")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (
+            tmp_path / ".agents" / "skills" / "claude-command-review" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert "$ARGUMENTS" in text  # preserved verbatim in the body
+        assert "argument" in text  # caveat note about runtime expansion
+        assert "shell-interpolation" not in text or "Source uses Claude `!" in text
+
+    def test_command_skill_idempotent(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, [])
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("Body.", encoding="utf-8")
+
+        first = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+
+    def test_stale_command_skill_removed(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, [])
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("Body.", encoding="utf-8")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        # Remove the source command.
+        cmd.unlink()
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert not (
+            tmp_path / ".agents" / "skills" / "claude-command-review"
+        ).exists()

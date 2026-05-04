@@ -195,7 +195,9 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 # Managed fallback directory: re-sync via the configured strategy
                 # so subsequent runs preserve translate/copy semantics.
                 if data.skills_strategy == "translate":
-                    return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
+                    return self._sync_translate(
+                        source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                    )
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             dir_was_cleared = True
             if not dry_run:
@@ -205,7 +207,9 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 logger.info("skills.dir_backed_up", original=str(target_dir), backup=str(bak))
 
         if data.skills_strategy == "translate":
-            return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
+            return self._sync_translate(
+                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            )
 
         if data.skills_strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
@@ -307,7 +311,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         )
 
     def _sync_translate(
-        self, source_dir: Path, target_dir: Path, *, dry_run: bool
+        self,
+        source_dir: Path,
+        target_dir: Path,
+        *,
+        project_root: Path,
+        dry_run: bool,
     ) -> SyncResult:
         """Per-skill copy with target-aware SKILL.md rewriting.
 
@@ -318,13 +327,31 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         ``references/``, ``assets/``) are copied verbatim. Hash-based
         idempotency. Stale skill subdirectories whose source disappeared are
         removed.
+
+        When the target is *not* Claude and ``.claude/commands/`` exists
+        under ``project_root``, each Claude slash command is also wrapped
+        as a single-file skill named ``claude-command-<slug>`` so the
+        prompt body survives the migration. See
+        :mod:`crossby.sync.slash_commands` for the conversion details.
         """
+        from crossby.sync.slash_commands import iter_command_skills
+
+        command_skills: list[tuple[str, str]] = []
+        if self.tool_id != AIToolID.CLAUDE:
+            for _src_path, definition in iter_command_skills(project_root):
+                rendered = render_markdown_skill(definition)
+                command_skills.append((definition.name, rendered))
+
         skill_dirs = [
             child
             for child in sorted(source_dir.iterdir())
             if child.is_dir() and (child / "SKILL.md").is_file()
         ]
-        if not skill_dirs:
+        target_existed = target_dir.is_dir()
+        # Even when there's nothing to translate, an existing target may have
+        # stale entries from a previous run; we still want to walk it once.
+        nothing_to_write = not skill_dirs and not command_skills
+        if nothing_to_write and not target_existed:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -333,7 +360,6 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 message="no skills to translate",
             )
 
-        target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
 
         if dry_run:
@@ -346,13 +372,17 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             )
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        wanted_names = {skill_dir.name for skill_dir in skill_dirs}
+        wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
+            name for name, _ in command_skills
+        }
         # Stale cleanup
+        removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
                 if child.is_dir() and child.name not in wanted_names:
                     shutil.rmtree(child)
                     logger.info("skills.stale_removed", path=str(child))
+                    removed_any = True
 
         skipped_all = True
         for skill_dir in skill_dirs:
@@ -381,7 +411,20 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             target_skill_md.write_text(rendered, encoding="utf-8")
             _refresh_skill_support_dirs(skill_dir, target_skill)
 
-        if skipped_all and target_existed:
+        for name, rendered in command_skills:
+            target_skill = target_dir / name
+            target_skill.mkdir(parents=True, exist_ok=True)
+            target_skill_md = target_skill / "SKILL.md"
+            if target_skill_md.is_file():
+                if (
+                    hashlib.sha256(target_skill_md.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    continue
+            skipped_all = False
+            target_skill_md.write_text(rendered, encoding="utf-8")
+
+        if skipped_all and target_existed and not removed_any:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
