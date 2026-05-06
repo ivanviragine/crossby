@@ -1,9 +1,7 @@
 """Post-sync target validators.
 
 Re-parse each tool's output files and surface structural issues that
-``run_sync`` itself can't catch. The OpenAI ``migrate-to-codex`` skill
-runs an equivalent ``--validate-target`` pass after every migration; the
-checks here mirror that:
+``run_sync`` itself can't catch:
 
 - ``.codex/config.toml`` parses as TOML; every ``[mcp_servers.<name>]``
   whose ``command`` is set has the binary on ``PATH``.
@@ -50,7 +48,6 @@ class ValidationFinding:
 
 
 # Files that should stay under this size threshold for an instructions file.
-# Mirrors migrate-to-codex's MAX_AGENTS_MD_BYTES.
 INSTRUCTION_SIZE_LIMIT_BYTES = 32 * 1024
 
 

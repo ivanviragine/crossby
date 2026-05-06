@@ -6,9 +6,9 @@ between Claude and Codex/GPT, and Claude permission modes ↔ Codex sandbox
 modes. Concrete writers compose these helpers; nothing here knows about a
 specific concern's control flow.
 
-The mappings mirror what's in OpenAI's `migrate-to-codex` skill but are
-bidirectional. Forward (claude → codex) is well-defined by family prefix;
-reverse (codex → claude) is lossy and picks a sensible default per family.
+Mappings are bidirectional. Forward (claude → codex) is well-defined by
+family prefix; reverse (codex → claude) is lossy and picks a sensible
+default per family.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ class ModelFamilyMapping:
     effort_forward: tuple[tuple[EffortLevel, EffortLevel], ...]
 
 
-# Source: OpenAI migrate-to-codex's MODEL_PREFIX_MAPPINGS, plus an XHIGH ↔ MAX
+# Family mapping with effort-bias-by-family, plus an XHIGH ↔ MAX
 # round-trip so reverse(forward(x)) ≈ x for the common cases.
 MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
     ModelFamilyMapping(

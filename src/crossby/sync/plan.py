@@ -1,11 +1,10 @@
 """Plan and doctor summaries derived from sync results + validators.
 
 ``crossby sync --plan`` and ``crossby sync --doctor`` are pre-write
-inspection modes inspired by OpenAI's ``migrate-to-codex`` skill. Both
-ride on a dry-run sync execution; this module just aggregates the
-:class:`SyncResult` rows into a stage-by-concern summary, counts
-manual-fix and error situations, and turns that into the readiness
-score the doctor mode renders.
+inspection modes. Both ride on a dry-run sync execution; this module
+just aggregates the :class:`SyncResult` rows into a stage-by-concern
+summary, counts manual-fix and error situations, and turns that into
+the readiness score the doctor mode renders.
 """
 
 from __future__ import annotations
@@ -143,7 +142,7 @@ def doctor_readiness(
 ) -> Readiness:
     """Map plan + validation counts to a coarse readiness rating.
 
-    Mirrors migrate-to-codex's static thresholds:
+    Static thresholds:
 
     - ``high`` when nothing demands attention.
     - ``medium`` when there are 1–3 actionable items.

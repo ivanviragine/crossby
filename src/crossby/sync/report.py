@@ -1,9 +1,8 @@
 """Persistent sync reports + portable markdown-table format.
 
 Crossby's CLI prints a Rich table at the end of every sync run; that
-output disappears as soon as the terminal scrolls. This module owns the
-two complementary outputs the OpenAI ``migrate-to-codex`` skill keeps
-around:
+output disappears as soon as the terminal scrolls. This module owns two
+complementary outputs that survive past the run:
 
 - A persistent ``.crossby/sync-report.md`` written after every real run
   so the user can re-open it (or paste it into a PR description).
@@ -11,10 +10,10 @@ around:
   can render in place of the Rich table when the user passes
   ``--report-format markdown-table``.
 
-The OpenAI skill's ``Status`` column uses three controlled values:
-``Added``, ``Check before using``, ``Not Added``. We map crossby's
-:class:`SyncResult.action` + message into the same vocabulary so reports
-remain comparable across the two ecosystems.
+The ``Status`` column uses three controlled values: ``Added``,
+``Check before using``, ``Not Added``. ``classify_status`` maps each
+:class:`SyncResult` into that vocabulary by inspecting action +
+message.
 """
 
 from __future__ import annotations
