@@ -449,3 +449,178 @@ class TestPlanAndDoctor:
         # readiness=high means exit 0; medium/low may or may not — just verify the section.
         assert "Crossby doctor" in result.output
         assert "readiness:" in result.output
+
+
+class TestStrategyAndReportFormatValidation:
+    """``--strategy`` and ``--report-format`` reject unknown values."""
+
+    def test_invalid_strategy_exits_one(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["sync", "--strategy", "wat", "--from", "claude", "--path", str(tmp_path)],
+        )
+        assert result.exit_code == 1
+        assert "--strategy" in result.output
+
+    def test_invalid_report_format_exits_one(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "sync",
+                "--report-format",
+                "yaml",
+                "--from",
+                "claude",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--report-format" in result.output
+
+    def test_strategy_translate_threads_to_skills_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--strategy translate`` flips skills_strategy on the run."""
+        # Set up a Claude skill so the skills writer has work.
+        skill = tmp_path / ".claude" / "skills" / "my-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: my-skill\ndescription: x\nallowed-tools:\n  - Read\n---\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "codex"],
+        )
+        result = runner.invoke(
+            app,
+            [
+                "sync",
+                "skills",
+                "--from",
+                "claude",
+                "--strategy",
+                "translate",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        # Translate ran end-to-end and produced the codex skill copy with a
+        # manual-fix block (Codex doesn't honour Claude's allowed-tools).
+        codex_skill = tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md"
+        assert result.exit_code == 0, result.output
+        assert codex_skill.is_file()
+        assert "<!-- crossby:manual-fix:start -->" in codex_skill.read_text(
+            encoding="utf-8"
+        )
+
+
+class TestPersistReportGate:
+    """The persistent report file is only written for real (non-dry-run) syncs."""
+
+    def test_dry_run_does_not_persist_report(
+        self,
+        project_with_claude_perms: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(project_with_claude_perms)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            runner.invoke(
+                app,
+                [
+                    "sync",
+                    "--from",
+                    "claude",
+                    "--dry-run",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+        # No .crossby/sync-report.md should exist after a dry-run.
+        assert not (
+            project_with_claude_perms / ".crossby" / "sync-report.md"
+        ).exists()
+
+    def test_real_run_writes_report(
+        self,
+        project_with_claude_perms: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(project_with_claude_perms)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            runner.invoke(
+                app,
+                [
+                    "sync",
+                    "--from",
+                    "claude",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+        assert (
+            project_with_claude_perms / ".crossby" / "sync-report.md"
+        ).is_file()
+
+    def test_no_persist_report_skips_file(
+        self,
+        project_with_claude_perms: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(project_with_claude_perms)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            runner.invoke(
+                app,
+                [
+                    "sync",
+                    "--from",
+                    "claude",
+                    "--no-persist-report",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+        assert not (
+            project_with_claude_perms / ".crossby" / "sync-report.md"
+        ).exists()
+
+
+class TestWizardScanShowsPlugins:
+    """The wizard scan output should list a Plugins row when plugins exist."""
+
+    def test_plugin_dir_appears_in_scan_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Plugin source + a Claude rules file so the wizard doesn't skip
+        # outright with "no tool configs found to sync".
+        (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
+        (tmp_path / ".claude" / "plugins" / "team-macros").mkdir(parents=True)
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        # Send empty stdin so the wizard exits at the first prompt instead of
+        # blocking. We only care about the scan output that prints first.
+        result = runner.invoke(
+            app,
+            ["sync", "--path", str(tmp_path)],
+            input="\n",
+        )
+        # Don't assert exit_code (wizard may abort on EOF); the scan section
+        # must mention Plugins regardless of how the run ends.
+        assert "Plugins:" in result.output

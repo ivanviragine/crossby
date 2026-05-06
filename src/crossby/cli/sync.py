@@ -11,14 +11,14 @@ from crossby.ui.console import console
 
 if TYPE_CHECKING:
     from crossby.models.ai import AIToolID
-    from crossby.sync.base import SyncConcern, SyncResult
+    from crossby.sync.base import SyncConcern, SyncData, SyncResult
     from crossby.sync.validate import ValidationFinding
 
 
 def sync(
     concern: str | None = typer.Argument(
         None,
-        help="Sync concern: permissions, rules, mcp, agents, hooks. Omit for all.",
+        help="Sync concern: permissions, rules, mcp, agents, skills, hooks, plugins. Omit for all.",
     ),
     from_tool: str | None = typer.Option(
         None, "--from", help="Source tool to read configs from."
@@ -31,6 +31,16 @@ def sync(
     ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite existing target files (backs up first)."
+    ),
+    strategy: str | None = typer.Option(
+        None,
+        "--strategy",
+        help=(
+            "File strategy for rules and skills: 'symlink' (default), 'copy', "
+            "or 'translate' (skills-only — per-tool SKILL.md rewrite with "
+            "manual-fix notes for non-Claude targets, plus Claude slash "
+            "commands as namespaced skills)."
+        ),
     ),
     validate_target: bool = typer.Option(
         False,
@@ -99,6 +109,23 @@ def sync(
     project_root = path.resolve()
     config = load_config(project_root)
 
+    # Validate enum-style flag values up-front so the error is descriptive
+    # rather than a silent fallback.
+    valid_report_formats = {"table", "markdown-table"}
+    if report_format not in valid_report_formats:
+        console.error(
+            f"Unknown --report-format: {report_format!r}. "
+            f"Valid: {', '.join(sorted(valid_report_formats))}."
+        )
+        raise typer.Exit(1)
+    valid_strategies = {"symlink", "copy", "translate"}
+    if strategy is not None and strategy not in valid_strategies:
+        console.error(
+            f"Unknown --strategy: {strategy!r}. "
+            f"Valid: {', '.join(sorted(valid_strategies))}."
+        )
+        raise typer.Exit(1)
+
     # Pre-write inspection modes are mutually exclusive.
     inspect_modes = sum(1 for flag in (validate_target, plan, doctor) if flag)
     if inspect_modes > 1:
@@ -124,6 +151,7 @@ def sync(
             to_tool=to_tool,
             concern=concern,
             mode="doctor" if doctor else "plan",
+            strategy=strategy,
         )
         return
 
@@ -194,6 +222,7 @@ def sync(
     # interactive wizard so the existing zero-config UX is preserved.
     if source_tool is not None:
         data = build_sync_data(project_root, from_tool=source_tool)
+        _apply_strategy(data, strategy)
         target_tools = (
             [target_tool]
             if target_tool
@@ -227,6 +256,7 @@ def sync(
     console.detail(f"  MCP:         {scan.mcp.summary}")
     console.detail(f"  Hooks:       {scan.hooks.summary}")
     console.detail(f"  Permissions: {scan.permissions.summary}")
+    console.detail(f"  Plugins:     {scan.plugins.summary}")
     console.empty()
 
     # Check if anything was found
@@ -237,6 +267,7 @@ def sync(
         scan.mcp.found,
         scan.hooks.found,
         scan.permissions.found,
+        scan.plugins.found,
     ])
     if not has_data:
         console.info("No tool configs found to sync.")
@@ -532,6 +563,29 @@ def _persist_report(results: list[SyncResult], project_root: Path) -> None:
     console.detail(f"  report: {path.relative_to(project_root)}")
 
 
+def _apply_strategy(data: "SyncData", strategy: str | None) -> None:
+    """Override SyncData strategy fields from the CLI ``--strategy`` flag.
+
+    ``translate`` only meaningfully affects skills; rules + agents fall back
+    to ``copy`` (rules' foreign-marker detection still triggers per-target
+    copy on its own when needed). ``None`` means "leave SyncData defaults".
+    """
+    if strategy is None:
+        return
+    if strategy == "translate":
+        data.skills_strategy = "translate"
+        data.rules_strategy = "copy"
+        data.agents_strategy = "copy"
+    elif strategy == "copy":
+        data.skills_strategy = "copy"
+        data.rules_strategy = "copy"
+        data.agents_strategy = "copy"
+    else:
+        data.skills_strategy = "symlink"
+        data.rules_strategy = "symlink"
+        data.agents_strategy = "symlink"
+
+
 def _display_validation(findings: list[ValidationFinding]) -> None:
     """Render validation findings as a Rich table."""
     from rich.table import Table
@@ -581,17 +635,16 @@ def _run_inspection(
     to_tool: str | None,
     concern: str | None,
     mode: Literal["plan", "doctor"],
+    strategy: str | None = None,
 ) -> None:
     """Run a dry-run sync and print a plan or doctor summary."""
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.models.ai import AIToolID
     from crossby.services.sync_resolution import (
         resolve_sync_concern,
         resolve_sync_from,
         resolve_sync_to,
     )
     from crossby.sync import run_sync
-    from crossby.sync.base import SyncConcern
     from crossby.sync.plan import (
         build_doctor,
         render_doctor,
@@ -621,6 +674,7 @@ def _run_inspection(
         [target] if target else [t for t in installed_tools if t != source]
     )
     data = build_sync_data(project_root, from_tool=source)
+    _apply_strategy(data, strategy)
     results = run_sync(
         data,
         project_root,

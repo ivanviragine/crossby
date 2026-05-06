@@ -220,3 +220,90 @@ class TestRunSyncAutoDetect:
 
         assert len(results) == 1
         assert results[0].tool_id == AIToolID.CLAUDE
+
+
+class TestRunSyncPluginDiscovery:
+    """Plugin discovery is injected into run_sync after writers."""
+
+    def test_plugins_appear_in_results_when_present(self, tmp_path: Path) -> None:
+        """A `.claude/plugins/<name>` dir produces one PLUGINS row per plugin."""
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        (tmp_path / ".claude" / "plugins" / "team-macros").mkdir(parents=True)
+
+        # Empty registry — only the plugin discovery should fire.
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[],
+            registry=SyncRegistry(),
+        )
+
+        plugin_results = [r for r in results if r.concern == SyncConcern.PLUGINS]
+        assert plugin_results
+        assert all(r.action == "skipped" for r in plugin_results)
+        assert any("team-macros" in (r.message or "") for r in plugin_results)
+
+    def test_plugins_skipped_when_tool_id_filter_active(self, tmp_path: Path) -> None:
+        """Per-tool runs don't reopen plugin discovery."""
+        from crossby.models.ai import AIToolID
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        (tmp_path / ".claude" / "plugins" / "team-macros").mkdir(parents=True)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            installed_tools=[AIToolID.CLAUDE],
+            registry=SyncRegistry(),
+        )
+        assert not [r for r in results if r.concern == SyncConcern.PLUGINS]
+
+    def test_plugins_skipped_when_other_concern_filter_active(
+        self, tmp_path: Path
+    ) -> None:
+        """Asking for ``rules`` doesn't include plugin findings."""
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        (tmp_path / ".claude" / "plugins" / "team-macros").mkdir(parents=True)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            concern=SyncConcern.RULES,
+            installed_tools=[],
+            registry=SyncRegistry(),
+        )
+        assert not [r for r in results if r.concern == SyncConcern.PLUGINS]
+
+    def test_plugins_concern_filter_keeps_only_plugin_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """``concern=PLUGINS`` returns plugin rows even with no other writers."""
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        (tmp_path / ".claude" / "plugins" / "team-macros").mkdir(parents=True)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            concern=SyncConcern.PLUGINS,
+            installed_tools=[],
+            registry=SyncRegistry(),
+        )
+        assert results
+        assert all(r.concern == SyncConcern.PLUGINS for r in results)
+
+    def test_no_findings_when_no_plugin_dirs(self, tmp_path: Path) -> None:
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        results = run_sync(
+            SyncData(), tmp_path, installed_tools=[], registry=SyncRegistry()
+        )
+        assert not [r for r in results if r.concern == SyncConcern.PLUGINS]

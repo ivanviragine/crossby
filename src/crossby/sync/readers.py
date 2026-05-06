@@ -560,6 +560,7 @@ class ProjectScan:
     mcp: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     permissions: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
     hooks: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
+    plugins: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
 
 
 def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> ProjectScan:
@@ -634,6 +635,23 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
         if hooks_by_tool else "none found"
     )
 
+    # Plugins — detect-only; no per-tool dimension since plugins live on
+    # the source side. We pack the labelled list under a single AIToolID.CLAUDE
+    # key so the wizard's "found?" check still works without a special case.
+    from crossby.sync.plugins import discover_plugins
+
+    plugin_findings = discover_plugins(project_root)
+    plugins_summary = (
+        f"{len(plugin_findings)} item(s) — manual setup required"
+        if plugin_findings
+        else "none found"
+    )
+    plugins_found: dict[AIToolID, list[str]] = (
+        {AIToolID.CLAUDE: [f.label for f in plugin_findings]}
+        if plugin_findings
+        else {}
+    )
+
     return ProjectScan(
         installed_tools=installed_tools,
         rules=ConcernScan(found=rules_found, summary=rules_summary),
@@ -642,6 +660,7 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
         mcp=ConcernScan(found=dict(mcp_by_tool), summary=mcp_summary),
         permissions=ConcernScan(found=dict(perm_by_tool), summary=perm_summary),
         hooks=ConcernScan(found=dict(hooks_by_tool), summary=hooks_summary),
+        plugins=ConcernScan(found=dict(plugins_found), summary=plugins_summary),
     )
 
 
