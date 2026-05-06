@@ -76,7 +76,7 @@ def read_merge_write_json(
         return "skipped", ""
 
     if dry_run:
-        action: str = "created" if was_new else "updated"
+        action: SyncAction = "created" if was_new else "updated"
         return action, ""
 
     existing[key] = section

@@ -130,7 +130,7 @@ def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
         section = raw.get("mcp_servers")
         if isinstance(section, dict):
-            return section  # type: ignore[return-value]
+            return section
     except Exception:
         pass
     return None

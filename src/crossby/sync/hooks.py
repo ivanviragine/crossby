@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from crossby.models.ai import AIToolID
 from crossby.sync.base import SyncData
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncResult
 from crossby.sync.json_utils import read_json_file, write_json_file
+
+
+_HookAction = Literal["created", "updated", "skipped", "error"]
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +173,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 file_path=path,
             )
 
-        action = "created" if was_new else "updated"
+        action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
             existing["hooks"] = hooks_section
             write_json_file(path, existing)
@@ -278,7 +281,7 @@ class CursorHooksWriter(AbstractSyncWriter):
                 file_path=path,
             )
 
-        action = "created" if was_new else "updated"
+        action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
             write_json_file(path, existing)
 
@@ -393,7 +396,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 message="; ".join(warnings_msgs) or None,
             )
 
-        action = "created" if was_new else "updated"
+        action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
             existing["version"] = 1
             existing["hooks"] = hooks_section
@@ -483,8 +486,8 @@ class GeminiHooksWriter(AbstractSyncWriter):
                 tools = legacy_entry.get("tools")
                 if not isinstance(tools, list):
                     tools = []
-                event_list = hooks_section.setdefault(legacy_event, [])
-                event_list.append({
+                legacy_bucket = hooks_section.setdefault(legacy_event, [])
+                legacy_bucket.append({
                     "matcher": _tools_to_matcher(tools),
                     "hooks": [{"type": "command", "command": command}],
                 })
@@ -535,7 +538,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
                 file_path=path,
             )
 
-        action = "created" if was_new else "updated"
+        action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
             existing["hooks"] = hooks_section
             write_json_file(path, existing)
