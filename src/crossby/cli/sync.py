@@ -676,6 +676,16 @@ def _run_inspection(
     target_tools = (
         [target] if target else [t for t in installed_tools if t != source]
     )
+    if not target_tools:
+        # When the user has only the source tool installed (e.g. just
+        # Claude on PATH), there's nothing to sync to. Plugin discovery
+        # still runs below, but a clearer message up front prevents the
+        # misleading "no sync rows produced — check source/target/concern
+        # flags" output.
+        console.warn(
+            f"No target tools detected besides the source ({source}). "
+            "Install another AI tool or pass --to <tool> explicitly."
+        )
     data = build_sync_data(project_root, from_tool=source)
     _apply_strategy(data, strategy)
     results = run_sync(

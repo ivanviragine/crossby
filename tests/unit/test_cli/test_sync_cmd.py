@@ -624,3 +624,37 @@ class TestWizardScanShowsPlugins:
         # Don't assert exit_code (wizard may abort on EOF); the scan section
         # must mention Plugins regardless of how the run ends.
         assert "Plugins:" in result.output
+
+
+class TestPlanDoctorNoTargets:
+    """When only the source tool is installed, --plan/--doctor warns clearly
+    instead of just saying "no sync rows produced"."""
+
+    def test_plan_warns_when_no_target_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude"],
+        )
+        result = runner.invoke(
+            app,
+            ["sync", "--plan", "--from", "claude", "--path", str(tmp_path)],
+        )
+        # Run still succeeds (plugins still discovered, etc.) but the warning
+        # fires so the user knows why their plan is empty.
+        assert "No target tools detected" in result.output
+
+    def test_doctor_warns_when_no_target_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude"],
+        )
+        result = runner.invoke(
+            app,
+            ["sync", "--doctor", "--from", "claude", "--path", str(tmp_path)],
+        )
+        assert "No target tools detected" in result.output
