@@ -79,10 +79,15 @@ CLI command
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
 - **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
-- **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`.
+- **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
+- **Canonical agent + skill models** (`sync/agent_models.py`) — `AgentDefinition` and `SkillDefinition` are tool-neutral dataclasses. Each on-disk schema (markdown + YAML frontmatter, Codex TOML) has a `parse_*` and `render_*`. `agents_schema_compatible(source, target)` decides whether a writer can symlink (same schema) or has to translate (e.g. Claude → Codex).
+- **Manual-fix block** (`sync/manual_fix.py`) — when a writer can't faithfully translate a source field, it embeds a stable `<!-- crossby:manual-fix:start --> ... <!-- crossby:manual-fix:end -->` block in the rendered file. The block survives markdown rendering, sits inside TOML multi-line strings without escaping, and is replaced 1:1 on re-runs (`strip_manual_fix_blocks` + `append_manual_fix_block` + `find_manual_fix_blocks`).
+- **Cross-provider mappings** (`sync/translation.py`) — Claude↔Codex family table for `model`, family-aware `effort` bias, and `permissionMode` ↔ `sandbox_mode`. Used by both the agents writer and `crossby launch`'s `build_launch_command` for cross-provider model translation.
+- **Pre-write inspection** (`sync/plan.py`, `sync/validate.py`) — `--plan` summarizes a dry-run by concern + manual-fix count; `--doctor` adds validation findings and a coarse `high`/`medium`/`low` readiness rating; `--validate-target` re-parses every synced file (TOML / JSON parseability, agent required fields, skill frontmatter, MCP `command` on PATH, instruction file size).
+- **Persistent reports** (`sync/report.py`) — every real (non-dry-run) sync writes `.crossby/sync-report.md` with a portable `| Status | Item | Notes |` table. Statuses: `Added`, `Check before using`, `Not Added` — driven by `(action, file_path)` rather than message-substring matching.
 - **`.crossby.yml`** is loaded by `config/loader.py` into Pydantic v2 models. **Sync does not depend on it** — it reads each tool's native config directly from standard paths. The config is only consulted by `crossby launch` for defaults.
 - **Symlinks are always relative** (`os.path.relpath`, `config/linker.py`) so they survive repo moves.
-- **Sync is idempotent** — re-running on already-linked files is a no-op.
+- **Sync is idempotent** — re-running on already-linked files is a no-op. Translate writers hash-compare rendered output before deciding `created` / `updated` / `skipped`.
 
 ### Headless vs. interactive launches
 
@@ -114,11 +119,31 @@ Sync writers live in `src/crossby/sync/<concern>.py` and subclass `AbstractSyncW
 
 1. Sets `tool_id: AIToolID` and `concern: SyncConcern`.
 2. Implements `sync(data, project_root, *, dry_run, force) -> SyncResult`.
-3. Must be idempotent — re-running on unchanged state should return `action="skip"` or `action="noop"`.
+3. Must be idempotent — re-running on unchanged state should return `action="skipped"` (with `file_path` set when the artifact is already in place; `file_path=None` means "nothing was synced for this concern", which the report renderer maps to `Not Added`).
 4. Must respect `dry_run` — compute the intended change but make no filesystem writes.
 5. On write conflicts, honor `force` (backup + overwrite) vs. raising.
 
 Register the instance in `src/crossby/sync/__init__.py` alongside the other writers. `SyncRegistry` enforces uniqueness by `(tool_id, concern)`.
+
+### Symlink, copy, or translate
+
+Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:
+
+- **`symlink`** (default): create relative symlinks. Cheapest; edits propagate everywhere; only works when source and target use the same on-disk schema.
+- **`copy`**: physical copy with optional per-file rewrite (e.g. translate tool names `Bash`→`Shell` for Cursor). Used when the user wants a real file to commit, or when a marker on the source content would otherwise leak across schemas.
+- **`translate`**: parse via the canonical `AgentDefinition` / `SkillDefinition`, attach `ManualFixNote`s for fields the target doesn't honour, render back to the target's on-disk shape. Hash-based idempotency. Stale outputs whose source disappeared are removed.
+
+When you add a new writer that handles one of these concerns, decide which strategies it supports, plumb each through `_sync_symlink` / `_sync_copy` / `_sync_translate` (see `agents.py` / `skills.py` for the existing pattern), and add tests for each strategy plus the no-op idempotent case.
+
+### Adding a manual-fix path
+
+If your writer translates a field that the target tool may not enforce or understand:
+
+1. Build a `ManualFixNote` with a short `category` (e.g. `permissionMode`, `allowed-tools`) and a user-facing `message`.
+2. Attach the note via `definition.with_notes([note])` on the canonical model.
+3. The renderer (`render_markdown_skill`, `render_markdown_agent`, `render_toml_agent`) appends a `<!-- crossby:manual-fix --> … <!-- /crossby:manual-fix -->` block at the bottom — no extra plumbing needed.
+
+Keep notes short and literal. Avoid Crossby-internal terminology in the message; users editing the file shouldn't need to know about `AgentDefinition` etc.
 
 ## Tool Reference
 
