@@ -6,7 +6,8 @@ Run through each feature below before going public. Start in a scratch project (
 # Prep: install from local source so you test the current code, not an old PyPI build
 uv tool install --from . crossby --force
 crossby --version   # prints crossby.__version__ (currently 0.2.3); must be kept in sync with pyproject.toml on every release
-crossby --help      # should list: launch, sync, convert, stats, handoff
+crossby --help      # should list: launch, sync, convert, stats, handoff, init
+crossby sync --help # should list (under Options): --strategy, --plan, --doctor, --validate-target, --report-format, --no-persist-report
 ```
 
 ---
@@ -28,7 +29,7 @@ crossby --help      # should list: launch, sync, convert, stats, handoff
 - [ ] `crossby sync --from claude` — should port everything Claude has to every other installed tool without prompting
 - [ ] `crossby sync --from codex` — should work just as well if you have an `AGENTS.md` and `.agents/` setup
 - [ ] `crossby sync --from claude --to cursor` — narrows the target to a single tool
-- [ ] `crossby sync rules --from claude` — runs only the rules concern (also try `agents`, `skills`, `permissions`, `hooks`, `mcp`)
+- [ ] `crossby sync rules --from claude` — runs only the rules concern (also try `agents`, `skills`, `permissions`, `hooks`, `mcp`, `plugins`)
 
 ### 1c. Dry-run and idempotency
 
@@ -39,6 +40,39 @@ crossby --help      # should list: launch, sync, convert, stats, handoff
 
 - [ ] Create a non-symlink `.cursorrules` with custom content, then run `crossby sync --from claude` — it should refuse to overwrite without `--force`
 - [ ] Rerun with `--force` — verify the original is backed up (look for `.bak` or similar) and the symlink is in place
+
+### 1e. Pre-write inspection (`--plan`, `--doctor`, `--validate-target`)
+
+- [ ] `crossby sync --plan --from claude` — prints "Migration plan:" with action/concern counts and a manual-review list; does **not** write any files
+- [ ] `crossby sync --doctor --from claude` — prints the plan plus a "Crossby doctor:" block with `readiness: high|medium|low`. Verify exit code is 0 for high/medium, 1 for low
+- [ ] `crossby sync --plan` (no `--from`) with only one AI tool installed — should warn "No target tools detected besides the source (…)" instead of "no sync rows produced"
+- [ ] After a successful sync, run `crossby sync --validate-target` — should re-parse target files and print a "validation report" table; exit 0 with no errors. Then deliberately corrupt `.codex/config.toml` (e.g. add `[[broken`) and re-run — verify exit 1 with an `error` row
+- [ ] `--validate-target`, `--plan`, `--doctor` are mutually exclusive — passing two together should error
+
+### 1f. Translate strategy (`--strategy translate`)
+
+- [ ] In a project with a Claude skill carrying `allowed-tools` in frontmatter, run `crossby sync --from claude --strategy translate --to codex`. Verify `.agents/skills/<name>/SKILL.md` contains a `<!-- crossby:manual-fix:start -->` block describing the lossy field
+- [ ] In a project with a Claude agent carrying `permissionMode: plan`, run `crossby sync --from claude --strategy translate --to cursor`. Verify `.cursor/agents/<name>.md` carries a manual-fix block enumerating the Claude-only fields
+- [ ] Edit the source skill/agent and re-run — the translated copy should still contain exactly **one** manual-fix block (not two)
+- [ ] Drop a `.claude/commands/pr-review.md` slash command. Run `crossby sync --from claude --strategy translate --to codex`. Verify a new `claude-command-pr-review/SKILL.md` appears under the codex skills root, with caveats for `$ARGUMENTS` / `!\`shell\`` / `@file` / `{{template}}` if used
+- [ ] `crossby sync --strategy bogus --from claude` — should exit 1 with "Unknown --strategy: 'bogus'"
+
+### 1g. Persistent report + portable format
+
+- [ ] After any real sync run, verify `.crossby/sync-report.md` exists with a header, `| Status | Item | Notes |` table, **relative paths** in the Item column (not `/tmp/proj/.cursor/cli.json`), and Status values from `{Added, Check before using, Not Added}`
+- [ ] `crossby sync --from claude --no-persist-report` — verify `.crossby/sync-report.md` is **not** written
+- [ ] `crossby sync --from claude --report-format markdown-table` — same table on stdout instead of the Rich table
+- [ ] `crossby sync --report-format yaml --from claude` — should exit 1 with "Unknown --report-format: 'yaml'"
+
+### 1h. Plugins
+
+- [ ] Drop a fake plugin at `.claude/plugins/team-macros/`, then `crossby sync --from claude` — verify the result table includes a row with `concern=plugins`, `action=skipped`, message mentioning "Plugin needs manual setup". The persistent report classifies it as `Not Added`
+- [ ] `crossby sync plugins --from claude` — same row, no other concerns reported
+- [ ] Run the wizard (`crossby sync` no flags) — the scan summary should include a `Plugins:` line
+
+### 1i. Legacy `.agents/` codex layout
+
+- [ ] In a project that has a `.agents/` symlink or top-level `.md` files (left over from old crossby), run `crossby sync --from claude --to codex`. Verify a structlog warning fires with `agents.legacy_codex_path`, the new `.codex/agents/<name>.toml` files are written, and the legacy `.agents/` directory is left untouched
 
 ---
 
@@ -75,6 +109,13 @@ crossby --help      # should list: launch, sync, convert, stats, handoff
 - [ ] `crossby launch --tool codex` — should start Codex
 - [ ] `crossby launch --tool cursor --yolo` — verify `--yolo` is translated (Cursor uses `--force`)
 - [ ] `crossby launch --tool opencode --yolo` — OpenCode doesn't support YOLO; verify you get a warning (or an error — check current behavior)
+
+### 2c′. Cross-provider model translation
+
+- [ ] `crossby launch --tool codex --model claude-sonnet-4.6 --effort high` — should fire a `UserWarning` like `Translating model 'claude-sonnet-4.6' → 'gpt-5.4-mini' for Codex CLI (effort high → xhigh)`. Verify the launched binary actually receives `gpt-5.4-mini` and `xhigh` (the warning is enough; you don't need codex installed to see the warning fire)
+- [ ] `crossby launch --tool claude --model gpt-5.4` — should warn `Translating model 'gpt-5.4' → 'claude-opus-4.7' for Claude Code` and the cmd should use `claude-opus-4-7` (Claude's dashed format)
+- [ ] `crossby launch --tool cursor --model claude-sonnet-4.6` — Cursor accepts arbitrary ids; should **not** translate, no warning
+- [ ] `crossby launch --tool codex --model o1-mini` — unknown family; passes through, no warning
 
 ### 2d. Plan mode
 
@@ -146,12 +187,20 @@ crossby --help      # should list: launch, sync, convert, stats, handoff
 - [ ] `crossby launch --tool copilot --model claude-opus-4.7 --yolo` — the "AI tool / Model / YOLO mode" block should print **once** (with the display name "GitHub Copilot"), not twice. Regression test for a prior double-print.
 - [ ] `crossby launch --tool claude` (no other flags, in a TTY) — confirmation menu should show the selection, then after "Proceed" the launch.py block prints the final state once.
 
+## 6b. `crossby init --install-skill`
+
+- [ ] `crossby init --non-interactive --install-skill` in a fresh project with at least one AI tool installed — verifies the bundled runbook lands at `<tool>/skills/crossby-sync/SKILL.md` for every installed tool, plus `references/differences.md`
+- [ ] Re-run with `--force --install-skill` — verify the per-tool detail line says `skill skipped` (idempotent)
+- [ ] Edit one of the installed `SKILL.md` copies, then re-run with `--install-skill --force` — verify the detail line says `skill updated`
+- [ ] `crossby init --non-interactive` (no `--install-skill`) — verify nothing under `<tool>/skills/` is created
+
 ## 7. Edge cases and failure modes
 
 - [ ] Run any command in a directory with a malformed `.crossby.yml` (e.g. unclosed string) — verify a clean error, not a traceback
 - [ ] `crossby sync` in an empty directory with no AI tool configs — should say there's nothing to sync, not crash
 - [ ] `crossby launch --tool claude` when `claude` is not on PATH — should error with an install hint, not crash
 - [ ] `crossby sync --from claude` when Claude's `.claude/settings.json` contains an MCP server and Codex is a target — confirms Codex `config.toml` is written (tomli-w is a base dep, no optional-skip path)
+- [ ] `crossby sync --from claude` with `Authorization: Bearer ${API_TOKEN}` and `X-Tenant: ${TENANT}` headers in source MCP config, target Codex — verify `.codex/config.toml` rewrites these into `bearer_token_env_var = "API_TOKEN"` and `env_http_headers = { "X-Tenant" = "TENANT" }`
 
 ---
 
