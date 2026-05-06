@@ -147,8 +147,13 @@ def _render_frontmatter(fm: dict[str, object], body: str) -> str:
     return f"---\n{yaml.dump(fm, default_flow_style=False, sort_keys=False)}---\n{body}"
 
 
-def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
-    """Copy one agent file to target, translating tool names."""
+def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
+    """Copy one agent file to target, translating tool names.
+
+    Returns True when the target was written or rewritten, False when the
+    on-disk content was already byte-identical to the rendered output
+    (idempotent re-run).
+    """
     content = source.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(content)
     if isinstance(fm, dict):
@@ -162,11 +167,12 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str) -> None:
     if target.is_file():
         try:
             if target.read_text(encoding="utf-8") == out:
-                return
+                return False
         except OSError:
             pass
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(out, encoding="utf-8")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -349,28 +355,45 @@ class _BaseAgentsWriter(AbstractSyncWriter):
     def _sync_copy(
         self, source_dir: Path, target_dir: Path, *, dry_run: bool
     ) -> SyncResult:
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="created",
+                action=action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
-        _copy_all_agents(source_dir, target_dir, str(self.tool_id))
+        wrote = _copy_all_agents(source_dir, target_dir, str(self.tool_id))
+        if not wrote and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already copied",
+            )
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
-            action="created",
+            action=action,
             file_path=target_dir,
         )
 
 
-def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: str) -> None:
-    """Copy all .md agent files from source to target, translating tool names."""
+def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: str) -> bool:
+    """Copy all .md agent files from source to target, translating tool names.
+
+    Returns True when at least one file was written or rewritten, False
+    when every file was already up to date (idempotent re-run).
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
+    wrote_any = False
     for src in source_dir.glob("*.md"):
-        _copy_agent_file(src, target_dir / src.name, tool_id)
+        if _copy_agent_file(src, target_dir / src.name, tool_id):
+            wrote_any = True
+    return wrote_any
 
 
 # ---------------------------------------------------------------------------
@@ -742,21 +765,33 @@ class CopilotAgentsWriter(AbstractSyncWriter):
     def _sync_copy(
         self, source_dir: Path, target_dir: Path, *, dry_run: bool
     ) -> SyncResult:
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="created",
+                action=action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
         target_dir.mkdir(parents=True, exist_ok=True)
+        wrote_any = False
         for src in source_dir.glob("*.md"):
             dest = target_dir / f"{src.stem}.agent.md"
-            _copy_agent_file(src, dest, "copilot")
+            if _copy_agent_file(src, dest, "copilot"):
+                wrote_any = True
+        if not wrote_any and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already copied",
+            )
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
-            action="created",
+            action=action,
             file_path=target_dir,
         )

@@ -231,7 +231,8 @@ class TestClaudeAgentsWriter:
         w = ClaudeAgentsWriter()
         data = _data()
         result = w.sync(data, tmp_path)
-        assert result.action == "created"
+        # Target dir already existed (empty), so this is an "updated" sync.
+        assert result.action == "updated"
         assert (target / "a.md").is_file()
 
     def test_source_is_file_is_error(self, tmp_path: Path) -> None:
@@ -408,7 +409,19 @@ class TestCopyStrategy:
         w = ClaudeAgentsWriter()
         data = _data(strategy="copy")
         result = w.sync(data, tmp_path)
-        assert result.action == "created"
+        # Target dir + file existed but content differs → updated.
+        assert result.action == "updated"
+
+    def test_copy_idempotent_skipped_on_no_op(self, tmp_path: Path) -> None:
+        """Re-running copy when nothing changed reports skipped, not created."""
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        first = w.sync(data, tmp_path)
+        second = w.sync(data, tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+        assert "already copied" in (second.message or "")
 
     def test_copy_errors_on_symlinked_target_without_force(self, tmp_path: Path) -> None:
         """Copy strategy errors when target path is a symlink (would write outside project)."""
