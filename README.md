@@ -60,6 +60,11 @@ crossby launch ccyolo
 # …or spell it out with unified flags
 crossby launch --tool claude --model claude-sonnet-4.6 --effort high --yolo
 
+# Inspect before writing — plan, doctor, validate
+crossby sync --plan --from claude
+crossby sync --doctor --from claude
+crossby sync --validate-target
+
 # Hand the current session off to another tool
 crossby handoff --from claude --to codex
 
@@ -71,18 +76,57 @@ Every command with missing arguments drops into a "Proceed / Change X" review so
 
 ## What gets synced
 
-| Config      | Strategy | Notes                                                                                        |
-| ----------- | -------- | -------------------------------------------------------------------------------------------- |
-| Rules       | Symlink  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md` |
-| Agents      | Symlink  | Each tool's agents directory ↔ equivalent per tool                                           |
-| Skills      | Symlink  | `.claude/skills/` ↔ `.agents/skills/` ↔ `.gemini/skills/` ↔ `.cursor/skills/` ↔ `.github/skills/` |
-| Permissions | Convert  | Canonical ↔ `Bash()` / `Shell()` / `shell()` format per tool                                 |
-| Hooks       | Write    | Per-tool native hook schema                                                                  |
-| MCP servers | Merge    | Source tool's MCP config → each target tool's MCP config                                     |
+| Config      | Strategy             | Notes                                                                                        |
+| ----------- | -------------------- | -------------------------------------------------------------------------------------------- |
+| Rules       | Symlink (auto-copy)  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md`. Falls back to copy with a `<!-- crossby:manual-fix -->` block when the source mentions surfaces specific to a different tool (`/hooks`, `ExitPlanMode`, `permissionMode`, …). |
+| Agents      | Symlink / translate  | Markdown-shape tools (Claude / Cursor / Gemini / Copilot) symlink directories. Codex translates per file into `.codex/agents/<name>.toml` with `permissionMode → sandbox_mode`, `model + effort` family-mapped to GPT, lossy fields preserved as a manual-fix block. |
+| Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
+| Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` / `shell()` format per tool                       |
+| Hooks       | Write                | Per-tool native hook schema; matcher widens on re-runs                                       |
+| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars` |
+| Plugins     | Detect (manual)      | `.claude/plugins/`, `plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand |
 
-Before writing anything, `crossby sync` scans the source tool and shows a plan — what it can port, what it can't, and why. Use `--dry-run` to preview without applying.
+Before writing anything, `crossby sync --plan` shows a stage-by-concern dry-run summary; `--doctor` adds a readiness rating (`high` / `medium` / `low`) plus the target-validation checks that would run after; `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`). Use `--dry-run` to run a real sync in shadow mode.
+
+After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR description. Pass `--no-persist-report` to skip, or `--report-format markdown-table` to render the same shape on stdout.
 
 > Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool.
+
+## Translate strategy and manual-fix blocks
+
+Default strategy is `symlink` (with content-aware copy fallback for rules). Pass `--strategy translate` to do per-file rewriting that preserves intent across tools whose semantics diverge:
+
+```bash
+crossby sync --from claude --strategy translate
+```
+
+When a field doesn't have a faithful equivalent on the target — e.g. Claude `permissionMode: plan` going to Codex, or `allowed-tools` going to a tool that doesn't enforce them — the rendered file gets a clearly-marked block:
+
+```markdown
+<!-- crossby:manual-fix:start -->
+## Manual migration required
+
+- Claude-specific agent semantics carried over verbatim. The target tool does not enforce them — review and rewrite or remove as needed. Fields preserved: `permissionMode: plan`, `skills` preload list (`release-notes`).
+<!-- crossby:manual-fix:end -->
+```
+
+Re-running `crossby sync` replaces the block in lockstep with the source — no stacking. Removing the block once you've addressed the note is supported; the next sync only re-emits if the source still triggers it.
+
+## Cross-provider model translation
+
+`crossby launch` translates model ids across families when the target tool wouldn't accept the source family natively:
+
+```bash
+# Pass a Claude model id to Codex — translated to gpt-5.4-mini under the hood
+crossby launch --tool codex --model claude-sonnet-4.6 --effort high
+# → codex --model gpt-5.4-mini -c model_reasoning_effort=xhigh
+```
+
+Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-5.4` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
+
+## Agent-readable runbook
+
+`crossby init --install-skill` copies the bundled `crossby-sync` skill into every installed tool's skills directory. From inside Claude Code / Codex / Cursor / etc., the LLM can drive the full sync loop end-to-end — scan, plan, fix manual-fix blocks, validate — without leaving the session. The bundle is at `src/crossby/data/skill/`; the `references/differences.md` file in the bundle has the per-surface mapping table.
 
 ## Session handoff
 
