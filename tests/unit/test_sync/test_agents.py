@@ -1036,3 +1036,69 @@ class TestCodexAgentsTranslate:
         result = CodexAgentsWriter().sync(_data(), tmp_path)
         assert result.action == "skipped"
         assert "no agents to translate" in (result.message or "")
+
+
+# ---------------------------------------------------------------------------
+# Legacy `.agents/` codex layout detection
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyCodexAgentsDetection:
+    """Pre-PR codex agents lived at `.agents/`; new path is `.codex/agents/`.
+    A small detector warns users on next sync so they can clean up."""
+
+    def test_returns_none_when_no_legacy_dir(self, tmp_path: Path) -> None:
+        from crossby.sync.agents import detect_legacy_codex_agents
+
+        assert detect_legacy_codex_agents(tmp_path) is None
+
+    def test_returns_path_when_dot_agents_is_symlink(self, tmp_path: Path) -> None:
+        from crossby.sync.agents import detect_legacy_codex_agents
+
+        source = tmp_path / "src"
+        source.mkdir()
+        (tmp_path / ".agents").symlink_to(source)
+        assert detect_legacy_codex_agents(tmp_path) == tmp_path / ".agents"
+
+    def test_returns_path_when_dot_agents_has_top_level_md(
+        self, tmp_path: Path
+    ) -> None:
+        from crossby.sync.agents import detect_legacy_codex_agents
+
+        legacy = tmp_path / ".agents"
+        legacy.mkdir()
+        (legacy / "release-lead.md").write_text("# x", encoding="utf-8")
+        assert detect_legacy_codex_agents(tmp_path) == legacy
+
+    def test_skills_only_dir_is_not_legacy(self, tmp_path: Path) -> None:
+        # `.agents/skills/` is Codex's current skills root and must not trip
+        # the warning.
+        from crossby.sync.agents import detect_legacy_codex_agents
+
+        skills = tmp_path / ".agents" / "skills" / "my-skill"
+        skills.mkdir(parents=True)
+        (skills / "SKILL.md").write_text("# x", encoding="utf-8")
+        assert detect_legacy_codex_agents(tmp_path) is None
+
+    def test_codex_agents_writer_logs_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Real CodexAgentsWriter run emits the legacy-path warning when the
+        old `.agents/` symlink is present.
+
+        ``structlog`` writes through its own pipeline rather than the stdlib
+        ``logging`` module, so we capture stdout/stderr rather than caplog.
+        """
+        from crossby.sync.agents import CodexAgentsWriter
+
+        source = _make_source(tmp_path, [])
+        (source / "x.md").write_text(
+            "---\nname: x\ndescription: y\n---\nbody",
+            encoding="utf-8",
+        )
+        (tmp_path / ".agents").symlink_to(source)
+
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+        captured = capsys.readouterr()
+        assert result.action in {"created", "updated"}
+        assert "agents.legacy_codex_path" in (captured.out + captured.err)

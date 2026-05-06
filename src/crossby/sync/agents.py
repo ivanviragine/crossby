@@ -147,6 +147,54 @@ def _render_frontmatter(fm: dict[str, object], body: str) -> str:
     return f"---\n{yaml.dump(fm, default_flow_style=False, sort_keys=False)}---\n{body}"
 
 
+def detect_legacy_codex_agents(project_root: Path) -> Path | None:
+    """Return the legacy `.agents/` path when it carries old codex-agent content.
+
+    Crossby ≤ 0.2.x synced codex agents to ``<project>/.agents/`` (either as a
+    directory symlink to the source or as a markdown copy). The current path
+    per upstream Codex docs is ``<project>/.codex/agents/<name>.toml``;
+    `.agents/skills/` is the Codex *skills* root and is left alone.
+
+    Detection: the legacy path is reported when ``.agents`` is a symlink
+    (the old default), OR when it's a real directory containing one or more
+    top-level ``*.md`` files (old copy fallback). A directory containing
+    only ``skills/`` (current Codex skills layout) returns ``None``.
+    """
+    legacy = project_root / ".agents"
+    if legacy.is_symlink():
+        return legacy
+    if not legacy.is_dir():
+        return None
+    try:
+        for child in legacy.iterdir():
+            if child.is_file() and child.suffix == ".md":
+                return legacy
+    except OSError:
+        return None
+    return None
+
+
+def _warn_legacy_codex_agents_path(project_root: Path) -> None:
+    """Log a one-shot warning when the legacy `.agents/` path is present.
+
+    Non-destructive: never auto-deletes, never blocks the sync. Users can
+    remove the directory or symlink at their convenience now that codex
+    agents live at ``.codex/agents/``.
+    """
+    legacy = detect_legacy_codex_agents(project_root)
+    if legacy is None:
+        return
+    logger.warning(
+        "agents.legacy_codex_path",
+        path=str(legacy),
+        hint=(
+            f"`.agents/` is no longer the codex agents target — codex agents "
+            f"now sync to `.codex/agents/`. The legacy path was left untouched; "
+            f"remove `{legacy}` once you've confirmed nothing else relies on it."
+        ),
+    )
+
+
 def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
     """Copy one agent file to target, translating tool names.
 
@@ -468,6 +516,8 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 action="error",
                 message=f"source directory not found: {data.agents_source}",
             )
+
+        _warn_legacy_codex_agents_path(project_root)
 
         target_dir = project_root / self._target_rel
 
