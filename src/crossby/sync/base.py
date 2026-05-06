@@ -42,7 +42,7 @@ class SyncData:
 
     # Agents concern
     agents_source: str | None = None  # relative path to canonical agents directory
-    agents_strategy: Literal["symlink", "copy"] = "symlink"
+    agents_strategy: Literal["symlink", "copy", "translate"] = "symlink"
     agents_gitignore: bool = True
 
     # Skills concern

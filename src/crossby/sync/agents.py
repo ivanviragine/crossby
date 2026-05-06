@@ -14,6 +14,7 @@ import yaml
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.sync.agent_models import (
+    AgentDefinition,
     parse_markdown_agent,
     parse_toml_agent,
     render_toml_agent,
@@ -195,6 +196,90 @@ def _warn_legacy_codex_agents_path(project_root: Path) -> None:
     )
 
 
+_NON_CLAUDE_LOSSY_FIELDS_NOTE = (
+    "Claude-specific agent semantics carried over verbatim. The target "
+    "tool does not enforce them — review and rewrite or remove as needed."
+)
+
+
+def _annotate_agent_for_target(
+    definition: "AgentDefinition", target: AIToolID
+) -> "AgentDefinition":
+    """Attach manual-fix notes describing fields ``target`` won't honour.
+
+    Markdown-shape targets (Claude, Cursor, Gemini, Copilot) all accept
+    the same on-disk file shape, but only Claude actually understands
+    ``permissionMode``, ``skills`` preload semantics, ``disallowedTools``,
+    and a few other Claude-specific frontmatter fields. When syncing
+    Claude → another markdown-shape target with ``--strategy translate``,
+    those fields stay in frontmatter for reference and a single
+    consolidated manual-fix block lists which ones need a human's eye.
+
+    For Claude itself, returns the definition unchanged (the fields
+    apply natively). For Codex, this writer doesn't run — Codex agents
+    use their own TOML translator in :class:`CodexAgentsWriter`.
+    """
+    from crossby.sync.manual_fix import ManualFixNote
+    from crossby.sync.translation import (
+        CLAUDE_PERMISSION_MODES_UNMAPPED,
+        map_permission_mode_claude_to_codex,
+    )
+
+    if target == AIToolID.CLAUDE:
+        return definition
+
+    notes: list[ManualFixNote] = []
+    flagged: list[str] = []
+
+    if definition.permission_mode is not None:
+        # acceptEdits / readOnly / bypassPermissions translate cleanly to
+        # something Codex-equivalent; the value still doesn't apply to a
+        # Cursor / Gemini / Copilot agent. Anything in the unmapped set is
+        # genuinely Claude-only.
+        if (
+            map_permission_mode_claude_to_codex(definition.permission_mode) is None
+            and definition.permission_mode in CLAUDE_PERMISSION_MODES_UNMAPPED
+        ):
+            flagged.append(f"`permissionMode: {definition.permission_mode}`")
+        elif definition.permission_mode in {
+            "acceptEdits",
+            "readOnly",
+            "bypassPermissions",
+        }:
+            flagged.append(f"`permissionMode: {definition.permission_mode}`")
+
+    if definition.skills:
+        flagged.append(
+            "`skills` preload list ("
+            + ", ".join(f"`{s}`" for s in definition.skills)
+            + ")"
+        )
+    if definition.tools_allow:
+        flagged.append(
+            "`tools` allow-list ("
+            + ", ".join(f"`{t}`" for t in definition.tools_allow)
+            + ")"
+        )
+    if definition.tools_deny:
+        flagged.append(
+            "`disallowedTools` deny-list ("
+            + ", ".join(f"`{t}`" for t in definition.tools_deny)
+            + ")"
+        )
+
+    if flagged:
+        joined = ", ".join(flagged)
+        notes.append(
+            ManualFixNote(
+                category="claude-only-fields",
+                message=(
+                    f"{_NON_CLAUDE_LOSSY_FIELDS_NOTE} Fields preserved: {joined}."
+                ),
+            )
+        )
+    return definition.with_notes(notes)
+
+
 def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
     """Copy one agent file to target, translating tool names.
 
@@ -308,7 +393,12 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                             "or use --force to back it up and replace it."
                         ),
                     )
-                # Managed fallback directory: proceed with copy for re-entrancy.
+                # Managed fallback directory: re-sync via the configured
+                # strategy so subsequent runs preserve translate/copy semantics.
+                if data.agents_strategy == "translate":
+                    return self._sync_translate(
+                        source_dir, target_dir, dry_run=dry_run
+                    )
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             dir_was_cleared = True
             if not dry_run:
@@ -316,6 +406,9 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 shutil.copytree(str(target_dir), str(bak))
                 shutil.rmtree(str(target_dir))
                 logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(bak))
+
+        if data.agents_strategy == "translate":
+            return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
 
         if data.agents_strategy == "copy":
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
@@ -427,6 +520,89 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=target_dir,
+        )
+
+    def _sync_translate(
+        self, source_dir: Path, target_dir: Path, *, dry_run: bool
+    ) -> SyncResult:
+        """Per-file copy with target-aware lossy-field annotation.
+
+        For each ``<name>.md`` under ``source_dir``: parse to a canonical
+        :class:`AgentDefinition`, attach manual-fix notes for fields
+        ``self.tool_id`` doesn't natively honour (e.g. ``permissionMode:
+        plan`` for any non-Codex target, ``skills`` preload semantics,
+        ``disallowedTools``), render back to markdown + frontmatter, and
+        write to ``<target_dir>/<name>.md``. Hash-based idempotency.
+        Stale ``.md`` files whose source is gone are removed.
+
+        Symlink remains the default for genuinely compatible source/target
+        pairs; the user opts in via ``--strategy translate``.
+        """
+        from crossby.sync.agent_models import (
+            parse_markdown_agent,
+            render_markdown_agent,
+        )
+
+        source_files = sorted(source_dir.glob("*.md"))
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
+
+        if not source_files and not target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="no agents to translate",
+            )
+
+        if dry_run:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action=action,
+                file_path=target_dir,
+                message="translate (dry-run)",
+            )
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        wanted = {src.name for src in source_files}
+        removed_any = False
+        for existing in target_dir.glob("*.md"):
+            if existing.name not in wanted:
+                existing.unlink()
+                logger.info("agents.stale_removed", path=str(existing))
+                removed_any = True
+
+        wrote_any = False
+        for src in source_files:
+            definition = parse_markdown_agent(
+                src.read_text(encoding="utf-8"),
+                fallback_name=src.stem,
+            )
+            annotated = _annotate_agent_for_target(definition, self.tool_id)
+            rendered = render_markdown_agent(annotated, target_tool=self.tool_id)
+            target_file = target_dir / src.name
+            if target_file.is_file():
+                if target_file.read_text(encoding="utf-8") == rendered:
+                    continue
+            target_file.write_text(rendered, encoding="utf-8")
+            wrote_any = True
+
+        if not wrote_any and not removed_any and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already translated",
+            )
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=target_dir,
+            message="translated",
         )
 
 

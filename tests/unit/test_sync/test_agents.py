@@ -1080,15 +1080,17 @@ class TestLegacyCodexAgentsDetection:
         (skills / "SKILL.md").write_text("# x", encoding="utf-8")
         assert detect_legacy_codex_agents(tmp_path) is None
 
-    def test_codex_agents_writer_logs_warning(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    def test_writer_invokes_warning_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Real CodexAgentsWriter run emits the legacy-path warning when the
-        old `.agents/` symlink is present.
+        """Real CodexAgentsWriter run calls _warn_legacy_codex_agents_path
+        when the legacy `.agents/` symlink exists.
 
-        ``structlog`` writes through its own pipeline rather than the stdlib
-        ``logging`` module, so we capture stdout/stderr rather than caplog.
+        We mock the helper directly rather than chasing structlog's
+        process-wide writer pipeline (which can be reconfigured by other
+        tests in the suite, making capsys-based assertions flaky).
         """
+        from crossby.sync import agents as agents_mod
         from crossby.sync.agents import CodexAgentsWriter
 
         source = _make_source(tmp_path, [])
@@ -1098,7 +1100,148 @@ class TestLegacyCodexAgentsDetection:
         )
         (tmp_path / ".agents").symlink_to(source)
 
+        called: list[Path] = []
+
+        def _spy(project_root: Path) -> None:
+            called.append(project_root)
+
+        monkeypatch.setattr(
+            agents_mod, "_warn_legacy_codex_agents_path", _spy
+        )
         result = CodexAgentsWriter().sync(_data(), tmp_path)
-        captured = capsys.readouterr()
+
         assert result.action in {"created", "updated"}
-        assert "agents.legacy_codex_path" in (captured.out + captured.err)
+        assert called == [tmp_path]
+
+
+# ---------------------------------------------------------------------------
+# Agents translate strategy
+# ---------------------------------------------------------------------------
+
+
+class TestAgentsTranslateStrategy:
+    """`--strategy translate` annotates Claude-specific lossy fields with a
+    manual-fix block when the target is a markdown-shape tool other than Claude.
+
+    Codex agents are handled by CodexAgentsWriter (TOML); this covers the
+    Claude → Cursor / Gemini / Copilot path."""
+
+    def _make_claude_agent(
+        self,
+        source_dir: Path,
+        name: str,
+        *,
+        permission_mode: str | None = None,
+        skills_list: list[str] | None = None,
+        tools: list[str] | None = None,
+        disallowed: list[str] | None = None,
+    ) -> None:
+        lines = ["---", f"name: {name}", "description: A test agent."]
+        if permission_mode is not None:
+            lines.append(f"permissionMode: {permission_mode}")
+        if skills_list:
+            lines.append("skills:")
+            for s in skills_list:
+                lines.append(f"  - {s}")
+        if tools:
+            lines.append("tools:")
+            for t in tools:
+                lines.append(f"  - {t}")
+        if disallowed:
+            lines.append("disallowedTools:")
+            for d in disallowed:
+                lines.append(f"  - {d}")
+        lines.extend(["---", "Body.", ""])
+        (source_dir / f"{name}.md").write_text("\n".join(lines))
+
+    def test_unmappable_permission_mode_emits_manual_fix_for_cursor(
+        self, tmp_path: Path
+    ) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x", permission_mode="plan")
+        result = CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        out = tmp_path / ".cursor" / "agents" / "x.md"
+        text = out.read_text(encoding="utf-8")
+        assert "<!-- crossby:manual-fix:start -->" in text
+        assert "permissionMode: plan" in text
+
+    def test_skills_preload_emits_manual_fix(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x", skills_list=["release-notes"])
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".cursor" / "agents" / "x.md").read_text(encoding="utf-8")
+        assert "<!-- crossby:manual-fix:start -->" in text
+        assert "release-notes" in text
+
+    def test_disallowed_tools_emits_manual_fix(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x", disallowed=["Write"])
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".cursor" / "agents" / "x.md").read_text(encoding="utf-8")
+        assert "disallowedTools" in text
+        assert "Write" in text
+
+    def test_no_manual_fix_when_only_neutral_fields(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x")  # no Claude-only fields
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".cursor" / "agents" / "x.md").read_text(encoding="utf-8")
+        assert "<!-- crossby:manual-fix" not in text
+
+    def test_claude_target_never_gets_manual_fix(self, tmp_path: Path) -> None:
+        # When the target IS Claude, the fields apply natively and shouldn't
+        # be annotated.
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x", permission_mode="plan")
+        result = ClaudeAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        text = (tmp_path / ".claude" / "agents" / "x.md").read_text(encoding="utf-8")
+        assert "<!-- crossby:manual-fix" not in text
+
+    def test_idempotent_translate(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x", permission_mode="plan")
+        first = CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        second = CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+        assert "already translated" in (second.message or "")
+
+    def test_stale_md_removed(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "keep")
+        self._make_claude_agent(source, "drop")
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        (source / "drop.md").unlink()
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert (tmp_path / ".cursor" / "agents" / "keep.md").is_file()
+        assert not (tmp_path / ".cursor" / "agents" / "drop.md").exists()
+
+    def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x")
+        result = CursorAgentsWriter().sync(
+            _data(strategy="translate"), tmp_path, dry_run=True
+        )
+        assert result.action in {"created", "updated"}
+        assert "dry-run" in (result.message or "")
+        assert not (tmp_path / ".cursor" / "agents").exists()
+
+    def test_re_translate_after_source_change(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_claude_agent(source, "x")  # no Claude-only fields initially
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text_before = (tmp_path / ".cursor" / "agents" / "x.md").read_text(
+            encoding="utf-8"
+        )
+        assert "<!-- crossby:manual-fix" not in text_before
+
+        # Add a Claude-only field — re-running should produce a manual-fix block.
+        self._make_claude_agent(source, "x", permission_mode="plan")
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text_after = (tmp_path / ".cursor" / "agents" / "x.md").read_text(
+            encoding="utf-8"
+        )
+        assert text_after.count("<!-- crossby:manual-fix:start -->") == 1
+        assert "permissionMode: plan" in text_after

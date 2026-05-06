@@ -569,16 +569,21 @@ def _persist_report(results: list[SyncResult], project_root: Path) -> None:
 def _apply_strategy(data: "SyncData", strategy: str | None) -> None:
     """Override SyncData strategy fields from the CLI ``--strategy`` flag.
 
-    ``translate`` only meaningfully affects skills; rules + agents fall back
-    to ``copy`` (rules' foreign-marker detection still triggers per-target
-    copy on its own when needed). ``None`` means "leave SyncData defaults".
+    ``translate`` flips skills *and* agents into per-file rewrite mode so
+    target-tool-specific lossy fields (Claude ``allowed-tools`` for non-
+    Claude skill targets; Claude ``permissionMode: plan`` / ``skills``
+    preload / ``disallowedTools`` for non-Codex agent targets) get a
+    ``<!-- crossby:manual-fix -->`` block in the rendered output. Rules
+    fall back to ``copy`` (the foreign-marker detector inside the rules
+    writer still force-copies per target on its own when needed).
+    ``None`` means "leave SyncData defaults".
     """
     if strategy is None:
         return
     if strategy == "translate":
         data.skills_strategy = "translate"
+        data.agents_strategy = "translate"
         data.rules_strategy = "copy"
-        data.agents_strategy = "copy"
     elif strategy == "copy":
         data.skills_strategy = "copy"
         data.rules_strategy = "copy"
