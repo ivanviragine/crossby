@@ -51,13 +51,33 @@ class TestClassifyStatus:
             == "Check before using"
         )
 
-    def test_skipped_when_no_source_is_not_added(self) -> None:
+    def test_skipped_with_no_file_path_is_not_added(self) -> None:
+        # "no source detected" / "no hooks config" / etc. — writer never
+        # identified a target artifact. No file_path is the canonical signal.
         assert (
-            classify_status(_r(action="skipped", message="no rules source detected"))
+            classify_status(
+                _r(
+                    action="skipped",
+                    message="no rules source detected",
+                    file_path=None,
+                )
+            )
+            == "Not Added"
+        )
+
+    def test_skipped_no_hooks_config_is_not_added(self) -> None:
+        # Regression: the "no hooks config" message previously fell through
+        # to the default "Added" classification because the heuristic only
+        # matched messages mentioning "source".
+        assert (
+            classify_status(
+                _r(action="skipped", message="no hooks config", file_path=None)
+            )
             == "Not Added"
         )
 
     def test_skipped_when_already_in_place_is_added(self) -> None:
+        # file_path set + skipped == idempotent re-run.
         assert (
             classify_status(_r(action="skipped", message="already linked")) == "Added"
         )
@@ -106,6 +126,50 @@ class TestRenderPersistentReport:
     def test_no_rows_says_nothing_was_synced(self) -> None:
         out = render_persistent_report([], project_name="x")
         assert "No sync rows" in out
+
+    def test_paths_relativized_against_project_root(self) -> None:
+        # Regression: persistent reports used to leak absolute paths
+        # (/tmp/<project>/.cursor/cli.json) which makes the report
+        # non-portable. With project_root supplied, paths render relative.
+        result = _r(
+            action="created",
+            file_path=Path("/tmp/proj/.cursor/cli.json"),
+        )
+        out = render_persistent_report(
+            [result],
+            project_name="proj",
+            project_root=Path("/tmp/proj"),
+        )
+        assert ".cursor/cli.json" in out
+        assert "/tmp/proj/.cursor/cli.json" not in out
+
+
+class TestRenderMarkdownTableRelativePaths:
+    def test_passes_project_root_through(self) -> None:
+        result = _r(
+            action="created",
+            file_path=Path("/tmp/proj/.cursor/cli.json"),
+        )
+        out = render_markdown_table([result], project_root=Path("/tmp/proj"))
+        assert "/tmp/proj/" not in out
+        assert ".cursor/cli.json" in out
+
+    def test_no_project_root_keeps_absolute_path(self) -> None:
+        result = _r(
+            action="created",
+            file_path=Path("/tmp/proj/.cursor/cli.json"),
+        )
+        out = render_markdown_table([result])
+        assert "/tmp/proj/.cursor/cli.json" in out
+
+    def test_outside_project_root_keeps_absolute(self) -> None:
+        # If the file_path isn't under project_root, leave it as-is.
+        result = _r(
+            action="created",
+            file_path=Path("/etc/global-config.json"),
+        )
+        out = render_markdown_table([result], project_root=Path("/tmp/proj"))
+        assert "/etc/global-config.json" in out
 
 
 class TestWritePersistentReport:

@@ -237,7 +237,7 @@ def sync(
             force=force,
             installed_tools=target_tools,
         )
-        _display_results(results, report_format=report_format)
+        _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
             _persist_report(results, project_root)
         if any(r.action == "error" for r in results):
@@ -418,7 +418,7 @@ def sync(
         console.info("No sync writers matched the given filters.")
         return
 
-    _display_results(results, report_format=report_format)
+    _display_results(results, report_format=report_format, project_root=project_root)
 
     synced = sum(1 for r in results if r.action in ("created", "updated"))
     console.empty()
@@ -509,13 +509,16 @@ def _confirm_sync_defaults(
 
 
 def _display_results(
-    results: list[SyncResult], *, report_format: str = "table"
+    results: list[SyncResult],
+    *,
+    report_format: str = "table",
+    project_root: Path | None = None,
 ) -> None:
     """Display sync results in a Rich table or as a portable markdown table."""
     if report_format == "markdown-table":
         from crossby.sync.report import render_markdown_table
 
-        rendered = render_markdown_table(results)
+        rendered = render_markdown_table(results, project_root=project_root)
         if rendered:
             console.out.print(rendered)
         return

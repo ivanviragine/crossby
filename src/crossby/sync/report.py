@@ -51,37 +51,62 @@ _CHECK_HINTS = (
 
 
 def classify_status(result: SyncResult) -> str:
-    """Map a :class:`SyncResult` to one of the three controlled statuses."""
+    """Map a :class:`SyncResult` to one of the three controlled statuses.
+
+    The classification rule for ``skipped`` rows uses ``file_path``: when a
+    writer skipped *and* never identified a target artifact (``file_path is
+    None``) the right reading is "nothing was synced for this concern" →
+    ``Not Added``. When ``file_path`` is set the skip means "already in
+    place from a prior run" → ``Added``. This is more robust than
+    substring-matching the message, which mis-labelled e.g. ``"no hooks
+    config"`` as ``Added``.
+    """
     message = (result.message or "").lower()
     if result.action in {"created", "updated"}:
         if any(hint in message for hint in _CHECK_HINTS):
             return "Check before using"
         return "Added"
     if result.action == "skipped":
-        # Skipped because the artifact is already in place is functionally
-        # the same as "Added"; explicit "no source" reads as "Not Added".
-        if "no" in message and "source" in message:
+        if result.file_path is None:
             return "Not Added"
         return "Added"
     # error
     return "Not Added"
 
 
-def _item_label(result: SyncResult) -> str:
+def _item_label(result: SyncResult, project_root: Path | None = None) -> str:
+    """Build the ``Item`` cell for a sync result.
+
+    Paths are rendered relative to ``project_root`` when supplied; this
+    keeps the markdown report portable across machines instead of leaking
+    absolute paths into PR descriptions.
+    """
     type_label = _CONCERN_LABELS.get(result.concern, result.concern.value)
-    name = (
-        result.file_path.as_posix()
-        if result.file_path is not None
-        else (str(result.tool_id) if result.tool_id is not None else "")
-    )
+    if result.file_path is not None:
+        path = result.file_path
+        if project_root is not None and path.is_absolute():
+            try:
+                path = path.relative_to(project_root)
+            except ValueError:
+                pass
+        name = path.as_posix()
+    elif result.tool_id is not None:
+        name = str(result.tool_id)
+    else:
+        name = ""
     return f"`{type_label}` {name}".rstrip()
 
 
-def render_markdown_table(results: Sequence[SyncResult]) -> str:
+def render_markdown_table(
+    results: Sequence[SyncResult],
+    *,
+    project_root: Path | None = None,
+) -> str:
     """Render a portable ``| Status | Item | Notes |`` table.
 
     Returns the empty string when there are no rows so callers can omit
-    the section entirely instead of producing a header-only table.
+    the section entirely instead of producing a header-only table. Pass
+    ``project_root`` to relativize file paths in the ``Item`` cell.
     """
     if not results:
         return ""
@@ -91,7 +116,7 @@ def render_markdown_table(results: Sequence[SyncResult]) -> str:
     ]
     for result in results:
         status = classify_status(result)
-        item = _item_label(result)
+        item = _item_label(result, project_root)
         notes = (result.message or "").strip() or "—"
         # Pipes in any of the cells would break the table; escape them.
         lines.append(
@@ -111,6 +136,7 @@ def render_persistent_report(
     *,
     project_name: str,
     timestamp: datetime | None = None,
+    project_root: Path | None = None,
 ) -> str:
     """Build the markdown body that gets written to ``.crossby/sync-report.md``.
 
@@ -122,7 +148,12 @@ def render_persistent_report(
     header = f"# crossby sync report\n\n_{when} · **{project_name}**_\n"
     if not results:
         return header + "\n_No sync rows were produced._\n"
-    return header + "\n" + render_markdown_table(results) + "\n"
+    return (
+        header
+        + "\n"
+        + render_markdown_table(results, project_root=project_root)
+        + "\n"
+    )
 
 
 def write_persistent_report(
@@ -133,6 +164,7 @@ def write_persistent_report(
     body = render_persistent_report(
         results,
         project_name=project_root.name or "(unnamed project)",
+        project_root=project_root,
     )
     path = project_root / REPORT_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
