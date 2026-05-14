@@ -198,6 +198,7 @@ def emit_cursor(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
         ("skills", ir.skills, "Cursor lacks per-agent skill binding"),
         ("permission_mode", ir.permission_mode, "Cursor uses readonly bool only"),
         ("sandbox_mode", ir.sandbox_mode, "Cursor uses readonly bool only"),
+        ("disallowed_tools", ir.disallowed_tools, "Cursor has no per-tool denylist"),
         ("target", ir.target, "Copilot-only"),
         ("nickname_candidates", ir.nickname_candidates, "Codex-only"),
     ]:
@@ -348,8 +349,19 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
         agent["model"] = ir.model
     if ir.effort:
         agent["model_reasoning_effort"] = ir.effort
+    # Three signals can drive sandbox_mode, in priority order: an explicit
+    # ir.sandbox_mode (Codex source), ir.permission_mode (Claude source —
+    # the three values that map cleanly), or the tools/readonly allowlist
+    # intent (Cursor / Gemini / Copilot source).
+    _claude_to_sandbox = {
+        "acceptEdits": "workspace-write",
+        "readOnly": "read-only",
+        "bypassPermissions": "danger-full-access",
+    }
     if ir.sandbox_mode:
         agent["sandbox_mode"] = ir.sandbox_mode
+    elif ir.permission_mode in _claude_to_sandbox:
+        agent["sandbox_mode"] = _claude_to_sandbox[ir.permission_mode]
     elif ir.tools is not None or ir.readonly is True:
         # Map allowlist intent → coarse sandbox mode.
         if ir.readonly is True or (ir.tools is not None and all_read_only(ir.tools)):
@@ -371,9 +383,17 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     if ir.nickname_candidates:
         agent["nickname_candidates"] = ir.nickname_candidates
 
+    # permission_mode only warrants a dropped-warning when it didn't map
+    # cleanly to a sandbox_mode value above (i.e. anything outside the
+    # _claude_to_sandbox table — `default`, `dontAsk`, `plan`).
+    unmapped_permission_mode = (
+        ir.permission_mode
+        if ir.permission_mode and ir.permission_mode not in _claude_to_sandbox
+        else None
+    )
     for field, value, reason in [
         ("disallowed_tools", ir.disallowed_tools, "no denylist field"),
-        ("permission_mode", ir.permission_mode, "Claude-only"),
+        ("permission_mode", unmapped_permission_mode, "Claude-only"),
         ("hooks", ir.hooks, "not part of Codex agent format"),
         ("target", ir.target, "Copilot-only"),
         ("max_turns", ir.max_turns, "no per-agent turn cap; managed via config.toml"),

@@ -80,7 +80,8 @@ CLI command
 - **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
-- **Canonical agent + skill models** (`sync/agent_models.py`) — `AgentDefinition` and `SkillDefinition` are tool-neutral dataclasses. Each on-disk schema (markdown + YAML frontmatter, Codex TOML) has a `parse_*` and `render_*`. `agents_schema_compatible(source, target)` decides whether a writer can symlink (same schema) or has to translate (e.g. Claude → Codex).
+- **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
+- **Canonical skill model** (`sync/agent_models.py`) — `SkillDefinition` is a tool-neutral dataclass plus `parse_markdown_skill` / `render_markdown_skill` / `translate_skill_for_target`. Skills use the same on-disk SKILL.md shape across every tool today, so the canonical layer exists only to attach manual-fix notes for fields the target tool doesn't honour (Claude `allowed-tools` on non-Claude targets).
 - **Manual-fix block** (`sync/manual_fix.py`) — when a writer can't faithfully translate a source field, it embeds a stable `<!-- crossby:manual-fix:start --> ... <!-- crossby:manual-fix:end -->` block in the rendered file. The block survives markdown rendering, sits inside TOML multi-line strings without escaping, and is replaced 1:1 on re-runs (`strip_manual_fix_blocks` + `append_manual_fix_block` + `find_manual_fix_blocks`).
 - **Cross-provider mappings** (`sync/translation.py`) — Claude↔Codex family table for `model`, family-aware `effort` bias, and `permissionMode` ↔ `sandbox_mode`. Used by both the agents writer and `crossby launch`'s `build_launch_command` for cross-provider model translation.
 - **Pre-write inspection** (`sync/plan.py`, `sync/validate.py`) — `--plan` summarizes a dry-run by concern + manual-fix count; `--doctor` adds validation findings and a coarse `high`/`medium`/`low` readiness rating; `--validate-target` re-parses every synced file (TOML / JSON parseability, agent required fields, skill frontmatter, MCP `command` on PATH, instruction file size).
@@ -131,7 +132,7 @@ Writers that own file-tree concerns (rules, agents, skills) support up to three 
 
 - **`symlink`** (default): create relative symlinks. Cheapest; edits propagate everywhere; only works when source and target use the same on-disk schema.
 - **`copy`**: physical copy with optional per-file rewrite (e.g. translate tool names `Bash`→`Shell` for Cursor). Used when the user wants a real file to commit, or when a marker on the source content would otherwise leak across schemas.
-- **`translate`**: parse via the canonical `AgentDefinition` / `SkillDefinition`, attach `ManualFixNote`s for fields the target doesn't honour, render back to the target's on-disk shape. Hash-based idempotency. Stale outputs whose source disappeared are removed.
+- **`translate`**: agent writers delegate to `subagents.api.convert(from_tool, to_tool, content)` (canonical `SubagentIR` + per-tool parsers/emitters). Skill writers parse via `SkillDefinition` and call `translate_skill_for_target`. Both attach manual-fix notes for fields the target doesn't honour, render back to the target's on-disk shape, hash-compare for idempotency, and remove stale outputs whose source disappeared.
 
 When you add a new writer that handles one of these concerns, decide which strategies it supports, plumb each through `_sync_symlink` / `_sync_copy` / `_sync_translate` (see `agents.py` / `skills.py` for the existing pattern), and add tests for each strategy plus the no-op idempotent case.
 
@@ -143,7 +144,7 @@ If your writer translates a field that the target tool may not enforce or unders
 2. Attach the note via `definition.with_notes([note])` on the canonical model.
 3. The renderer (`render_markdown_skill`, `render_markdown_agent`, `render_toml_agent`) appends a `<!-- crossby:manual-fix --> … <!-- /crossby:manual-fix -->` block at the bottom — no extra plumbing needed.
 
-Keep notes short and literal. Avoid Crossby-internal terminology in the message; users editing the file shouldn't need to know about `AgentDefinition` etc.
+Keep notes short and literal. Avoid Crossby-internal terminology in the message; users editing the file shouldn't need to know about `SubagentIR` or `SkillDefinition` to act on the note.
 
 ## Tool Reference
 

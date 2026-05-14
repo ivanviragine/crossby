@@ -6,19 +6,13 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 import yaml
 
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
-from crossby.sync.agent_models import (
-    AgentDefinition,
-    parse_markdown_agent,
-    parse_toml_agent,
-    render_toml_agent,
-)
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.file_utils import backup_path
 from crossby.sync.gitignore_utils import update_managed_block
@@ -196,88 +190,135 @@ def _warn_legacy_codex_agents_path(project_root: Path) -> None:
     )
 
 
-_NON_CLAUDE_LOSSY_FIELDS_NOTE = (
-    "Claude-specific agent semantics carried over verbatim. The target "
-    "tool does not enforce them — review and rewrite or remove as needed."
-)
+# Sync writers delegate cross-tool translation to :mod:`crossby.subagents`,
+# the canonical agent IR + parser + emitter layer. The helpers below add
+# the directory-level concerns that one-shot translator doesn't care about:
+# source-tool inference from the source-dir path, in-file manual-fix block
+# emission from `ConversionWarning`s, and Codex's two-output emit
+# (agent TOML + optional ``[agents.<name>]`` config fragment).
+
+# Map tool-default agent paths back to their AIToolID, used by
+# _infer_source_tool to pick the right parser without an explicit source-tool
+# flag. Tool-neutral source dirs (e.g. ``.crossby/agents``) fall through to
+# claude — the most common markdown frontmatter shape.
+_SOURCE_TOOL_BY_PATH: dict[str, str] = {
+    ".claude/agents": "claude",
+    ".cursor/agents": "cursor",
+    ".gemini/agents": "gemini",
+    ".github/agents": "copilot",
+    ".codex/agents": "codex",
+}
 
 
-def _annotate_agent_for_target(
-    definition: "AgentDefinition", target: AIToolID
-) -> "AgentDefinition":
-    """Attach manual-fix notes describing fields ``target`` won't honour.
+def _infer_source_tool(source_dir: Path) -> str:
+    """Return the subagents tool name (`claude`, `cursor`, …) for a source dir.
 
-    Markdown-shape targets (Claude, Cursor, Gemini, Copilot) all accept
-    the same on-disk file shape, but only Claude actually understands
-    ``permissionMode``, ``skills`` preload semantics, ``disallowedTools``,
-    and a few other Claude-specific frontmatter fields. When syncing
-    Claude → another markdown-shape target with ``--strategy translate``,
-    those fields stay in frontmatter for reference and a single
-    consolidated manual-fix block lists which ones need a human's eye.
-
-    For Claude itself, returns the definition unchanged (the fields
-    apply natively). For Codex, this writer doesn't run — Codex agents
-    use their own TOML translator in :class:`CodexAgentsWriter`.
+    Falls back to ``claude`` for tool-neutral paths (markdown + YAML
+    frontmatter is the prevailing shape across Claude / Cursor / Gemini /
+    Copilot, and the Claude parser is the most lenient).
     """
-    from crossby.sync.manual_fix import ManualFixNote
+    s = source_dir.as_posix()
+    for needle, tool in _SOURCE_TOOL_BY_PATH.items():
+        if s.endswith(needle):
+            return tool
+    return "claude"
+
+
+def _significant_warnings(warnings: list[Any]) -> list[Any]:
+    """Filter `ConversionWarning`s to lossy/dropped — info notes are silent."""
+    from crossby.subagents.ir import WarningSeverity
+
+    return [w for w in warnings if w.severity != WarningSeverity.INFO]
+
+
+def _ir_body_with_manual_fix(ir: Any, warnings: list[Any]) -> Any:
+    """Return a copy of ``ir`` with a `crossby:manual-fix` block in its body.
+
+    Returns ``ir`` unchanged when there are no significant warnings.  The
+    block is rendered uniformly across markdown and TOML targets because
+    the IR's ``body`` field becomes the markdown body for non-Codex
+    targets and the ``developer_instructions`` for Codex.
+    """
+    from crossby.sync.manual_fix import ManualFixNote, append_manual_fix_block
+
+    if not warnings:
+        return ir
+    notes = [
+        ManualFixNote(
+            category=w.field,
+            message=f"[{w.severity.value}] {w.field}: {w.message}",
+        )
+        for w in warnings
+    ]
+    new_body = append_manual_fix_block(ir.body or "", notes)
+    return ir.model_copy(update={"body": new_body})
+
+
+def _translate_markdown_agent(
+    *, content: str, from_tool: str, to_tool: str
+) -> str:
+    """Translate a markdown-shape agent file and embed manual-fix notes.
+
+    Returns the rendered markdown for the target tool. Used by
+    :class:`_BaseAgentsWriter._sync_translate` for the four markdown-shape
+    targets (Claude / Cursor / Gemini / Copilot). For Codex output see
+    :func:`_translate_codex_agent`.
+    """
+    from crossby.subagents.api import emit as _emit, parse as _parse
+
+    ir, parse_warnings = _parse(from_tool, content)
+    # First pass: discover what the target emitter would warn about.
+    _, emit_warnings = _emit(to_tool, ir)
+    notes = _significant_warnings(parse_warnings + emit_warnings)
+    rich_ir = _ir_body_with_manual_fix(ir, notes)
+    payload, _ = _emit(to_tool, rich_ir)
+    # Markdown emitters always return ``str``; only emit_codex returns a
+    # CodexEmission, and this helper is for the markdown-shape targets.
+    assert isinstance(payload, str)
+    return payload
+
+
+def _translate_codex_agent(
+    *, content: str, from_tool: str
+) -> tuple[str, str]:
+    """Translate to Codex; returns (agent.toml, config.toml fragment).
+
+    Two-pass pattern: emit once to collect warnings, mutate IR body to
+    carry a `crossby:manual-fix` block, re-emit so the block lands inside
+    ``developer_instructions``. Also pre-translates Claude-family model
+    ids and effort tiers to Codex equivalents — subagents.emitters.emit_codex
+    passes ``model`` through verbatim, which would hand Codex an id it
+    rejects (``claude-sonnet-4.6``); the family mapping in sync.translation
+    is the right place to land that conversion.
+    """
+    from crossby.subagents.api import emit as _emit, parse as _parse
     from crossby.sync.translation import (
-        CLAUDE_PERMISSION_MODES_UNMAPPED,
-        map_permission_mode_claude_to_codex,
+        find_claude_family,
+        map_effort_claude_to_codex,
+        map_model_claude_to_codex,
     )
 
-    if target == AIToolID.CLAUDE:
-        return definition
+    ir, parse_warnings = _parse(from_tool, content)
 
-    notes: list[ManualFixNote] = []
-    flagged: list[str] = []
-
-    if definition.permission_mode is not None:
-        # acceptEdits / readOnly / bypassPermissions translate cleanly to
-        # something Codex-equivalent; the value still doesn't apply to a
-        # Cursor / Gemini / Copilot agent. Anything in the unmapped set is
-        # genuinely Claude-only.
-        if (
-            map_permission_mode_claude_to_codex(definition.permission_mode) is None
-            and definition.permission_mode in CLAUDE_PERMISSION_MODES_UNMAPPED
-        ):
-            flagged.append(f"`permissionMode: {definition.permission_mode}`")
-        elif definition.permission_mode in {
-            "acceptEdits",
-            "readOnly",
-            "bypassPermissions",
-        }:
-            flagged.append(f"`permissionMode: {definition.permission_mode}`")
-
-    if definition.skills:
-        flagged.append(
-            "`skills` preload list ("
-            + ", ".join(f"`{s}`" for s in definition.skills)
-            + ")"
-        )
-    if definition.tools_allow:
-        flagged.append(
-            "`tools` allow-list ("
-            + ", ".join(f"`{t}`" for t in definition.tools_allow)
-            + ")"
-        )
-    if definition.tools_deny:
-        flagged.append(
-            "`disallowedTools` deny-list ("
-            + ", ".join(f"`{t}`" for t in definition.tools_deny)
-            + ")"
+    # Cross-provider translation for the model + effort pair.  Only fires
+    # when the model belongs to a known Claude family — anything else
+    # (gpt-*, custom ids, etc.) passes through to the emitter unchanged.
+    if ir.model and find_claude_family(ir.model) is not None:
+        translated_model = map_model_claude_to_codex(ir.model)
+        translated_effort = ir.effort
+        if ir.effort:
+            mapped = map_effort_claude_to_codex(ir.model, ir.effort)
+            if mapped is not None:
+                translated_effort = mapped.value
+        ir = ir.model_copy(
+            update={"model": translated_model, "effort": translated_effort}
         )
 
-    if flagged:
-        joined = ", ".join(flagged)
-        notes.append(
-            ManualFixNote(
-                category="claude-only-fields",
-                message=(
-                    f"{_NON_CLAUDE_LOSSY_FIELDS_NOTE} Fields preserved: {joined}."
-                ),
-            )
-        )
-    return definition.with_notes(notes)
+    _, emit_warnings = _emit("codex", ir)
+    notes = _significant_warnings(parse_warnings + emit_warnings)
+    rich_ir = _ir_body_with_manual_fix(ir, notes)
+    emission, _ = _emit("codex", rich_ir)
+    return emission.agent_toml, emission.config_fragment
 
 
 def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
@@ -525,23 +566,23 @@ class _BaseAgentsWriter(AbstractSyncWriter):
     def _sync_translate(
         self, source_dir: Path, target_dir: Path, *, dry_run: bool
     ) -> SyncResult:
-        """Per-file copy with target-aware lossy-field annotation.
+        """Per-file translation with lossy-field annotation.
 
-        For each ``<name>.md`` under ``source_dir``: parse to a canonical
-        :class:`AgentDefinition`, attach manual-fix notes for fields
-        ``self.tool_id`` doesn't natively honour (e.g. ``permissionMode:
-        plan`` for any non-Codex target, ``skills`` preload semantics,
-        ``disallowedTools``), render back to markdown + frontmatter, and
-        write to ``<target_dir>/<name>.md``. Hash-based idempotency.
-        Stale ``.md`` files whose source is gone are removed.
+        Delegates parse/emit to :mod:`crossby.subagents.api.convert` — that's
+        the canonical cross-tool subagent translator (rich `SubagentIR`,
+        per-tool parsers/emitters, structured `ConversionWarning`s). The
+        sync writer adds the directory-level concerns the one-shot CLI
+        doesn't care about: file iteration, hash-based idempotency, stale
+        cleanup, and emitting any lossy/dropped warnings as an in-file
+        ``<!-- crossby:manual-fix -->`` block so the user sees the lossy
+        edge inside the artifact, not just on the terminal.
 
-        Symlink remains the default for genuinely compatible source/target
-        pairs; the user opts in via ``--strategy translate``.
+        Source tool is inferred from the source-dir path against the known
+        per-tool paths (``.claude/agents`` → claude, etc.); falls back to
+        ``claude`` when the source is a tool-neutral directory like
+        ``.crossby/agents``.
         """
-        from crossby.sync.agent_models import (
-            parse_markdown_agent,
-            render_markdown_agent,
-        )
+        from_tool = _infer_source_tool(source_dir)
 
         source_files = sorted(source_dir.glob("*.md"))
         target_existed = target_dir.is_dir()
@@ -574,14 +615,14 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 logger.info("agents.stale_removed", path=str(existing))
                 removed_any = True
 
+        target_tool = str(self.tool_id)
         wrote_any = False
         for src in source_files:
-            definition = parse_markdown_agent(
-                src.read_text(encoding="utf-8"),
-                fallback_name=src.stem,
+            rendered = _translate_markdown_agent(
+                content=src.read_text(encoding="utf-8"),
+                from_tool=from_tool,
+                to_tool=target_tool,
             )
-            annotated = _annotate_agent_for_target(definition, self.tool_id)
-            rendered = render_markdown_agent(annotated, target_tool=self.tool_id)
             target_file = target_dir / src.name
             if target_file.is_file():
                 if target_file.read_text(encoding="utf-8") == rendered:
@@ -750,16 +791,22 @@ class CodexAgentsWriter(AbstractSyncWriter):
             + [p for p in source_dir.glob("*.toml") if p.is_file()]
         )
 
-    def _render_for_target(self, source: Path) -> str:
-        if source.suffix == ".toml":
-            definition = parse_toml_agent(
-                source.read_text(encoding="utf-8"), fallback_name=source.stem
-            )
-        else:
-            definition = parse_markdown_agent(
-                source.read_text(encoding="utf-8"), fallback_name=source.stem
-            )
-        return render_toml_agent(definition)
+    def _render_for_target(self, source: Path) -> tuple[str, str]:
+        """Translate one source agent file to ``(agent.toml, config_fragment)``.
+
+        Per-file source-tool inference: ``.toml`` is Codex (round-trip),
+        anything else is parsed as Claude markdown via subagents.api. The
+        config_fragment is the ``[agents.<name>]`` block PR #46's Codex
+        emitter produces — used by :meth:`_write_codex_config_fragment` to
+        register the agent globally in ``~/.codex/config.toml``.
+        """
+        from_tool = "codex" if source.suffix == ".toml" else _infer_source_tool(
+            source.parent
+        )
+        return _translate_codex_agent(
+            content=source.read_text(encoding="utf-8"),
+            from_tool=from_tool,
+        )
 
     def _translate_all(
         self, source_dir: Path, target_dir: Path, *, dry_run: bool
@@ -791,20 +838,20 @@ class CodexAgentsWriter(AbstractSyncWriter):
                     logger.info("agents.stale_removed", path=str(existing))
 
         for src in sources:
-            rendered = self._render_for_target(src)
+            agent_toml, _config_fragment = self._render_for_target(src)
             dest = target_dir / f"{src.stem}.toml"
             if dest.is_file():
                 try:
                     if (
                         hashlib.sha256(dest.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-                        == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                        == hashlib.sha256(agent_toml.encode("utf-8")).hexdigest()
                     ):
                         continue
                 except OSError:
                     pass
             skipped_all = False
             if not dry_run:
-                dest.write_text(rendered, encoding="utf-8")
+                dest.write_text(agent_toml, encoding="utf-8")
             wrote_any = True
 
         if skipped_all and target_existed:
