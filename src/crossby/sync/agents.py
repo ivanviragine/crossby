@@ -234,15 +234,28 @@ def _significant_warnings(warnings: list[Any]) -> list[Any]:
 def _ir_body_with_manual_fix(ir: Any, warnings: list[Any]) -> Any:
     """Return a copy of ``ir`` with a `crossby:manual-fix` block in its body.
 
-    Returns ``ir`` unchanged when there are no significant warnings.  The
-    block is rendered uniformly across markdown and TOML targets because
-    the IR's ``body`` field becomes the markdown body for non-Codex
-    targets and the ``developer_instructions`` for Codex.
+    Strips any pre-existing manual-fix block from the IR body before
+    appending the fresh one. Without that strip, a source file that
+    already contains a block (because the user round-tripped it, or
+    edited a previously-translated artifact and fed it back) would
+    accumulate a new block on every sync. Returns ``ir`` unchanged
+    when there are no significant warnings *and* the body has no
+    leftover block to strip.
     """
-    from crossby.sync.manual_fix import ManualFixNote, append_manual_fix_block
+    from crossby.sync.manual_fix import (
+        ManualFixNote,
+        append_manual_fix_block,
+        strip_manual_fix_blocks,
+    )
 
+    body = ir.body or ""
+    cleaned_body = strip_manual_fix_blocks(body)
     if not warnings:
-        return ir
+        # Nothing fresh to attach, but if we cleaned a stale block, return
+        # the cleaned body so re-translates remove the old artifact.
+        if cleaned_body == body:
+            return ir
+        return ir.model_copy(update={"body": cleaned_body})
     notes = [
         ManualFixNote(
             category=w.field,
@@ -250,7 +263,7 @@ def _ir_body_with_manual_fix(ir: Any, warnings: list[Any]) -> Any:
         )
         for w in warnings
     ]
-    new_body = append_manual_fix_block(ir.body or "", notes)
+    new_body = append_manual_fix_block(cleaned_body, notes)
     return ir.model_copy(update={"body": new_body})
 
 

@@ -711,3 +711,39 @@ class TestTranslateClaudeSlashCommands:
         assert not (
             tmp_path / ".agents" / "skills" / "claude-command-review"
         ).exists()
+
+
+class TestSkillsTranslateNoDuplicateManualFix:
+    """Regression test: a source SKILL.md that already contains a
+    `<!-- crossby:manual-fix -->` block (because the user round-tripped it,
+    edited a previously-translated artifact, or fed it back) must not
+    accumulate a second block on re-translate. The fix strips any existing
+    block at parse time so SkillDefinition.body is always clean and
+    render_markdown_skill writes exactly one fresh block per target."""
+
+    def test_source_with_manual_fix_block_strips_and_replaces(
+        self, tmp_path: Path
+    ) -> None:
+        source = _make_source(tmp_path, [])
+        skill_dir = source / "leftover"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: leftover\n"
+            "description: y\n"
+            "allowed-tools:\n"
+            "  - Read\n"
+            "---\n"
+            "Body.\n\n"
+            "<!-- crossby:manual-fix:start -->\n"
+            "## Manual migration required\n\n"
+            "- stale note\n"
+            "<!-- crossby:manual-fix:end -->\n",
+            encoding="utf-8",
+        )
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        out = (
+            tmp_path / ".agents" / "skills" / "leftover" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert out.count("<!-- crossby:manual-fix:start -->") == 1
+        assert "stale note" not in out

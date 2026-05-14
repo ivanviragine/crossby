@@ -1262,3 +1262,123 @@ class TestAgentsTranslateStrategy:
         )
         assert text_after.count("<!-- crossby:manual-fix:start -->") == 1
         assert "permission_mode" in text_after
+
+
+class TestAgentsTranslateNoDuplicateManualFix:
+    """A source agent that already contains a `<!-- crossby:manual-fix -->`
+    block must not accumulate a second block on re-translate. Regression
+    test for a real bug discovered in review: ``_ir_body_with_manual_fix``
+    used to ``append`` without stripping the prior block."""
+
+    def test_source_with_manual_fix_block_is_replaced_not_stacked(
+        self, tmp_path: Path
+    ) -> None:
+        source = _make_source(tmp_path, [])
+        (source / "x.md").write_text(
+            "---\n"
+            "name: x\n"
+            "description: y\n"
+            "permissionMode: plan\n"
+            "---\n"
+            "Body.\n\n"
+            "<!-- crossby:manual-fix:start -->\n"
+            "## Manual migration required\n\n"
+            "- [dropped] permission_mode: stale note\n"
+            "<!-- crossby:manual-fix:end -->\n",
+            encoding="utf-8",
+        )
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        out = tmp_path / ".cursor" / "agents" / "x.md"
+        text = out.read_text(encoding="utf-8")
+        assert text.count("<!-- crossby:manual-fix:start -->") == 1
+        # The stale message should be gone — only the fresh emit warning text
+        # belongs in the block now.
+        assert "stale note" not in text
+
+    def test_source_with_only_stale_block_and_no_lossy_fields_strips_block(
+        self, tmp_path: Path
+    ) -> None:
+        # Source has a leftover block but no Claude-only fields to translate.
+        # The strip path in _ir_body_with_manual_fix should still run.
+        source = _make_source(tmp_path, [])
+        (source / "x.md").write_text(
+            "---\n"
+            "name: x\n"
+            "description: y\n"
+            "---\n"
+            "Body.\n\n"
+            "<!-- crossby:manual-fix:start -->\n"
+            "## Manual migration required\n\n"
+            "- [dropped] leftover from a previous run\n"
+            "<!-- crossby:manual-fix:end -->\n",
+            encoding="utf-8",
+        )
+        CursorAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        text = (tmp_path / ".cursor" / "agents" / "x.md").read_text(encoding="utf-8")
+        assert "leftover from a previous run" not in text
+        assert "<!-- crossby:manual-fix" not in text
+
+
+class TestCodexPermissionModeMappings:
+    """My patch to subagents.emit_codex maps Claude `permissionMode` →
+    Codex `sandbox_mode` for the three values that translate cleanly,
+    and suppresses the dropped-Claude-only warning when the mapping
+    fires."""
+
+    def _claude_agent_with_mode(self, source: Path, name: str, mode: str) -> None:
+        (source / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: y\npermissionMode: {mode}\n---\nBody.\n",
+            encoding="utf-8",
+        )
+
+    def test_accept_edits_maps_to_workspace_write(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent_with_mode(source, "x", "acceptEdits")
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        assert parsed["sandbox_mode"] == "workspace-write"
+        # When the mapping fires the dropped-Claude-only warning should NOT
+        # appear in developer_instructions.
+        assert "permission_mode" not in parsed["developer_instructions"]
+
+    def test_read_only_maps_to_read_only(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent_with_mode(source, "x", "readOnly")
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        assert parsed["sandbox_mode"] == "read-only"
+
+    def test_bypass_permissions_maps_to_danger_full_access(
+        self, tmp_path: Path
+    ) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent_with_mode(source, "x", "bypassPermissions")
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        assert parsed["sandbox_mode"] == "danger-full-access"
+
+    def test_unmapped_mode_falls_through_to_warning(self, tmp_path: Path) -> None:
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent_with_mode(source, "x", "plan")
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        parsed = tomllib.loads(
+            (tmp_path / ".codex" / "agents" / "x.toml").read_text(encoding="utf-8")
+        )
+        # No sandbox_mode set; the dropped warning appears in the manual-fix
+        # block embedded in developer_instructions.
+        assert "sandbox_mode" not in parsed
+        assert "permission_mode" in parsed["developer_instructions"]

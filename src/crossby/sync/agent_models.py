@@ -29,7 +29,11 @@ from typing import Any
 import yaml
 
 from crossby.models.ai import AIToolID
-from crossby.sync.manual_fix import ManualFixNote, append_manual_fix_block
+from crossby.sync.manual_fix import (
+    ManualFixNote,
+    append_manual_fix_block,
+    strip_manual_fix_blocks,
+)
 
 
 class SkillSchema(StrEnum):
@@ -133,7 +137,14 @@ def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
 
 
 def parse_markdown_skill(content: str, *, fallback_name: str = "skill") -> SkillDefinition:
-    """Parse a SKILL.md file into a canonical SkillDefinition."""
+    """Parse a SKILL.md file into a canonical SkillDefinition.
+
+    Any pre-existing ``<!-- crossby:manual-fix -->`` block is stripped from
+    the body — the parsed SkillDefinition holds the user's content only,
+    and the renderer re-emits a fresh block per target. Without this strip
+    a re-translated source (or a target file fed back as source) would
+    accumulate a new block on every sync.
+    """
     fm, body = _split_frontmatter(content)
     name = str(fm.get("name") or fallback_name).strip() or fallback_name
     description = str(fm.get("description") or "").strip()
@@ -145,7 +156,7 @@ def parse_markdown_skill(content: str, *, fallback_name: str = "skill") -> Skill
     return SkillDefinition(
         name=name,
         description=description,
-        body=body,
+        body=strip_manual_fix_blocks(body),
         allowed_tools=_coerce_str_tuple(allowed_tools_raw),
         extra_frontmatter=extra,
     )
