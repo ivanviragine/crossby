@@ -22,6 +22,23 @@ class TestBundledSkillRoot:
         root = bundled_skill_root()
         assert (root / "references" / "differences.md").is_file()
 
+    def test_bundle_contains_agents_openai_yaml(self) -> None:
+        # Required for the Agent Skills standard layout (and so Codex /
+        # similar UIs can render the skill in lists and chips).
+        root = bundled_skill_root()
+        assert (root / "agents" / "openai.yaml").is_file()
+
+    def test_skill_md_has_trigger_shaped_description(self) -> None:
+        # Discovery convention: the description must start with "Use when"
+        # so the model knows when to invoke the skill, not just what it is.
+        text = (bundled_skill_root() / "SKILL.md").read_text(encoding="utf-8")
+        assert "description: Use when" in text
+
+    def test_skill_md_carries_metadata_short_description(self) -> None:
+        text = (bundled_skill_root() / "SKILL.md").read_text(encoding="utf-8")
+        assert "metadata:" in text
+        assert "short-description:" in text
+
 
 class TestInstallBundle:
     def test_creates_when_missing(self, tmp_path: Path) -> None:
@@ -30,6 +47,7 @@ class TestInstallBundle:
         skill_dir = tmp_path / SKILL_NAME
         assert (skill_dir / "SKILL.md").is_file()
         assert (skill_dir / "references" / "differences.md").is_file()
+        assert (skill_dir / "agents" / "openai.yaml").is_file()
 
     def test_skipped_when_byte_for_byte_match(self, tmp_path: Path) -> None:
         install_bundle(tmp_path)
@@ -48,6 +66,7 @@ class TestInstallBundle:
         skill_dir = tmp_path / SKILL_NAME
         assert not (skill_dir / "__init__.py").exists()
         assert not (skill_dir / "references" / "__init__.py").exists()
+        assert not (skill_dir / "agents" / "__init__.py").exists()
 
 
 class TestInstallForTools:

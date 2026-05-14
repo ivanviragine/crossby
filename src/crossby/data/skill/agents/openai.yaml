@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crossby Sync"
+  short_description: "Sync AI tool config across every installed CLI"
+  default_prompt: "Use $crossby-sync to mirror this project's AI tool configuration across every installed CLI."

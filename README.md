@@ -128,6 +128,14 @@ Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for
 
 `crossby init --install-skill` copies the bundled `crossby-sync` skill into every installed tool's skills directory. From inside Claude Code / Codex / Cursor / etc., the LLM can drive the full sync loop end-to-end — scan, plan, fix manual-fix blocks, validate — without leaving the session. The bundle is at `src/crossby/data/skill/`; the `references/differences.md` file in the bundle has the per-surface mapping table.
 
+The bundle follows the [Agent Skills](https://agentskills.io) standard layout (`SKILL.md`, `agents/openai.yaml`, `references/`), so Codex users can also install it via the upstream `$skill-installer` skill without touching crossby:
+
+```
+$skill-installer install https://github.com/ivanviragine/crossby/tree/main/src/crossby/data/skill
+```
+
+That installs it globally under `$CODEX_HOME/skills/` instead of per-project. Use whichever model fits — `crossby init --install-skill` for a project-scoped install that travels with the repo, or `$skill-installer` for a one-time user-scoped install.
+
 ## Session handoff
 
 ```bash
