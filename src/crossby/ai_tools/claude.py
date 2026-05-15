@@ -170,6 +170,38 @@ class ClaudeAdapter(AbstractAITool):
     def structured_output_args(self, json_schema: dict[str, Any]) -> list[str]:
         return ["--output-format", "json", "--json-schema", json.dumps(json_schema)]
 
+    def unwrap_structured_output(self, raw: str) -> str:
+        """Unwrap Claude's ``--print --output-format json`` envelope.
+
+        Claude wraps the model response in:
+        ``{"type": "result", "is_error": bool, "result": "<str>",
+           "structured_output": {...}, ...}``
+
+        Prefers ``structured_output`` (schema-conformant object, re-serialized
+        to JSON). Falls back to ``result`` (a JSON string for structured
+        prompts, plain text otherwise). Returns ``raw`` unchanged when the
+        output is not an envelope so plain-text and markdown prompts still work.
+        """
+        from crossby.handoff.summarizer import SummarizerParseError
+
+        stripped = raw.strip()
+        try:
+            envelope = json.loads(stripped)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(envelope, dict) or envelope.get("type") != "result":
+            return raw
+        if envelope.get("is_error"):
+            msg = envelope.get("result") or "unknown error"
+            raise SummarizerParseError(f"Claude reported an error: {msg}")
+        structured = envelope.get("structured_output")
+        if structured is not None:
+            return json.dumps(structured)
+        result = envelope.get("result")
+        if result is not None:
+            return str(result)
+        return raw
+
     def effort_args(self, effort: EffortLevel) -> list[str]:
         """Claude uses the native ``--effort <level>`` flag."""
         return ["--effort", effort.value]

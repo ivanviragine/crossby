@@ -176,7 +176,12 @@ class HandoffSummarizer:
             raise SummarizerParseError(
                 f"Summarizer tool exited {result.returncode}: {result.stderr.strip()}"
             )
-        return result.stdout
+        try:
+            return self.summarizer_tool.unwrap_structured_output(result.stdout)
+        except SummarizerParseError:
+            raise
+        except Exception as exc:
+            raise SummarizerParseError(f"Failed to unwrap tool output: {exc}") from exc
 
     def _parse_output(self, raw: str) -> dict[str, Any]:
         payload = _try_parse_json(raw)

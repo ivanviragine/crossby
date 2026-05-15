@@ -279,6 +279,15 @@ class AbstractAITool(ABC):
         """
         return []
 
+    def unwrap_structured_output(self, raw: str) -> str:
+        """Unwrap a tool-specific stdout envelope to yield the model payload.
+
+        Default: return ``raw`` unchanged. Override per tool when the CLI wraps
+        the model response in a metadata envelope so downstream parsers receive
+        the model output directly.
+        """
+        return raw
+
     def effort_args(self, effort: EffortLevel) -> list[str]:
         """Get extra CLI args to set reasoning effort level.
 

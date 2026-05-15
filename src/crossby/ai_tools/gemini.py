@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
@@ -62,6 +63,27 @@ class GeminiAdapter(AbstractAITool):
     def structured_output_args(self, json_schema: dict[str, Any]) -> list[str]:
         """Gemini uses ``--output-format json`` for structured output."""
         return ["--output-format", "json"]
+
+    def unwrap_structured_output(self, raw: str) -> str:
+        """Unwrap Gemini's ``--output-format json`` envelope.
+
+        Gemini wraps the model response in:
+        ``{"session_id": "...", "response": "<model output>", "stats": {...}}``
+
+        The model payload is in ``response`` (a string). Returns ``raw``
+        unchanged when the output is not a Gemini envelope.
+        """
+        stripped = raw.strip()
+        try:
+            envelope = json.loads(stripped)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(envelope, dict) or "response" not in envelope or "session_id" not in envelope:
+            return raw
+        response = envelope.get("response")
+        if response is not None:
+            return str(response)
+        return raw
 
     def allowed_commands_args(self, commands: list[str]) -> list[str]:
         """Gemini CLI uses the Policy Engine instead of ``--allowed-tools`` flags.
