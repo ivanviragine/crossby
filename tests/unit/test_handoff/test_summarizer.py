@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ def _make_summarizer_tool(
     tool.TOOL_ID = tool_id
     tool.structured_output_args = MagicMock(return_value=json_schema_args or [])
     tool.build_launch_command = MagicMock(return_value=["fake", "--prompt", "X"])
+    tool.unwrap_structured_output = MagicMock(side_effect=lambda raw: raw)
     return tool
 
 
@@ -275,3 +277,170 @@ def test_summarize_raw_returns_rawhandoff_and_skips_json_schema() -> None:
 
 # Suppress unused-import linter complaints in some configs.
 _ = Any
+
+
+# ---------------------------------------------------------------------------
+# ClaudeAdapter.unwrap_structured_output unit tests
+# ---------------------------------------------------------------------------
+
+_FULL_PAYLOAD: dict[str, Any] = {
+    "current_task": "Refactor auth",
+    "key_decisions": ["drop cache"],
+    "modified_files": ["auth.py"],
+    "blockers": [],
+    "next_steps": ["write migration"],
+    "critical_context": "cache is load-bearing",
+}
+
+
+def _claude_envelope(
+    payload: dict[str, Any],
+    *,
+    is_error: bool = False,
+    include_structured_output: bool = True,
+) -> str:
+    env: dict[str, Any] = {
+        "type": "result",
+        "subtype": "error" if is_error else "success",
+        "is_error": is_error,
+        "result": payload.get("result", json.dumps(payload)) if is_error else json.dumps(payload),
+        "session_id": "test-session",
+    }
+    if include_structured_output and not is_error:
+        env["structured_output"] = payload
+    return json.dumps(env)
+
+
+def test_claude_unwrap_extracts_structured_output() -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    raw = _claude_envelope(_FULL_PAYLOAD, include_structured_output=True)
+    result = adapter.unwrap_structured_output(raw)
+    assert json.loads(result) == _FULL_PAYLOAD
+
+
+def test_claude_unwrap_falls_back_to_result_when_no_structured_output() -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    raw = _claude_envelope(_FULL_PAYLOAD, include_structured_output=False)
+    result = adapter.unwrap_structured_output(raw)
+    assert json.loads(result) == _FULL_PAYLOAD
+
+
+def test_claude_unwrap_raises_on_is_error() -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    error_envelope = json.dumps({
+        "type": "result",
+        "subtype": "error",
+        "is_error": True,
+        "result": "Model refused to respond",
+        "session_id": "test-session",
+    })
+    with pytest.raises(SummarizerParseError, match="Model refused to respond"):
+        adapter.unwrap_structured_output(error_envelope)
+
+
+def test_claude_unwrap_passthrough_for_plain_json() -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    plain = json.dumps(_FULL_PAYLOAD)
+    assert adapter.unwrap_structured_output(plain) == plain
+
+
+def test_claude_unwrap_passthrough_for_markdown() -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    adapter = ClaudeAdapter()
+    markdown = "## Current Task\nBuild thing.\n## Key Decisions\n- a\n"
+    assert adapter.unwrap_structured_output(markdown) == markdown
+
+
+# ---------------------------------------------------------------------------
+# GeminiAdapter.unwrap_structured_output unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_unwrap_extracts_response() -> None:
+    from crossby.ai_tools.gemini import GeminiAdapter
+
+    adapter = GeminiAdapter()
+    payload_json = json.dumps(_FULL_PAYLOAD)
+    envelope = json.dumps({
+        "session_id": "gemini-session",
+        "response": payload_json,
+        "stats": {"models": {}},
+    })
+    result = adapter.unwrap_structured_output(envelope)
+    assert result == payload_json
+
+
+def test_gemini_unwrap_passthrough_for_non_envelope() -> None:
+    from crossby.ai_tools.gemini import GeminiAdapter
+
+    adapter = GeminiAdapter()
+    plain = json.dumps(_FULL_PAYLOAD)
+    assert adapter.unwrap_structured_output(plain) == plain
+
+
+# ---------------------------------------------------------------------------
+# End-to-end regression: Claude envelope → summarizer produces populated doc
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_structured_unwraps_claude_envelope() -> None:
+    """Regression: Claude's JSON envelope is unwrapped before _parse_output."""
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    tool = ClaudeAdapter()
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
+
+    envelope_stdout = _claude_envelope(_FULL_PAYLOAD, include_structured_output=True)
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=envelope_stdout, stderr=""
+    )
+
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
+        patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc),
+    ):
+        doc = summarizer.summarize_structured(
+            _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+        )
+
+    assert doc.current_task == "Refactor auth"
+    assert doc.key_decisions == ["drop cache"]
+    assert doc.next_steps == ["write migration"]
+    assert doc.critical_context == "cache is load-bearing"
+
+
+def test_summarize_structured_raises_on_claude_is_error() -> None:
+    """Regression: Claude is_error envelope propagates as SummarizerParseError."""
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    tool = ClaudeAdapter()
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
+
+    error_stdout = json.dumps({
+        "type": "result",
+        "subtype": "error",
+        "is_error": True,
+        "result": "context limit exceeded",
+        "session_id": "test-session",
+    })
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=error_stdout, stderr=""
+    )
+
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
+        patch("crossby.handoff.summarizer.subprocess.run", return_value=fake_proc),
+        pytest.raises(SummarizerParseError, match="context limit exceeded"),
+    ):
+        summarizer.summarize_structured(
+            _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+        )
