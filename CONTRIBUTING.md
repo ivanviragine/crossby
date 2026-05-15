@@ -251,8 +251,41 @@ Breaking changes: append `!` after the type (e.g. `feat!:`) and add a `BREAKING 
 
 ## Release Process
 
-1. Ensure `./scripts/check-all.sh` passes on `main`.
-2. Update the version in `pyproject.toml`.
+1. Ensure `./scripts/check-all.sh` passes on `main` (1437+ tests, ruff
+   clean, mypy strict clean).
+2. Bump the version in **both** `pyproject.toml` and
+   `src/crossby/__init__.py` — they must match.
 3. Commit: `chore: release vX.Y.Z`.
-4. Tag: `git tag vX.Y.Z`.
-5. Push both: `git push origin main && git push origin vX.Y.Z`.
+4. Build artifacts:
+   ```bash
+   rm -rf dist/ && uv build
+   ```
+   Produces `dist/crossby-X.Y.Z-py3-none-any.whl` and
+   `dist/crossby-X.Y.Z.tar.gz`.
+5. Smoke-test the wheel in a fresh venv:
+   ```bash
+   python -m venv /tmp/crossby-release-test
+   /tmp/crossby-release-test/bin/pip install dist/crossby-X.Y.Z-*.whl
+   /tmp/crossby-release-test/bin/crossby --version   # must print X.Y.Z
+   /tmp/crossby-release-test/bin/crossby --help
+   ```
+6. Tag and push:
+   ```bash
+   git tag vX.Y.Z
+   git push origin main vX.Y.Z
+   ```
+7. Publish to PyPI. Until trusted publishing lands, use a local token
+   (e.g. via `~/.pypirc` or `UV_PUBLISH_TOKEN`):
+   ```bash
+   UV_PUBLISH_TOKEN=<token> uv publish dist/crossby-X.Y.Z-*.whl dist/crossby-X.Y.Z.tar.gz
+   ```
+8. Verify the upload from a fresh venv:
+   ```bash
+   python -m venv /tmp/crossby-pypi-check
+   /tmp/crossby-pypi-check/bin/pip install --upgrade crossby
+   /tmp/crossby-pypi-check/bin/crossby --version
+   ```
+9. Create the GitHub release pointing at the new tag:
+   ```bash
+   gh release create vX.Y.Z --title "crossby vX.Y.Z" --notes-file <path> --latest
+   ```

@@ -19,6 +19,7 @@ htmlcov/
 .commit-msg
 .crossby.yml
 KNOWLEDGE.md
+steps.md
 .agents/
 # wade-managed symlinks (skills sync)
 .cursor/skills

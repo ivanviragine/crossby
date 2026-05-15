@@ -90,7 +90,7 @@ Before writing anything, `crossby sync --plan` shows a stage-by-concern dry-run 
 
 After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR description. Pass `--no-persist-report` to skip, or `--report-format markdown-table` to render the same shape on stdout.
 
-> Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool.
+> Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool. To translate a single subagent file between tools (Claude / Cursor / Gemini / Copilot / Codex), use `crossby agents convert --from claude --to codex .claude/agents/researcher.md`.
 
 ## Translate strategy and manual-fix blocks
 
