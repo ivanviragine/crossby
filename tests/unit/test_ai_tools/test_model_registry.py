@@ -56,3 +56,11 @@ class TestRegistryGetModels:
         assert len(models) == len(get_models_for_tool("opencode"))
         # Using suffix for classification, we expect the original string in id
         assert "anthropic/claude-sonnet-4.6" in [m.id for m in models]
+
+    def test_cursor_adapter_reads_registry(self) -> None:
+        adapter = AbstractAITool.get(AIToolID.CURSOR)
+        models = adapter.get_models()
+        assert len(models) == len(get_models_for_tool("cursor"))
+        model_ids = [m.id for m in models]
+        assert "auto" in model_ids
+        assert "claude-opus-4-7-high" in model_ids

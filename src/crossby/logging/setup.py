@@ -12,9 +12,9 @@ def configure(verbose: bool = False) -> None:
     """Configure structlog for the application.
 
     Args:
-        verbose: If True, set log level to DEBUG. Otherwise INFO.
+        verbose: If True, set log level to DEBUG. Otherwise WARNING.
     """
-    log_level = logging.DEBUG if verbose else logging.ERROR
+    log_level = logging.DEBUG if verbose else logging.WARNING
 
     structlog.configure(
         processors=[
@@ -38,4 +38,5 @@ def configure(verbose: bool = False) -> None:
         format="%(message)s",
         stream=sys.stderr,
         level=log_level,
+        force=True,
     )

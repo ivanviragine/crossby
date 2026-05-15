@@ -1,39 +1,47 @@
-"""Gemini CLI pre-tool hook configuration.
-
-Writes `.gemini/settings.json` (project-level) with a `BeforeTool` entry
-that runs the plan write guard script.  Gemini may only support global
-config — writing project-level is a best-effort approach.
-"""
+"""Gemini .gemini/settings.json hook management."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from crossby.models.config import HookEntry
+from crossby.sync.base import SyncData
+from crossby.sync.hooks import GeminiHooksWriter
 
-from crossby.config.hooks_util import upsert_hook_entry
-
-
-class GeminiHookEntry(BaseModel):
-    event: str
-    command: str
-    tools: list[str]
+__all__ = ["configure_plan_hooks", "configure_worktree_hooks"]
 
 
-def configure_plan_hooks(working_dir: Path, guard_script: Path) -> None:
-    """Write .gemini/settings.json with a BeforeTool guard entry.
+def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
+    """Install a plan-mode write-guard hook into .gemini/settings.json.
 
-    Merges with any existing settings.  Idempotent — re-running
-    with the same guard_script path is a no-op.
+    Registers ``guard_path`` as a ``BeforeTool`` hook scoped to Edit and Write
+    tools. Idempotent — calling twice does not duplicate the entry. Preserves
+    any existing hooks already in the file.
+
+    If ``.gemini/settings.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
+    Args:
+        worktree_path: Root of the worktree (directory that contains ``.gemini/``).
+        guard_path: Path to the guard script to run before file writes.
     """
-    upsert_hook_entry(
-        hooks_file=working_dir / ".gemini" / "settings.json",
-        entry=GeminiHookEntry(
-            event="BeforeTool",
-            command=f"python3 {guard_script.resolve()}",
-            tools=[".*"],
-        ),
-        dedup_key="command",
-        ensure_path=["hooks"],
-        log_event="gemini_hooks.configured",
-    )
+    hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
+    GeminiHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+
+
+def configure_worktree_hooks(worktree_path: Path, guard_path: Path) -> None:
+    """Install a worktree-isolation write-guard hook into .gemini/settings.json.
+
+    Registers ``guard_path`` as a ``BeforeTool`` hook scoped to Edit and Write
+    tools. Idempotent — calling twice does not duplicate the entry. Preserves
+    any existing hooks already in the file.
+
+    If ``.gemini/settings.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
+    Args:
+        worktree_path: Root of the worktree (directory that contains ``.gemini/``).
+        guard_path: Path to the guard script to run before file writes.
+    """
+    hook = HookEntry(event="pre_tool_use", tools=["Edit", "Write"], command=str(guard_path))
+    GeminiHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)

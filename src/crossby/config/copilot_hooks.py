@@ -1,43 +1,59 @@
-"""Copilot pre-tool-use hook configuration.
-
-Writes `.github/hooks/hooks.json` with a `preToolUse` entry that runs the
-plan write guard script.  Copilot CLI reads hooks from `.github/hooks/*.json`.
-"""
+"""Copilot .github/hooks/hooks.json hook management."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from crossby.models.config import HookEntry
+from crossby.sync.base import SyncData
+from crossby.sync.hooks import CopilotHooksWriter
 
-from crossby.config.hooks_util import upsert_hook_entry
-
-
-class CopilotHookEntry(BaseModel):
-    type: str
-    bash: str
-    comment: str
+__all__ = ["configure_plan_hooks", "configure_worktree_hooks"]
 
 
-def configure_plan_hooks(working_dir: Path, guard_script: Path) -> None:
-    """Write .github/hooks/hooks.json with a preToolUse guard entry.
+def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
+    """Install a plan-mode write-guard hook into .github/hooks/hooks.json.
 
-    Uses the official GitHub Copilot CLI hooks.json schema with
-    ``version``, ``hooks.preToolUse`` array, and hook objects containing
-    ``type``, ``bash``, and ``comment`` fields.
+    Registers ``guard_path`` as a ``preToolUse`` hook. Idempotent — calling
+    twice does not duplicate the entry. Preserves any existing hooks already
+    in the file.
 
-    Merges with any existing hooks config.  Idempotent — re-running
-    with the same guard_script path is a no-op.
+    **Copilot limitation**: Copilot's hook format has no per-tool filter field.
+    The guard will fire on *all* tool calls, not just file-write tools (Edit,
+    Write). This is a known Copilot limitation and cannot be worked around
+    without Copilot adding tool-filter support.
+
+    If ``.github/hooks/hooks.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
+    Args:
+        worktree_path: Root of the worktree (directory that contains ``.github/``).
+        guard_path: Path to the guard script to run before tool calls.
     """
-    upsert_hook_entry(
-        hooks_file=working_dir / ".github" / "hooks" / "hooks.json",
-        entry=CopilotHookEntry(
-            type="command",
-            bash=f"python3 {guard_script.resolve()}",
-            comment="Plan write guard for file-write tools (edit, create)",
-        ),
-        dedup_key="bash",
-        ensure_path=["hooks", "preToolUse"],
-        top_level_defaults={"version": 1},
-        log_event="copilot_hooks.configured",
-    )
+    # tools is intentionally left empty: Copilot has no per-tool filter.
+    hook = HookEntry(event="pre_tool_use", tools=[], command=str(guard_path))
+    CopilotHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
+
+
+def configure_worktree_hooks(worktree_path: Path, guard_path: Path) -> None:
+    """Install a worktree-isolation write-guard hook into .github/hooks/hooks.json.
+
+    Registers ``guard_path`` as a ``preToolUse`` hook. Idempotent — calling
+    twice does not duplicate the entry. Preserves any existing hooks already
+    in the file.
+
+    **Copilot limitation**: Copilot's hook format has no per-tool filter field.
+    The guard will fire on *all* tool calls, not just file-write tools (Edit,
+    Write). This is a known Copilot limitation and cannot be worked around
+    without Copilot adding tool-filter support.
+
+    If ``.github/hooks/hooks.json`` contains invalid JSON, the underlying writer
+    emits a ``warnings.warn()`` and returns without writing — no exception is raised.
+
+    Args:
+        worktree_path: Root of the worktree (directory that contains ``.github/``).
+        guard_path: Path to the guard script to run before tool calls.
+    """
+    # tools is intentionally left empty: Copilot has no per-tool filter.
+    hook = HookEntry(event="pre_tool_use", tools=[], command=str(guard_path))
+    CopilotHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)

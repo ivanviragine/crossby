@@ -9,6 +9,9 @@ from typing import ClassVar
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.data import get_models_for_tool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import cursor as cursor_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -17,6 +20,14 @@ from crossby.models.ai import (
 )
 
 logger = structlog.get_logger()
+
+# Cursor model IDs that already encode an effort level in their name — e.g.
+# "claude-opus-4-7-high", "claude-opus-4-7-thinking-xhigh". Appending
+# "-thinking" to these would produce invalid IDs.
+_EFFORT_LEVEL_SUFFIXES = frozenset({"-low", "-medium", "-high", "-xhigh", "-max"})
+
+# Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
+_NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
 
 class CursorAdapter(AbstractAITool):
@@ -45,11 +56,18 @@ class CursorAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_yolo=True,
+            supports_plan_mode=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Cursor accepts the initial message as a positional argument."""
         return [prompt]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return cursor_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return cursor_reader.read_session(ref)
 
     def is_model_compatible(self, model: str) -> bool:
         """Cursor accepts all model IDs."""
@@ -64,13 +82,27 @@ class CursorAdapter(AbstractAITool):
         return ["--force"]
 
     def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
-        """For high/max effort, append ``-thinking`` to the model ID."""
+        """For high/xhigh/max effort, append ``-thinking`` to the model ID.
+
+        Models that already encode effort (e.g. ``-high``, ``-xhigh``) or
+        thinking mode (``-thinking``) in their name are returned unchanged.
+
+        The constructed ``<model>-thinking`` ID is validated against the
+        bundled Cursor model registry. If the registry has no matching
+        entry (e.g. the model has no thinking variant, or is unknown to
+        crossby), the original ``model`` is returned unchanged so the
+        Cursor CLI receives a valid ID.
+        """
         if (
-            effort in (EffortLevel.HIGH, EffortLevel.MAX)
+            effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
             and model
+            and model not in _NO_THINKING_MODELS
             and not model.endswith("-thinking")
+            and not model.endswith(tuple(_EFFORT_LEVEL_SUFFIXES))
         ):
-            return f"{model}-thinking"
+            candidate = f"{model}-thinking"
+            if candidate in get_models_for_tool(AIToolID.CURSOR):
+                return candidate
         return model
 
     def preserve_session_data(self, working_dir: Path, main_checkout_path: Path) -> bool:

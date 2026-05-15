@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import copilot as copilot_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -30,11 +32,19 @@ class CopilotAdapter(AbstractAITool):
             supports_headless=True,
             supports_yolo=True,
             supports_resume=True,
+            supports_trusted_dirs=True,
+            supports_plan_mode=True,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
         """Resume a Copilot session: ``copilot --resume=<session_id>``."""
         return ["copilot", f"--resume={session_id}"]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return copilot_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return copilot_reader.read_session(ref)
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Copilot uses -i for the initial message."""
@@ -49,6 +59,10 @@ class CopilotAdapter(AbstractAITool):
         """Copilot accepts all model IDs."""
         return True
 
+    def plan_mode_args(self) -> list[str]:
+        """Copilot supports ``--plan`` (GA'd Jan 2026)."""
+        return ["--plan"]
+
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Copilot uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]
@@ -60,7 +74,7 @@ class CopilotAdapter(AbstractAITool):
         """
         result: list[str] = []
         for cmd in commands:
-            parts = cmd.split(None, 1)
+            parts = cmd.split(":", 1)
             binary = parts[0]
             args = parts[1] if len(parts) > 1 else ""
             pattern = f"shell({binary}:{args})" if args else f"shell({binary})"

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.handoff.models import ConversationTranscript, SessionRef
+from crossby.handoff.readers import codex as codex_reader
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -13,11 +16,12 @@ from crossby.models.ai import (
     EffortLevel,
 )
 
-# Codex uses "xhigh" for our "max" level
+# Codex uses "xhigh" for both our XHIGH and MAX levels
 _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.LOW: "low",
     EffortLevel.MEDIUM: "medium",
     EffortLevel.HIGH: "high",
+    EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
 
@@ -39,11 +43,18 @@ class CodexAdapter(AbstractAITool):
             supports_effort=True,
             supports_yolo=True,
             supports_resume=True,
+            supports_trusted_dirs=True,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
         """Resume a Codex session: ``codex resume <session_id>``."""
         return ["codex", "resume", session_id]
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        return codex_reader.locate_sessions(project_path)
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        return codex_reader.read_session(ref)
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Codex accepts the initial message as a positional argument."""

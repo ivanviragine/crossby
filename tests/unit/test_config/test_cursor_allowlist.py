@@ -18,7 +18,7 @@ from crossby.config.cursor_allowlist import (
 def _patch_global_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect the global config path to a temp directory."""
     fake_config = tmp_path / ".cursor" / "cli-config.json"
-    monkeypatch.setattr("crossby.config.cursor_allowlist._GLOBAL_CONFIG_PATH", fake_config)
+    monkeypatch.setattr("crossby.sync.permissions._GLOBAL_CURSOR_CONFIG_PATH", fake_config)
 
 
 def _global_config_path(tmp_path: Path) -> Path:
@@ -68,14 +68,16 @@ class TestConfigureAllowlistGlobal:
         assert data["permissions"]["allow"].count("Shell(myapp:*)") == 1
 
     def test_handles_corrupted_json(self, tmp_path: Path) -> None:
+        """Refuses to clobber a malformed global config — leaves it for the user."""
         config_path = _global_config_path(tmp_path)
         config_path.parent.mkdir(parents=True)
-        config_path.write_text("{broken!!", encoding="utf-8")
+        original = "{broken!!"
+        config_path.write_text(original, encoding="utf-8")
 
         configure_allowlist(patterns=["myapp:*"])
 
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert "Shell(myapp:*)" in data["permissions"]["allow"]
+        # File is left untouched.
+        assert config_path.read_text(encoding="utf-8") == original
 
     def test_no_patterns_is_noop(self, tmp_path: Path) -> None:
         """Calling with no patterns does not create any file."""

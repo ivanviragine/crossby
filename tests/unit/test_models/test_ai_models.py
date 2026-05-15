@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from crossby.ai_tools import AbstractAITool
@@ -305,9 +307,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("gemini")
         assert adapter.plan_mode_args() == ["--approval-mode", "plan"]
 
-    def test_copilot_no_plan_mode(self) -> None:
+    def test_copilot_plan_mode(self) -> None:
         adapter = AbstractAITool.get("copilot")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--plan"]
 
     def test_codex_no_plan_mode(self) -> None:
         adapter = AbstractAITool.get("codex")
@@ -381,3 +383,77 @@ class TestNormalizeModelFormat:
         assert adapter.normalize_model_format("sonnet-4.6") == "sonnet-4.6"
         assert adapter.normalize_model_format("opus-4.6") == "opus-4.6"
         assert adapter.normalize_model_format("gpt-5.3-codex") == "gpt-5.3-codex"
+
+
+class TestCrossProviderModelTranslation:
+    """build_launch_command translates cross-provider model ids when the
+    target tool wouldn't accept the source family natively."""
+
+    def test_claude_model_translated_for_codex(self) -> None:
+        adapter = AbstractAITool.get("codex")
+        with pytest.warns(UserWarning, match="Translating model"):
+            cmd = adapter.build_launch_command(model="claude-sonnet-4.6")
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        # Sonnet maps to gpt-5.4-mini per family mapping.
+        assert cmd[idx + 1] == "gpt-5.4-mini"
+
+    def test_claude_opus_to_codex(self) -> None:
+        adapter = AbstractAITool.get("codex")
+        with pytest.warns(UserWarning, match="Translating model"):
+            cmd = adapter.build_launch_command(model="claude-opus-4.6")
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "gpt-5.4"
+
+    def test_effort_biased_when_translating_to_codex(self) -> None:
+        from crossby.models.ai import EffortLevel
+
+        adapter = AbstractAITool.get("codex")
+        # Sonnet HIGH should bump to XHIGH on the Codex side per family
+        # bias. The bumped value flows through to the model_reasoning_effort
+        # config arg.
+        with pytest.warns(UserWarning, match=r"effort high → xhigh"):
+            cmd = adapter.build_launch_command(
+                model="claude-sonnet-4.6",
+                effort=EffortLevel.HIGH,
+            )
+        joined = " ".join(cmd)
+        assert "xhigh" in joined
+
+    def test_codex_model_translated_for_claude(self) -> None:
+        adapter = AbstractAITool.get("claude")
+        with pytest.warns(UserWarning, match="Translating model"):
+            cmd = adapter.build_launch_command(model="gpt-5.4")
+        idx = cmd.index("--model")
+        # gpt-5.4 reverse-maps to claude-opus-4.7, then normalize_model_format
+        # converts dotted → dashed for Claude.
+        assert cmd[idx + 1] == "claude-opus-4-7"
+
+    def test_native_model_not_translated(self) -> None:
+        # Claude → Claude with a native id should not warn.
+        adapter = AbstractAITool.get("claude")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning becomes an exception
+            cmd = adapter.build_launch_command(model="claude-haiku-4.5")
+        assert "--model" in cmd
+        assert "claude-haiku-4-5" in cmd
+
+    def test_passthrough_for_arbitrary_accepting_tool(self) -> None:
+        # Cursor / Copilot / OpenCode accept arbitrary model ids — no
+        # translation, no warning.
+        adapter = AbstractAITool.get("cursor")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cmd = adapter.build_launch_command(model="claude-sonnet-4.6")
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-sonnet-4.6"
+
+    def test_unknown_model_for_codex_passes_through(self) -> None:
+        # A model id that isn't on either provider's family mapping passes
+        # through untranslated and the tool's native rejection takes over.
+        adapter = AbstractAITool.get("codex")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cmd = adapter.build_launch_command(model="o1-mini")
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "o1-mini"

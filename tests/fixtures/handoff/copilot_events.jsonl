@@ -1,0 +1,5 @@
+{"type":"session.start","data":{"sessionId":"sess-1","version":1,"startTime":"2026-02-21T14:38:01.956Z","context":{"cwd":"/Users/tester/proj"}},"id":"s1","timestamp":"2026-02-21T14:38:01.980Z","parentId":null}
+{"type":"user.message","data":{"content":"Let's implement the new feature."},"id":"u1","timestamp":"2026-02-21T14:38:41.770Z","parentId":null}
+{"type":"assistant.message","data":{"messageId":"m1","content":"Reading the plan.","toolRequests":[{"toolCallId":"t1","name":"view","arguments":{"path":"/Users/tester/proj/PLAN.md"},"type":"function"}]},"id":"a1","timestamp":"2026-02-21T14:38:42.000Z","parentId":"u1"}
+{"type":"tool.result","data":{"output":"File contents here."},"id":"r1","timestamp":"2026-02-21T14:38:43.000Z","parentId":"a1"}
+{"type":"assistant.message","data":{"messageId":"m2","content":"Plan looks clear. Proceeding."},"id":"a2","timestamp":"2026-02-21T14:38:44.000Z","parentId":"r1"}

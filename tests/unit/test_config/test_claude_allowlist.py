@@ -8,7 +8,6 @@ from pathlib import Path
 from crossby.config.claude_allowlist import (
     canonical_to_claude,
     configure_allowlist,
-    configure_plan_hooks,
     is_allowlist_configured,
 )
 
@@ -83,17 +82,18 @@ class TestConfigureAllowlist:
         assert count == 1, f"Expected exactly 1 entry, got {count}"
 
     def test_handles_corrupted_json(self, tmp_path: Path) -> None:
-        """Handles corrupted/invalid JSON gracefully by starting fresh."""
+        """Refuses to overwrite corrupted JSON — surfaces error, leaves file alone."""
         project_root = tmp_path / "project"
         claude_dir = project_root / ".claude"
         claude_dir.mkdir(parents=True)
         settings_path = claude_dir / "settings.json"
-        settings_path.write_text("{invalid json!!", encoding="utf-8")
+        original = "{invalid json!!"
+        settings_path.write_text(original, encoding="utf-8")
 
         configure_allowlist(project_root, patterns=["myapp:*"])
 
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        # Malformed file is NOT silently replaced.
+        assert settings_path.read_text(encoding="utf-8") == original
 
     def test_preserves_other_settings_keys(self, tmp_path: Path) -> None:
         """Preserves all non-permissions keys in existing settings."""
@@ -154,17 +154,17 @@ class TestConfigureAllowlist:
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
 
     def test_handles_non_dict_root(self, tmp_path: Path) -> None:
-        """Handles settings.json containing a non-dict root (e.g. a list)."""
+        """Refuses to overwrite a non-dict-root file (e.g. a list)."""
         project_root = tmp_path / "project"
         claude_dir = project_root / ".claude"
         claude_dir.mkdir(parents=True)
         settings_path = claude_dir / "settings.json"
-        settings_path.write_text("[1, 2, 3]\n", encoding="utf-8")
+        original = "[1, 2, 3]\n"
+        settings_path.write_text(original, encoding="utf-8")
 
         configure_allowlist(project_root, patterns=["myapp:*"])
 
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
+        assert settings_path.read_text(encoding="utf-8") == original
 
     def test_multiple_patterns(self, tmp_path: Path) -> None:
         """Multiple patterns are all added."""
@@ -236,45 +236,3 @@ class TestIsAllowlistConfigured:
         )
 
         assert is_allowlist_configured(project_root, patterns=["myapp:*", "other:*"]) is False
-
-
-class TestConfigurePlanHooks:
-    """Tests for configure_plan_hooks()."""
-
-    def test_adds_pretooluse_hook(self, tmp_path: Path) -> None:
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        assert settings_path.is_file()
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        hooks = data["hooks"]["PreToolUse"]
-        assert len(hooks) == 1
-        assert hooks[0]["matcher"] == "Edit|Write|NotebookEdit"
-        # Verify hook is an object with type and command keys
-        assert isinstance(hooks[0]["hooks"], list)
-        assert len(hooks[0]["hooks"]) == 1
-        assert hooks[0]["hooks"][0]["type"] == "command"
-        assert hooks[0]["hooks"][0]["command"] == f"python3 {guard}"
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert len(data["hooks"]["PreToolUse"]) == 1
-
-    def test_merges_with_existing_allowlist(self, tmp_path: Path) -> None:
-        configure_allowlist(tmp_path, patterns=["myapp:*"])
-        guard = tmp_path / "guard.py"
-        guard.touch()
-        configure_plan_hooks(tmp_path, guard)
-
-        settings_path = tmp_path / ".claude" / "settings.json"
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert "Bash(myapp:*)" in data["permissions"]["allow"]
-        assert len(data["hooks"]["PreToolUse"]) == 1

@@ -11,7 +11,10 @@ import shutil
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from crossby.handoff.models import ConversationTranscript, SessionRef
 
 import structlog
 
@@ -133,6 +136,7 @@ class AbstractAITool(ABC):
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
+        plan_mode: bool = False,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -163,6 +167,7 @@ class AbstractAITool(ABC):
         cmd = self.build_launch_command(
             model=model,
             initial_message=prompt,
+            plan_mode=plan_mode,
             trusted_dirs=trusted_dirs,
             effort=effort,
             allowed_commands=allowed_commands,
@@ -186,6 +191,22 @@ class AbstractAITool(ABC):
         """Check if a model ID is valid for this tool."""
         return True  # Default: allow all. Override per tool.
 
+    # Session handoff — concrete readers own per-tool cwd matching.
+
+    def locate_sessions(self, project_path: Path) -> list[SessionRef]:
+        """Return all session refs this tool has recorded for ``project_path``.
+
+        Default: no handoff support — concrete adapters override.
+        """
+        raise NotImplementedError(f"{self.TOOL_ID} does not support session handoff")
+
+    def read_session(self, ref: SessionRef) -> ConversationTranscript:
+        """Parse the session pointed to by ``ref`` into a ConversationTranscript.
+
+        Default: no handoff support — concrete adapters override.
+        """
+        raise NotImplementedError(f"{self.TOOL_ID} does not support session handoff")
+
     def initial_message_args(self, prompt: str) -> list[str]:
         """Get CLI args to pass an initial message for an interactive session.
 
@@ -194,6 +215,10 @@ class AbstractAITool(ABC):
         Tools that require a flag return [flag, prompt].
         """
         return []
+
+    # ------------------------------------------------------------------
+    # Extended API — used by build_launch_command() and library consumers
+    # ------------------------------------------------------------------
 
     def plan_mode_args(self) -> list[str]:
         """Get extra CLI args for native plan/approval mode."""
@@ -342,6 +367,32 @@ class AbstractAITool(ABC):
         elif effort and not effective_model:
             effective_model = self.resolve_effort_model(None, effort)
 
+        # Cross-provider translation: if the user passed a model id that
+        # belongs to another provider's family (Claude → Codex or Codex →
+        # Claude), try to translate via the canonical family mappings rather
+        # than handing the tool an id it will reject. Other tools that
+        # accept arbitrary model ids (Cursor, Copilot, OpenCode) skip this
+        # branch via is_model_compatible() returning True.
+        if effective_model and not self.is_model_compatible(effective_model):
+            translated = _maybe_translate_cross_provider(effective_model, self.TOOL_ID, effort)
+            if translated is not None:
+                translated_model, translated_effort = translated
+                effort_note = (
+                    f" (effort {effort.value} → {translated_effort.value})"
+                    if effort and translated_effort and translated_effort != effort
+                    else ""
+                )
+                warnings.warn(
+                    f"Translating model {effective_model!r} → {translated_model!r} "
+                    f"for {caps.display_name}{effort_note}; "
+                    f"pass --model with a native id to skip this translation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                effective_model = translated_model
+                if translated_effort is not None:
+                    effort = translated_effort
+
         if effective_model and caps.supports_model_flag:
             cmd.extend([caps.model_flag, self.normalize_model_format(effective_model)])
 
@@ -380,6 +431,43 @@ class AbstractAITool(ABC):
             cmd.extend(self.allowed_commands_args(allowed_commands))
 
         return cmd
+
+
+def _maybe_translate_cross_provider(
+    model: str,
+    tool_id: AIToolID,
+    effort: EffortLevel | None,
+) -> tuple[str, EffortLevel | None] | None:
+    """Apply Claude↔Codex family mapping when ``model`` isn't native to
+    ``tool_id``.
+
+    Returns ``(translated_model, translated_effort)`` when a translation is
+    known, ``None`` otherwise. Effort is family-biased (Sonnet shifts up
+    one tier on the way to Codex, reverse picks the lowest source tier).
+
+    Imports the translation helpers lazily to avoid a circular dependency
+    via ``crossby.sync`` package init.
+    """
+    from crossby.sync.translation import (
+        find_claude_family,
+        map_effort_claude_to_codex,
+        map_effort_codex_to_claude,
+        map_model_claude_to_codex,
+        map_model_codex_to_claude,
+    )
+
+    # Claude model → Codex family
+    if tool_id == AIToolID.CODEX and find_claude_family(model) is not None:
+        translated_effort = map_effort_claude_to_codex(model, effort) if effort else None
+        return map_model_claude_to_codex(model), translated_effort
+
+    # Codex/GPT model → Claude family
+    if tool_id == AIToolID.CLAUDE and model.startswith("gpt-"):
+        target = map_model_codex_to_claude(model)
+        translated_effort = map_effort_codex_to_claude(model, target, effort) if effort else None
+        return target, translated_effort
+
+    return None
 
 
 def pick_best_model(models: list[AIModel]) -> AIModel | None:

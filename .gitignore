@@ -18,3 +18,9 @@ htmlcov/
 *.log
 .commit-msg
 .crossby.yml
+KNOWLEDGE.md
+.agents/
+# wade-managed symlinks (skills sync)
+.cursor/skills
+.gemini/
+.github/skills

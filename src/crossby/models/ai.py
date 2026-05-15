@@ -14,6 +14,7 @@ class EffortLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    XHIGH = "xhigh"
     MAX = "max"
 
 
@@ -48,8 +49,8 @@ class ModelTier(StrEnum):
 class AIModel(BaseModel, frozen=True):
     """A concrete model available through an AI tool.
 
-    Models are discovered at runtime by querying the tool (e.g., `claude models`).
-    The model ID comes directly from the tool — no format conversion needed.
+    Models come from a bundled static registry (``data/models.json``).
+    The model ID format matches what each tool's CLI accepts.
     """
 
     id: str
@@ -77,6 +78,8 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_effort: bool = False
     supports_yolo: bool = False
     supports_resume: bool = False
+    supports_trusted_dirs: bool = False
+    supports_plan_mode: bool = False
 
 
 class TokenUsage(BaseModel):

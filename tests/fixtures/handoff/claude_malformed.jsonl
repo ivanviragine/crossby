@@ -1,0 +1,3 @@
+{"parentUuid":null,"type":"user","message":{"role":"user","content":"First real turn."},"uuid":"u1","timestamp":"2026-03-24T18:35:33.597Z","cwd":"/Users/tester/proj","sessionId":"session-malformed"}
+this is not valid JSON
+{"parentUuid":"u1","type":"assistant","message":{"model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"Okay, continuing despite the bad line."}]},"uuid":"a1","timestamp":"2026-03-24T18:35:40.100Z","cwd":"/Users/tester/proj","sessionId":"session-malformed"}
