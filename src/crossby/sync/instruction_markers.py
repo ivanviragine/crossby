@@ -58,8 +58,11 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
     AIToolID.COPILOT: (
         (r"\.github/copilot-instructions", "Copilot instructions file"),
         (r"\bcopilot-instructions\b", "Copilot instructions filename"),
-        (r"@workspace\b", "Copilot @workspace participant"),
-        (r"@github\b", "Copilot @github participant"),
+        # Negative lookbehind avoids matching inside emails / handles like
+        # `me@workspace.com` or `team@github.com` — only standalone
+        # @-participants count as a Copilot marker.
+        (r"(?<!\w)@workspace\b", "Copilot @workspace participant"),
+        (r"(?<!\w)@github\b", "Copilot @github participant"),
         (r"\.github/agents/", "Copilot .github/agents paths"),
         (r"\.github/skills/", "Copilot .github/skills paths"),
         (r"\.github/hooks/", "Copilot .github/hooks paths"),

@@ -164,6 +164,15 @@ class TestExpandedCopilotMarkers:
         found = detect_tool_markers("Run @github to look up the issue.")
         assert AIToolID.COPILOT in found
 
+    def test_workspace_in_email_does_not_match(self) -> None:
+        # Negative lookbehind: email addresses must not trip the marker.
+        found = detect_tool_markers("Email me@workspace.com for access.")
+        assert AIToolID.COPILOT not in found
+
+    def test_github_in_email_does_not_match(self) -> None:
+        found = detect_tool_markers("Reach team@github.com offline.")
+        assert AIToolID.COPILOT not in found
+
     def test_github_agents_path(self) -> None:
         found = detect_tool_markers("Agents go under .github/agents/")
         assert AIToolID.COPILOT in found

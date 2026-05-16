@@ -456,8 +456,15 @@ def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
 
 # Each entry is (relative path, concern). Claude/Gemini settings.json hold both
 # MCP servers and hooks, so we tag them MCP (validation is just JSON parseability).
+# `.claude.json` and `.mcp.json` ship with the MCP PATH walker, so we list them
+# here too — otherwise malformed JSON in those files would be silently dropped
+# by the walker without any "invalid JSON" finding from elsewhere.
 _JSON_CONFIGS: dict[AIToolID, list[tuple[Path, SyncConcern]]] = {
-    AIToolID.CLAUDE: [(Path(".claude") / "settings.json", SyncConcern.MCP)],
+    AIToolID.CLAUDE: [
+        (Path(".claude.json"), SyncConcern.MCP),
+        (Path(".mcp.json"), SyncConcern.MCP),
+        (Path(".claude") / "settings.json", SyncConcern.MCP),
+    ],
     AIToolID.CURSOR: [
         (Path(".cursor") / "cli.json", SyncConcern.MCP),
         (Path(".cursor") / "mcp.json", SyncConcern.MCP),

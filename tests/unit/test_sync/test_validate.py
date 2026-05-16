@@ -196,6 +196,34 @@ class TestJsonConfigs:
         assert len(hook_errors) == 1
         assert "hooks.json" in str(hook_errors[0].path)
 
+    def test_invalid_root_claude_json_surfaces_error(self, tmp_path: Path) -> None:
+        """Regression: malformed `.claude.json` must produce a parse-error finding.
+
+        Previously the MCP PATH walker swallowed JSON errors and the JSON
+        validator didn't cover `.claude.json` / `.mcp.json`, so invalid JSON
+        in those files went entirely unreported.
+        """
+        path = tmp_path / ".claude.json"
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f
+            for f in findings
+            if f.level == "error" and f.tool_id == AIToolID.CLAUDE and "claude.json" in str(f.path)
+        ]
+        assert errors, "malformed .claude.json must surface a JSON parse error"
+
+    def test_invalid_root_mcp_json_surfaces_error(self, tmp_path: Path) -> None:
+        path = tmp_path / ".mcp.json"
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f
+            for f in findings
+            if f.level == "error" and f.tool_id == AIToolID.CLAUDE and ".mcp.json" in str(f.path)
+        ]
+        assert errors, "malformed .mcp.json must surface a JSON parse error"
+
 
 class TestValidateTargetTopLevel:
     def test_empty_project_returns_empty(self, tmp_path: Path) -> None:
