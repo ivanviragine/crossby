@@ -342,19 +342,22 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         idempotency. Stale skill subdirectories whose source disappeared are
         removed.
 
-        When the target is *not* Claude and ``.claude/commands/`` exists
-        under ``project_root``, each Claude slash command is also wrapped
-        as a single-file skill named ``claude-command-<slug>`` so the
-        prompt body survives the migration. See
-        :mod:`crossby.sync.slash_commands` for the conversion details.
+        When a source tool that has a slash-command primitive (Claude /
+        Cursor / Gemini today) lives in the project and ``self.tool_id`` is
+        different, each of that tool's commands is wrapped as a single-file
+        skill named ``<source>-command-<slug>`` so the prompt body survives
+        the migration. See :mod:`crossby.sync.slash_commands` for the
+        per-tool runtime caveats.
         """
         from crossby.sync.slash_commands import iter_command_skills
 
         command_skills: list[tuple[str, str]] = []
-        if self.tool_id != AIToolID.CLAUDE:
-            for _src_path, definition in iter_command_skills(project_root):
-                rendered = render_markdown_skill(definition)
-                command_skills.append((definition.name, rendered))
+        for _src_path, source_tool, definition in iter_command_skills(project_root):
+            if source_tool == self.tool_id:
+                # Don't wrap a tool's own commands into skills for itself.
+                continue
+            rendered = render_markdown_skill(definition)
+            command_skills.append((definition.name, rendered))
 
         skill_dirs = [
             child

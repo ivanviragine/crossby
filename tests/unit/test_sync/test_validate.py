@@ -196,6 +196,34 @@ class TestJsonConfigs:
         assert len(hook_errors) == 1
         assert "hooks.json" in str(hook_errors[0].path)
 
+    def test_invalid_root_claude_json_surfaces_error(self, tmp_path: Path) -> None:
+        """Regression: malformed `.claude.json` must produce a parse-error finding.
+
+        Previously the MCP PATH walker swallowed JSON errors and the JSON
+        validator didn't cover `.claude.json` / `.mcp.json`, so invalid JSON
+        in those files went entirely unreported.
+        """
+        path = tmp_path / ".claude.json"
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f
+            for f in findings
+            if f.level == "error" and f.tool_id == AIToolID.CLAUDE and "claude.json" in str(f.path)
+        ]
+        assert errors, "malformed .claude.json must surface a JSON parse error"
+
+    def test_invalid_root_mcp_json_surfaces_error(self, tmp_path: Path) -> None:
+        path = tmp_path / ".mcp.json"
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f
+            for f in findings
+            if f.level == "error" and f.tool_id == AIToolID.CLAUDE and ".mcp.json" in str(f.path)
+        ]
+        assert errors, "malformed .mcp.json must surface a JSON parse error"
+
 
 class TestValidateTargetTopLevel:
     def test_empty_project_returns_empty(self, tmp_path: Path) -> None:
@@ -248,3 +276,140 @@ class TestHasErrors:
             detail="fine",
         )
         assert not has_errors([f])
+
+
+# ---------------------------------------------------------------------------
+# Multi-tool MCP PATH validation
+# ---------------------------------------------------------------------------
+
+
+from crossby.sync.validate import validate_mcp_command_paths  # noqa: E402
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+class TestMCPCommandPaths:
+    @staticmethod
+    def _absent() -> str:
+        return "definitely-not-a-real-binary-xyz123"
+
+    @staticmethod
+    def _present() -> str:
+        # `sh` is on PATH on every supported development host.
+        return "sh"
+
+    def test_claude_settings_warns_when_absent(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".claude" / "settings.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CLAUDE
+            and f.concern == SyncConcern.MCP
+            and f.level == "warning"
+            for f in findings
+        )
+
+    def test_dot_mcp_json_warns_when_absent(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".mcp.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings
+        )
+
+    def test_dot_claude_json_warns_when_absent(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".claude.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings
+        )
+
+    def test_cursor_mcp_json_warns_when_absent(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".cursor" / "mcp.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CURSOR and f.level == "warning" for f in findings
+        )
+
+    def test_vscode_mcp_json_uses_servers_key(self, tmp_path: Path) -> None:
+        """Copilot uses `servers`, not `mcpServers` — verify the key dispatch."""
+        # Wrong key under .vscode/mcp.json → no findings.
+        _write_json(
+            tmp_path / ".vscode" / "mcp.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings_wrong_key = validate_mcp_command_paths(tmp_path)
+        assert not any(f.tool_id == AIToolID.COPILOT for f in findings_wrong_key)
+        # Right key produces a warning.
+        _write_json(
+            tmp_path / ".vscode" / "mcp.json",
+            {"servers": {"fake": {"command": self._absent()}}},
+        )
+        findings_right_key = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.COPILOT and f.level == "warning"
+            for f in findings_right_key
+        )
+
+    def test_gemini_settings_warns_when_absent(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".gemini" / "settings.json",
+            {"mcpServers": {"fake": {"command": self._absent()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.GEMINI and f.level == "warning" for f in findings
+        )
+
+    def test_ok_when_present(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / ".cursor" / "mcp.json",
+            {"mcpServers": {"shell": {"command": self._present()}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings
+        )
+
+    def test_skips_entries_without_command(self, tmp_path: Path) -> None:
+        """HTTP/SSE-only entries have no `command`; should be silently skipped."""
+        _write_json(
+            tmp_path / ".cursor" / "mcp.json",
+            {"mcpServers": {"remote": {"url": "https://example.com/mcp"}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert not any(f.tool_id == AIToolID.CURSOR for f in findings)
+
+    def test_silently_skips_malformed_json(self, tmp_path: Path) -> None:
+        """Malformed JSON is handled by validate_json_configs; PATH walker stays quiet."""
+        path = tmp_path / ".cursor" / "mcp.json"
+        path.parent.mkdir()
+        path.write_text("{not json", encoding="utf-8")
+        # No exception, no findings from this validator.
+        findings = validate_mcp_command_paths(tmp_path)
+        assert not any(f.tool_id == AIToolID.CURSOR for f in findings)
+
+    def test_env_var_command_expanded(self, tmp_path: Path, monkeypatch) -> None:
+        """${VAR} in command is expanded via os.path.expandvars before lookup."""
+        monkeypatch.setenv("CROSSBY_TEST_SHELL", "sh")
+        _write_json(
+            tmp_path / ".cursor" / "mcp.json",
+            {"mcpServers": {"shell": {"command": "${CROSSBY_TEST_SHELL}"}}},
+        )
+        findings = validate_mcp_command_paths(tmp_path)
+        assert any(
+            f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings
+        )

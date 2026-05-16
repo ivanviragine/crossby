@@ -22,7 +22,10 @@ If the user has not selected a source tool, infer one from the project
 (prefer Codex's `AGENTS.md`, then `CLAUDE.md`) and proceed. Do not edit
 the source tool's files (`.claude/settings.json`, `.claude/agents/`,
 etc.); manual fixes belong in the **generated** Codex / Cursor / Gemini
-/ Copilot artifacts.
+/ Copilot artifacts. Preserve unrelated existing config entries in
+target files (e.g. `[mcp_servers]` Crossby didn't write, hand-curated
+hook entries, custom JSON keys) — do not ask about them unless they
+fail validation or directly conflict with the sync.
 
 ## Sync order
 
@@ -40,6 +43,9 @@ Run in this order for each project:
      source skill has `allowed-tools`
    - Validate the target via `crossby sync --validate-target`
    - Report the final markdown table
+
+   Before finishing, update the TODO list so every finished step is
+   marked `completed` and no step remains `in_progress`.
 
 2. Read `references/differences.md` (and refresh the upstream tool
    docs if its `Docs last checked` date is more than ~3 months old).

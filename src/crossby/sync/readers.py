@@ -302,9 +302,27 @@ def discover_permissions(project_root: Path, from_tool: AIToolID | None = None) 
 
 # Reverse event name maps (tool-specific → canonical)
 _REVERSE_EVENTS: dict[str, str] = {
+    # pre_tool_use
     "PreToolUse": "pre_tool_use",
     "preToolUse": "pre_tool_use",
     "BeforeTool": "pre_tool_use",
+    # post_tool_use
+    "PostToolUse": "post_tool_use",
+    "postToolUse": "post_tool_use",
+    "AfterTool": "post_tool_use",
+    # session_start
+    "SessionStart": "session_start",
+    "sessionStart": "session_start",
+    # user_prompt_submit
+    "UserPromptSubmit": "user_prompt_submit",
+    "userPromptSubmit": "user_prompt_submit",
+    "beforeSubmitPrompt": "user_prompt_submit",
+    # stop
+    "Stop": "stop",
+    "stop": "stop",
+    # notification
+    "Notification": "notification",
+    "notification": "notification",
 }
 
 # Reverse tool name maps (tool-specific → canonical)
