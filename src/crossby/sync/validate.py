@@ -21,8 +21,10 @@ Findings are tool-neutral; the CLI renders them as a Rich table.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -130,6 +132,57 @@ def _parse_skill_frontmatter(skill_md: Path) -> dict[str, object] | None:
 
 
 # ---------------------------------------------------------------------------
+# Shared MCP PATH check
+# ---------------------------------------------------------------------------
+
+
+def _validate_mcp_commands_on_path(
+    findings: list[ValidationFinding],
+    project_root: Path,
+    config_path: Path,
+    *,
+    tool_id: AIToolID,
+    servers: Mapping[str, object],
+) -> None:
+    """Append one ``ok`` / ``warning`` finding per server-with-a-command.
+
+    Servers without a ``command`` (e.g. pure HTTP/SSE transports) are
+    skipped. Env-var-templated commands are expanded via
+    :func:`os.path.expandvars` before the :func:`shutil.which` lookup so
+    ``${HOME}/bin/foo`` resolves the same way the shell would when Codex /
+    Claude / Cursor actually launches the server.
+    """
+    for name, server in sorted(servers.items()):
+        if not isinstance(server, dict):
+            continue
+        command = server.get("command")
+        if not command:
+            continue
+        command_str = str(command)
+        resolved = os.path.expandvars(command_str)
+        if shutil.which(resolved):
+            findings.append(
+                _ok(
+                    project_root,
+                    config_path,
+                    f"MCP `{name}` command `{command_str}` on PATH",
+                    tool_id=tool_id,
+                    concern=SyncConcern.MCP,
+                )
+            )
+        else:
+            findings.append(
+                _warn(
+                    project_root,
+                    config_path,
+                    f"MCP `{name}` command `{command_str}` not on PATH",
+                    tool_id=tool_id,
+                    concern=SyncConcern.MCP,
+                )
+            )
+
+
+# ---------------------------------------------------------------------------
 # Codex validators
 # ---------------------------------------------------------------------------
 
@@ -164,33 +217,13 @@ def validate_codex_config(project_root: Path) -> list[ValidationFinding]:
     )
     mcp_servers = parsed.get("mcp_servers")
     if isinstance(mcp_servers, dict):
-        for name, server in sorted(mcp_servers.items()):
-            if not isinstance(server, dict):
-                continue
-            command = server.get("command")
-            if not command:
-                continue
-            command_str = str(command)
-            if shutil.which(command_str):
-                findings.append(
-                    _ok(
-                        project_root,
-                        config_path,
-                        f"MCP `{name}` command `{command_str}` on PATH",
-                        tool_id=AIToolID.CODEX,
-                        concern=SyncConcern.MCP,
-                    )
-                )
-            else:
-                findings.append(
-                    _warn(
-                        project_root,
-                        config_path,
-                        f"MCP `{name}` command `{command_str}` not on PATH",
-                        tool_id=AIToolID.CODEX,
-                        concern=SyncConcern.MCP,
-                    )
-                )
+        _validate_mcp_commands_on_path(
+            findings,
+            project_root,
+            config_path,
+            tool_id=AIToolID.CODEX,
+            servers=mcp_servers,
+        )
     return findings
 
 
@@ -357,6 +390,66 @@ def validate_instruction_sizes(project_root: Path) -> list[ValidationFinding]:
 
 
 # ---------------------------------------------------------------------------
+# JSON-config MCP PATH validators (every tool that lists MCP commands in JSON)
+# ---------------------------------------------------------------------------
+
+
+# Where each tool stores MCP server entries in a JSON file, and under which
+# top-level key the server table lives. ``.vscode/mcp.json`` (Copilot) uses
+# ``servers``; every other JSON-shape store uses ``mcpServers``.
+_JSON_MCP_LOCATIONS: dict[AIToolID, list[tuple[Path, str]]] = {
+    AIToolID.CLAUDE: [
+        (Path(".claude.json"), "mcpServers"),
+        (Path(".mcp.json"), "mcpServers"),
+        (Path(".claude") / "settings.json", "mcpServers"),
+    ],
+    AIToolID.CURSOR: [
+        (Path(".cursor") / "mcp.json", "mcpServers"),
+    ],
+    AIToolID.COPILOT: [
+        (Path(".vscode") / "mcp.json", "servers"),
+    ],
+    AIToolID.GEMINI: [
+        (Path(".gemini") / "settings.json", "mcpServers"),
+    ],
+}
+
+
+def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
+    """Validate that every tool's MCP server ``command`` resolves on ``PATH``.
+
+    Codex is handled separately by :func:`validate_codex_config` because its
+    config lives in TOML rather than JSON. This walker covers the JSON-shape
+    tools — Claude, Cursor, Copilot (via the VS Code mcp.json), and Gemini.
+    JSON parse failures are silently skipped here; :func:`validate_json_configs`
+    surfaces them with full detail.
+    """
+    findings: list[ValidationFinding] = []
+    for tool, entries in _JSON_MCP_LOCATIONS.items():
+        for rel, key in entries:
+            path = project_root / rel
+            if not path.is_file():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            servers = raw.get(key)
+            if not isinstance(servers, dict):
+                continue
+            _validate_mcp_commands_on_path(
+                findings,
+                project_root,
+                path,
+                tool_id=tool,
+                servers=servers,
+            )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # JSON config validators
 # ---------------------------------------------------------------------------
 
@@ -416,12 +509,18 @@ def validate_json_configs(project_root: Path) -> list[ValidationFinding]:
 
 
 def validate_target(project_root: Path) -> list[ValidationFinding]:
-    """Run every validator against ``project_root`` and return findings."""
+    """Run every validator against ``project_root`` and return findings.
+
+    MCP PATH checks run BEFORE :func:`validate_json_configs` so a malformed
+    JSON file is reported as a parse error by the JSON validator rather than
+    silently swallowed by the PATH walker.
+    """
     findings: list[ValidationFinding] = []
     findings.extend(validate_codex_config(project_root))
     findings.extend(validate_codex_agents(project_root))
     findings.extend(validate_skill_frontmatter(project_root))
     findings.extend(validate_instruction_sizes(project_root))
+    findings.extend(validate_mcp_command_paths(project_root))
     findings.extend(validate_json_configs(project_root))
     return findings
 
@@ -439,6 +538,7 @@ __all__ = [
     "validate_codex_config",
     "validate_instruction_sizes",
     "validate_json_configs",
+    "validate_mcp_command_paths",
     "validate_skill_frontmatter",
     "validate_target",
 ]

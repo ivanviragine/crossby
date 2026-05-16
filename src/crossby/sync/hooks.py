@@ -12,12 +12,15 @@ non-destructive merge strategy (dedup by (event, command)):
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 from crossby.models.ai import AIToolID
+from crossby.models.config import HookEntry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import read_json_file, write_json_file
+from crossby.sync.manual_fix import ManualFixNote
 
 _HookAction = Literal["created", "updated", "skipped", "error"]
 
@@ -27,10 +30,32 @@ _HookAction = Literal["created", "updated", "skipped", "error"]
 # ---------------------------------------------------------------------------
 
 _EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
-    AIToolID.CLAUDE: {"pre_tool_use": "PreToolUse"},
-    AIToolID.CURSOR: {"pre_tool_use": "preToolUse"},
-    AIToolID.COPILOT: {"pre_tool_use": "preToolUse"},
-    AIToolID.GEMINI: {"pre_tool_use": "BeforeTool"},
+    AIToolID.CLAUDE: {
+        "pre_tool_use": "PreToolUse",
+        "post_tool_use": "PostToolUse",
+        "session_start": "SessionStart",
+        "user_prompt_submit": "UserPromptSubmit",
+        "stop": "Stop",
+        "notification": "Notification",
+    },
+    AIToolID.CURSOR: {
+        "pre_tool_use": "preToolUse",
+        "stop": "stop",
+    },
+    AIToolID.COPILOT: {
+        "pre_tool_use": "preToolUse",
+    },
+    AIToolID.GEMINI: {
+        "pre_tool_use": "BeforeTool",
+        "post_tool_use": "AfterTool",
+    },
+    AIToolID.CODEX: {
+        "pre_tool_use": "PreToolUse",
+        "post_tool_use": "PostToolUse",
+        "session_start": "SessionStart",
+        "user_prompt_submit": "UserPromptSubmit",
+        "stop": "Stop",
+    },
 }
 
 
@@ -88,8 +113,75 @@ def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared filtering / messaging
+# ---------------------------------------------------------------------------
+
+
+def _filter_supported_hooks(
+    hooks: Sequence[HookEntry],
+    supported: frozenset[str],
+) -> tuple[list[HookEntry], list[ManualFixNote]]:
+    """Split incoming hooks into supported-event entries plus drop notes.
+
+    A note is emitted once per distinct unsupported event so a source file
+    with three ``Notification`` hooks produces one row instead of three.
+    """
+    kept: list[HookEntry] = []
+    notes: list[ManualFixNote] = []
+    seen: set[str] = set()
+    for hook in hooks:
+        if hook.event in supported:
+            kept.append(hook)
+            continue
+        if hook.event in seen:
+            continue
+        seen.add(hook.event)
+        notes.append(
+            ManualFixNote(
+                category=f"hooks.{hook.event}",
+                message=(
+                    f"Source has a `{hook.event}` hook that the target tool "
+                    "does not support; translate or remove it manually."
+                ),
+            )
+        )
+    return kept, notes
+
+
+def _message_with_notes(
+    base: str | None,
+    notes: Sequence[ManualFixNote],
+) -> str | None:
+    """Combine an optional base message with manual-fix note summaries.
+
+    Always includes the literal substring ``manual_fix`` when notes exist so
+    :func:`crossby.sync.report.classify_status` flips the row to
+    ``Check before using``.
+    """
+    if not notes:
+        return base
+    summary = "; ".join(note.category or note.message for note in notes)
+    suffix = f"manual_fix: {summary}"
+    if not base:
+        return suffix
+    return f"{base}; {suffix}"
+
+
+# ---------------------------------------------------------------------------
 # ClaudeHooksWriter
 # ---------------------------------------------------------------------------
+
+
+_CLAUDE_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {
+        "pre_tool_use",
+        "post_tool_use",
+        "session_start",
+        "user_prompt_submit",
+        "stop",
+        "notification",
+    }
+)
 
 
 class ClaudeHooksWriter(AbstractSyncWriter):
@@ -145,13 +237,14 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
+        kept, notes = _filter_supported_hooks(data.hooks, _CLAUDE_SUPPORTED_EVENTS)
         existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
         changed = False
-        for hook in data.hooks:
+        for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -202,6 +295,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 concern=self.concern,
                 action="skipped",
                 file_path=path,
+                message=_message_with_notes(None, notes),
             )
 
         action: _HookAction = "created" if was_new else "updated"
@@ -214,12 +308,18 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
+            message=_message_with_notes(None, notes),
         )
 
 
 # ---------------------------------------------------------------------------
 # CursorHooksWriter
 # ---------------------------------------------------------------------------
+
+
+_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "stop"})
+# Cursor honours per-tool scoping only on its tool-execution events.
+_CURSOR_TOOL_SCOPE_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
 
 
 class CursorHooksWriter(AbstractSyncWriter):
@@ -270,10 +370,12 @@ class CursorHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
+        kept, notes = _filter_supported_hooks(data.hooks, _CURSOR_SUPPORTED_EVENTS)
         existing = file_data or {}
         changed = False
+        dropped_tool_scope_events: set[str] = set()
 
-        for hook in data.hooks:
+        for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = existing.get(event_name, [])
             if not isinstance(event_list, list):
@@ -284,12 +386,21 @@ class CursorHooksWriter(AbstractSyncWriter):
             # is treated as "all tools" — that's how Cursor reads it — so we
             # leave it alone instead of narrowing to the desired subset.
             command = hook.command
-            desired_tools = _translate_tools(hook.tools or [], self.tool_id)
+            allow_tool_scope = hook.event in _CURSOR_TOOL_SCOPE_EVENTS
+            raw_desired = hook.tools or []
+            desired_tools = _translate_tools(raw_desired, self.tool_id) if allow_tool_scope else []
+            if not allow_tool_scope and raw_desired:
+                dropped_tool_scope_events.add(hook.event)
             already_exists = False
             for entry in event_list:
                 if not isinstance(entry, dict) or entry.get("command") != command:
                     continue
                 already_exists = True
+                if not allow_tool_scope:
+                    if "tools" in entry:
+                        del entry["tools"]
+                        changed = True
+                    break
                 raw_tools = entry.get("tools")
                 # Missing key or empty list ⇒ "all tools"; don't narrow it.
                 if raw_tools is None or (isinstance(raw_tools, list) and not raw_tools):
@@ -305,11 +416,23 @@ class CursorHooksWriter(AbstractSyncWriter):
                 new_entry: dict[str, Any] = {
                     "event": event_name,
                     "command": command,
-                    "tools": desired_tools,
                 }
+                if allow_tool_scope:
+                    new_entry["tools"] = desired_tools
                 event_list.append(new_entry)
                 existing[event_name] = event_list
                 changed = True
+
+        for event in sorted(dropped_tool_scope_events):
+            notes.append(
+                ManualFixNote(
+                    category=f"hooks.{event}.tools",
+                    message=(
+                        f"Cursor `{_translate_event(event, self.tool_id)}` hooks have no "
+                        "per-tool scope; the source `tools` filter was dropped on write."
+                    ),
+                )
+            )
 
         if not changed:
             return SyncResult(
@@ -317,6 +440,7 @@ class CursorHooksWriter(AbstractSyncWriter):
                 concern=self.concern,
                 action="skipped",
                 file_path=path,
+                message=_message_with_notes(None, notes),
             )
 
         action: _HookAction = "created" if was_new else "updated"
@@ -328,12 +452,16 @@ class CursorHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
+            message=_message_with_notes(None, notes),
         )
 
 
 # ---------------------------------------------------------------------------
 # CopilotHooksWriter
 # ---------------------------------------------------------------------------
+
+
+_COPILOT_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
 
 
 class CopilotHooksWriter(AbstractSyncWriter):
@@ -387,15 +515,16 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
+        kept, notes = _filter_supported_hooks(data.hooks, _COPILOT_SUPPORTED_EVENTS)
         existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
         changed = False
-        warnings_msgs: list[str] = []
+        seen_tool_filter_drop = False
 
-        for hook in data.hooks:
+        for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -408,10 +537,16 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
             if not already_exists:
-                if hook.tools and hook.tools != ["*"]:
-                    warnings_msgs.append(
-                        "Copilot hooks do not support tool filtering — "
-                        f"'{command}' will apply to all tools."
+                if hook.tools and hook.tools != ["*"] and not seen_tool_filter_drop:
+                    seen_tool_filter_drop = True
+                    notes.append(
+                        ManualFixNote(
+                            category="hooks.tools",
+                            message=(
+                                "Copilot hooks have no per-tool filter; source `tools` "
+                                "scope was dropped and the hook applies to all tools."
+                            ),
+                        )
                     )
                 new_entry: dict[str, Any] = {
                     "type": "command",
@@ -430,7 +565,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
                 concern=self.concern,
                 action="skipped",
                 file_path=path,
-                message="; ".join(warnings_msgs) or None,
+                message=_message_with_notes(None, notes),
             )
 
         action: _HookAction = "created" if was_new else "updated"
@@ -444,13 +579,16 @@ class CopilotHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message="; ".join(warnings_msgs) or None,
+            message=_message_with_notes(None, notes),
         )
 
 
 # ---------------------------------------------------------------------------
 # GeminiHooksWriter
 # ---------------------------------------------------------------------------
+
+
+_GEMINI_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "post_tool_use"})
 
 
 class GeminiHooksWriter(AbstractSyncWriter):
@@ -533,8 +671,9 @@ class GeminiHooksWriter(AbstractSyncWriter):
         else:
             hooks_section = {}
 
+        kept, notes = _filter_supported_hooks(data.hooks, _GEMINI_SUPPORTED_EVENTS)
         changed = False
-        for hook in data.hooks:
+        for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
@@ -585,6 +724,7 @@ class GeminiHooksWriter(AbstractSyncWriter):
                 concern=self.concern,
                 action="skipped",
                 file_path=path,
+                message=_message_with_notes(None, notes),
             )
 
         action: _HookAction = "created" if was_new else "updated"
@@ -597,4 +737,166 @@ class GeminiHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
+            message=_message_with_notes(None, notes),
+        )
+
+
+# ---------------------------------------------------------------------------
+# CodexHooksWriter
+# ---------------------------------------------------------------------------
+
+
+_CODEX_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "post_tool_use", "session_start", "user_prompt_submit", "stop"}
+)
+# Codex honours `matcher` only on these events; for others (UserPromptSubmit,
+# Stop) it is silently ignored, so we drop it on write and surface a note.
+_CODEX_MATCHER_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "post_tool_use", "session_start"}
+)
+_CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
+    category="features.codex_hooks",
+    message=(
+        "Set `[features].codex_hooks = true` in `.codex/config.toml` for "
+        "Codex to actually load these hooks."
+    ),
+)
+
+
+class CodexHooksWriter(AbstractSyncWriter):
+    """Merges hooks into .codex/hooks.json with the Claude-shape JSON layout.
+
+    Codex supports only a subset of Claude's hook events (PreToolUse,
+    PostToolUse, SessionStart, UserPromptSubmit, Stop) and only honours
+    ``matcher`` on the first three. Unsupported events and dropped matchers
+    are reported as manual-fix notes in the ``SyncResult.message`` so the
+    sync report classifies the row as ``Check before using``. The writer
+    also always emits the ``[features].codex_hooks = true`` reminder, since
+    the file is inert without it.
+    """
+
+    tool_id = AIToolID.CODEX
+    concern = SyncConcern.HOOKS
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        if not data.hooks:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="no hooks config",
+            )
+
+        path = project_root / ".codex" / "hooks.json"
+        file_data, error, was_new = read_json_file(path)
+        if error is not None:
+            msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
+            warnings.warn(msg, stacklevel=2)
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                file_path=path,
+                message=msg,
+            )
+
+        kept, notes = _filter_supported_hooks(data.hooks, _CODEX_SUPPORTED_EVENTS)
+        notes.append(_CODEX_FEATURES_FLAG_NOTE)
+
+        existing = file_data or {}
+        hooks_section: dict[str, Any] = existing.get("hooks", {})
+        if not isinstance(hooks_section, dict):
+            hooks_section = {}
+
+        changed = False
+        dropped_matcher_events: set[str] = set()
+        for hook in kept:
+            event_name = _translate_event(hook.event, self.tool_id)
+            event_list: list[Any] = hooks_section.get(event_name, [])
+            if not isinstance(event_list, list):
+                event_list = []
+
+            command = hook.command
+            desired_tools = hook.tools or []
+            allow_matcher = hook.event in _CODEX_MATCHER_EVENTS
+            if not allow_matcher and desired_tools:
+                dropped_matcher_events.add(hook.event)
+
+            already_exists = False
+            for entry in event_list:
+                if not isinstance(entry, dict):
+                    continue
+                inner_hooks = entry.get("hooks")
+                if not isinstance(inner_hooks, list):
+                    continue
+                found_in_entry = any(
+                    (isinstance(inner, dict) and inner.get("command") == command)
+                    or (isinstance(inner, str) and inner == command)
+                    for inner in inner_hooks
+                )
+                if found_in_entry:
+                    already_exists = True
+                    if allow_matcher:
+                        existing_matcher = entry.get("matcher")
+                        widened = _widen_matcher(
+                            existing_matcher if isinstance(existing_matcher, str) else None,
+                            desired_tools,
+                        )
+                        if widened != existing_matcher:
+                            entry["matcher"] = widened
+                            changed = True
+                    elif "matcher" in entry:
+                        # Strip a matcher Codex ignores so the file stays clean.
+                        del entry["matcher"]
+                        changed = True
+                    break
+
+            if not already_exists:
+                new_entry: dict[str, Any] = {
+                    "hooks": [{"type": "command", "command": command}],
+                }
+                if allow_matcher:
+                    new_entry["matcher"] = _tools_to_matcher(desired_tools)
+                event_list.append(new_entry)
+                hooks_section[event_name] = event_list
+                changed = True
+
+        for event in sorted(dropped_matcher_events):
+            notes.append(
+                ManualFixNote(
+                    category=f"hooks.{event}.matcher",
+                    message=(
+                        f"Codex ignores `matcher` on `{_translate_event(event, self.tool_id)}`; "
+                        "tool scope was dropped on write."
+                    ),
+                )
+            )
+
+        if not changed and not kept:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=path,
+                message=_message_with_notes(None, notes),
+            )
+
+        action: _HookAction = "created" if was_new else "updated"
+        if not dry_run:
+            existing["hooks"] = hooks_section
+            write_json_file(path, existing)
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=path,
+            message=_message_with_notes(None, notes),
         )

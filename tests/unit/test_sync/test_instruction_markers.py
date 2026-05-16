@@ -100,3 +100,112 @@ class TestManualFixNotes:
         notes = manual_fix_notes_for_target(text, AIToolID.CURSOR)
         assert len(notes) == 1
         assert "cursor" in notes[0].message
+
+
+# ---------------------------------------------------------------------------
+# Expanded per-tool markers (one positive + one negative case each)
+# ---------------------------------------------------------------------------
+
+
+class TestExpandedCodexMarkers:
+    def test_mcp_servers_table_detected(self) -> None:
+        found = detect_tool_markers("Configure [mcp_servers.foo] in config.toml.")
+        assert AIToolID.CODEX in found
+
+    def test_features_table_detected(self) -> None:
+        found = detect_tool_markers("Set [features].codex_hooks = true.")
+        assert AIToolID.CODEX in found
+
+    def test_model_reasoning_effort_detected(self) -> None:
+        found = detect_tool_markers("Bump model_reasoning_effort to high.")
+        assert AIToolID.CODEX in found
+
+    def test_codex_hooks_flag_detected(self) -> None:
+        found = detect_tool_markers("Make sure codex_hooks is enabled.")
+        assert AIToolID.CODEX in found
+
+    def test_agents_skills_path_detected(self) -> None:
+        found = detect_tool_markers("Drop the skill under .agents/skills/foo/.")
+        assert AIToolID.CODEX in found
+
+    def test_no_codex_marker(self) -> None:
+        found = detect_tool_markers("This file mentions nothing tool-specific.")
+        assert AIToolID.CODEX not in found
+
+
+class TestExpandedCursorMarkers:
+    def test_cursor_agents_path(self) -> None:
+        found = detect_tool_markers("See .cursor/agents/release-lead.md")
+        assert AIToolID.CURSOR in found
+
+    def test_cursor_commands_path(self) -> None:
+        found = detect_tool_markers("See .cursor/commands/fmt.md")
+        assert AIToolID.CURSOR in found
+
+    def test_cursor_skills_path(self) -> None:
+        found = detect_tool_markers("Skills live in .cursor/skills/foo/SKILL.md")
+        assert AIToolID.CURSOR in found
+
+    def test_cursor_cli_json(self) -> None:
+        found = detect_tool_markers("Allow rules live in .cursor/cli.json")
+        assert AIToolID.CURSOR in found
+
+    def test_no_cursor_marker(self) -> None:
+        found = detect_tool_markers("Plain prose with no marker.")
+        assert AIToolID.CURSOR not in found
+
+
+class TestExpandedCopilotMarkers:
+    def test_workspace_participant(self) -> None:
+        found = detect_tool_markers("Ask @workspace for help.")
+        assert AIToolID.COPILOT in found
+
+    def test_github_participant(self) -> None:
+        found = detect_tool_markers("Run @github to look up the issue.")
+        assert AIToolID.COPILOT in found
+
+    def test_github_agents_path(self) -> None:
+        found = detect_tool_markers("Agents go under .github/agents/")
+        assert AIToolID.COPILOT in found
+
+    def test_vscode_mcp_json(self) -> None:
+        found = detect_tool_markers("MCP servers live in .vscode/mcp.json")
+        assert AIToolID.COPILOT in found
+
+    def test_no_copilot_marker(self) -> None:
+        found = detect_tool_markers("Plain prose.")
+        assert AIToolID.COPILOT not in found
+
+
+class TestExpandedGeminiMarkers:
+    def test_gemini_agents_path(self) -> None:
+        found = detect_tool_markers("See .gemini/agents/release-lead.md")
+        assert AIToolID.GEMINI in found
+
+    def test_gemini_commands_path(self) -> None:
+        found = detect_tool_markers("See .gemini/commands/sum.md")
+        assert AIToolID.GEMINI in found
+
+    def test_beforetool_event(self) -> None:
+        found = detect_tool_markers("Use the BeforeTool hook to gate writes.")
+        assert AIToolID.GEMINI in found
+
+    def test_aftertool_event(self) -> None:
+        found = detect_tool_markers("Use the AfterTool hook to audit.")
+        assert AIToolID.GEMINI in found
+
+    def test_no_gemini_marker(self) -> None:
+        found = detect_tool_markers("Plain prose.")
+        assert AIToolID.GEMINI not in found
+
+
+class TestNeutralStillNeutral:
+    """Regression: expanded marker lists must not flag plain documentation."""
+
+    def test_clean_doc_still_clean(self) -> None:
+        content = (
+            "# Project guidelines\n\n"
+            "This codebase is a Python CLI. Follow PEP 8 and write tests.\n"
+            "Use idiomatic patterns; prefer composition over inheritance.\n"
+        )
+        assert detect_tool_markers(content) == {}

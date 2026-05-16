@@ -66,7 +66,10 @@ class TestTranslateEvent:
         assert _translate_event("pre_tool_use", AIToolID.GEMINI) == "BeforeTool"
 
     def test_unknown_event_passthrough(self) -> None:
-        assert _translate_event("post_tool_use", AIToolID.CLAUDE) == "post_tool_use"
+        # `nonexistent_event` is not in any tool's mapping, so it falls through
+        # unchanged. (Note: `post_tool_use` is now a canonical event with a
+        # mapping for every supporting writer.)
+        assert _translate_event("nonexistent_event", AIToolID.CLAUDE) == "nonexistent_event"
 
 
 class TestTranslateTools:
@@ -418,10 +421,16 @@ class TestCopilotHooksWriter:
         assert pre[0]["comment"] == "Plan write guard"
 
     def test_tools_warning_in_message(self, tmp_path: Path) -> None:
-        """CopilotHooksWriter warns when canonical hook specifies tools."""
+        """CopilotHooksWriter warns when canonical hook specifies tools.
+
+        The note is emitted as a manual-fix entry so the sync report flips
+        the row to ``Check before using``; the literal substring
+        ``manual_fix`` plus ``hooks.tools`` survives in the message.
+        """
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.message is not None
-        assert "Copilot hooks do not support tool filtering" in result.message
+        assert "manual_fix" in result.message
+        assert "hooks.tools" in result.message
 
     def test_no_tools_no_warning(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg(BARE_HOOK), tmp_path)
@@ -791,3 +800,147 @@ class TestDiscoverHooksUnion:
         hooks = discover_hooks(tmp_path)
 
         assert len(hooks) == 2
+
+
+# ---------------------------------------------------------------------------
+# CodexHooksWriter
+# ---------------------------------------------------------------------------
+
+
+def _stop_hook() -> HookEntry:
+    return HookEntry(event="stop", command="python3 ./scripts/post.py", tools=[])
+
+
+def _post_tool_use_hook() -> HookEntry:
+    return HookEntry(event="post_tool_use", command="python3 ./scripts/audit.py", tools=["Edit"])
+
+
+def _notification_hook() -> HookEntry:
+    return HookEntry(event="notification", command="python3 ./scripts/notify.py", tools=[])
+
+
+class TestCodexHooksWriter:
+    """CodexHooksWriter — supports a subset of Claude's events."""
+
+    def setup_method(self) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        self.writer = CodexHooksWriter()
+
+    def test_writes_supported_events_to_codex_hooks_json(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg(GUARD_HOOK, _post_tool_use_hook()), tmp_path)
+        assert result.action == "created"
+        path = tmp_path / ".codex" / "hooks.json"
+        data = _read_json(path)
+        assert "PreToolUse" in data["hooks"]
+        assert "PostToolUse" in data["hooks"]
+
+    def test_drops_notification_event(self, tmp_path: Path) -> None:
+        """Codex has no notification event; it should be dropped with a note."""
+        result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
+        # No supported hook → nothing to write, but features-flag note must be present.
+        assert result.message is not None
+        assert "manual_fix" in result.message
+        assert "hooks.notification" in result.message
+
+    def test_user_prompt_submit_drops_matcher(self, tmp_path: Path) -> None:
+        ups_with_tools = HookEntry(
+            event="user_prompt_submit",
+            command="python3 ./scripts/ups.py",
+            tools=["Edit"],
+        )
+        result = self.writer.sync(_cfg(ups_with_tools), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".codex" / "hooks.json")
+        entries = data["hooks"]["UserPromptSubmit"]
+        assert len(entries) == 1
+        assert "matcher" not in entries[0]
+        assert result.message is not None
+        assert "user_prompt_submit.matcher" in result.message
+
+    def test_stop_drops_matcher(self, tmp_path: Path) -> None:
+        stop_with_tools = HookEntry(event="stop", command="python3 stop.py", tools=["Bash"])
+        result = self.writer.sync(_cfg(stop_with_tools), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".codex" / "hooks.json")
+        assert "matcher" not in data["hooks"]["Stop"][0]
+
+    def test_features_flag_note_always_present(self, tmp_path: Path) -> None:
+        """Even a clean sync emits the codex_hooks features-flag reminder."""
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.message is not None
+        assert "features.codex_hooks" in result.message
+
+    def test_merges_with_existing_file(self, tmp_path: Path) -> None:
+        path = tmp_path / ".codex" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        existing = {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Read", "hooks": [{"type": "command", "command": "echo old"}]}
+                ]
+            }
+        }
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        data = _read_json(path)
+        # Old entry preserved; new entry appended.
+        assert len(data["hooks"]["PreToolUse"]) == 2
+
+    def test_supported_event_round_trip_writes_matcher(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".codex" / "hooks.json")
+        entry = data["hooks"]["PreToolUse"][0]
+        assert entry["matcher"] == "Edit|Write"
+
+
+# ---------------------------------------------------------------------------
+# Cross-writer parity — every existing writer drops unsupported events
+# ---------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+class TestCrossWriterUnsupportedEvents:
+    """Every hooks writer flags unsupported events with a manual_fix note."""
+
+    @pytest.mark.parametrize(
+        ("writer_cls", "unsupported_event"),
+        [
+            # Cursor only supports pre_tool_use + stop.
+            ("CursorHooksWriter", "post_tool_use"),
+            ("CursorHooksWriter", "session_start"),
+            ("CursorHooksWriter", "user_prompt_submit"),
+            ("CursorHooksWriter", "notification"),
+            # Copilot only supports pre_tool_use.
+            ("CopilotHooksWriter", "post_tool_use"),
+            ("CopilotHooksWriter", "stop"),
+            ("CopilotHooksWriter", "user_prompt_submit"),
+            # Gemini supports pre_tool_use + post_tool_use.
+            ("GeminiHooksWriter", "stop"),
+            ("GeminiHooksWriter", "notification"),
+            ("GeminiHooksWriter", "user_prompt_submit"),
+            # Codex supports everything except notification.
+            ("CodexHooksWriter", "notification"),
+        ],
+    )
+    def test_writer_drops_unsupported_event(
+        self, tmp_path: Path, writer_cls: str, unsupported_event: str
+    ) -> None:
+        from crossby.sync import hooks as hooks_mod
+
+        writer = getattr(hooks_mod, writer_cls)()
+        hook = HookEntry(event=unsupported_event, command="echo x", tools=[])
+        result = writer.sync(_cfg(hook), tmp_path)
+        # The writer may write nothing (no supported hooks left) OR write
+        # extras like the Codex features-flag note. Either way, the manual_fix
+        # substring must surface so report.classify_status flips the row.
+        assert result.message is not None, (
+            f"{writer_cls} must emit a message when {unsupported_event} is dropped"
+        )
+        assert "manual_fix" in result.message
+        assert f"hooks.{unsupported_event}" in result.message
