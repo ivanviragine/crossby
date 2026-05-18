@@ -36,7 +36,12 @@ def handoff(
         None, "--to", help="Target tool to launch with the handoff as initial prompt."
     ),
     session_id: str | None = typer.Option(
-        None, "--session-id", help="Override the latest-session heuristic."
+        None,
+        "--session-id",
+        help=(
+            "Session ID to use. When omitted, an interactive picker is shown (TTY) "
+            "or the latest session is used (non-TTY)."
+        ),
     ),
     output: Path | None = typer.Option(
         None, "--output", help="Write the handoff file to this path instead of the default."
@@ -74,7 +79,7 @@ def handoff(
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.config.loader import ConfigError, load_config
-    from crossby.handoff.picker import pick_latest_session
+    from crossby.handoff.picker import pick_latest_session, prompt_for_session
     from crossby.handoff.prompts import (
         PRESETS,
         PromptNotFoundError,
@@ -161,7 +166,17 @@ def handoff(
             console.error(f"No {source_id} session with id '{session_id}' in {project_root}.")
             raise typer.Exit(1)
     else:
-        chosen = pick_latest_session(sessions, project_root)
+        from crossby.handoff._utils import safe_resolve
+        from crossby.ui import prompts
+
+        target = project_root.resolve()
+        matching = [
+            s for s in sessions if s.cwd is not None and safe_resolve(s.cwd) == target
+        ]
+        if prompts.is_tty() and len(matching) > 1:
+            chosen = prompt_for_session(sessions, project_root)
+        else:
+            chosen = pick_latest_session(sessions, project_root)
         if chosen is None:
             console.error(
                 f"No {source_id} sessions found for {project_root}. "

@@ -489,3 +489,92 @@ def test_handoff_token_budget_zero_produces_friendly_error(tmp_path: Path) -> No
     assert "must be positive" in result.output
     # No traceback — friendly errors do not bubble exceptions out.
     assert "Traceback" not in result.output
+
+
+# --- interactive session picker e2e -----------------------------------------
+
+_OLDER_SESSION_JSONL = (
+    '{"type":"file-history-snapshot","messageId":"old1","snapshot":{"messageId":"old1",'
+    '"trackedFileBackups":{},"timestamp":"2026-03-20T10:00:00.000Z"},"isSnapshotUpdate":false}\n'
+    '{"parentUuid":null,"type":"user","message":{"role":"user","content":"Old session user."},'
+    '"uuid":"ou1","timestamp":"2026-03-20T10:00:00.100Z","cwd":"/Users/tester/proj",'
+    '"sessionId":"session-older"}\n'
+    '{"parentUuid":"ou1","type":"assistant","message":{"model":"claude-sonnet-4-6","role":'
+    '"assistant","content":[{"type":"text","text":"Old session assistant reply."}]},'
+    '"uuid":"oa1","timestamp":"2026-03-20T10:00:02.000Z","cwd":"/Users/tester/proj",'
+    '"sessionId":"session-older"}\n'
+)
+
+_NEWER_SESSION_JSONL = (
+    '{"type":"file-history-snapshot","messageId":"new1","snapshot":{"messageId":"new1",'
+    '"trackedFileBackups":{},"timestamp":"2026-03-24T18:35:33.582Z"},"isSnapshotUpdate":false}\n'
+    '{"parentUuid":null,"type":"user","message":{"role":"user","content":"Newer session user."},'
+    '"uuid":"nu1","timestamp":"2026-03-24T18:35:33.597Z","cwd":"/Users/tester/proj",'
+    '"sessionId":"session-newer"}\n'
+    '{"parentUuid":"nu1","type":"assistant","message":{"model":"claude-sonnet-4-6","role":'
+    '"assistant","content":[{"type":"text","text":"Newer session assistant reply."}]},'
+    '"uuid":"na1","timestamp":"2026-03-24T18:35:36.002Z","cwd":"/Users/tester/proj",'
+    '"sessionId":"session-newer"}\n'
+)
+
+
+def _stage_two_claude_sessions(fake_home: Path, project_root: Path) -> tuple[str, str]:
+    """Install two sessions (newer + older) into the fake home dir.
+
+    Returns (newer_session_id, older_session_id) — the JSONL file stems.
+    """
+    encoded = str(project_root).replace("/", "-").replace(".", "-")
+    session_dir = fake_home / ".claude" / "projects" / encoded
+    session_dir.mkdir(parents=True)
+    (session_dir / "session_newer.jsonl").write_text(_NEWER_SESSION_JSONL, encoding="utf-8")
+    (session_dir / "session_older.jsonl").write_text(_OLDER_SESSION_JSONL, encoding="utf-8")
+    return "session_newer", "session_older"
+
+
+def test_interactive_picker_selects_older_session_when_index_1_chosen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With >1 sessions and TTY active, picking index 1 hands off the older session."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    newer_id, older_id = _stage_two_claude_sessions(fake_home, project_root.resolve())
+
+    launched: dict[str, object] = {}
+    fake_run = _make_unified_subprocess_run(launched)
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        patch("crossby.ui.prompts.is_tty", return_value=True),
+        patch("crossby.ui.prompts.select", return_value=1),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from",
+                "claude",
+                "--to",
+                "codex",
+                "--path",
+                str(project_root),
+                "--no-launch",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text(encoding="utf-8")
+    # The handoff document must reference the older session (index 1 = 2nd-newest).
+    assert older_id in body
+    assert newer_id not in body
