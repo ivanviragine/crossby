@@ -39,8 +39,8 @@ def handoff(
         None,
         "--session-id",
         help=(
-            "Session ID to use. When omitted, an interactive picker is shown (TTY) "
-            "or the latest session is used (non-TTY)."
+            "Session ID to use. When omitted, an interactive picker is shown on TTY "
+            "when multiple matching sessions exist; otherwise the latest session is used."
         ),
     ),
     output: Path | None = typer.Option(

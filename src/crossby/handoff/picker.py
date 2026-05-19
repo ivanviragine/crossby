@@ -53,7 +53,7 @@ def _format_session_row(ref: SessionRef) -> str:
         if ref.started_at.tzinfo is not None
         else ref.started_at.replace(tzinfo=UTC)
     )
-    iso_utc = aware.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    iso_utc = aware.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     relative = _relative_time(ref.started_at)
     return f"{short_id}  ·  {relative}  ·  {iso_utc}"
 

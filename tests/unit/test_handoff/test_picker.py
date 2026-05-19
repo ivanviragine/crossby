@@ -127,4 +127,4 @@ def test_format_session_row_shape() -> None:
     assert len(parts) == 3
     assert parts[0] == "019cb497"
     assert "2026-05-18" in parts[2]
-    assert "UTC" in parts[2]
+    assert parts[2].endswith("Z")
