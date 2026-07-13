@@ -8,6 +8,7 @@ any differences. Exits 1 if updates are needed.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -28,7 +29,11 @@ _DOCS_URLS: dict[str, str] = {
 }
 
 _SCRAPE_PATTERNS: dict[str, str] = {
-    "claude": r"claude-[a-z]+-[0-9]+[-\.][0-9]+[a-zA-Z0-9._-]*",
+    # Family-anchored, word-boundary pattern. Matches single-number families
+    # (claude-sonnet-5, claude-fable-5) as well as dotted ones (claude-opus-4.8)
+    # while excluding dated snapshots (-20251001), -v1 variants, and docs-page
+    # slug run-ons.
+    "claude": r"claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?(?!\d|-\d|-v\d)\b",
     "gemini": r"gemini-[0-9][.0-9]*-(flash|pro|ultra)[a-z0-9._-]*",
     "codex": r"gpt-[0-9][.0-9]*[a-zA-Z0-9._-]*",
 }
@@ -140,20 +145,13 @@ def _scrape_models(tool: str) -> set[str]:
 
 
 def probe_claude() -> set[str]:
-    """Probe claude CLI, fallback to scrape."""
-    try:
-        res = subprocess.run(["claude", "models"], capture_output=True, text=True, timeout=15)
-        if res.returncode == 0:
-            models = set()
-            for line in res.stdout.splitlines():
-                if line.strip() and not line.startswith(("#", "-")):
-                    parts = line.split()
-                    if parts and parts[0].lower() not in ("model", "name", "id"):
-                        models.add(parts[0])
-            if models:
-                return models
-    except Exception:
-        pass
+    """Discover Claude models from the published docs.
+
+    Claude Code has no non-interactive model-list command: ``claude models`` is
+    interpreted as a *prompt* and returns prose, not a model list, so it cannot
+    be scraped. The published models docs page is therefore the sole source of
+    truth for the Claude catalog.
+    """
     return _scrape_models("claude")
 
 
@@ -455,10 +453,12 @@ def main() -> int:
         "Please apply the following changes to the lists:\n" + "\n".join(diff_summary)
     )
 
-    import os
-
     env = os.environ.copy()
-    env.pop("CLAUDECODE", None)  # Prevent nested session crash if user runs this inside Claude Code
+    # Claude Code exports these sentinels inside an active session. Strip them so
+    # a nested probe subprocess doesn't mis-detect itself as already running
+    # inside Claude Code (which crashes the nested launch).
+    for sentinel in ("CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CODE_ENTRYPOINT"):
+        env.pop(sentinel, None)
 
     expected_schema = {
         "type": "object",
