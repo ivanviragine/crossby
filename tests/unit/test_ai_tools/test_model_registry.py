@@ -22,6 +22,12 @@ class TestModelRegistry:
         for key in MODELS:
             assert not key.startswith("_")
 
+    def test_claude_registry_includes_current_models(self) -> None:
+        """The Claude catalog tracks the current generation (WADE #309 port)."""
+        claude_models = get_models_for_tool("claude")
+        for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-fable-5"):
+            assert model in claude_models
+
 
 class TestRegistryGetModels:
     """Verify that adapters read correctly from the static registry."""

@@ -78,7 +78,11 @@ class GeminiAdapter(AbstractAITool):
             envelope = json.loads(stripped)
         except json.JSONDecodeError:
             return raw
-        if not isinstance(envelope, dict) or "response" not in envelope or "session_id" not in envelope:
+        if (
+            not isinstance(envelope, dict)
+            or "response" not in envelope
+            or "session_id" not in envelope
+        ):
             return raw
         response = envelope.get("response")
         if response is not None:

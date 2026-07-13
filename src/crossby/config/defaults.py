@@ -9,9 +9,9 @@ from crossby.models.config import ComplexityModelMapping
 TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
     AIToolID.CLAUDE: ComplexityModelMapping(
         easy="claude-haiku-4.5",
-        medium="claude-sonnet-4.6",
-        complex="claude-sonnet-4.6",
-        very_complex="claude-opus-4.6",
+        medium="claude-sonnet-5",
+        complex="claude-sonnet-5",
+        very_complex="claude-opus-4.8",
     ),
     AIToolID.COPILOT: ComplexityModelMapping(
         easy="claude-haiku-4.5",
