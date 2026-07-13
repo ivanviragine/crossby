@@ -55,6 +55,20 @@ class TestCrossbyConfig:
         assert config.get_complexity_model("claude", "medium") == "claude-sonnet-4.6"
         assert config.get_complexity_model("unknown", "easy") is None
 
+    def test_get_complexity_effort(self):
+        config = CrossbyConfig(
+            models={
+                "claude": ComplexityModelMapping(
+                    easy_effort="low",
+                    very_complex_effort="high",
+                )
+            }
+        )
+        assert config.get_complexity_effort("claude", "easy") == "low"
+        assert config.get_complexity_effort("claude", "very_complex") == "high"
+        assert config.get_complexity_effort("claude", "medium") is None
+        assert config.get_complexity_effort("unknown", "easy") is None
+
     def test_get_effort_fallback(self):
         config = CrossbyConfig(
             ai=AIConfig(

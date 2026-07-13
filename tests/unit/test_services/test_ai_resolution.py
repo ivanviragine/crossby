@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from crossby.models.ai import EffortLevel
-from crossby.models.config import CrossbyConfig
+from crossby.models.config import (
+    AIConfig,
+    CommandConfig,
+    ComplexityModelMapping,
+    CrossbyConfig,
+)
 from crossby.services.ai_resolution import (
     resolve_effort,
     resolve_model,
@@ -66,6 +71,46 @@ class TestResolveEffortStrict:
         config = CrossbyConfig()
         result = resolve_effort("high", config, tool="claude", strict=True)
         assert result == EffortLevel.HIGH
+
+
+class TestResolveEffortComplexityAndEnvVar:
+    """Per-complexity-tier effort resolution and a configurable effort env var."""
+
+    def test_per_tier_effort_used_when_complexity_given(self) -> None:
+        config = CrossbyConfig(models={"claude": ComplexityModelMapping(complex_effort="high")})
+        result = resolve_effort(None, config, tool="claude", complexity="complex")
+        assert result == EffortLevel.HIGH
+
+    def test_per_tier_skipped_without_complexity(self) -> None:
+        config = CrossbyConfig(models={"claude": ComplexityModelMapping(complex_effort="high")})
+        assert resolve_effort(None, config, tool="claude") is None
+
+    def test_command_effort_takes_precedence_over_per_tier(self) -> None:
+        config = CrossbyConfig(
+            ai=AIConfig(commands={"plan": CommandConfig(effort="low")}),
+            models={"claude": ComplexityModelMapping(complex_effort="high")},
+        )
+        result = resolve_effort(None, config, command="plan", tool="claude", complexity="complex")
+        assert result == EffortLevel.LOW
+
+    def test_global_effort_used_when_no_per_tier(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(effort="medium"))
+        result = resolve_effort(None, config, tool="claude", complexity="easy")
+        assert result == EffortLevel.MEDIUM
+
+    def test_custom_env_var_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CROSSBY_EFFORT", raising=False)
+        monkeypatch.setenv("WADE_EFFORT", "high")
+        result = resolve_effort(None, CrossbyConfig(), tool="claude", env_var="WADE_EFFORT")
+        assert result == EffortLevel.HIGH
+
+    def test_default_env_var_not_read_when_custom_requested(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CROSSBY_EFFORT", "high")
+        monkeypatch.delenv("WADE_EFFORT", raising=False)
+        # Consumer asked only for WADE_EFFORT; CROSSBY_EFFORT must not leak in.
+        assert resolve_effort(None, CrossbyConfig(), tool="claude", env_var="WADE_EFFORT") is None
 
 
 class TestResolveYoloStrict:

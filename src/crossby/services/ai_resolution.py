@@ -114,15 +114,22 @@ def resolve_effort(
     command: str = "plan",
     *,
     tool: str | None = None,
+    complexity: str | None = None,
+    env_var: str = "CROSSBY_EFFORT",
     strict: bool = False,
 ) -> EffortLevel | None:
     """Resolve effort level from args -> env var -> config -> None.
 
     Fallback chain:
       1. Explicit *effort* arg (e.g. ``--effort`` CLI flag)
-      2. ``CROSSBY_EFFORT`` environment variable
+      2. Environment variable named *env_var* (default ``CROSSBY_EFFORT``)
       3. Command-specific config (``ai.<command>.effort``)
-      4. Global config (``ai.effort``)
+      4. Per-complexity-tier config (``models.<tool>.<complexity>_effort``)
+      5. Global config (``ai.effort``)
+
+    *complexity* enables the per-tier lookup (step 4); when omitted, that step
+    is skipped. *env_var* lets a consumer supply its own effort environment
+    variable (e.g. wade passes ``"WADE_EFFORT"``).
 
     When *tool* is provided and the tool does not support effort, a warning
     is logged and ``None`` is returned.
@@ -133,10 +140,21 @@ def resolve_effort(
     resolved: str | None = effort
 
     if not resolved:
-        resolved = os.environ.get("CROSSBY_EFFORT")
+        resolved = os.environ.get(env_var)
 
+    # Command-specific config (ai.<command>.effort)
+    if not resolved and command and command in config.ai.commands:
+        cmd_config = config.ai.commands[command]
+        if cmd_config.effort:
+            resolved = cmd_config.effort
+
+    # Per-complexity-tier config (models.<tool>.<complexity>_effort)
+    if not resolved and tool and complexity:
+        resolved = config.get_complexity_effort(tool, complexity)
+
+    # Global config (ai.effort)
     if not resolved:
-        resolved = config.get_effort(command)
+        resolved = config.ai.effort
 
     if not resolved:
         return None
