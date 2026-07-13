@@ -39,11 +39,11 @@ class TestClaudeScrapePattern:
 
     def test_excludes_dated_snapshots(self) -> None:
         text = "claude-sonnet-4-5-20250929"
-        assert "claude-sonnet-4-5-20250929" not in re.findall(CLAUDE_PATTERN, text)
+        assert re.findall(CLAUDE_PATTERN, text) == []
 
     def test_excludes_v1_variants(self) -> None:
         text = "claude-opus-4-1-v1"
-        assert "claude-opus-4-1-v1" not in re.findall(CLAUDE_PATTERN, text)
+        assert re.findall(CLAUDE_PATTERN, text) == []
 
     def test_excludes_slug_run_ons(self) -> None:
         matches = re.findall(CLAUDE_PATTERN, "claude-sonnet-5-vs-gpt-5")

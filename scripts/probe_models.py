@@ -33,7 +33,7 @@ _SCRAPE_PATTERNS: dict[str, str] = {
     # (claude-sonnet-5, claude-fable-5) as well as dotted ones (claude-opus-4.8)
     # while excluding dated snapshots (-20251001), -v1 variants, and docs-page
     # slug run-ons.
-    "claude": r"claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?\b",
+    "claude": r"claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?(?!\d|-\d|-v\d)\b",
     "gemini": r"gemini-[0-9][.0-9]*-(flash|pro|ultra)[a-z0-9._-]*",
     "codex": r"gpt-[0-9][.0-9]*[a-zA-Z0-9._-]*",
 }
