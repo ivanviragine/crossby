@@ -85,5 +85,13 @@ class CodexAdapter(AbstractAITool):
         return ["-c", f'model_reasoning_effort="{mapped}"']
 
     def yolo_args(self) -> list[str]:
-        """Codex uses ``--yolo``."""
-        return ["--yolo"]
+        """Codex skips approval prompts with ``-a never`` while keeping its
+        sandbox intact.
+
+        ``--yolo`` (an alias for ``--dangerously-bypass-approvals-and-sandbox``)
+        is deliberately avoided: it would also disable the OS sandbox
+        (Seatbelt/Landlock), making Codex's yolo mode far more permissive than
+        the approval-only yolo of every other adapter. Yolo here means "skip
+        approval prompts", not "remove the sandbox".
+        """
+        return ["-a", "never"]
