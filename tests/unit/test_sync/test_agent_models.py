@@ -13,6 +13,7 @@ import textwrap
 
 from crossby.models.ai import AIToolID
 from crossby.sync.agent_models import (
+    CLAUDE_ONLY_SKILL_FIELDS,
     SKILL_SCHEMA_BY_TOOL,
     SkillDefinition,
     SkillSchema,
@@ -141,3 +142,56 @@ class TestTranslateSkillForTarget:
         d = SkillDefinition(name="x", description="y")
         translated = translate_skill_for_target(d, AIToolID.CODEX)
         assert translated.manual_fix_notes == ()
+
+    def test_flags_claude_only_frontmatter_field_for_non_claude_target(self) -> None:
+        # Regression: fields like `model` / `disable-model-invocation` used
+        # to pass through extra_frontmatter into every target's SKILL.md
+        # completely silently, unlike every other lossy edge Crossby
+        # surfaces with a manual-fix note.
+        d = SkillDefinition(
+            name="x", description="y", extra_frontmatter={"model": "claude-opus-4.7"}
+        )
+        translated = translate_skill_for_target(d, AIToolID.CODEX)
+        assert len(translated.manual_fix_notes) == 1
+        assert "`model`" in translated.manual_fix_notes[0].message
+
+    def test_claude_only_frontmatter_field_not_flagged_for_claude_target(self) -> None:
+        d = SkillDefinition(
+            name="x", description="y", extra_frontmatter={"model": "claude-opus-4.7"}
+        )
+        translated = translate_skill_for_target(d, AIToolID.CLAUDE)
+        assert translated.manual_fix_notes == ()
+
+    def test_unknown_non_claude_only_extra_field_not_flagged(self) -> None:
+        # Fields Crossby doesn't recognize as Claude-only pass through
+        # without a note — only the known list in CLAUDE_ONLY_SKILL_FIELDS
+        # triggers a manual-fix.
+        d = SkillDefinition(name="x", description="y", extra_frontmatter={"customField": 42})
+        translated = translate_skill_for_target(d, AIToolID.CODEX)
+        assert translated.manual_fix_notes == ()
+
+    def test_multiple_claude_only_fields_combine_into_one_note(self) -> None:
+        d = SkillDefinition(
+            name="x",
+            description="y",
+            extra_frontmatter={"model": "claude-opus-4.7", "argument-hint": "<file>"},
+        )
+        translated = translate_skill_for_target(d, AIToolID.CODEX)
+        assert len(translated.manual_fix_notes) == 1
+        message = translated.manual_fix_notes[0].message
+        assert "`argument-hint`" in message
+        assert "`model`" in message
+
+    def test_claude_only_skill_fields_constant_matches_known_claude_metadata(self) -> None:
+        assert {
+            "model",
+            "effort",
+            "disable-model-invocation",
+            "user-invocable",
+            "argument-hint",
+            "context",
+            "agent",
+            "hooks",
+            "paths",
+            "shell",
+        } == CLAUDE_ONLY_SKILL_FIELDS

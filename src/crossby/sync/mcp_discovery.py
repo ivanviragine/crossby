@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from crossby.sync.base import SyncConcern, SyncResult
+
 
 @dataclass
 class DiscoveredServer:
@@ -27,6 +29,18 @@ class DiscoveryResult:
 
     servers: dict[str, DiscoveredServer] = field(default_factory=dict)
     conflicts: list[tuple[str, str, str]] = field(default_factory=list)  # (name, tool1, tool2)
+    # (name, source_tool) for every kept server whose raw entry declared an
+    # ``oauth`` block. No ``MCPServerConfig`` field represents OAuth config
+    # (callbackPort, clientId, authServerMetadataUrl, ...), so every writer
+    # silently drops it today; this list lets callers surface that instead
+    # of losing it with no trace. See :func:`report_oauth_configs`.
+    oauth_servers: list[tuple[str, str]] = field(default_factory=list)
+
+
+# Claude's user-scope config file (``claude mcp add --scope user``). Module-level
+# so tests can monkeypatch it, matching the pattern used for Cursor's global
+# config path in sync/permissions.py.
+_GLOBAL_CLAUDE_JSON_PATH = Path.home() / ".claude.json"
 
 
 def _read_json_section(path: Path, key: str) -> dict[str, Any] | None:
@@ -72,11 +86,20 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
     """Scan all tool config files for MCP server definitions.
 
     Scans:
-    - .claude/settings.json → mcpServers
+    - .mcp.json → mcpServers (Claude's project-scope file, e.g. ``claude mcp
+      add --scope project``; this is the canonical location for most real
+      projects, checked into version control)
+    - .claude/settings.json → mcpServers (legacy/manual location)
+    - ~/.claude.json → mcpServers (Claude's user-scope file)
     - .cursor/mcp.json → mcpServers
     - .vscode/mcp.json → servers (Copilot format)
     - .gemini/settings.json → mcpServers
     - .codex/config.toml → mcp_servers
+
+    Claude sources are scanned most-specific-first (project .mcp.json, then
+    .claude/settings.json, then the user-scope ~/.claude.json) so the
+    first-seen-wins merge below prefers the project-scoped definition when
+    the same server name appears in more than one Claude source.
 
     Returns:
         DiscoveryResult with merged servers (first-seen wins) and conflicts.
@@ -84,7 +107,9 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
     result = DiscoveryResult()
 
     sources: list[tuple[str, Path, str]] = [
+        ("claude", project_root / ".mcp.json", "mcpServers"),
         ("claude", project_root / ".claude" / "settings.json", "mcpServers"),
+        ("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers"),
         ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers"),
         ("copilot", project_root / ".vscode" / "mcp.json", "servers"),
         ("gemini", project_root / ".gemini" / "settings.json", "mcpServers"),
@@ -99,11 +124,20 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
                 continue
             normalized = _normalize_entry(entry)
             if name in result.servers:
-                result.conflicts.append((name, result.servers[name].source_tool, tool))
+                existing_tool = result.servers[name].source_tool
+                # Multiple Claude scopes (.mcp.json, .claude/settings.json,
+                # ~/.claude.json) share the "claude" tool label; a name
+                # collision between them is scope precedence, not a
+                # cross-tool conflict, so it's resolved silently
+                # (first-seen — i.e. most specific scope — wins).
+                if existing_tool != tool:
+                    result.conflicts.append((name, existing_tool, tool))
             else:
                 result.servers[name] = DiscoveredServer(
                     name=name, source_tool=tool, data=normalized
                 )
+                if isinstance(entry.get("oauth"), dict):
+                    result.oauth_servers.append((name, tool))
 
     # Codex TOML
     codex_path = project_root / ".codex" / "config.toml"
@@ -135,3 +169,35 @@ def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
     except Exception:
         pass
     return None
+
+
+def report_oauth_configs(project_root: Path) -> list[SyncResult]:
+    """Report MCP servers whose source entry has an ``oauth`` block.
+
+    No writer in :mod:`crossby.sync.mcp` ports OAuth config (``callbackPort``,
+    ``clientId``, ``authServerMetadataUrl``, ...) across tools — it's dropped
+    silently during discovery/normalization today because
+    :class:`crossby.models.config.MCPServerConfig` has no field for it. This
+    turns that silent drop into a manual-fix report row instead, mirroring
+    :func:`crossby.sync.plugins.report_plugins`'s detect-only pattern.
+
+    ``file_path=None`` is deliberate (there is no per-target artifact this
+    row is about) — it's what makes :func:`crossby.sync.report.classify_status`
+    read the row as ``Not Added`` and :func:`crossby.sync.plan.summarize_plan`
+    count it toward the doctor readiness score.
+    """
+    discovery = discover_mcp_servers(project_root)
+    return [
+        SyncResult(
+            tool_id=None,
+            concern=SyncConcern.MCP,
+            action="skipped",
+            file_path=None,
+            message=(
+                f"MCP server `{name}` (from {source_tool}) has an `oauth` block Crossby "
+                "does not port across tools; this is a manual-fix — configure OAuth "
+                "directly in each target tool's native config."
+            ),
+        )
+        for name, source_tool in discovery.oauth_servers
+    ]

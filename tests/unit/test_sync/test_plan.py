@@ -70,6 +70,49 @@ class TestSummarize:
         s = summarize_plan(results)
         assert s.error_count == 1
 
+    def test_unaddressed_mcp_report_counts_as_manual_fix(self) -> None:
+        # Regression: crossby.sync.mcp_discovery.report_oauth_configs() emits
+        # action="skipped", file_path=None rows (same shape as plugins, but
+        # sharing SyncConcern.MCP with regular writer rows, so it can't use
+        # a concern-wide carve-out). file_path=None + a manual-fix hint in
+        # the message must count even though the action isn't a write.
+        results = [
+            SyncResult(
+                tool_id=None,
+                concern=SyncConcern.MCP,
+                action="skipped",
+                file_path=None,
+                message="MCP server `x` has an oauth block; this is a manual-fix.",
+            )
+        ]
+        s = summarize_plan(results)
+        assert s.manual_fix_count == 1
+
+    def test_idempotent_skip_with_real_target_not_counted(self) -> None:
+        # Contrast case: a real "already handled" skip has file_path set to
+        # the target it left alone, even if the message happens to mention
+        # "translated" — it must NOT count as fresh manual-review.
+        results = [_result(action="skipped", message="already translated")]
+        s = summarize_plan(results)
+        assert s.manual_fix_count == 0
+
+    def test_plugin_finding_counts_as_manual_fix(self) -> None:
+        # Regression: crossby.sync.plugins.report_plugins() always emits
+        # action="skipped" rows (never created/updated), so they used to
+        # fall outside _WRITING_ACTIONS and silently drop out of the
+        # manual-fix tally — meaning --doctor could report readiness: high
+        # while an unmigrated Claude plugin sat in the project.
+        results = [
+            _result(
+                action="skipped",
+                concern=SyncConcern.PLUGINS,
+                tool_id=None,
+                message="plugin `team-macros`: needs manual migration",
+            )
+        ]
+        s = summarize_plan(results)
+        assert s.manual_fix_count == 1
+
 
 class TestRenderPlan:
     def test_empty_plan(self) -> None:

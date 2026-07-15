@@ -78,6 +78,44 @@ class TestClassifyStatus:
     def test_error_is_not_added(self) -> None:
         assert classify_status(_r(action="error", message="boom")) == "Not Added"
 
+    def test_mcp_oauth_report_is_not_added(self) -> None:
+        # crossby.sync.mcp_discovery.report_oauth_configs() rows: skipped,
+        # file_path=None — already covered by the general "skipped + no
+        # file_path" rule, unlike the plugins case above. Locked in here
+        # under its own name so a future refactor of either function trips
+        # this test instead of only the general one.
+        assert (
+            classify_status(
+                _r(
+                    action="skipped",
+                    concern=SyncConcern.MCP,
+                    tool_id=None,
+                    file_path=None,
+                    message="MCP server `x` has an oauth block; this is a manual-fix.",
+                )
+            )
+            == "Not Added"
+        )
+
+    def test_plugin_finding_is_not_added_even_with_file_path(self) -> None:
+        # Regression: crossby.sync.plugins.report_plugins() always emits
+        # action="skipped" with file_path set to the *undone* source plugin
+        # path (not a target artifact already in place), which used to
+        # collide with the general "skipped + file_path set == Added"
+        # heuristic and mislabel unmigrated plugins as "Added".
+        assert (
+            classify_status(
+                _r(
+                    action="skipped",
+                    concern=SyncConcern.PLUGINS,
+                    tool_id=None,
+                    file_path=Path(".claude/plugins/team-macros"),
+                    message="plugin `team-macros`: needs manual migration",
+                )
+            )
+            == "Not Added"
+        )
+
 
 class TestRenderMarkdownTable:
     def test_empty_when_no_results(self) -> None:

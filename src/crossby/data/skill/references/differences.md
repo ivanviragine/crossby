@@ -35,6 +35,7 @@ tool's docs and confirm the schemas before trusting these rows.
 | --- | --- | --- | --- |
 | `<tool>/skills/<name>/SKILL.md` | every other tool's skills dir | directory symlink (default) | All tools accept SKILL.md verbatim. |
 | Source has `allowed-tools` and target ≠ Claude | per-tool copy with manual-fix | translate strategy (`--strategy translate`) | `allowed-tools` is Claude-only; non-Claude targets see a manual-fix note explaining the field isn't enforced. |
+| Source has `model`, `effort`, `disable-model-invocation`, `user-invocable`, `argument-hint`, `context`, `agent`, `hooks`, or `paths`/`shell` and target ≠ Claude | per-tool copy with manual-fix | translate strategy | These Claude-only skill fields are kept in frontmatter for reference (no data loss, round-trips back to Claude cleanly) but flagged with one combined manual-fix note since no other tool interprets them. |
 | Source `scripts/`, `references/`, `assets/` subdirs | mirrored into the translated target skill dir | translate strategy | Support files are copied verbatim. |
 | `.claude/commands/<name>.md` (Claude slash command) | `<target-skills-dir>/claude-command-<slug>/SKILL.md` | translate strategy, only when target ≠ Claude | The body is wrapped under a `## Command Template` heading; runtime expansion (`$ARGUMENTS`, `!\`shell\``, `@file`, `{{tpl}}`) becomes a manual-fix note. |
 | `.cursor/commands/<name>.md` (Cursor slash command) | `<target-skills-dir>/cursor-command-<slug>/SKILL.md` | translate strategy, only when target ≠ Cursor | Plain-markdown body wrapped under `## Command Template`; no Cursor runtime expansion is currently detected, so only the generic "this was a slash command" manual-fix note is emitted. |
@@ -44,11 +45,12 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `.claude/settings.json` `mcpServers` | `.cursor/mcp.json`, `.gemini/settings.json`, `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. |
+| `.mcp.json` (project scope), `.claude/settings.json`, `~/.claude.json` (user scope) `mcpServers` | `.cursor/mcp.json`, `.gemini/settings.json`, `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. All three Claude sources are scanned most-specific-first (project `.mcp.json` wins on a name collision), so name collisions between them are resolved silently rather than reported as a conflict. |
 | `headers: {Authorization: "Bearer ${TOKEN}"}` | Codex `bearer_token_env_var = "TOKEN"` | regex rewrite | Only the `Bearer ${VAR}` shape is rewritten; `${VAR:-default}` fallbacks are dropped and the key is reported. |
 | `headers: {X-Foo: "${VAR}"}` | Codex `env_http_headers = {X-Foo = "VAR"}` | regex rewrite | Static headers stay in `http_headers`. |
 | `env: {KEY: "${KEY}"}` (self-reference) | Codex `env_vars = ["KEY"]` | regex rewrite | Other `${VAR}` env values stay literal so source tools can interpolate them. |
 | `enabled: false` / `disabled: true` | dropped from the target | merge | Disabled servers in the source are removed from every target. |
+| `oauth: {...}` (`callbackPort`, `clientId`, `authServerMetadataUrl`, ...) | not written to any target | report-only | No writer ports OAuth config across tools; a `manual-fix` row is reported per server instead of silently dropping it (`Not Added` in the sync report). Configure OAuth manually for each target. |
 
 ## Permissions
 
@@ -116,7 +118,7 @@ the concerns below) aren't wired yet.
 | --- | --- | --- |
 | Claude → Codex | agents | `permissionMode: plan` / `dontAsk` / `bypassPermissions`; `tools` / `disallowedTools` / `skills` (become prompt guidance only) |
 | Claude → Codex | hooks | `Notification`; `matcher` on `UserPromptSubmit` / `Stop`; non-`command` hook types (`prompt`, `agent`, `http`, `async`) |
-| Claude → Codex | mcp | `headers` with `${VAR:-default}` fallbacks; `oauth.clientId` / `authServerMetadataUrl` / `headersHelper`; `type: sse` |
+| Claude → Codex | mcp | `headers` with `${VAR:-default}` fallbacks; `oauth` (whole block — reported as a manual-fix row, not written to any target); `type: sse` |
 | Claude → Cursor | hooks | every event except `pre_tool_use` and `stop`; `tools` filter on `stop` |
 | Claude → Copilot | hooks | every event except `pre_tool_use`; the `tools` filter (Copilot has no per-tool scope) |
 | Claude → Gemini | hooks | every event except `pre_tool_use` and `post_tool_use` (kept as `BeforeTool` / `AfterTool`) |

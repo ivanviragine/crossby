@@ -58,7 +58,26 @@ class PlanSummary:
 
 
 def summarize_plan(results: Sequence[SyncResult]) -> PlanSummary:
-    """Aggregate dry-run sync results into a :class:`PlanSummary`."""
+    """Aggregate dry-run sync results into a :class:`PlanSummary`.
+
+    ``SyncConcern.PLUGINS`` rows always count as manual-review, regardless
+    of action or message content: :func:`crossby.sync.plugins.report_plugins`
+    only ever emits a row when it found a plugin/marketplace Crossby can't
+    migrate, so by construction every such row is undone work. Without this,
+    plugin findings (always ``action="skipped"``) never matched
+    ``_WRITING_ACTIONS`` and silently dropped out of the doctor readiness
+    score.
+
+    Detect-only reporters that share a concern with regular writers (e.g.
+    :func:`crossby.sync.mcp_discovery.report_oauth_configs`, concern
+    ``MCP``) can't use the same concern-wide carve-out — most ``MCP`` rows
+    are normal writes. They're instead recognized by ``file_path is None``
+    plus a manual-fix hint in the message: a *real* idempotent "already
+    handled" skip always has ``file_path`` set to the target it left alone,
+    so ``file_path is None`` here means "this row never had a target to
+    write, it's pure detection" — the same signal
+    :func:`crossby.sync.report.classify_status` uses for ``Not Added``.
+    """
     by_concern: dict[SyncConcern, int] = {}
     by_action: dict[str, int] = {}
     manual_fix: list[SyncResult] = []
@@ -66,10 +85,17 @@ def summarize_plan(results: Sequence[SyncResult]) -> PlanSummary:
     for result in results:
         by_concern[result.concern] = by_concern.get(result.concern, 0) + 1
         by_action[result.action] = by_action.get(result.action, 0) + 1
+        is_plugin_finding = result.concern == SyncConcern.PLUGINS
+        has_manual_fix_hint = bool(
+            result.message and any(hint in result.message.lower() for hint in _MANUAL_FIX_HINTS)
+        )
+        is_unaddressed_report = (
+            result.action == "skipped" and result.file_path is None and has_manual_fix_hint
+        )
         if (
-            result.action in _WRITING_ACTIONS
-            and result.message
-            and any(hint in result.message.lower() for hint in _MANUAL_FIX_HINTS)
+            is_plugin_finding
+            or is_unaddressed_report
+            or (result.action in _WRITING_ACTIONS and has_manual_fix_hint)
         ):
             manual_fix.append(result)
 
