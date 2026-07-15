@@ -251,41 +251,28 @@ Breaking changes: append `!` after the type (e.g. `feat!:`) and add a `BREAKING 
 
 ## Release Process
 
-1. Ensure `./scripts/check-all.sh` passes on `main` (1437+ tests, ruff
-   clean, mypy strict clean).
-2. Bump the version in **both** `pyproject.toml` and
-   `src/crossby/__init__.py` — they must match.
-3. Commit: `chore: release vX.Y.Z`.
-4. Build artifacts:
-   ```bash
-   rm -rf dist/ && uv build
-   ```
-   Produces `dist/crossby-X.Y.Z-py3-none-any.whl` and
-   `dist/crossby-X.Y.Z.tar.gz`.
-5. Smoke-test the wheel in a fresh venv:
-   ```bash
-   python -m venv /tmp/crossby-release-test
-   /tmp/crossby-release-test/bin/pip install dist/crossby-X.Y.Z-*.whl
-   /tmp/crossby-release-test/bin/crossby --version   # must print X.Y.Z
-   /tmp/crossby-release-test/bin/crossby --help
-   ```
-6. Tag and push:
-   ```bash
-   git tag vX.Y.Z
-   git push origin main vX.Y.Z
-   ```
-7. Publish to PyPI. Until trusted publishing lands, use a local token
-   (e.g. via `~/.pypirc` or `UV_PUBLISH_TOKEN`):
-   ```bash
-   UV_PUBLISH_TOKEN=<token> uv publish dist/crossby-X.Y.Z-*.whl dist/crossby-X.Y.Z.tar.gz
-   ```
-8. Verify the upload from a fresh venv:
-   ```bash
-   python -m venv /tmp/crossby-pypi-check
-   /tmp/crossby-pypi-check/bin/pip install --upgrade crossby
-   /tmp/crossby-pypi-check/bin/crossby --version
-   ```
-9. Create the GitHub release pointing at the new tag:
-   ```bash
-   gh release create vX.Y.Z --title "crossby vX.Y.Z" --notes-file <path> --latest
-   ```
+Releasing is automated end-to-end via GitHub Actions — no manual version
+bumps, builds, or `pip`/`twine` commands needed:
+
+1. Merge a PR into `main` whose title follows [Conventional
+   Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, etc.).
+   `pr-title-lint.yml` enforces this at PR time.
+2. `auto-version.yml` detects the bump type from the PR title
+   (`fix`/`docs`/`chore`/… → patch, `feat`/`update` → minor, `!:` or
+   `BREAKING CHANGE` → major), bumps `pyproject.toml` and
+   `src/crossby/__init__.py`, then commits, tags (`vX.Y.Z`), and pushes.
+3. `release.yml` creates a **draft GitHub Release** for the new tag with
+   auto-generated notes.
+4. Review the draft on GitHub and click **Publish Release**.
+5. `publish.yml` builds the wheel/sdist with `uv build` and publishes to
+   PyPI, authenticated via [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
+   (OIDC) — no API tokens stored anywhere. If PyPI ever rejects the publish
+   with `invalid-publisher`, the trusted publisher for `crossby` needs to be
+   (re-)registered on pypi.org under **Publishing** settings, matching
+   `ivanviragine/crossby`, workflow `publish.yml`, environment `pypi`.
+
+To preview a version bump locally without pushing:
+
+```bash
+uv run python scripts/auto_version.py patch --dry-run   # or minor / major
+```
