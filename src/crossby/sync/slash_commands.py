@@ -154,10 +154,7 @@ def command_to_skill(
     name = command_skill_name(command_path, root=root, source_tool=source_tool)
     relative = command_path.relative_to(root).with_suffix("").as_posix()
     display = str(source_tool).title()
-    description = (
-        parsed.description
-        or f"Run the migrated {display} `{relative}` slash command."
-    )
+    description = parsed.description or f"Run the migrated {display} `{relative}` slash command."
 
     body = (
         f"# {name}\n\n"
@@ -204,9 +201,7 @@ def iter_command_skills(
             continue
         root = project_root / rel
         for command_path in discover_commands(project_root, tool):
-            yield command_path, tool, command_to_skill(
-                command_path, root=root, source_tool=tool
-            )
+            yield command_path, tool, command_to_skill(command_path, root=root, source_tool=tool)
 
 
 __all__ = [

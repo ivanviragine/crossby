@@ -103,16 +103,14 @@ class TestSkillName:
         cmd = _make_command(tmp_path, "fmt.md", "", source_tool=AIToolID.CURSOR)
         root = tmp_path / ".cursor" / "commands"
         assert (
-            command_skill_name(cmd, root=root, source_tool=AIToolID.CURSOR)
-            == "cursor-command-fmt"
+            command_skill_name(cmd, root=root, source_tool=AIToolID.CURSOR) == "cursor-command-fmt"
         )
 
     def test_gemini_namespace(self, tmp_path: Path) -> None:
         cmd = _make_command(tmp_path, "sum.md", "", source_tool=AIToolID.GEMINI)
         root = tmp_path / ".gemini" / "commands"
         assert (
-            command_skill_name(cmd, root=root, source_tool=AIToolID.GEMINI)
-            == "gemini-command-sum"
+            command_skill_name(cmd, root=root, source_tool=AIToolID.GEMINI) == "gemini-command-sum"
         )
 
 
@@ -143,18 +141,14 @@ class TestClaudeRuntimeCaveats:
         assert any(n.category == "template-variables" for n in notes)
 
     def test_clean_body_no_notes(self) -> None:
-        assert detect_runtime_caveats(
-            "Plain prose.", source_tool=AIToolID.CLAUDE
-        ) == []
+        assert detect_runtime_caveats("Plain prose.", source_tool=AIToolID.CLAUDE) == []
 
 
 class TestCursorRuntimeCaveats:
     def test_no_patterns_means_clean(self) -> None:
         # Cursor has an empty pattern list; even $ARGUMENTS-shaped text emits
         # no caveats because Cursor doesn't expand it.
-        assert detect_runtime_caveats(
-            "Run with $ARGUMENTS", source_tool=AIToolID.CURSOR
-        ) == []
+        assert detect_runtime_caveats("Run with $ARGUMENTS", source_tool=AIToolID.CURSOR) == []
 
 
 class TestGeminiRuntimeCaveats:

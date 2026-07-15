@@ -308,9 +308,7 @@ class TestMCPCommandPaths:
         )
         findings = validate_mcp_command_paths(tmp_path)
         assert any(
-            f.tool_id == AIToolID.CLAUDE
-            and f.concern == SyncConcern.MCP
-            and f.level == "warning"
+            f.tool_id == AIToolID.CLAUDE and f.concern == SyncConcern.MCP and f.level == "warning"
             for f in findings
         )
 
@@ -320,9 +318,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"fake": {"command": self._absent()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings)
 
     def test_dot_claude_json_warns_when_absent(self, tmp_path: Path) -> None:
         _write_json(
@@ -330,9 +326,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"fake": {"command": self._absent()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings)
 
     def test_cursor_mcp_json_warns_when_absent(self, tmp_path: Path) -> None:
         _write_json(
@@ -340,9 +334,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"fake": {"command": self._absent()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.CURSOR and f.level == "warning" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.CURSOR and f.level == "warning" for f in findings)
 
     def test_vscode_mcp_json_uses_servers_key(self, tmp_path: Path) -> None:
         """Copilot uses `servers`, not `mcpServers` — verify the key dispatch."""
@@ -360,8 +352,7 @@ class TestMCPCommandPaths:
         )
         findings_right_key = validate_mcp_command_paths(tmp_path)
         assert any(
-            f.tool_id == AIToolID.COPILOT and f.level == "warning"
-            for f in findings_right_key
+            f.tool_id == AIToolID.COPILOT and f.level == "warning" for f in findings_right_key
         )
 
     def test_gemini_settings_warns_when_absent(self, tmp_path: Path) -> None:
@@ -370,9 +361,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"fake": {"command": self._absent()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.GEMINI and f.level == "warning" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.GEMINI and f.level == "warning" for f in findings)
 
     def test_ok_when_present(self, tmp_path: Path) -> None:
         _write_json(
@@ -380,9 +369,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"shell": {"command": self._present()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings)
 
     def test_skips_entries_without_command(self, tmp_path: Path) -> None:
         """HTTP/SSE-only entries have no `command`; should be silently skipped."""
@@ -410,6 +397,4 @@ class TestMCPCommandPaths:
             {"mcpServers": {"shell": {"command": "${CROSSBY_TEST_SHELL}"}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings)

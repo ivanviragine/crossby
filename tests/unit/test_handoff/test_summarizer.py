@@ -333,13 +333,15 @@ def test_claude_unwrap_raises_on_is_error() -> None:
     from crossby.ai_tools.claude import ClaudeAdapter
 
     adapter = ClaudeAdapter()
-    error_envelope = json.dumps({
-        "type": "result",
-        "subtype": "error",
-        "is_error": True,
-        "result": "Model refused to respond",
-        "session_id": "test-session",
-    })
+    error_envelope = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error",
+            "is_error": True,
+            "result": "Model refused to respond",
+            "session_id": "test-session",
+        }
+    )
     with pytest.raises(SummarizerParseError, match="Model refused to respond"):
         adapter.unwrap_structured_output(error_envelope)
 
@@ -370,11 +372,13 @@ def test_gemini_unwrap_extracts_response() -> None:
 
     adapter = GeminiAdapter()
     payload_json = json.dumps(_FULL_PAYLOAD)
-    envelope = json.dumps({
-        "session_id": "gemini-session",
-        "response": payload_json,
-        "stats": {"models": {}},
-    })
+    envelope = json.dumps(
+        {
+            "session_id": "gemini-session",
+            "response": payload_json,
+            "stats": {"models": {}},
+        }
+    )
     result = adapter.unwrap_structured_output(envelope)
     assert result == payload_json
 
@@ -425,16 +429,16 @@ def test_summarize_structured_raises_on_claude_is_error() -> None:
     tool = ClaudeAdapter()
     summarizer = HandoffSummarizer(tool, prompt_template="TEST PROMPT")
 
-    error_stdout = json.dumps({
-        "type": "result",
-        "subtype": "error",
-        "is_error": True,
-        "result": "context limit exceeded",
-        "session_id": "test-session",
-    })
-    fake_proc = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout=error_stdout, stderr=""
+    error_stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error",
+            "is_error": True,
+            "result": "context limit exceeded",
+            "session_id": "test-session",
+        }
     )
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout=error_stdout, stderr="")
 
     with (
         patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),

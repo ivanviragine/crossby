@@ -49,9 +49,7 @@ def _format_session_row(ref: SessionRef) -> str:
     """Render one picker row: '<short_id>  ·  <relative>  ·  <iso_utc>'."""
     short_id = ref.session_id[:8] if len(ref.session_id) > 8 else ref.session_id
     aware = (
-        ref.started_at
-        if ref.started_at.tzinfo is not None
-        else ref.started_at.replace(tzinfo=UTC)
+        ref.started_at if ref.started_at.tzinfo is not None else ref.started_at.replace(tzinfo=UTC)
     )
     iso_utc = aware.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     relative = _relative_time(ref.started_at)

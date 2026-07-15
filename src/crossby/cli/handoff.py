@@ -170,9 +170,7 @@ def handoff(
         from crossby.ui import prompts
 
         target = project_root.resolve()
-        matching = [
-            s for s in sessions if s.cwd is not None and safe_resolve(s.cwd) == target
-        ]
+        matching = [s for s in sessions if s.cwd is not None and safe_resolve(s.cwd) == target]
         if prompts.is_tty() and len(matching) > 1:
             chosen = prompt_for_session(sessions, project_root)
         else:
