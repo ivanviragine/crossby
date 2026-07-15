@@ -295,3 +295,69 @@ class TestRunSyncPluginDiscovery:
 
         results = run_sync(SyncData(), tmp_path, installed_tools=[], registry=SyncRegistry())
         assert not [r for r in results if r.concern == SyncConcern.PLUGINS]
+
+
+class TestRunSyncOauthDiscovery:
+    """MCP oauth-config discovery is injected into run_sync after writers,
+    mirroring plugin discovery above."""
+
+    def test_oauth_server_appears_in_results(self, tmp_path: Path) -> None:
+        import json
+
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        mcp_json = tmp_path / ".mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "secure-srv": {
+                            "url": "https://example.com/mcp",
+                            "oauth": {"callbackPort": 3000},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[],
+            registry=SyncRegistry(),
+        )
+
+        mcp_results = [r for r in results if r.concern == SyncConcern.MCP]
+        assert mcp_results
+        assert all(r.action == "skipped" and r.file_path is None for r in mcp_results)
+        assert any("secure-srv" in (r.message or "") for r in mcp_results)
+
+    def test_skipped_when_tool_id_filter_active(self, tmp_path: Path) -> None:
+        import json
+
+        from crossby.models.ai import AIToolID
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"secure-srv": {"url": "x", "oauth": {}}}}),
+            encoding="utf-8",
+        )
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            installed_tools=[AIToolID.CLAUDE],
+            registry=SyncRegistry(),
+        )
+        assert not [r for r in results if r.concern == SyncConcern.MCP]
+
+    def test_no_findings_when_no_oauth_servers(self, tmp_path: Path) -> None:
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
+
+        results = run_sync(SyncData(), tmp_path, installed_tools=[], registry=SyncRegistry())
+        assert not [r for r in results if r.concern == SyncConcern.MCP]

@@ -185,12 +185,39 @@ def render_markdown_skill(definition: SkillDefinition) -> str:
     return rendered
 
 
+# Claude skill-frontmatter fields with Claude-specific runtime meaning
+# (skill-level model pin, invocation control, slash-command-style metadata).
+# None of these have an equivalent on any other supported tool today. They
+# are kept in ``extra_frontmatter`` verbatim — stripping them would be data
+# loss and would break a later translate back to Claude — but without a
+# manual-fix note they passed through into every non-Claude target's
+# SKILL.md silently, unlike every other lossy edge Crossby surfaces.
+CLAUDE_ONLY_SKILL_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "effort",
+        "disable-model-invocation",
+        "user-invocable",
+        "argument-hint",
+        "context",
+        "agent",
+        "hooks",
+        "paths",
+        "shell",
+    }
+)
+
+
 def translate_skill_for_target(definition: SkillDefinition, target: AIToolID) -> SkillDefinition:
     """Annotate a SkillDefinition with manual-fix notes for ``target``.
 
     ``allowed-tools`` is a Claude concept; for any non-Claude target, surface
     it as guidance instead of a permission boundary. Other tools today
     accept the same SKILL.md shape so no field rewriting is needed.
+
+    Other Claude-only fields in :data:`CLAUDE_ONLY_SKILL_FIELDS` (skill-level
+    ``model``, ``disable-model-invocation``, etc.) get a single combined note
+    per skill for the same reason.
     """
     notes: list[ManualFixNote] = []
     if definition.allowed_tools and target != AIToolID.CLAUDE:
@@ -206,6 +233,24 @@ def translate_skill_for_target(definition: SkillDefinition, target: AIToolID) ->
                 ),
             )
         )
+    if target != AIToolID.CLAUDE:
+        claude_only_present = sorted(
+            field_name
+            for field_name in definition.extra_frontmatter
+            if field_name in CLAUDE_ONLY_SKILL_FIELDS
+        )
+        if claude_only_present:
+            notes.append(
+                ManualFixNote(
+                    category="claude-only-frontmatter",
+                    message=(
+                        "Source frontmatter has Claude-specific field(s) ("
+                        + ", ".join(f"`{f}`" for f in claude_only_present)
+                        + f") kept for reference, but {target} does not interpret them. "
+                        "Rewrite or remove if the behavior they imply is needed."
+                    ),
+                )
+            )
     return definition.with_notes(notes)
 
 
@@ -218,6 +263,7 @@ def parse_skill_file(path: Path, *, source_tool: AIToolID) -> SkillDefinition:
 
 
 __all__ = [
+    "CLAUDE_ONLY_SKILL_FIELDS",
     "SKILL_SCHEMA_BY_TOOL",
     "SkillDefinition",
     "SkillSchema",

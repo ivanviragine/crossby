@@ -60,6 +60,12 @@ def classify_status(result: SyncResult) -> str:
     place from a prior run" → ``Added``. This is more robust than
     substring-matching the message, which mis-labelled e.g. ``"no hooks
     config"`` as ``Added``.
+
+    ``SyncConcern.PLUGINS`` rows break that ``file_path`` convention on
+    purpose: :func:`crossby.sync.plugins.report_plugins` always emits
+    ``action="skipped"`` with ``file_path`` set to the *undone* source
+    plugin/marketplace path, not a target artifact already in place. Every
+    plugin row is therefore always "Not Added" regardless of ``file_path``.
     """
     message = (result.message or "").lower()
     if result.action in {"created", "updated"}:
@@ -67,7 +73,7 @@ def classify_status(result: SyncResult) -> str:
             return "Check before using"
         return "Added"
     if result.action == "skipped":
-        if result.file_path is None:
+        if result.concern == SyncConcern.PLUGINS or result.file_path is None:
             return "Not Added"
         return "Added"
     # error

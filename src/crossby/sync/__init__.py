@@ -191,6 +191,14 @@ def run_sync(
 
         results.extend(report_plugins(project_root))
 
+    # MCP oauth-config discovery — same detect-only shape as plugins above:
+    # append manual-fix rows for source MCP servers with an `oauth` block
+    # that no writer ports across tools.
+    if tool_id is None and (concern is None or concern == SyncConcern.MCP):
+        from crossby.sync.mcp_discovery import report_oauth_configs
+
+        results.extend(report_oauth_configs(project_root))
+
     return results
 
 
