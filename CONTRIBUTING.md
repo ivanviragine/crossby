@@ -251,28 +251,67 @@ Breaking changes: append `!` after the type (e.g. `feat!:`) and add a `BREAKING 
 
 ## Release Process
 
-Releasing is automated end-to-end via GitHub Actions — no manual version
-bumps, builds, or `pip`/`twine` commands needed:
+### Every release
 
-1. Merge a PR into `main` whose title follows [Conventional
-   Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, etc.).
-   `pr-title-lint.yml` enforces this at PR time.
-2. `auto-version.yml` detects the bump type from the PR title
-   (`fix`/`docs`/`chore`/… → patch, `feat`/`update` → minor, `!:` or
-   `BREAKING CHANGE` → major), bumps `pyproject.toml` and
-   `src/crossby/__init__.py`, then commits, tags (`vX.Y.Z`), and pushes.
-3. `release.yml` creates a **draft GitHub Release** for the new tag with
+```bash
+uv run python scripts/auto_version.py patch --push   # or minor / major
+```
+
+This bumps `pyproject.toml` and `src/crossby/__init__.py`, commits, tags
+(`vX.Y.Z`), and pushes. From there:
+
+1. `release.yml` creates a **draft GitHub Release** for the new tag with
    auto-generated notes.
-4. Review the draft on GitHub and click **Publish Release**.
-5. `publish.yml` builds the wheel/sdist with `uv build` and publishes to
+2. Review the draft on GitHub and click **Publish Release**.
+3. `publish.yml` builds the wheel/sdist with `uv build` and publishes to
    PyPI, authenticated via [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
    (OIDC) — no API tokens stored anywhere. If PyPI ever rejects the publish
    with `invalid-publisher`, the trusted publisher for `crossby` needs to be
    (re-)registered on pypi.org under **Publishing** settings, matching
    `ivanviragine/crossby`, workflow `publish.yml`, environment `pypi`.
 
-To preview a version bump locally without pushing:
+If you have `./scripts/install-hooks.sh` set up (see below), you rarely need
+to run the bump command manually — pushing a conventional-commit-prefixed
+commit straight to `main` auto-bumps, tags, and pushes for you via a
+`pre-push` hook.
+
+**Merging a PR through GitHub's UI does *not* trigger a release on its own.**
+`auto-version.yml` still bumps/commits/tags on merge, but that push is
+authenticated as `GITHUB_TOKEN`, and GitHub Actions never lets a
+`GITHUB_TOKEN`-authored push trigger other workflows (it's an anti-recursion
+guard) — so `release.yml` never fires and the tag is left without a release.
+If that happens, either re-push the tag yourself (`git push origin vX.Y.Z
+--force` from a checkout with your own credentials) or create the release
+manually: `gh release create vX.Y.Z --draft --generate-notes`.
+
+### Git Hooks
 
 ```bash
-uv run python scripts/auto_version.py patch --dry-run   # or minor / major
+./scripts/install-hooks.sh          # install into .git/hooks/
+./scripts/install-hooks.sh --force  # overwrite existing hooks
 ```
+
+Installs `pre-push` from `scripts/hooks/pre-push`, which detects
+conventional-commit prefixes on pushes to `main`/`master` and runs the
+version-bump step above automatically (skipped if the tip commit is already
+a version bump, to avoid double-bumping). Because the hook pushes the tag
+using your own git identity rather than `GITHUB_TOKEN`, it doesn't hit the
+cascade limitation above — `release.yml` fires normally.
+
+### Manual fallback
+
+`./scripts/release.sh` builds and publishes the current version directly
+from your machine (needs a PyPI API token via `UV_PUBLISH_TOKEN` or
+`~/.pypirc` — Trusted Publishing only works from within GitHub Actions).
+Use it if the CI pipeline is unavailable. `--dry-run` previews without
+publishing.
+
+### Version bump types
+
+```bash
+uv run python scripts/auto_version.py patch   # bug fixes     0.1.0 → 0.1.1
+uv run python scripts/auto_version.py minor   # new features  0.1.0 → 0.2.0
+uv run python scripts/auto_version.py major   # breaking      0.1.0 → 1.0.0
+```
+
+Add `--dry-run` to preview without making changes.
