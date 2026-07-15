@@ -20,15 +20,15 @@ jobs:
           COMMIT_MSG: ${{ github.event.pull_request.title }}
         run: |
           MSG="$COMMIT_MSG"
-          FIRST_LINE=$(echo "$MSG" | head -n 1)
+          FIRST_LINE=$(printf '%s\n' "$MSG" | head -n 1)
 
-          if echo "$MSG" | grep -q 'BREAKING CHANGE'; then
+          if printf '%s\n' "$MSG" | grep -q 'BREAKING CHANGE'; then
             echo "bump=major" >> "$GITHUB_OUTPUT"
-          elif echo "$FIRST_LINE" | grep -qE '^[a-z]+(\(.+\))?!:'; then
+          elif printf '%s\n' "$FIRST_LINE" | grep -qE '^[a-z]+(\(.+\))?!:'; then
             echo "bump=major" >> "$GITHUB_OUTPUT"
-          elif echo "$FIRST_LINE" | grep -qE '^(feat|update)(\(.+\))?:'; then
+          elif printf '%s\n' "$FIRST_LINE" | grep -qE '^(feat|update)(\(.+\))?:'; then
             echo "bump=minor" >> "$GITHUB_OUTPUT"
-          elif echo "$FIRST_LINE" | grep -qE '^(fix|docs|refactor|chore|style|perf|test|ci|build|revert)(\(.+\))?:'; then
+          elif printf '%s\n' "$FIRST_LINE" | grep -qE '^(fix|docs|refactor|chore|style|perf|test|ci|build|revert)(\(.+\))?:'; then
             echo "bump=patch" >> "$GITHUB_OUTPUT"
           else
             echo "bump=" >> "$GITHUB_OUTPUT"
@@ -41,6 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.detect.outputs.bump != ''
         with:
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v3
@@ -69,5 +70,5 @@ jobs:
       - name: Push commit and tag
         if: steps.detect.outputs.bump != ''
         run: |
-          git push
-          git push --tags
+          git push origin HEAD:${{ github.event.pull_request.base.ref }}
+          git push origin --tags
