@@ -147,7 +147,7 @@ toml = [
 
 [[package]]
 name = "crossby"
-version = "0.2.6"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
