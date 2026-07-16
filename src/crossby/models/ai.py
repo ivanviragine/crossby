@@ -46,6 +46,28 @@ class ModelTier(StrEnum):
     POWERFUL = "powerful"
 
 
+class HookOutputDialect(StrEnum):
+    """How a tool expects a hook to signal an allow/deny/context decision.
+
+    Grouped by output *shape*, not by tool — several tools share one shape:
+
+    - ``HOOK_SPECIFIC_OUTPUT`` — a ``{"hookSpecificOutput": {...}}`` object on
+      stdout carrying ``permissionDecision`` / ``additionalContext`` (Claude,
+      Codex).
+    - ``PERMISSION`` — a ``{"permission": "allow"|"deny", ...}`` object on
+      stdout (Cursor).
+    - ``EXIT_CODE`` — no structured stdout contract; the exit code is the only
+      block signal, with a human message on stderr (Gemini, Copilot).
+
+    A deny always also exits non-zero (2) so the block is honored even by tools
+    that ignore stdout — the dialect only governs the stdout payload shape.
+    """
+
+    HOOK_SPECIFIC_OUTPUT = "hook_specific_output"
+    PERMISSION = "permission"
+    EXIT_CODE = "exit_code"
+
+
 class AIModel(BaseModel, frozen=True):
     """A concrete model available through an AI tool.
 
@@ -80,6 +102,29 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_resume: bool = False
     supports_trusted_dirs: bool = False
     supports_plan_mode: bool = False
+
+    # --- Hook lifecycle & runtime I/O (consumed by crossby.hooks.runtime) ---
+    supports_stop_hook: bool = False
+    """Tool fires a Stop / agent-turn-complete hook that can block completion."""
+    supports_session_start_hook: bool = False
+    """Tool fires a SessionStart hook that can inject additional context."""
+    sandboxes_writes: bool = False
+    """Tool hard-confines file writes to its trusted/workspace dirs (e.g. Codex
+    ``--sandbox workspace-write``). When True, an out-of-worktree write is
+    already blocked by the runtime, so a wade worktree-containment guard hook is
+    redundant. Distinct from ``supports_trusted_dirs`` (which only means the tool
+    accepts a trusted-dir flag; Claude adds dirs but still prompts rather than
+    hard-blocks)."""
+    hook_output_dialect: HookOutputDialect = HookOutputDialect.HOOK_SPECIFIC_OUTPUT
+    """Which stdout shape this tool reads a hook decision from."""
+    hook_fail_open_default: bool = False
+    """Tool treats a hook that errors/crashes as *allow* (fail-open) unless the
+    hook config opts into fail-closed. True for Cursor — callers writing a
+    security guard must set the tool's fail-closed flag when this is True."""
+    supports_usage_reporting: bool = False
+    """Tool emits structured token usage in headless output (``--output-format
+    json`` / ``codex exec --json``), so usage need not be scraped from a
+    transcript log. False for Cursor (no usage fields in CLI output)."""
 
 
 class TokenUsage(BaseModel):

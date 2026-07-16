@@ -12,6 +12,7 @@ from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
     AIToolType,
+    HookOutputDialect,
     TokenUsage,
 )
 
@@ -34,6 +35,7 @@ class CopilotAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             supports_plan_mode=True,
+            hook_output_dialect=HookOutputDialect.EXIT_CODE,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
