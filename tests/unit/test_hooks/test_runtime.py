@@ -10,6 +10,7 @@ from crossby.hooks.runtime import (
     HookDecision,
     HookEvent,
     emit_decision,
+    emit_stop_decision,
     parse_event,
 )
 from crossby.models.ai import HookOutputDialect
@@ -72,6 +73,13 @@ class TestParseEventEvents:
     def test_event_override_used_when_absent(self) -> None:
         ev = parse_event(json.dumps({"tool_name": "Write"}), event="stop")
         assert ev.event == "stop"
+
+    @pytest.mark.parametrize("key", ["stop_hook_active", "stopHookActive"])
+    def test_stop_hook_active_parsed(self, key: str) -> None:
+        assert parse_event(json.dumps({key: True})).stop_hook_active is True
+
+    def test_stop_hook_active_defaults_false(self) -> None:
+        assert parse_event(json.dumps({"event": "stop"})).stop_hook_active is False
 
 
 class TestParseEventMalformed:
@@ -162,5 +170,29 @@ class TestEmitDecisionContext:
     @pytest.mark.parametrize("dialect", [HookOutputDialect.PERMISSION, HookOutputDialect.EXIT_CODE])
     def test_context_no_op_for_other_dialects(self, dialect: HookOutputDialect) -> None:
         em = emit_decision(HookDecision.context("hello"), dialect)
+        assert em.exit_code == 0
+        assert em.stdout == ""
+
+
+class TestEmitStopDecision:
+    @pytest.mark.parametrize("dialect", list(HookOutputDialect))
+    def test_no_block_is_silent_exit_zero(self, dialect: HookOutputDialect) -> None:
+        em = emit_stop_decision(False, "unused", dialect)
+        assert em.exit_code == 0
+        assert em.stdout == ""
+
+    def test_block_hook_specific_output(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookOutputDialect.HOOK_SPECIFIC_OUTPUT)
+        assert em.exit_code == 0  # Stop hooks block via the JSON decision, not exit code
+        payload = json.loads(em.stdout)
+        assert payload == {"decision": "block", "reason": "finish first"}
+
+    def test_block_cursor_followup(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookOutputDialect.PERMISSION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"followup_message": "finish first"}
+
+    def test_block_exit_code_dialect_is_noop(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""

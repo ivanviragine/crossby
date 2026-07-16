@@ -34,6 +34,7 @@ __all__ = [
     "HookEmission",
     "HookEvent",
     "emit_decision",
+    "emit_stop_decision",
     "parse_event",
 ]
 
@@ -75,6 +76,9 @@ class HookEvent(BaseModel):
     command: str | None = None
     """Shell command for bash-family tool calls, if present."""
     cwd: str | None = None
+    stop_hook_active: bool = False
+    """True when a Stop hook already fired and blocked this turn — a guard must
+    not block again (single-shot) or the session loops forever."""
     raw: dict[str, Any] = {}
     """The original decoded payload, for policies needing fields not normalized."""
 
@@ -215,6 +219,7 @@ def parse_event(raw_stdin: str, *, event: str | None = None) -> HookEvent:
         file_path=_extract_file_path(data),
         command=_extract_command(data),
         cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+        stop_hook_active=bool(data.get("stop_hook_active") or data.get("stopHookActive")),
         raw=data,
     )
 
@@ -269,3 +274,33 @@ def emit_decision(
         return HookEmission(stdout=json.dumps(perm_payload), stderr=reason, exit_code=2)
     # EXIT_CODE — the exit code is the only block signal; reason goes to stderr.
     return HookEmission(stderr=reason, exit_code=2)
+
+
+def emit_stop_decision(
+    should_block: bool,
+    reason: str,
+    dialect: HookOutputDialect,
+) -> HookEmission:
+    """Serialize a session-*Stop* decision into a tool's continue/block contract.
+
+    Unlike PreToolUse (allow/deny a tool call), a Stop hook keeps the agent
+    working by *blocking* completion and feeding a message back:
+
+    - ``HOOK_SPECIFIC_OUTPUT`` (Claude, Codex): ``{"decision": "block", "reason": …}``
+    - ``PERMISSION`` (Cursor): ``{"followup_message": …}`` (auto-submitted; the
+      tool bounds re-fires via its own ``loop_limit``).
+    - ``EXIT_CODE`` (Gemini, Copilot): no Stop-block channel — no-op allow. These
+      tools also report ``supports_stop_hook = False``, so a Stop hook should not
+      be installed for them in the first place.
+
+    ``should_block=False`` → exit 0 with no output (the turn ends normally).
+    """
+    if not should_block:
+        return HookEmission(exit_code=0)
+    if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
+        stop_payload: dict[str, Any] = {"decision": "block", "reason": reason}
+        return HookEmission(stdout=json.dumps(stop_payload), exit_code=0)
+    if dialect is HookOutputDialect.PERMISSION:
+        followup_payload: dict[str, Any] = {"followup_message": reason}
+        return HookEmission(stdout=json.dumps(followup_payload), exit_code=0)
+    return HookEmission(exit_code=0)

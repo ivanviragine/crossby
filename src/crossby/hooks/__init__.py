@@ -12,6 +12,7 @@ from crossby.hooks.runtime import (
     HookEmission,
     HookEvent,
     emit_decision,
+    emit_stop_decision,
     parse_event,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "HookEmission",
     "HookEvent",
     "emit_decision",
+    "emit_stop_decision",
     "parse_event",
 ]
