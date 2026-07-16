@@ -10,6 +10,7 @@ from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
     AIToolType,
+    HookOutputDialect,
 )
 
 
@@ -34,6 +35,7 @@ class GeminiAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             supports_plan_mode=True,
+            hook_output_dialect=HookOutputDialect.EXIT_CODE,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
