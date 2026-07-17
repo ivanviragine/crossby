@@ -128,11 +128,13 @@ def _extract_file_path(data: dict[str, Any]) -> str | None:
     """Pull the target file path from any supported tool-input dialect.
 
     Handles Claude/Cursor/Gemini (``tool_input``/``toolInput`` dict with
-    ``file_path``/``filePath``/``path``) and Copilot (``toolArgs`` JSON string).
+    ``file_path``/``filePath``/``path``/``notebook_path``) and Copilot
+    (``toolArgs`` JSON string). ``notebook_path`` covers NotebookEdit, whose
+    target lives in a differently-named field.
     """
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(tool_input, dict):
-        for key in ("file_path", "filePath", "path"):
+        for key in ("file_path", "filePath", "path", "notebook_path", "notebookPath"):
             val = tool_input.get(key)
             if isinstance(val, str) and val:
                 return val
@@ -144,7 +146,7 @@ def _extract_file_path(data: dict[str, Any]) -> str | None:
         except (json.JSONDecodeError, ValueError):
             parsed = None
         if isinstance(parsed, dict):
-            for key in ("file", "path", "filePath", "file_path"):
+            for key in ("file", "path", "filePath", "file_path", "notebook_path", "notebookPath"):
                 val = parsed.get(key)
                 if isinstance(val, str) and val:
                     return val
