@@ -137,6 +137,12 @@ class HookEntry(BaseModel):
     command: str
     tools: list[str] = Field(default_factory=list)
     description: str = ""
+    fail_closed: bool = False
+    """Block the action if the hook process itself fails (crash/timeout/invalid
+    output) instead of letting it through. Honored only by tools that expose a
+    per-hook fail-closed switch — today just Cursor (``failClosed: true``), which
+    otherwise defaults to fail-open. Set this on security guards; other writers
+    ignore it (their hooks already fail closed, or offer no such switch)."""
 
 
 class ProfileConfig(BaseModel):

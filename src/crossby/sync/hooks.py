@@ -329,13 +329,16 @@ class CursorHooksWriter(AbstractSyncWriter):
 
         {
           "preToolUse": [
-            {"event": "preToolUse", "command": "...", "tools": ["Edit", "Shell"]}
+            {"event": "preToolUse", "command": "...", "tools": ["Edit", "Shell"],
+             "failClosed": true}
           ]
         }
 
     Merge key: ``entry.command`` within the event's array.
     When the command matches, the ``tools`` list is widened if the desired
-    coverage has grown (upgrade-safe).
+    coverage has grown (upgrade-safe). ``failClosed: true`` is emitted for hooks
+    marked :attr:`HookEntry.fail_closed` — Cursor otherwise treats a hook that
+    crashes/times out as *allow*, silently defeating a security guard.
     """
 
     tool_id = AIToolID.CURSOR
@@ -396,6 +399,12 @@ class CursorHooksWriter(AbstractSyncWriter):
                 if not isinstance(entry, dict) or entry.get("command") != command:
                     continue
                 already_exists = True
+                # Upgrade-safe: add failClosed to a pre-existing entry that lacks
+                # it (e.g. written by an older crossby) so security guards harden
+                # on re-sync. Never silently downgrade an entry to fail-open.
+                if hook.fail_closed and entry.get("failClosed") is not True:
+                    entry["failClosed"] = True
+                    changed = True
                 if not allow_tool_scope:
                     if "tools" in entry:
                         del entry["tools"]
@@ -419,6 +428,10 @@ class CursorHooksWriter(AbstractSyncWriter):
                 }
                 if allow_tool_scope:
                     new_entry["tools"] = desired_tools
+                if hook.fail_closed:
+                    # Cursor defaults hooks to fail-open; a security guard must
+                    # block the action when the hook itself crashes/times out.
+                    new_entry["failClosed"] = True
                 event_list.append(new_entry)
                 existing[event_name] = event_list
                 changed = True

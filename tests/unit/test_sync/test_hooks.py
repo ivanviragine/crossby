@@ -323,6 +323,33 @@ class TestCursorHooksWriter:
         data = _read_json(tmp_path / ".cursor" / "hooks.json")
         assert data["preToolUse"][0]["tools"] == ["Shell"]
 
+    def test_fail_closed_emitted(self, tmp_path: Path) -> None:
+        """A fail-closed hook writes ``failClosed: true`` (Cursor is fail-open by default)."""
+        hook = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"], fail_closed=True)
+        self.writer.sync(_cfg(hook), tmp_path)
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert data["preToolUse"][0]["failClosed"] is True
+
+    def test_fail_closed_absent_by_default(self, tmp_path: Path) -> None:
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert "failClosed" not in data["preToolUse"][0]
+
+    def test_fail_closed_added_to_existing_entry(self, tmp_path: Path) -> None:
+        """Re-syncing a fail-closed hook hardens a pre-existing fail-open entry."""
+        path = tmp_path / ".cursor" / "hooks.json"
+        path.parent.mkdir()
+        existing = {"preToolUse": [{"event": "preToolUse", "command": "guard", "tools": ["Edit"]}]}
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        hook = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"], fail_closed=True)
+        result = self.writer.sync(_cfg(hook), tmp_path)
+
+        assert result.action == "updated"
+        data = _read_json(path)
+        assert len(data["preToolUse"]) == 1  # same command → merged, not duplicated
+        assert data["preToolUse"][0]["failClosed"] is True
+
     def test_merges_into_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".cursor" / "hooks.json"
         path.parent.mkdir()
