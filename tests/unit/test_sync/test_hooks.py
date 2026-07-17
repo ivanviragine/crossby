@@ -838,7 +838,8 @@ class TestCodexHooksWriter:
     def test_drops_notification_event(self, tmp_path: Path) -> None:
         """Codex has no notification event; it should be dropped with a note."""
         result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
-        # No supported hook → nothing to write, but features-flag note must be present.
+        # No supported hook → nothing kept, so no feature flag is written; the
+        # dropped-event note is what surfaces.
         assert result.message is not None
         assert "manual_fix" in result.message
         assert "hooks.notification" in result.message
@@ -865,11 +866,57 @@ class TestCodexHooksWriter:
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         assert "matcher" not in data["hooks"]["Stop"][0]
 
-    def test_features_flag_note_always_present(self, tmp_path: Path) -> None:
-        """Even a clean sync emits the codex_hooks features-flag reminder."""
+    def test_enables_codex_hooks_feature_flag(self, tmp_path: Path) -> None:
+        """A sync writes [features].codex_hooks = true so Codex loads the hooks."""
+        import tomllib
+
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "created"
+        # Flag written automatically → no manual-fix note on the happy path.
+        assert result.message is None or "features.codex_hooks" not in result.message
+
+        config = tmp_path / ".codex" / "config.toml"
+        assert config.is_file()
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["features"]["codex_hooks"] is True
+
+    def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
+        """Enabling the flag merges into an existing config, keeping other keys."""
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('model = "gpt-5"\n\n[features]\nother_flag = true\n', encoding="utf-8")
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["model"] == "gpt-5"
+        assert parsed["features"]["other_flag"] is True
+        assert parsed["features"]["codex_hooks"] is True
+
+    def test_feature_flag_idempotent_when_already_set(self, tmp_path: Path) -> None:
+        """A config that already enables the flag is left untouched."""
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = "[features]\ncodex_hooks = true\n"
+        config.write_text(original, encoding="utf-8")
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        assert config.read_text(encoding="utf-8") == original
+
+    def test_malformed_config_surfaces_manual_fix_note(self, tmp_path: Path) -> None:
+        """If .codex/config.toml is invalid TOML, surface a manual-fix note."""
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("this is = = not valid toml", encoding="utf-8")
+
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.message is not None
         assert "features.codex_hooks" in result.message
+        # The malformed file is left as-is (not clobbered).
+        assert config.read_text(encoding="utf-8") == "this is = = not valid toml"
 
     def test_merges_with_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".codex" / "hooks.json"

@@ -42,6 +42,22 @@ class TestParseEventDialects:
         assert ev.file_path == "/repo/b.py"
         assert ev.tool_name == "edit"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # NotebookEdit puts its target in notebook_path, not file_path.
+            {"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/repo/a.py"}},
+            {"toolName": "NotebookEdit", "toolInput": {"notebookPath": "/repo/a.py"}},
+            {"toolName": "notebookedit", "toolArgs": '{"notebook_path": "/repo/a.py"}'},
+        ],
+    )
+    def test_notebook_path_extracted(self, payload: dict) -> None:
+        # Without this the worktree guard can't see a NotebookEdit target and
+        # would fail open, letting an out-of-worktree notebook write through.
+        ev = parse_event(json.dumps(payload))
+        assert ev.file_path == "/repo/a.py"
+        assert ev.is_write is True
+
     def test_command_extraction(self) -> None:
         ev = parse_event(json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}))
         assert ev.command == "rm -rf /"
