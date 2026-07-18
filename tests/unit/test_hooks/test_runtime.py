@@ -191,9 +191,20 @@ class TestEmitDecisionContext:
 
 
 class TestEmitStopDecision:
-    @pytest.mark.parametrize("dialect", list(HookOutputDialect))
-    def test_no_block_is_silent_exit_zero(self, dialect: HookOutputDialect) -> None:
+    @pytest.mark.parametrize(
+        "dialect",
+        [HookOutputDialect.HOOK_SPECIFIC_OUTPUT, HookOutputDialect.PERMISSION],
+    )
+    def test_no_block_emits_continue_on_stdout_dialects(self, dialect: HookOutputDialect) -> None:
+        # Codex rejects an empty-stdout Stop hook, so a no-op must still emit
+        # valid JSON; {"continue": true} is the universal harmless no-op.
         em = emit_stop_decision(False, "unused", dialect)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"continue": True}
+
+    def test_no_block_is_silent_for_exit_code_dialect(self) -> None:
+        # EXIT_CODE tools ignore stdout entirely, so a no-op stays truly silent.
+        em = emit_stop_decision(False, "unused", HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
 

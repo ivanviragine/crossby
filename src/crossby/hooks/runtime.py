@@ -295,10 +295,18 @@ def emit_stop_decision(
       tools also report ``supports_stop_hook = False``, so a Stop hook should not
       be installed for them in the first place.
 
-    ``should_block=False`` → exit 0 with no output (the turn ends normally).
+    ``should_block=False`` → the turn ends normally, but a *no-op still emits
+    ``{"continue": true}`` on the stdout-reading dialects*: Codex rejects an
+    empty-stdout Stop hook with "invalid stop hook JSON output" (confirmed
+    against a live Codex session), so a silent no-op would surface an error to
+    the user on every clean stop. ``{"continue": true}`` is the universal no-op
+    — a harmless allow for Claude and Cursor too. ``EXIT_CODE`` tools ignore
+    stdout, so they stay truly silent.
     """
     if not should_block:
-        return HookEmission(exit_code=0)
+        if dialect is HookOutputDialect.EXIT_CODE:
+            return HookEmission(exit_code=0)
+        return HookEmission(stdout=json.dumps({"continue": True}), exit_code=0)
     if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
         stop_payload: dict[str, Any] = {"decision": "block", "reason": reason}
         return HookEmission(stdout=json.dumps(stop_payload), exit_code=0)
