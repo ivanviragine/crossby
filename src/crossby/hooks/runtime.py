@@ -27,12 +27,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from crossby.models.ai import HookOutputDialect
+from crossby.models.ai import AIToolID, HookOutputDialect
 
 __all__ = [
     "HookDecision",
     "HookEmission",
     "HookEvent",
+    "detect_tool_id",
     "emit_decision",
     "emit_stop_decision",
     "parse_event",
@@ -124,20 +125,33 @@ class HookEmission(BaseModel):
     exit_code: int = 0
 
 
+_FILE_PATH_KEYS = ("file_path", "filePath", "path", "notebook_path", "notebookPath")
+
+
+def _first_str(source: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """Return the first non-empty string value among ``keys`` in ``source``."""
+    for key in keys:
+        val = source.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
 def _extract_file_path(data: dict[str, Any]) -> str | None:
     """Pull the target file path from any supported tool-input dialect.
 
     Handles Claude/Cursor/Gemini (``tool_input``/``toolInput`` dict with
-    ``file_path``/``filePath``/``path``/``notebook_path``) and Copilot
-    (``toolArgs`` JSON string). ``notebook_path`` covers NotebookEdit, whose
-    target lives in a differently-named field.
+    ``file_path``/``filePath``/``path``/``notebook_path``), Copilot (``toolArgs``
+    JSON string), and Cursor's event hooks that place the path at the payload
+    *top level* (e.g. ``beforeReadFile``, which has no ``tool_input`` wrapper).
+    ``notebook_path`` covers NotebookEdit, whose target lives in a
+    differently-named field.
     """
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(tool_input, dict):
-        for key in ("file_path", "filePath", "path", "notebook_path", "notebookPath"):
-            val = tool_input.get(key)
-            if isinstance(val, str) and val:
-                return val
+        found = _first_str(tool_input, _FILE_PATH_KEYS)
+        if found:
+            return found
 
     tool_args = data.get("toolArgs")
     if isinstance(tool_args, str):
@@ -146,15 +160,21 @@ def _extract_file_path(data: dict[str, Any]) -> str | None:
         except (json.JSONDecodeError, ValueError):
             parsed = None
         if isinstance(parsed, dict):
-            for key in ("file", "path", "filePath", "file_path", "notebook_path", "notebookPath"):
-                val = parsed.get(key)
-                if isinstance(val, str) and val:
-                    return val
-    return None
+            found = _first_str(parsed, ("file", *_FILE_PATH_KEYS))
+            if found:
+                return found
+
+    # Top-level fallback (Cursor's file-scoped event hooks put the path here,
+    # with no tool_input wrapper). Checked last so a wrapped value still wins.
+    return _first_str(data, _FILE_PATH_KEYS)
 
 
 def _extract_command(data: dict[str, Any]) -> str | None:
-    """Pull a shell command from any supported tool-input dialect."""
+    """Pull a shell command from any supported tool-input dialect.
+
+    Includes Cursor's ``beforeShellExecution``, which places ``command`` at the
+    payload *top level* (no ``tool_input`` wrapper, and often no ``tool_name``).
+    """
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(tool_input, dict):
         val = tool_input.get("command")
@@ -170,7 +190,9 @@ def _extract_command(data: dict[str, Any]) -> str | None:
             val = parsed.get("command")
             if isinstance(val, str) and val:
                 return val
-    return None
+    # Top-level fallback (Cursor beforeShellExecution). Checked last.
+    top = data.get("command")
+    return top if isinstance(top, str) and top else None
 
 
 def _extract_tool_name(data: dict[str, Any]) -> str | None:
@@ -190,6 +212,35 @@ def _extract_event(data: dict[str, Any], override: str | None) -> str | None:
         val = data.get(key)
         if isinstance(val, str) and val:
             return _CANONICAL_EVENT_NAMES.get(val.replace("_", "").lower(), val)
+    return None
+
+
+def detect_tool_id(data: dict[str, Any]) -> AIToolID | None:
+    """Best-effort guess of which AI tool sent a hook payload, from its shape.
+
+    A *fallback* for consumers that don't already know the tool — most bake a
+    tool id into the hook command at install time, which is more reliable.
+    Returns ``None`` when no distinguishing field is present, so the caller can
+    apply its own default rather than get a wrong guess.
+
+    Signals, checked in order:
+
+    - **Cursor** — a ``conversation_id`` string, or a non-empty
+      ``workspace_roots`` array (Cursor names both differently from the others).
+    - **Codex** — a top-level ``model`` string (Codex puts it in hook stdin;
+      Claude and Cursor do not).
+    - **Claude** — a ``session_id`` string with none of the above (Codex also
+      sends ``session_id``, so it is only conclusive once Codex is ruled out).
+    """
+    if isinstance(data.get("conversation_id"), str):
+        return AIToolID.CURSOR
+    workspace_roots = data.get("workspace_roots")
+    if isinstance(workspace_roots, list) and workspace_roots:
+        return AIToolID.CURSOR
+    if isinstance(data.get("model"), str):
+        return AIToolID.CODEX
+    if isinstance(data.get("session_id"), str):
+        return AIToolID.CLAUDE
     return None
 
 

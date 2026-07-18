@@ -9,11 +9,12 @@ import pytest
 from crossby.hooks.runtime import (
     HookDecision,
     HookEvent,
+    detect_tool_id,
     emit_decision,
     emit_stop_decision,
     parse_event,
 )
-from crossby.models.ai import HookOutputDialect
+from crossby.models.ai import AIToolID, HookOutputDialect
 
 
 class TestParseEventDialects:
@@ -62,6 +63,21 @@ class TestParseEventDialects:
         ev = parse_event(json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}))
         assert ev.command == "rm -rf /"
         assert ev.file_path is None
+
+    def test_cursor_top_level_command(self) -> None:
+        # Cursor beforeShellExecution puts command at the top level, no wrapper.
+        ev = parse_event(json.dumps({"command": "git push --force"}))
+        assert ev.command == "git push --force"
+
+    def test_cursor_top_level_file_path(self) -> None:
+        # Cursor's file-scoped event hooks put the path at the top level.
+        ev = parse_event(json.dumps({"file_path": "/repo/wt/a.py"}))
+        assert ev.file_path == "/repo/wt/a.py"
+
+    def test_wrapped_value_wins_over_top_level(self) -> None:
+        # A nested tool_input command still takes precedence over a top-level one.
+        payload = {"command": "top", "tool_input": {"command": "wrapped"}}
+        assert parse_event(json.dumps(payload)).command == "wrapped"
 
     def test_cwd_and_raw_preserved(self) -> None:
         payload = {"tool_name": "Write", "tool_input": {"file_path": "/x"}, "cwd": "/repo"}
@@ -223,3 +239,29 @@ class TestEmitStopDecision:
         em = emit_stop_decision(True, "finish first", HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
+
+
+class TestDetectToolId:
+    """Best-effort tool detection from a hook payload's shape."""
+
+    def test_cursor_by_conversation_id(self) -> None:
+        assert detect_tool_id({"conversation_id": "abc"}) is AIToolID.CURSOR
+
+    def test_cursor_by_workspace_roots(self) -> None:
+        assert detect_tool_id({"workspace_roots": ["/repo"]}) is AIToolID.CURSOR
+
+    def test_codex_by_model(self) -> None:
+        # Codex includes `model` in hook stdin; session_id present too but Cursor absent.
+        assert detect_tool_id({"model": "gpt-5", "session_id": "s"}) is AIToolID.CODEX
+
+    def test_claude_by_session_id(self) -> None:
+        assert detect_tool_id({"session_id": "s"}) is AIToolID.CLAUDE
+
+    def test_cursor_wins_over_codex_and_claude(self) -> None:
+        payload = {"conversation_id": "c", "model": "x", "session_id": "s"}
+        assert detect_tool_id(payload) is AIToolID.CURSOR
+
+    def test_unknown_returns_none(self) -> None:
+        # No distinguishing field → None, so the caller applies its own default.
+        assert detect_tool_id({"tool_name": "Write"}) is None
+        assert detect_tool_id({"workspace_roots": []}) is None
