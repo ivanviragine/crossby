@@ -141,6 +141,18 @@ class TestSkillFrontmatter:
         assert AIToolID.CLAUDE in tool_ids
         assert AIToolID.CODEX in tool_ids
 
+    def test_shared_agents_skills_path_not_duplicated(self, tmp_path: Path) -> None:
+        """Codex and Antigravity CLI both map to .agents/skills — a shared
+        skill must be reported once, not once per tool."""
+        self._make_skill(
+            tmp_path / ".agents" / "skills",
+            "shared-skill",
+            "---\nname: shared-skill\ndescription: x\n---\n",
+        )
+        findings = validate_skill_frontmatter(tmp_path)
+        assert len(findings) == 1
+        assert findings[0].tool_id == AIToolID.CODEX
+
 
 class TestInstructionSizes:
     def test_under_threshold_ok(self, tmp_path: Path) -> None:

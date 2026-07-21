@@ -2,7 +2,7 @@
 
 **One config. Every AI tool.**
 
-Stop re-writing your rules, permissions, and agents for every CLI. `crossby` syncs them across Claude, Copilot, Codex, Cursor, OpenCode, VS Code, the Antigravity IDE, and Antigravity CLI — and lets you hand off a live session from one tool to another without losing context.
+Stop re-writing your rules, permissions, and agents for every CLI. `crossby` syncs each surface across the tools that support it — including Claude, Copilot, Codex, Cursor, OpenCode, VS Code, the Antigravity IDE, and Antigravity CLI — and lets you hand off a live session from one tool to another without losing context.
 
 ```
 $ crossby sync --from codex

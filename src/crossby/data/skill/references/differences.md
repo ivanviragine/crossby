@@ -1,6 +1,6 @@
 # crossby cross-tool differences
 
-Per-surface mapping table for the nine tools `crossby` supports today:
+Per-surface mapping table for the eight tools `crossby` supports today:
 Claude, Cursor, Codex, Copilot, OpenCode, VS Code, Antigravity, and
 Antigravity CLI. Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
 `Shell(myapp:*)` ↔ `myapp:*`) are listed once; lossy or unsupported

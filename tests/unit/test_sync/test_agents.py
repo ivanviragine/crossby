@@ -1196,7 +1196,9 @@ class TestAgentsTranslateStrategy:
     manual-fix block when the target is a markdown-shape tool other than Claude.
 
     Codex agents are handled by CodexAgentsWriter (TOML); this covers the
-    Claude → Cursor / Antigravity CLI / Copilot path."""
+    Claude → Cursor / Copilot path. Antigravity CLI has no subagents
+    parser/emitter yet, so it falls back to copy — see
+    TestAntigravityCLITranslateFallback below."""
 
     def _make_claude_agent(
         self,
@@ -1337,6 +1339,28 @@ class TestAgentsTranslateStrategy:
         text_after = (tmp_path / ".cursor" / "agents" / "x.md").read_text(encoding="utf-8")
         assert text_after.count("<!-- crossby:manual-fix:start -->") == 1
         assert "permission_mode" in text_after
+
+
+class TestAntigravityCLITranslateFallback:
+    """Antigravity CLI has no subagents parser/emitter (emitters.emit() only
+    dispatches claude/cursor/copilot/codex), so ``--strategy translate``
+    must fall back to copy instead of raising ``ValueError: unknown target
+    tool``."""
+
+    def test_translate_falls_back_to_copy(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["reviewer.md"])
+        result = AntigravityCLIAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "created"
+        target = tmp_path / ".agents" / "agents" / "reviewer.md"
+        assert target.is_file()
+        assert not target.is_symlink()
+
+    def test_translate_fallback_is_idempotent(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["reviewer.md"])
+        first = AntigravityCLIAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        second = AntigravityCLIAgentsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
 
 
 class TestCopilotAgentsTranslate:

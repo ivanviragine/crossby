@@ -287,16 +287,21 @@ _SKILLS_LOCATIONS: dict[AIToolID, Path] = {
 
 def validate_skill_frontmatter(project_root: Path) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
+    seen: set[Path] = set()
     for tool, rel in _SKILLS_LOCATIONS.items():
         root = project_root / rel
         if not root.is_dir():
             continue
         # Resolve symlinks so we walk the underlying tree once even if multiple
-        # tool dirs symlink to the same canonical source.
+        # tool dirs symlink to the same canonical source (or, as with Codex and
+        # Antigravity CLI, share the same literal .agents/skills path).
         try:
             real_root = root.resolve()
         except OSError:
             real_root = root
+        if real_root in seen:
+            continue
+        seen.add(real_root)
         for skill_md in sorted(real_root.glob("*/SKILL.md")):
             data = _parse_skill_frontmatter(skill_md)
             relative = _relative(skill_md, project_root)

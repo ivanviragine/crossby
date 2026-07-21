@@ -386,6 +386,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 
     concern = SyncConcern.AGENTS
     _target_rel: str  # e.g. ".claude/agents"
+    # False for targets with no subagents parser/emitter (e.g. Antigravity CLI) —
+    # translate falls back to copy instead of reaching emitters.emit() with an
+    # unknown target tool.
+    _supports_translate: bool = True
 
     def sync(
         self,
@@ -468,7 +472,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 # strategy so subsequent runs preserve translate/copy semantics.
                 # Symlink strategy can't symlink-over an existing real dir, so
                 # it falls back to copy (matching pre-marker behavior).
-                if data.agents_strategy == "translate":
+                if data.agents_strategy == "translate" and self._supports_translate:
                     return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
                 return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
             else:
@@ -479,10 +483,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                     shutil.rmtree(str(target_dir))
                     logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(bak))
 
-        if data.agents_strategy == "translate":
+        if data.agents_strategy == "translate" and self._supports_translate:
             return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
 
-        if data.agents_strategy == "copy":
+        if data.agents_strategy in ("copy", "translate"):
             return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
 
         return self._sync_symlink(
@@ -742,10 +746,17 @@ class CursorAgentsWriter(_BaseAgentsWriter):
 
 
 class AntigravityCLIAgentsWriter(_BaseAgentsWriter):
-    """Sync agents → .agents/agents/"""
+    """Sync agents → .agents/agents/.
+
+    No dedicated subagents parser/emitter exists for Antigravity CLI yet
+    (see :func:`_infer_source_tool`), so ``agents_strategy="translate"``
+    falls back to copy instead of reaching ``emitters.emit()`` with an
+    unsupported target tool.
+    """
 
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = ".agents/agents"
+    _supports_translate = False
 
 
 class CodexAgentsWriter(AbstractSyncWriter):

@@ -21,8 +21,8 @@ generated files, and re-run checks without stopping for confirmation.
 If the user has not selected a source tool, infer one from the project
 (prefer Codex's `AGENTS.md`, then `CLAUDE.md`) and proceed. Do not edit
 the source tool's files (`.claude/settings.json`, `.claude/agents/`,
-etc.); manual fixes belong in the **generated** Codex / Cursor / Copilot
-artifacts. Preserve unrelated existing config entries in
+etc.); manual fixes belong in the **generated** Codex / Cursor / Copilot /
+Antigravity CLI artifacts. Preserve unrelated existing config entries in
 target files (e.g. `[mcp_servers]` Crossby didn't write, hand-curated
 hook entries, custom JSON keys) — do not ask about them unless they
 fail validation or directly conflict with the sync.
