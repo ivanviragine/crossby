@@ -17,6 +17,7 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HookOutputDialect,
 )
 
 logger = structlog.get_logger()
@@ -57,6 +58,9 @@ class CursorAdapter(AbstractAITool):
             supports_effort=True,
             supports_yolo=True,
             supports_plan_mode=True,
+            supports_stop_hook=True,
+            hook_output_dialect=HookOutputDialect.PERMISSION,
+            hook_fail_open_default=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:

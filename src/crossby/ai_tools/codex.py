@@ -44,6 +44,10 @@ class CodexAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            supports_stop_hook=True,
+            supports_session_start_hook=True,
+            sandboxes_writes=True,
+            supports_usage_reporting=True,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
