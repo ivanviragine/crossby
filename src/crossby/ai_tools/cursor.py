@@ -59,6 +59,7 @@ class CursorAdapter(AbstractAITool):
             supports_yolo=True,
             supports_plan_mode=True,
             supports_stop_hook=True,
+            supports_user_prompt_submit_hook=True,
             hook_output_dialect=HookOutputDialect.PERMISSION,
             hook_fail_open_default=True,
         )

@@ -52,6 +52,7 @@ class ClaudeAdapter(AbstractAITool):
             supports_plan_mode=True,
             supports_stop_hook=True,
             supports_session_start_hook=True,
+            supports_user_prompt_submit_hook=True,
             supports_usage_reporting=True,
         )
 

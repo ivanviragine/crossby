@@ -40,6 +40,7 @@ _EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
     },
     AIToolID.CURSOR: {
         "pre_tool_use": "preToolUse",
+        "user_prompt_submit": "beforeSubmitPrompt",
         "stop": "stop",
     },
     AIToolID.COPILOT: {
@@ -317,7 +318,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 # ---------------------------------------------------------------------------
 
 
-_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "stop"})
+_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "user_prompt_submit", "stop"}
+)
 # Cursor honours per-tool scoping only on its tool-execution events.
 _CURSOR_TOOL_SCOPE_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
 
