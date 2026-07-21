@@ -329,13 +329,16 @@ class CursorHooksWriter(AbstractSyncWriter):
 
         {
           "preToolUse": [
-            {"event": "preToolUse", "command": "...", "tools": ["Edit", "Shell"]}
+            {"event": "preToolUse", "command": "...", "tools": ["Edit", "Shell"],
+             "failClosed": true}
           ]
         }
 
     Merge key: ``entry.command`` within the event's array.
     When the command matches, the ``tools`` list is widened if the desired
-    coverage has grown (upgrade-safe).
+    coverage has grown (upgrade-safe). ``failClosed: true`` is emitted for hooks
+    marked :attr:`HookEntry.fail_closed` — Cursor otherwise treats a hook that
+    crashes/times out as *allow*, silently defeating a security guard.
     """
 
     tool_id = AIToolID.CURSOR
@@ -396,6 +399,12 @@ class CursorHooksWriter(AbstractSyncWriter):
                 if not isinstance(entry, dict) or entry.get("command") != command:
                     continue
                 already_exists = True
+                # Upgrade-safe: add failClosed to a pre-existing entry that lacks
+                # it (e.g. written by an older crossby) so security guards harden
+                # on re-sync. Never silently downgrade an entry to fail-open.
+                if hook.fail_closed and entry.get("failClosed") is not True:
+                    entry["failClosed"] = True
+                    changed = True
                 if not allow_tool_scope:
                     if "tools" in entry:
                         del entry["tools"]
@@ -419,6 +428,10 @@ class CursorHooksWriter(AbstractSyncWriter):
                 }
                 if allow_tool_scope:
                     new_entry["tools"] = desired_tools
+                if hook.fail_closed:
+                    # Cursor defaults hooks to fail-open; a security guard must
+                    # block the action when the hook itself crashes/times out.
+                    new_entry["failClosed"] = True
                 event_list.append(new_entry)
                 existing[event_name] = event_list
                 changed = True
@@ -754,13 +767,59 @@ _CODEX_SUPPORTED_EVENTS: frozenset[str] = frozenset(
 _CODEX_MATCHER_EVENTS: frozenset[str] = frozenset(
     {"pre_tool_use", "post_tool_use", "session_start"}
 )
+# Fallback note, surfaced ONLY when the flag can't be written automatically
+# (e.g. a pre-existing `.codex/config.toml` is malformed). On the happy path the
+# writer sets the flag itself, so no manual step is reported.
 _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
     category="features.codex_hooks",
     message=(
-        "Set `[features].codex_hooks = true` in `.codex/config.toml` for "
-        "Codex to actually load these hooks."
+        "Could not update `.codex/config.toml` automatically — set "
+        "`[features].codex_hooks = true` there manually so Codex loads these hooks."
     ),
 )
+
+
+def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> ManualFixNote | None:
+    """Enable ``[features].codex_hooks`` in ``.codex/config.toml`` (idempotent).
+
+    Codex ignores ``.codex/hooks.json`` unless this feature flag is set, so the
+    hooks we write are inert without it. Merges the flag into any existing config
+    (preserving other keys/tables) and writes it back.
+
+    Returns ``None`` on success (or when the flag is already set / ``dry_run``);
+    returns :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is malformed
+    TOML and can't be updated automatically, so the caller can surface a
+    manual-fix note instead of silently leaving the hooks inert.
+    """
+    import tomllib
+
+    import tomli_w
+
+    path = project_root / ".codex" / "config.toml"
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (tomllib.TOMLDecodeError, OSError, ValueError):
+            return _CODEX_FEATURES_FLAG_NOTE
+
+    features = existing.get("features")
+    if not isinstance(features, dict):
+        features = {}
+    if features.get("codex_hooks") is True:
+        return None  # already enabled — nothing to do
+
+    if dry_run:
+        return None
+
+    features["codex_hooks"] = True
+    existing["features"] = features
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tomli_w.dumps(existing), encoding="utf-8")
+    except OSError:
+        return _CODEX_FEATURES_FLAG_NOTE
+    return None
 
 
 class CodexHooksWriter(AbstractSyncWriter):
@@ -770,9 +829,10 @@ class CodexHooksWriter(AbstractSyncWriter):
     PostToolUse, SessionStart, UserPromptSubmit, Stop) and only honours
     ``matcher`` on the first three. Unsupported events and dropped matchers
     are reported as manual-fix notes in the ``SyncResult.message`` so the
-    sync report classifies the row as ``Check before using``. The writer
-    also always emits the ``[features].codex_hooks = true`` reminder, since
-    the file is inert without it.
+    sync report classifies the row as ``Check before using``. Because Codex
+    ignores ``hooks.json`` unless ``[features].codex_hooks = true`` is set, the
+    writer also enables that flag in ``.codex/config.toml`` automatically (a
+    manual-fix note is surfaced only if that file can't be written).
     """
 
     tool_id = AIToolID.CODEX
@@ -808,7 +868,6 @@ class CodexHooksWriter(AbstractSyncWriter):
             )
 
         kept, notes = _filter_supported_hooks(data.hooks, _CODEX_SUPPORTED_EVENTS)
-        notes.append(_CODEX_FEATURES_FLAG_NOTE)
 
         existing = file_data or {}
         hooks_section: dict[str, Any] = existing.get("hooks", {})
@@ -887,6 +946,13 @@ class CodexHooksWriter(AbstractSyncWriter):
                 file_path=path,
                 message=_message_with_notes(None, notes),
             )
+
+        # Enable the feature flag so Codex actually loads these hooks. On success
+        # this is silent; if it can't be written a manual-fix note is surfaced.
+        if kept:
+            flag_note = _ensure_codex_hooks_feature_flag(project_root, dry_run=dry_run)
+            if flag_note is not None:
+                notes.append(flag_note)
 
         action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
