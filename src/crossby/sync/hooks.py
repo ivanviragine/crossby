@@ -318,9 +318,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 # ---------------------------------------------------------------------------
 
 
-_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset(
-    {"pre_tool_use", "user_prompt_submit", "stop"}
-)
+_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "user_prompt_submit", "stop"})
 # Cursor honours per-tool scoping only on its tool-execution events.
 _CURSOR_TOOL_SCOPE_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
 
