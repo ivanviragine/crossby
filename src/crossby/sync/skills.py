@@ -533,14 +533,21 @@ class CursorSkillsWriter(_BaseSkillsWriter):
 
 
 class CodexSkillsWriter(_BaseSkillsWriter):
-    """Sync skills → .agents/skills/"""
+    """Sync skills → .agents/skills/.
+
+    Codex and Antigravity CLI intentionally share this directory. Both
+    writers point at the same physical path, so `detect_skills_source()`'s
+    scan order (`config/skills.py:_SCAN_ORDER`) — not the writer — decides
+    which `AIToolID` a shared directory is attributed to when both are
+    installed.
+    """
 
     tool_id = AIToolID.CODEX
     _target_rel = SKILLS_DIR[AIToolID.CODEX]
 
 
 class AntigravityCLISkillsWriter(_BaseSkillsWriter):
-    """Sync skills → .agents/skills/ (shared with Codex)"""
+    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex."""
 
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = SKILLS_DIR[AIToolID.ANTIGRAVITY_CLI]

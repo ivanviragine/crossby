@@ -361,11 +361,20 @@ class CopilotRulesWriter(_BaseRulesWriter):
 
 
 class CodexRulesWriter(_BaseRulesWriter):
+    """Codex and Antigravity CLI intentionally share ``AGENTS.md`` as their
+    target — both tools read the same file by convention, so syncing both
+    is idempotent (whichever writer runs second sees the file already
+    up to date). If the two tools' instruction conventions ever diverge,
+    this shared target becomes a real constraint, not just duplication.
+    """
+
     tool_id = AIToolID.CODEX
     _target_rel = "AGENTS.md"
 
 
 class AntigravityCLIRulesWriter(_BaseRulesWriter):
+    """See :class:`CodexRulesWriter` — shares ``AGENTS.md`` with Codex."""
+
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = "AGENTS.md"
 

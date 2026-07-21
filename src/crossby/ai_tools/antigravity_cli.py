@@ -80,6 +80,10 @@ class AntigravityCLIAdapter(AbstractAITool):
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         """Antigravity CLI persists conversations as opaque per-conversation
         SQLite databases (protobuf-like blob columns) under
-        ``~/.gemini/antigravity-cli/conversations/``, not as parseable text —
-        mirrors the known Gemini-CLI transcript-persistence limitation."""
+        ``~/.gemini/antigravity-cli/conversations/`` — verified locally via
+        ``agy --print`` + inspecting that directory, this is the real
+        install path (Antigravity CLI is a Gemini-family product, hence the
+        ``~/.gemini/`` prefix), not a leftover Gemini-CLI reference. Not
+        parseable text, so this mirrors the known Gemini-CLI
+        transcript-persistence limitation for a different underlying reason."""
         return TokenUsage()
