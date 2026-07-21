@@ -33,11 +33,6 @@ class TestGetInstructionsSource:
         result = get_instructions_source(AIToolID.COPILOT, tmp_path)
         assert result == github_dir / "copilot-instructions.md"
 
-    def test_gemini_source(self, tmp_path: Path) -> None:
-        (tmp_path / "GEMINI.md").write_text("instructions")
-        result = get_instructions_source(AIToolID.GEMINI, tmp_path)
-        assert result == tmp_path / "GEMINI.md"
-
     def test_codex_source(self, tmp_path: Path) -> None:
         (tmp_path / "AGENTS.md").write_text("instructions")
         result = get_instructions_source(AIToolID.CODEX, tmp_path)
@@ -51,6 +46,9 @@ class TestGetInstructionsTarget:
     def test_returns_path_for_supported_tool(self, tmp_path: Path) -> None:
         assert get_instructions_target(AIToolID.CURSOR, tmp_path) == tmp_path / ".cursorrules"
 
+    def test_antigravity_cli_target(self, tmp_path: Path) -> None:
+        assert get_instructions_target(AIToolID.ANTIGRAVITY_CLI, tmp_path) == tmp_path / "AGENTS.md"
+
     def test_returns_none_for_unsupported_tool(self, tmp_path: Path) -> None:
         assert get_instructions_target(AIToolID.VSCODE, tmp_path) is None
         assert get_instructions_target(AIToolID.OPENCODE, tmp_path) is None
@@ -63,8 +61,8 @@ class TestIsInstructionsSupported:
             AIToolID.CLAUDE,
             AIToolID.CURSOR,
             AIToolID.COPILOT,
-            AIToolID.GEMINI,
             AIToolID.CODEX,
+            AIToolID.ANTIGRAVITY_CLI,
         ]
         for tool in supported:
             assert is_instructions_supported(tool) is True

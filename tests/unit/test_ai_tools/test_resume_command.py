@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter
 from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.codex import CodexAdapter
 from crossby.ai_tools.copilot import CopilotAdapter
-from crossby.ai_tools.gemini import GeminiAdapter
 from crossby.ai_tools.opencode import OpenCodeAdapter
 
 
@@ -48,13 +48,13 @@ class TestResumeCommandSupported:
         adapter = OpenCodeAdapter()
         assert adapter.capabilities().supports_resume is True
 
-    def test_gemini_resume_command(self) -> None:
-        adapter = GeminiAdapter()
+    def test_antigravity_cli_resume_command(self) -> None:
+        adapter = AntigravityCLIAdapter()
         cmd = adapter.build_resume_command("sess-1")
-        assert cmd == ["gemini", "--resume", "sess-1"]
+        assert cmd == ["agy", "--conversation", "sess-1"]
 
-    def test_gemini_supports_resume_capability(self) -> None:
-        adapter = GeminiAdapter()
+    def test_antigravity_cli_supports_resume_capability(self) -> None:
+        adapter = AntigravityCLIAdapter()
         assert adapter.capabilities().supports_resume is True
 
 

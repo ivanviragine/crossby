@@ -343,7 +343,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         removed.
 
         When a source tool that has a slash-command primitive (Claude /
-        Cursor / Gemini today) lives in the project and ``self.tool_id`` is
+        Cursor today) lives in the project and ``self.tool_id`` is
         different, each of that tool's commands is wrapped as a single-file
         skill named ``<source>-command-<slug>`` so the prompt body survives
         the migration. See :mod:`crossby.sync.slash_commands` for the
@@ -539,11 +539,11 @@ class CodexSkillsWriter(_BaseSkillsWriter):
     _target_rel = SKILLS_DIR[AIToolID.CODEX]
 
 
-class GeminiSkillsWriter(_BaseSkillsWriter):
-    """Sync skills → .gemini/skills/"""
+class AntigravityCLISkillsWriter(_BaseSkillsWriter):
+    """Sync skills → .agents/skills/ (shared with Codex)"""
 
-    tool_id = AIToolID.GEMINI
-    _target_rel = SKILLS_DIR[AIToolID.GEMINI]
+    tool_id = AIToolID.ANTIGRAVITY_CLI
+    _target_rel = SKILLS_DIR[AIToolID.ANTIGRAVITY_CLI]
 
 
 class CopilotSkillsWriter(_BaseSkillsWriter):

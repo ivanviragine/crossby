@@ -250,50 +250,6 @@ class TestCopilotExtraction:
 
 
 # ---------------------------------------------------------------------------
-# Gemini table extraction
-# ---------------------------------------------------------------------------
-
-
-class TestGeminiExtraction:
-    def test_single_model(self) -> None:
-        text = "gemini-2.0-flash 12 45234 12345 8901"
-        usage = extract_token_usage_from_text(text)
-        assert usage.input_tokens == 45_234
-        assert usage.cached_tokens == 12_345
-        assert usage.output_tokens == 8_901
-
-    def test_multi_model(self) -> None:
-        text = "gemini-2.0-flash 12 45234 12345 8901\ngemini-2.5-pro 3 15000 5000 3000\n"
-        usage = extract_token_usage_from_text(text)
-        assert usage.input_tokens == 60_234
-        assert usage.output_tokens == 11_901
-        assert usage.cached_tokens == 17_345
-        assert len(usage.model_breakdown) == 2
-        assert usage.model_breakdown[0].model == "gemini-2.0-flash"
-        assert usage.model_breakdown[1].model == "gemini-2.5-pro"
-
-    def test_model_breakdown_detail(self) -> None:
-        text = "gemini-2.0-flash 12 45234 12345 8901"
-        breakdowns = extract_model_breakdown_from_text(text)
-        assert len(breakdowns) == 1
-        assert breakdowns[0].model == "gemini-2.0-flash"
-        assert breakdowns[0].input_tokens == 45_234
-        assert breakdowns[0].cached_tokens == 12_345
-        assert breakdowns[0].output_tokens == 8_901
-
-    def test_fixture_file(self) -> None:
-        """Real Gemini CLI transcript with ANSI escape codes and leading whitespace."""
-        usage = parse_transcript_common(FIXTURES / "gemini_session.txt")
-        assert usage.input_tokens == 14_928
-        assert usage.output_tokens == 141
-        assert usage.cached_tokens == 5_848
-        assert usage.total_tokens == 20_917
-        assert len(usage.model_breakdown) == 2
-        assert usage.model_breakdown[0].model == "gemini-2.5-flash-lite"
-        assert usage.model_breakdown[1].model == "gemini-3-flash-preview"
-
-
-# ---------------------------------------------------------------------------
 # Codex extraction
 # ---------------------------------------------------------------------------
 
@@ -362,18 +318,6 @@ class TestGenericExtraction:
 
 
 class TestCascadingPriority:
-    def test_gemini_takes_priority(self) -> None:
-        """Gemini table format should win over generic token mentions."""
-        text = (
-            "I used about 1000 tokens earlier.\n"
-            "gemini-2.0-flash 5 2000 500 1000\n"
-            "Total tokens: 99999\n"  # Should be ignored
-        )
-        usage = extract_token_usage_from_text(text)
-        # Gemini table values should win
-        assert usage.input_tokens == 2_000
-        assert usage.output_tokens == 1_000
-
     def test_copilot_over_generic(self) -> None:
         """Copilot format should win over generic fallback."""
         text = (
@@ -455,15 +399,6 @@ class TestReadTranscriptExcerpt:
 
 
 class TestModelBreakdown:
-    def test_gemini_breakdown(self) -> None:
-        text = "gemini-2.0-flash 12 45234 12345 8901\ngemini-2.5-pro 3 15000 5000 3000\n"
-        breakdowns = extract_model_breakdown_from_text(text)
-        assert len(breakdowns) == 2
-        assert breakdowns[0].model == "gemini-2.0-flash"
-        assert breakdowns[0].input_tokens == 45_234
-        assert breakdowns[1].model == "gemini-2.5-pro"
-        assert breakdowns[1].input_tokens == 15_000
-
     def test_copilot_breakdown(self) -> None:
         text = (
             "gpt-4o 736.6k in, 8.8k out, 625.5k cached (Est. 2 Premium requests)\n"
@@ -536,11 +471,6 @@ class TestSessionIdExtraction:
         usage = extract_token_usage_from_text(text)
         assert usage.session_id == "019ca0aa-ab7c-78a0-b2df-1384ecc0a6aa"
 
-    def test_gemini_session_id(self) -> None:
-        text = "Session ID: 08a1bd70-9f2e-4de0-b3e0-74a1c5dc1920\n"
-        usage = extract_token_usage_from_text(text)
-        assert usage.session_id == "08a1bd70-9f2e-4de0-b3e0-74a1c5dc1920"
-
     def test_opencode_session_id(self) -> None:
         text = "Continue  opencode -s ses_34724f14cffeSB5NIFGTLdA0jN\n"
         usage = extract_token_usage_from_text(text)
@@ -576,7 +506,3 @@ class TestSessionIdExtraction:
     def test_codex_fixture(self) -> None:
         usage = parse_transcript_common(FIXTURES / "codex_session.txt")
         assert usage.session_id == "019ca0aa-ab7c-78a0-b2df-1384ecc0a6aa"
-
-    def test_gemini_fixture(self) -> None:
-        usage = parse_transcript_common(FIXTURES / "gemini_session.txt")
-        assert usage.session_id == "08a1bd70-9f2e-4de0-b3e0-74a1c5dc1920"

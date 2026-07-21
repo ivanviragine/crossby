@@ -10,11 +10,11 @@ from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
 from crossby.sync.rules import (
     MANAGED_HEADER,
     TOOL_TARGETS,
+    AntigravityCLIRulesWriter,
     ClaudeRulesWriter,
     CodexRulesWriter,
     CopilotRulesWriter,
     CursorRulesWriter,
-    GeminiRulesWriter,
     detect_existing_rules,
     suggest_source,
 )
@@ -51,7 +51,7 @@ class TestSymlinkCreation:
             ClaudeRulesWriter,
             CursorRulesWriter,
             CopilotRulesWriter,
-            GeminiRulesWriter,
+            AntigravityCLIRulesWriter,
             CodexRulesWriter,
         ):
             registry.register(writer_cls())
@@ -60,7 +60,7 @@ class TestSymlinkCreation:
             AIToolID.CLAUDE,
             AIToolID.CURSOR,
             AIToolID.COPILOT,
-            AIToolID.GEMINI,
+            AIToolID.ANTIGRAVITY_CLI,
             AIToolID.CODEX,
         ]
         results = run_sync(
@@ -71,15 +71,15 @@ class TestSymlinkCreation:
             registry=registry,
         )
 
-        # Codex target (AGENTS.md) should be skipped (same resolved path)
+        # Codex and Antigravity CLI both target AGENTS.md (same as source) —
+        # both should be skipped (same resolved path).
         # Filter out gitignore result (tool_id=None)
         created = [r for r in results if r.action == "created" and r.tool_id is not None]
-        assert len(created) == len(TOOL_TARGETS) - 1  # minus codex (same path)
+        assert len(created) == len(TOOL_TARGETS) - 2  # minus codex + antigravity-cli (same path)
 
         assert (project / "CLAUDE.md").is_symlink()
         assert (project / ".cursorrules").is_symlink()
         assert (project / ".github" / "copilot-instructions.md").is_symlink()
-        assert (project / "GEMINI.md").is_symlink()
 
     def test_symlinks_are_relative(self, project: Path, data: SyncData):
         ClaudeRulesWriter().sync(data, project)
@@ -214,7 +214,7 @@ class TestToolFilter:
             ClaudeRulesWriter,
             CursorRulesWriter,
             CopilotRulesWriter,
-            GeminiRulesWriter,
+            AntigravityCLIRulesWriter,
             CodexRulesWriter,
         ):
             registry.register(writer_cls())
@@ -237,11 +237,12 @@ class TestDetectExisting:
 
     def test_detect_multiple(self, project: Path):
         (project / "CLAUDE.md").write_text("rules")
-        (project / "GEMINI.md").write_text("rules")
         found = detect_existing_rules(project)
         assert "claude" in found
-        assert "gemini" in found
         assert "codex" in found
+        # AGENTS.md (from the `project` fixture) is shared by codex and
+        # antigravity-cli — both should be detected against the same file.
+        assert "antigravity-cli" in found
 
     def test_detect_empty(self, tmp_path: Path):
         found = detect_existing_rules(tmp_path)
@@ -372,14 +373,15 @@ class TestForeignMarkerForceCopy:
     should switch from symlink to copy and embed a manual-fix block.
     """
 
-    def test_claude_only_content_forces_copy_to_gemini(self, tmp_path: Path):
-        # CLAUDE.md mentions ExitPlanMode → not neutral for a Gemini target.
+    def test_claude_only_content_forces_copy_to_antigravity_cli(self, tmp_path: Path):
+        # CLAUDE.md mentions ExitPlanMode → not neutral for an Antigravity
+        # CLI target.
         (tmp_path / "CLAUDE.md").write_text("# Rules\nUse ExitPlanMode when planning is done.\n")
         data = _make_data(source="CLAUDE.md", strategy="symlink")
 
-        result = GeminiRulesWriter().sync(data, tmp_path)
+        result = AntigravityCLIRulesWriter().sync(data, tmp_path)
 
-        target = tmp_path / "GEMINI.md"
+        target = tmp_path / "AGENTS.md"
         assert result.action == "created"
         assert target.is_file()
         assert not target.is_symlink()
@@ -395,9 +397,9 @@ class TestForeignMarkerForceCopy:
         (tmp_path / "CLAUDE.md").write_text("# Rules\nBe helpful.\n")
         data = _make_data(source="CLAUDE.md", strategy="symlink")
 
-        result = GeminiRulesWriter().sync(data, tmp_path)
+        result = AntigravityCLIRulesWriter().sync(data, tmp_path)
 
-        target = tmp_path / "GEMINI.md"
+        target = tmp_path / "AGENTS.md"
         assert result.action == "created"
         assert target.is_symlink()
         assert "<!-- crossby:manual-fix" not in target.read_text()
@@ -422,8 +424,8 @@ class TestForeignMarkerForceCopy:
         (tmp_path / "CLAUDE.md").write_text("# Rules\nUse ExitPlanMode when planning is done.\n")
         data = _make_data(source="CLAUDE.md", strategy="symlink")
 
-        first = GeminiRulesWriter().sync(data, tmp_path)
-        second = GeminiRulesWriter().sync(data, tmp_path)
+        first = AntigravityCLIRulesWriter().sync(data, tmp_path)
+        second = AntigravityCLIRulesWriter().sync(data, tmp_path)
         assert first.action == "created"
         assert second.action == "skipped"
         assert second.message == "already linked"
@@ -432,13 +434,13 @@ class TestForeignMarkerForceCopy:
         (tmp_path / "CLAUDE.md").write_text("# Rules\nUse ExitPlanMode.\n")
         data = _make_data(source="CLAUDE.md", strategy="symlink")
 
-        GeminiRulesWriter().sync(data, tmp_path)
+        AntigravityCLIRulesWriter().sync(data, tmp_path)
 
         # User edits the source — different Claude-only marker.
         (tmp_path / "CLAUDE.md").write_text("# Rules\nSet permissionMode to acceptEdits.\n")
 
-        result = GeminiRulesWriter().sync(data, tmp_path)
-        text = (tmp_path / "GEMINI.md").read_text()
+        result = AntigravityCLIRulesWriter().sync(data, tmp_path)
+        text = (tmp_path / "AGENTS.md").read_text()
 
         assert result.action == "updated"
         assert "permissionMode" in text
@@ -451,10 +453,10 @@ class TestForeignMarkerForceCopy:
         (tmp_path / "CLAUDE.md").write_text("# Rules\nUse ExitPlanMode.\n")
         data = _make_data(source="CLAUDE.md", strategy="symlink")
 
-        result = GeminiRulesWriter().sync(data, tmp_path, dry_run=True)
+        result = AntigravityCLIRulesWriter().sync(data, tmp_path, dry_run=True)
 
         assert result.action == "created"
         assert "would sync via copy" in (result.message or "")
         assert "foreign markers" in (result.message or "")
         # No file written.
-        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / "AGENTS.md").exists()

@@ -481,8 +481,10 @@ class TestPlanFlag:
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("plan_mode") is True
 
-    def test_plan_flag_forwards_to_gemini(self, tmp_path: Path) -> None:
-        adapter, result = self._launch_with_plan(tmp_path, "gemini", supports_plan_mode=True)
+    def test_plan_flag_forwards_to_antigravity_cli(self, tmp_path: Path) -> None:
+        adapter, result = self._launch_with_plan(
+            tmp_path, "antigravity-cli", supports_plan_mode=True
+        )
         assert result.exit_code == 0, result.output
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("plan_mode") is True

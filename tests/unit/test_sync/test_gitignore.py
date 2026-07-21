@@ -57,15 +57,15 @@ class TestUpdateRulesGitignore:
             tmp_path,
             installed_tools=[AIToolID.CLAUDE],
         )
-        # Then: claude + gemini
+        # Then: claude + cursor
         update_rules_gitignore(
             _cfg(),
             tmp_path,
-            installed_tools=[AIToolID.CLAUDE, AIToolID.GEMINI],
+            installed_tools=[AIToolID.CLAUDE, AIToolID.CURSOR],
         )
 
         content = (tmp_path / ".gitignore").read_text()
-        assert "GEMINI.md" in content
+        assert ".cursorrules" in content
         assert content.count(_BLOCK_START) == 1
 
     def test_no_modification_when_up_to_date(self, tmp_path: Path):
@@ -157,7 +157,7 @@ class TestUpdateRulesGitignore:
         content = (tmp_path / ".gitignore").read_text()
         assert "CLAUDE.md" in content
         assert ".cursorrules" not in content
-        assert "GEMINI.md" not in content
+        assert ".github/copilot-instructions.md" not in content
 
     def test_installed_tools_none_includes_all_enabled(self, tmp_path: Path):
         """When installed_tools is None, all known entries are included."""

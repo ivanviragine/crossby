@@ -59,10 +59,10 @@ class TestDetectSkills:
         assert AIToolID.CODEX in result
         assert result[AIToolID.CODEX] == ".agents/skills"
 
-    def test_detects_gemini_skills(self, tmp_path: Path) -> None:
-        _make_skills_dir(tmp_path, ".gemini/skills")
+    def test_detects_antigravity_cli_skills(self, tmp_path: Path) -> None:
+        _make_skills_dir(tmp_path, ".agents/skills")
         result = detect_skills(tmp_path)
-        assert AIToolID.GEMINI in result
+        assert AIToolID.ANTIGRAVITY_CLI in result
 
     def test_detects_copilot_skills(self, tmp_path: Path) -> None:
         _make_skills_dir(tmp_path, ".github/skills")
@@ -109,9 +109,9 @@ class TestSuggestSkillsSource:
         found = {AIToolID.CURSOR: ".cursor/skills", AIToolID.CLAUDE: ".claude/skills"}
         assert suggest_skills_source(found) == AIToolID.CLAUDE
 
-    def test_prefers_gemini_over_cursor(self) -> None:
-        found = {AIToolID.CURSOR: ".cursor/skills", AIToolID.GEMINI: ".gemini/skills"}
-        assert suggest_skills_source(found) == AIToolID.GEMINI
+    def test_prefers_antigravity_cli_over_cursor(self) -> None:
+        found = {AIToolID.CURSOR: ".cursor/skills", AIToolID.ANTIGRAVITY_CLI: ".agents/skills"}
+        assert suggest_skills_source(found) == AIToolID.ANTIGRAVITY_CLI
 
     def test_prefers_codex_over_cursor(self) -> None:
         found = {AIToolID.CURSOR: ".cursor/skills", AIToolID.CODEX: ".agents/skills"}

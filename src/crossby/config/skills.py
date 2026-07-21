@@ -12,18 +12,19 @@ SKILLS_DIR: dict[AIToolID, str] = {
     AIToolID.CLAUDE: ".claude/skills",
     AIToolID.CURSOR: ".cursor/skills",
     AIToolID.CODEX: ".agents/skills",
-    AIToolID.GEMINI: ".gemini/skills",
+    AIToolID.ANTIGRAVITY_CLI: ".agents/skills",
     AIToolID.COPILOT: ".github/skills",
 }
 
 # Scan order for detecting the canonical (non-symlinked) source directory.
-# CLAUDE, GEMINI, CODEX are checked first — they are most commonly the real source.
-# CURSOR and COPILOT are appended so all five tools can serve as a source,
-# while preserving the original three-tool detect_skills_source() priority.
+# CLAUDE, CODEX, ANTIGRAVITY_CLI are checked first — they are most commonly
+# the real source (CODEX and ANTIGRAVITY_CLI share ``.agents/skills``).
+# CURSOR and COPILOT are appended so all tools can serve as a source, while
+# preserving the original three-tool detect_skills_source() priority.
 _SCAN_ORDER = [
     AIToolID.CLAUDE,
-    AIToolID.GEMINI,
     AIToolID.CODEX,
+    AIToolID.ANTIGRAVITY_CLI,
     AIToolID.CURSOR,
     AIToolID.COPILOT,
 ]
@@ -32,11 +33,10 @@ _SCAN_ORDER = [
 def detect_skills_source(root: Path) -> Path | None:
     """Find the first real (non-symlinked) skills directory.
 
-    Scans all five tool locations in order: ``.claude/skills/``,
-    ``.gemini/skills/``, ``.agents/skills/``, ``.cursor/skills/``,
-    ``.github/skills/``.  The first three are checked first (highest
-    priority); CURSOR and COPILOT are checked last.  Returns None if
-    no real skills directory exists.
+    Scans all tool locations in order: ``.claude/skills/``,
+    ``.agents/skills/``, ``.cursor/skills/``, ``.github/skills/``.  The
+    first two are checked first (highest priority); CURSOR and COPILOT are
+    checked last.  Returns None if no real skills directory exists.
     """
     for tool_id in _SCAN_ORDER:
         rel = SKILLS_DIR[tool_id]

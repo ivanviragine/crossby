@@ -11,7 +11,6 @@ from crossby.subagents.parsers import (
     parse_codex,
     parse_copilot,
     parse_cursor,
-    parse_gemini,
 )
 
 
@@ -77,32 +76,6 @@ class TestParseClaude:
         ir, _ = parse_claude(text)
         assert ir.name == "a"
         assert ir.description == "x"
-
-
-class TestParseGemini:
-    def test_basic(self) -> None:
-        text = (
-            "---\n"
-            "name: searcher\n"
-            "description: Search files\n"
-            "tools:\n"
-            "  - read_file\n"
-            "  - grep_search\n"
-            "model: gemini-2.5-pro\n"
-            "temperature: 0.5\n"
-            "---\n"
-            "Body.\n"
-        )
-        ir, _ = parse_gemini(text)
-        assert ir.name == "searcher"
-        assert ir.tools == ["read_file", "grep"]  # canonicalized
-        assert ir.temperature == 0.5
-
-    def test_remote_kind_warns(self) -> None:
-        text = "---\nname: a\ndescription: x\nkind: remote\n---\n"
-        _, warnings = parse_gemini(text)
-        assert len(warnings) == 1
-        assert "A2A" in warnings[0].message
 
 
 class TestParseCopilot:

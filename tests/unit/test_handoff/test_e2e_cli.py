@@ -163,9 +163,9 @@ def test_handoff_no_launch_skips_target(fixtures_dir: Path, tmp_path: Path, monk
 
 def test_handoff_rejects_unsupported_source() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["handoff", "--from", "gemini", "--to", "claude"])
+    result = runner.invoke(app, ["handoff", "--from", "antigravity-cli", "--to", "claude"])
     assert result.exit_code == 1
-    assert "gemini" in result.output.lower() or "Gemini" in result.output
+    assert "antigravity cli" in result.output.lower()
 
 
 def test_handoff_errors_when_session_id_not_found(

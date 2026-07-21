@@ -45,10 +45,6 @@ _EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
     AIToolID.COPILOT: {
         "pre_tool_use": "preToolUse",
     },
-    AIToolID.GEMINI: {
-        "pre_tool_use": "BeforeTool",
-        "post_tool_use": "AfterTool",
-    },
     AIToolID.CODEX: {
         "pre_tool_use": "PreToolUse",
         "post_tool_use": "PostToolUse",
@@ -90,7 +86,7 @@ def _tools_to_matcher(tools: list[str]) -> str:
 def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
     """Return a regex matcher that covers both existing and desired tool sets.
 
-    Used by Claude/Copilot/Gemini hook merge to make repeat syncs additive
+    Used by Claude/Copilot hook merge to make repeat syncs additive
     instead of destructive — replacing a broader existing matcher (``.*``,
     ``Edit|Write``) with a narrower desired one (``Edit``) would silently
     drop coverage.
@@ -584,164 +580,6 @@ class CopilotHooksWriter(AbstractSyncWriter):
         action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
             existing["version"] = 1
-            existing["hooks"] = hooks_section
-            write_json_file(path, existing)
-
-        return SyncResult(
-            tool_id=self.tool_id,
-            concern=self.concern,
-            action=action,
-            file_path=path,
-            message=_message_with_notes(None, notes),
-        )
-
-
-# ---------------------------------------------------------------------------
-# GeminiHooksWriter
-# ---------------------------------------------------------------------------
-
-
-_GEMINI_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "post_tool_use"})
-
-
-class GeminiHooksWriter(AbstractSyncWriter):
-    """Merges hooks into .gemini/settings.json → hooks.<EventName>[].
-
-    Format::
-
-        {
-          "hooks": {
-            "BeforeTool": [
-              {
-                "matcher": "Edit|Write",
-                "hooks": [{"type": "command", "command": "..."}]
-              }
-            ]
-          }
-        }
-
-    Uses the same nested object-keyed structure as Claude.
-    Dedup key: command value within any entry's inner ``hooks[]``.
-    """
-
-    tool_id = AIToolID.GEMINI
-    concern = SyncConcern.HOOKS
-
-    def sync(
-        self,
-        data: SyncData,
-        project_root: Path,
-        *,
-        dry_run: bool = False,
-        force: bool = False,
-    ) -> SyncResult:
-        if not data.hooks:
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                message="no hooks config",
-            )
-
-        path = project_root / ".gemini" / "settings.json"
-        file_data, error, was_new = read_json_file(path)
-        if error is not None:
-            msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
-            warnings.warn(msg, stacklevel=2)
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="error",
-                file_path=path,
-                message=msg,
-            )
-
-        existing = file_data or {}
-        raw_hooks = existing.get("hooks", {})
-        hooks_section: dict[str, Any]
-        # Migrate old flat-array format to nested dict
-        if isinstance(raw_hooks, dict):
-            hooks_section = raw_hooks
-        elif isinstance(raw_hooks, list):
-            hooks_section = {}
-            for legacy_entry in raw_hooks:
-                if not isinstance(legacy_entry, dict):
-                    continue
-                legacy_event = legacy_entry.get("event")
-                command = legacy_entry.get("command")
-                if not isinstance(legacy_event, str) or not isinstance(command, str):
-                    continue
-                tools = legacy_entry.get("tools")
-                if not isinstance(tools, list):
-                    tools = []
-                legacy_bucket = hooks_section.setdefault(legacy_event, [])
-                legacy_bucket.append(
-                    {
-                        "matcher": _tools_to_matcher(tools),
-                        "hooks": [{"type": "command", "command": command}],
-                    }
-                )
-        else:
-            hooks_section = {}
-
-        kept, notes = _filter_supported_hooks(data.hooks, _GEMINI_SUPPORTED_EVENTS)
-        changed = False
-        for hook in kept:
-            event_name = _translate_event(hook.event, self.tool_id)
-            event_list: list[Any] = hooks_section.get(event_name, [])
-            if not isinstance(event_list, list):
-                event_list = []
-
-            # Dedup: check if command already exists in any entry's inner hooks[].
-            # When found, widen the entry's matcher to include the desired tools
-            # (parity with the Claude writer — repeat syncs should be additive,
-            # never narrowing existing coverage).
-            command = hook.command
-            desired_tools = hook.tools or []
-            already_exists = False
-            for entry in event_list:
-                if not isinstance(entry, dict):
-                    continue
-                inner_hooks = entry.get("hooks")
-                if not isinstance(inner_hooks, list):
-                    continue
-                command_in_entry = any(
-                    (isinstance(inner, dict) and inner.get("command") == command)
-                    or (isinstance(inner, str) and inner == command)
-                    for inner in inner_hooks
-                )
-                if command_in_entry:
-                    already_exists = True
-                    existing_matcher = entry.get("matcher")
-                    widened = _widen_matcher(
-                        existing_matcher if isinstance(existing_matcher, str) else None,
-                        desired_tools,
-                    )
-                    if widened != existing_matcher:
-                        entry["matcher"] = widened
-                        changed = True
-                    break
-
-            if not already_exists:
-                new_entry: dict[str, Any] = {
-                    "matcher": _tools_to_matcher(desired_tools),
-                    "hooks": [{"type": "command", "command": command}],
-                }
-                event_list.append(new_entry)
-                hooks_section[event_name] = event_list
-                changed = True
-
-        if not changed:
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                file_path=path,
-                message=_message_with_notes(None, notes),
-            )
-
-        action: _HookAction = "created" if was_new else "updated"
-        if not dry_run:
             existing["hooks"] = hooks_section
             write_json_file(path, existing)
 

@@ -141,13 +141,13 @@ class TestDetectMcpServers:
         mcp = [i for i in items if i.config_type == "mcp_servers"]
         assert len(mcp) == 1
 
-    def test_detects_gemini_mcp_servers(self, tmp_path: Path) -> None:
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "settings.json").write_text(
+    def test_detects_antigravity_cli_mcp_servers(self, tmp_path: Path) -> None:
+        agents_dir = tmp_path / ".agents"
+        agents_dir.mkdir()
+        (agents_dir / "mcp_config.json").write_text(
             json.dumps({"mcpServers": {"ctx": {"command": "npx"}}})
         )
-        items = detect_source_configs(AIToolID.GEMINI, tmp_path)
+        items = detect_source_configs(AIToolID.ANTIGRAVITY_CLI, tmp_path)
         mcp = [i for i in items if i.config_type == "mcp_servers"]
         assert len(mcp) == 1
 
@@ -167,57 +167,6 @@ class TestDetectMcpServers:
         items = detect_source_configs(AIToolID.CURSOR, tmp_path)
         mcp = [i for i in items if i.config_type == "mcp_servers"]
         assert len(mcp) == 0
-
-
-class TestDetectGeminiHooksAndPermissions:
-    def test_detects_gemini_hooks_dict_shape(self, tmp_path: Path) -> None:
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "settings.json").write_text(
-            json.dumps(
-                {
-                    "hooks": {
-                        "PreToolUse": [
-                            {"matcher": "Edit", "hooks": [{"type": "command", "command": "x"}]},
-                            {"matcher": "Write", "hooks": [{"type": "command", "command": "y"}]},
-                        ]
-                    }
-                }
-            )
-        )
-        items = detect_source_configs(AIToolID.GEMINI, tmp_path)
-        hooks = [i for i in items if i.config_type == "hooks"]
-        assert len(hooks) == 1
-        assert "2 hooks" in hooks[0].detail
-
-    def test_detects_gemini_hooks_legacy_list(self, tmp_path: Path) -> None:
-        gemini_dir = tmp_path / ".gemini"
-        gemini_dir.mkdir()
-        (gemini_dir / "settings.json").write_text(
-            json.dumps({"hooks": [{"event": "preToolUse", "command": "x"}]})
-        )
-        items = detect_source_configs(AIToolID.GEMINI, tmp_path)
-        hooks = [i for i in items if i.config_type == "hooks"]
-        assert len(hooks) == 1
-        assert "1 hook" in hooks[0].detail
-
-    def test_detects_gemini_permissions_toml(self, tmp_path: Path) -> None:
-        policies = tmp_path / ".gemini" / "policies"
-        policies.mkdir(parents=True)
-        (policies / "crossby.toml").write_text(
-            "[[rule]]\n"
-            'toolName = "run_shell_command"\n'
-            'decision = "allow"\n'
-            'commandPrefix = "npm"\n'
-            "[[rule]]\n"
-            'toolName = "run_shell_command"\n'
-            'decision = "allow"\n'
-            'commandPrefix = "git"\n'
-        )
-        items = detect_source_configs(AIToolID.GEMINI, tmp_path)
-        al = [i for i in items if i.config_type == "allowlist"]
-        assert len(al) == 1
-        assert "2 patterns" in al[0].detail
 
 
 class TestDetectCustomCommands:

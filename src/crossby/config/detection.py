@@ -99,8 +99,6 @@ def _detect_allowlist(tool_id: AIToolID, root: Path, items: list[DetectedConfig]
                 prefix="Shell(",
             )
         )
-    elif tool_id == AIToolID.GEMINI:
-        n = _count_gemini_shell_allow_rules(root / ".gemini" / "policies" / "crossby.toml")
 
     if n == 0:
         return
@@ -113,26 +111,6 @@ def _detect_allowlist(tool_id: AIToolID, root: Path, items: list[DetectedConfig]
             portable=True,
         )
     )
-
-
-def _count_gemini_shell_allow_rules(path: Path) -> int:
-    if not path.is_file():
-        return 0
-    with contextlib.suppress(OSError, tomllib.TOMLDecodeError):
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-        rules = data.get("rule", [])
-        if not isinstance(rules, list):
-            return 0
-        return sum(
-            1
-            for r in rules
-            if isinstance(r, dict)
-            and r.get("toolName") == "run_shell_command"
-            and r.get("decision") == "allow"
-            and isinstance(r.get("commandPrefix"), str)
-            and r["commandPrefix"]
-        )
-    return 0
 
 
 def _detect_hooks(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) -> None:
@@ -157,13 +135,6 @@ def _detect_hooks(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) ->
             if isinstance(hooks, dict):
                 count = sum(len(v) for v in hooks.values() if isinstance(v, list))
 
-    elif tool_id == AIToolID.GEMINI:
-        hooks = _read_json_key(root / ".gemini" / "settings.json", "hooks")
-        if isinstance(hooks, dict):
-            count = sum(len(v) for v in hooks.values() if isinstance(v, list))
-        elif isinstance(hooks, list):
-            count = len(hooks)
-
     if count == 0:
         return
 
@@ -186,10 +157,10 @@ def _detect_mcp_servers(tool_id: AIToolID, root: Path, items: list[DetectedConfi
         n = _count_json_dict(root / ".cursor" / "mcp.json", "mcpServers")
     elif tool_id == AIToolID.COPILOT:
         n = _count_json_dict(root / ".vscode" / "mcp.json", "servers")
-    elif tool_id == AIToolID.GEMINI:
-        n = _count_json_dict(root / ".gemini" / "settings.json", "mcpServers")
     elif tool_id == AIToolID.CODEX:
         n = _count_codex_mcp_servers(root / ".codex" / "config.toml")
+    elif tool_id == AIToolID.ANTIGRAVITY_CLI:
+        n = _count_json_dict(root / ".agents" / "mcp_config.json", "mcpServers")
 
     if n == 0:
         return

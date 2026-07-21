@@ -11,11 +11,11 @@ from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.sync.agents import (
     _GITIGNORE_BLOCK_ID,
+    AntigravityCLIAgentsWriter,
     ClaudeAgentsWriter,
     CodexAgentsWriter,
     CopilotAgentsWriter,
     CursorAgentsWriter,
-    GeminiAgentsWriter,
     _parse_frontmatter,
     _render_frontmatter,
     _translate_tools,
@@ -326,7 +326,7 @@ class TestRelativeSymlinkPaths:
         [
             (ClaudeAgentsWriter, ".claude/agents"),
             (CursorAgentsWriter, ".cursor/agents"),
-            (GeminiAgentsWriter, ".gemini/agents"),
+            (AntigravityCLIAgentsWriter, ".agents/agents"),
         ],
     )
     def test_symlink_is_relative(self, tmp_path: Path, writer_cls: type, target_rel: str) -> None:
@@ -769,7 +769,7 @@ class TestUpdateAgentsGitignore:
         assert ".claude/agents" in content
         assert ".cursor/agents" in content
         assert ".github/agents" not in content
-        assert ".gemini/agents" not in content
+        assert ".agents/agents" not in content
 
     def test_gitignore_false_does_nothing(self, tmp_path: Path) -> None:
         data = _data(gitignore=False)
@@ -817,7 +817,7 @@ class TestUpdateAgentsGitignore:
         assert ".claude/agents" in content
         assert ".cursor/agents" in content
         assert ".github/agents" not in content
-        assert ".gemini/agents" not in content
+        assert ".agents/agents" not in content
 
     def test_installed_tools_none_includes_all(self, tmp_path: Path) -> None:
         """With installed_tools=None and no targets, all known paths are included."""
@@ -1196,7 +1196,7 @@ class TestAgentsTranslateStrategy:
     manual-fix block when the target is a markdown-shape tool other than Claude.
 
     Codex agents are handled by CodexAgentsWriter (TOML); this covers the
-    Claude → Cursor / Gemini / Copilot path."""
+    Claude → Cursor / Antigravity CLI / Copilot path."""
 
     def _make_claude_agent(
         self,
@@ -1487,7 +1487,7 @@ class TestAgentsTranslateNoDuplicateManualFix:
         assert "name: writer" in writer
 
     def test_copilot_source_filenames_normalized_for_markdown_targets(self, tmp_path: Path) -> None:
-        """Copilot ``foo.agent.md`` should land as ``foo.md`` under Claude/Cursor/Gemini.
+        """Copilot ``foo.agent.md`` should land as ``foo.md`` under Claude/Cursor.
 
         Keeping the ``.agent.md`` suffix in a markdown target's directory
         would leave the file invisible to that tool (Claude expects plain

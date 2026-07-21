@@ -2,17 +2,17 @@
 
 **One config. Every AI tool.**
 
-Stop re-writing your rules, permissions, and agents for every CLI. `crossby` syncs them across Claude, Copilot, Gemini, Codex, Cursor, OpenCode, VS Code, and Antigravity — and lets you hand off a live session from one tool to another without losing context.
+Stop re-writing your rules, permissions, and agents for every CLI. `crossby` syncs them across Claude, Copilot, Codex, Cursor, OpenCode, VS Code, the Antigravity IDE, and Antigravity CLI — and lets you hand off a live session from one tool to another without losing context.
 
 ```
 $ crossby sync --from codex
 
-✓  rules         AGENTS.md         →  CLAUDE.md, GEMINI.md, .cursorrules, +1 more
+✓  rules         AGENTS.md         →  CLAUDE.md, .cursorrules, +1 more
 ✓  agents        .agents/          →  .claude/agents/, .cursor/agents/, +2 more
-✓  skills        .agents/skills/   →  .claude/skills/, .cursor/skills/, +2 more
-✓  permissions                     →  translated for Claude, Cursor, Gemini
-✓  hooks                           →  written for Claude, Cursor, Copilot, Gemini
-✓  mcp servers                     →  merged into Claude, Cursor, Codex, Copilot, Gemini
+✓  skills        .agents/skills/   →  .claude/skills/, .cursor/skills/, +1 more
+✓  permissions                     →  translated for Claude, Cursor
+✓  hooks                           →  written for Claude, Cursor, Copilot
+✓  mcp servers                     →  merged into Claude, Cursor, Codex, Copilot, Antigravity CLI
 ```
 
 Already on Claude? `crossby sync --from claude` works the same way — any tool can be the source.
@@ -22,7 +22,7 @@ Already on Claude? `crossby sync --from claude` works the same way — any tool 
 ## Why crossby?
 
 - **Every new tool inherits your setup.** Install a new AI CLI tomorrow and one `crossby sync` gives it your rules, agents, permissions, hooks, and MCP servers — translated into whatever format that tool expects.
-- **Pick any tool as your source.** `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, Copilot instructions — whatever you already write in becomes canonical. No migration, no lock-in.
+- **Pick any tool as your source.** `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, Copilot instructions — whatever you already write in becomes canonical. No migration, no lock-in.
 - **One set of launch flags for every tool.** `--model`, `--effort`, `--yolo`, `--plan`, `--resume` — crossby handles the per-tool translation. Unsupported flags raise errors instead of silently disappearing.
 - **Cross-tool session handoff.** Mid-session in one CLI and want to continue in another? `crossby handoff` summarizes the transcript and hands it off — so you never re-explain what you're doing.
 - **Stateless by default.** Works without a config file: `crossby sync` reads directly from each tool's standard paths. Drop in a `.crossby.yml` only when you want saved profiles or defaults.
@@ -48,7 +48,7 @@ crossby
 # Scaffold a .crossby.yml with your defaults (launch, sync, handoff).
 crossby init
 
-# Sync your setup to every installed tool (replace codex with claude, cursor, gemini, copilot…)
+# Sync your setup to every installed tool (replace codex with claude, cursor, antigravity-cli, copilot…)
 crossby sync --from codex
 
 # Or launch the interactive wizard
@@ -78,8 +78,8 @@ Every command with missing arguments drops into a "Proceed / Change X" review so
 
 | Config      | Strategy             | Notes                                                                                        |
 | ----------- | -------------------- | -------------------------------------------------------------------------------------------- |
-| Rules       | Symlink (auto-copy)  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `GEMINI.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md`. Falls back to copy with a `<!-- crossby:manual-fix -->` block when the source mentions surfaces specific to a different tool (`/hooks`, `ExitPlanMode`, `permissionMode`, …). |
-| Agents      | Symlink / translate  | Markdown-shape tools (Claude / Cursor / Gemini / Copilot) symlink directories. Codex translates per file into `.codex/agents/<name>.toml` with `permissionMode → sandbox_mode`, `model + effort` family-mapped to GPT, lossy fields preserved as a manual-fix block. |
+| Rules       | Symlink (auto-copy)  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md` (`AGENTS.md` is shared by Codex and Antigravity CLI). Falls back to copy with a `<!-- crossby:manual-fix -->` block when the source mentions surfaces specific to a different tool (`/hooks`, `ExitPlanMode`, `permissionMode`, …). |
+| Agents      | Symlink / translate  | Markdown-shape tools (Claude / Cursor / Copilot / Antigravity CLI) symlink directories. Codex translates per file into `.codex/agents/<name>.toml` with `permissionMode → sandbox_mode`, `model + effort` family-mapped to GPT, lossy fields preserved as a manual-fix block. |
 | Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` / `shell()` format per tool                       |
 | Hooks       | Write                | Per-tool native hook schema; matcher widens on re-runs                                       |
@@ -90,7 +90,7 @@ Before writing anything, `crossby sync --plan` shows a stage-by-concern dry-run 
 
 After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR description. Pass `--no-persist-report` to skip, or `--report-format markdown-table` to render the same shape on stdout.
 
-> Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool. To translate a single subagent file between tools (Claude / Cursor / Gemini / Copilot / Codex), use `crossby agents convert --from claude --to codex .claude/agents/researcher.md`.
+> Need to translate a single allowlist pattern by hand (e.g. while editing a config file)? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool. To translate a single subagent file between tools (Claude / Cursor / Copilot / Codex), use `crossby agents convert --from claude --to codex .claude/agents/researcher.md`.
 
 ## Translate strategy and manual-fix blocks
 
@@ -159,7 +159,7 @@ crossby handoff --from claude --to codex --prompt ./my-prompt.md
 
 The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
 
-Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Gemini, OpenCode, Antigravity, VS Code.
+Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Antigravity CLI, OpenCode, Antigravity, VS Code.
 
 ## Optional: `.crossby.yml`
 
@@ -200,16 +200,16 @@ Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--yolo`.
 
 ## Supported tools
 
-| Tool        | Sync | Launch | Handoff (source) | Handoff (target) |
-| ----------- | ---- | ------ | ---------------- | ---------------- |
-| Claude      | ✓    | ✓      | ✓                | ✓                |
-| Copilot     | ✓    | ✓      | ✓                | ✓                |
-| Gemini      | ✓    | ✓      | —                | ✓                |
-| Codex       | ✓    | ✓      | ✓                | ✓                |
-| Cursor      | ✓    | ✓      | ✓                | ✓                |
-| OpenCode    | ✓    | ✓      | —                | ✓                |
-| VS Code     | ✓    | ✓      | —                | ✓                |
-| Antigravity | ✓    | ✓      | —                | ✓                |
+| Tool           | Sync | Launch | Handoff (source) | Handoff (target) |
+| -------------- | ---- | ------ | ---------------- | ---------------- |
+| Claude         | ✓    | ✓      | ✓                | ✓                |
+| Copilot        | ✓    | ✓      | ✓                | ✓                |
+| Codex          | ✓    | ✓      | ✓                | ✓                |
+| Cursor         | ✓    | ✓      | ✓                | ✓                |
+| Antigravity CLI| ✓    | ✓      | —                 | ✓                |
+| OpenCode       | ✓    | ✓      | —                 | ✓                |
+| VS Code        | ✓    | ✓      | —                 | ✓                |
+| Antigravity    | ✓    | ✓      | —                 | ✓                |
 
 Per-tool flag mappings and adapter details live in [CONTRIBUTING.md](CONTRIBUTING.md#tool-reference).
 

@@ -18,7 +18,6 @@ from crossby.sync.slash_commands import (
 _SOURCE_RELS: dict[AIToolID, str] = {
     AIToolID.CLAUDE: ".claude/commands",
     AIToolID.CURSOR: ".cursor/commands",
-    AIToolID.GEMINI: ".gemini/commands",
 }
 
 
@@ -64,13 +63,6 @@ class TestDiscoverCursor:
         assert [p.name for p in results] == ["fmt.md"]
 
 
-class TestDiscoverGemini:
-    def test_lists_gemini_commands(self, tmp_path: Path) -> None:
-        _make_command(tmp_path, "sum.md", "# sum", source_tool=AIToolID.GEMINI)
-        results = discover_commands(tmp_path, AIToolID.GEMINI)
-        assert [p.name for p in results] == ["sum.md"]
-
-
 class TestDiscoverNoCommandPrimitive:
     def test_codex_returns_empty(self, tmp_path: Path) -> None:
         # Codex has no command primitive in _COMMAND_SOURCES.
@@ -104,13 +96,6 @@ class TestSkillName:
         root = tmp_path / ".cursor" / "commands"
         assert (
             command_skill_name(cmd, root=root, source_tool=AIToolID.CURSOR) == "cursor-command-fmt"
-        )
-
-    def test_gemini_namespace(self, tmp_path: Path) -> None:
-        cmd = _make_command(tmp_path, "sum.md", "", source_tool=AIToolID.GEMINI)
-        root = tmp_path / ".gemini" / "commands"
-        assert (
-            command_skill_name(cmd, root=root, source_tool=AIToolID.GEMINI) == "gemini-command-sum"
         )
 
 
@@ -149,15 +134,6 @@ class TestCursorRuntimeCaveats:
         # Cursor has an empty pattern list; even $ARGUMENTS-shaped text emits
         # no caveats because Cursor doesn't expand it.
         assert detect_runtime_caveats("Run with $ARGUMENTS", source_tool=AIToolID.CURSOR) == []
-
-
-class TestGeminiRuntimeCaveats:
-    def test_detects_args_template(self) -> None:
-        notes = detect_runtime_caveats("Summarize {{args}}", source_tool=AIToolID.GEMINI)
-        assert any(n.category == "gemini-args-template" for n in notes)
-
-    def test_clean_body_no_notes(self) -> None:
-        assert detect_runtime_caveats("Plain prose.", source_tool=AIToolID.GEMINI) == []
 
 
 # ---------------------------------------------------------------------------
@@ -214,22 +190,6 @@ class TestCommandToSkillCursor:
         assert any(n.category == "slash-command" for n in skill.manual_fix_notes)
 
 
-class TestCommandToSkillGemini:
-    def test_wraps_gemini_with_args(self, tmp_path: Path) -> None:
-        cmd = _make_command(
-            tmp_path,
-            "sum.md",
-            "Summarize {{args}} succinctly.",
-            source_tool=AIToolID.GEMINI,
-        )
-        root = tmp_path / ".gemini" / "commands"
-        skill = command_to_skill(cmd, root=root, source_tool=AIToolID.GEMINI)
-        cats = {n.category for n in skill.manual_fix_notes}
-        assert skill.name == "gemini-command-sum"
-        assert "slash-command" in cats
-        assert "gemini-args-template" in cats
-
-
 # ---------------------------------------------------------------------------
 # Iteration
 # ---------------------------------------------------------------------------
@@ -248,15 +208,13 @@ class TestIterCommandSkills:
     def test_yields_across_source_tools(self, tmp_path: Path) -> None:
         _make_command(tmp_path, "review.md", "C", source_tool=AIToolID.CLAUDE)
         _make_command(tmp_path, "fmt.md", "Cu", source_tool=AIToolID.CURSOR)
-        _make_command(tmp_path, "sum.md", "G", source_tool=AIToolID.GEMINI)
         triples = list(iter_command_skills(tmp_path))
         tools = {tool for _, tool, _ in triples}
         names = sorted(definition.name for _, _, definition in triples)
-        assert tools == {AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.GEMINI}
+        assert tools == {AIToolID.CLAUDE, AIToolID.CURSOR}
         assert names == [
             "claude-command-review",
             "cursor-command-fmt",
-            "gemini-command-sum",
         ]
 
     def test_empty_when_no_dir(self, tmp_path: Path) -> None:
@@ -279,7 +237,6 @@ class TestNamespaceCollisions:
         ("tool_a", "tool_b"),
         [
             (AIToolID.CLAUDE, AIToolID.CURSOR),
-            (AIToolID.CURSOR, AIToolID.GEMINI),
         ],
     )
     def test_same_command_name_different_tools_distinct_skills(

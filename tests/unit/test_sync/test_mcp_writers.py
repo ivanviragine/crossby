@@ -8,11 +8,11 @@ from pathlib import Path
 from crossby.models.config import MCPServerConfig
 from crossby.sync.base import SyncData
 from crossby.sync.mcp import (
+    AntigravityCLIMCPWriter,
     ClaudeMCPWriter,
     CodexMCPWriter,
     CopilotMCPWriter,
     CursorMCPWriter,
-    GeminiMCPWriter,
 )
 
 # ---------------------------------------------------------------------------
@@ -286,28 +286,28 @@ class TestCopilotMCPWriter:
 
 
 # ---------------------------------------------------------------------------
-# GeminiMCPWriter
+# AntigravityCLIMCPWriter
 # ---------------------------------------------------------------------------
 
 
-class TestGeminiMCPWriter:
-    writer = GeminiMCPWriter()
+class TestAntigravityCLIMCPWriter:
+    writer = AntigravityCLIMCPWriter()
 
     def test_creates_new_file(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "created"
-        data = _read_json(tmp_path / ".gemini" / "settings.json")
+        data = _read_json(tmp_path / ".agents" / "mcp_config.json")
         assert "context7" in data["mcpServers"]
 
-    def test_preserves_other_gemini_settings(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
+    def test_preserves_other_settings(self, tmp_path: Path) -> None:
+        path = tmp_path / ".agents" / "mcp_config.json"
         path.parent.mkdir()
-        existing = {"hooks": [{"event": "pre_tool", "command": "echo hi"}], "mcpServers": {}}
+        existing = {"other": "value", "mcpServers": {}}
         path.write_text(json.dumps(existing), encoding="utf-8")
 
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         data = _read_json(path)
-        assert data["hooks"] == existing["hooks"]
+        assert data["other"] == existing["other"]
         assert "context7" in data["mcpServers"]
 
     def test_idempotent(self, tmp_path: Path) -> None:
@@ -318,10 +318,10 @@ class TestGeminiMCPWriter:
     def test_dry_run(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
         assert result.action == "created"
-        assert not (tmp_path / ".gemini" / "settings.json").exists()
+        assert not (tmp_path / ".agents" / "mcp_config.json").exists()
 
     def test_malformed_json_skipped(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
+        path = tmp_path / ".agents" / "mcp_config.json"
         path.parent.mkdir()
         path.write_text("{bad}", encoding="utf-8")
         original = path.read_text()
@@ -332,7 +332,42 @@ class TestGeminiMCPWriter:
     def test_disabled_only_is_skipped(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
         assert result.action == "skipped"
-        assert not (tmp_path / ".gemini" / "settings.json").exists()
+        assert not (tmp_path / ".agents" / "mcp_config.json").exists()
+
+    def test_stdio_server_entry_unchanged(self, tmp_path: Path) -> None:
+        """Stdio servers use the standard shape — no ``serverUrl`` rewrite."""
+        self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        data = _read_json(tmp_path / ".agents" / "mcp_config.json")
+        entry = data["mcpServers"]["context7"]
+        assert entry == {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}
+        assert "serverUrl" not in entry
+
+    def test_remote_server_uses_server_url_key(self, tmp_path: Path) -> None:
+        """Remote (http/sse) servers use ``serverUrl`` instead of ``url`` —
+
+        the one documented deviation from the standard Claude/Cursor JSON
+        shape (see ``_to_antigravity_cli_entry``).
+        """
+        result = self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".agents" / "mcp_config.json")
+        entry = data["mcpServers"]["api"]
+        assert entry["serverUrl"] == "http://localhost:8080/mcp"
+        assert "url" not in entry
+
+    def test_remote_server_with_env_and_headers(self, tmp_path: Path) -> None:
+        server = MCPServerConfig(
+            transport="http",
+            url="https://api.example.com/mcp",
+            env={"API_TOKEN": "${API_TOKEN}"},
+            headers={"X-Tenant": "northstar"},
+        )
+        self.writer.sync(_cfg({"svc": server}), tmp_path)
+        data = _read_json(tmp_path / ".agents" / "mcp_config.json")
+        entry = data["mcpServers"]["svc"]
+        assert entry["serverUrl"] == "https://api.example.com/mcp"
+        assert entry["env"] == {"API_TOKEN": "${API_TOKEN}"}
+        assert entry["headers"] == {"X-Tenant": "northstar"}
 
 
 # ---------------------------------------------------------------------------

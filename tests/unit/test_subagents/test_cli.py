@@ -29,16 +29,6 @@ def _write_input(tmp_path: Path, name: str = "researcher.md", content: str = CLA
     return path
 
 
-def test_claude_to_gemini_stdout(tmp_path: Path) -> None:
-    src = _write_input(tmp_path)
-    result = runner.invoke(
-        app, ["agents", "convert", str(src), "--from", "claude", "--to", "gemini"]
-    )
-    assert result.exit_code == 0, result.stdout
-    assert "read_file" in result.stdout
-    assert "run_shell_command" in result.stdout
-
-
 def test_claude_to_codex_stdout_has_both_artifacts(tmp_path: Path) -> None:
     src = _write_input(tmp_path)
     result = runner.invoke(

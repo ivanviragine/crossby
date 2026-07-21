@@ -6,11 +6,11 @@ from pathlib import Path
 
 from crossby.models.ai import AIToolID
 from crossby.sync.agents import (
+    AntigravityCLIAgentsWriter,
     ClaudeAgentsWriter,
     CodexAgentsWriter,
     CopilotAgentsWriter,
     CursorAgentsWriter,
-    GeminiAgentsWriter,
     update_agents_gitignore,
 )
 from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
@@ -19,66 +19,67 @@ from crossby.sync.hooks import (
     CodexHooksWriter,
     CopilotHooksWriter,
     CursorHooksWriter,
-    GeminiHooksWriter,
 )
 from crossby.sync.mcp import (
+    AntigravityCLIMCPWriter,
     ClaudeMCPWriter,
     CodexMCPWriter,
     CopilotMCPWriter,
     CursorMCPWriter,
-    GeminiMCPWriter,
 )
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
     CursorPermissionWriter,
-    GeminiPermissionWriter,
 )
 from crossby.sync.rules import (
+    AntigravityCLIRulesWriter,
     ClaudeRulesWriter,
     CodexRulesWriter,
     CopilotRulesWriter,
     CursorRulesWriter,
-    GeminiRulesWriter,
     update_rules_gitignore,
 )
 from crossby.sync.skills import (
+    AntigravityCLISkillsWriter,
     ClaudeSkillsWriter,
     CodexSkillsWriter,
     CopilotSkillsWriter,
     CursorSkillsWriter,
-    GeminiSkillsWriter,
     update_skills_gitignore,
 )
 
 # Global default registry — one writer per (tool, concern) pair.
+# Antigravity CLI has no (ANTIGRAVITY_CLI, PERMISSIONS) or (ANTIGRAVITY_CLI,
+# HOOKS) writer: its permission model is mode-based (--mode/--sandbox/
+# --dangerously-skip-permissions launch flags, no per-project policy file)
+# and it has no hook system at all — same absence pattern as Codex having
+# no permission writer (sandbox mode is inherent, not a file to write).
 _registry = SyncRegistry()
 _registry.register(ClaudePermissionWriter())
 _registry.register(CursorPermissionWriter(scope="project"))
-_registry.register(GeminiPermissionWriter())
 _registry.register(ClaudeAgentsWriter())
 _registry.register(CopilotAgentsWriter())
 _registry.register(CursorAgentsWriter())
-_registry.register(GeminiAgentsWriter())
 _registry.register(CodexAgentsWriter())
+_registry.register(AntigravityCLIAgentsWriter())
 _registry.register(ClaudeRulesWriter())
 _registry.register(CursorRulesWriter())
 _registry.register(CopilotRulesWriter())
-_registry.register(GeminiRulesWriter())
 _registry.register(CodexRulesWriter())
+_registry.register(AntigravityCLIRulesWriter())
 _registry.register(ClaudeMCPWriter())
 _registry.register(CursorMCPWriter())
 _registry.register(CopilotMCPWriter())
-_registry.register(GeminiMCPWriter())
 _registry.register(CodexMCPWriter())
+_registry.register(AntigravityCLIMCPWriter())
 _registry.register(ClaudeHooksWriter())
 _registry.register(CursorHooksWriter())
 _registry.register(CopilotHooksWriter())
-_registry.register(GeminiHooksWriter())
 _registry.register(CodexHooksWriter())
 _registry.register(ClaudeSkillsWriter())
 _registry.register(CursorSkillsWriter())
 _registry.register(CodexSkillsWriter())
-_registry.register(GeminiSkillsWriter())
+_registry.register(AntigravityCLISkillsWriter())
 _registry.register(CopilotSkillsWriter())
 
 

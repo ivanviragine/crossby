@@ -196,7 +196,7 @@ def sync(
     installed_tools = AbstractAITool.detect_installed()
     if not installed_tools:
         console.error("No AI tools found in PATH.")
-        console.hint("Install at least one AI tool (claude, copilot, gemini, codex, cursor, etc.)")
+        console.hint("Install at least one AI tool (claude, copilot, codex, cursor, etc.)")
         raise typer.Exit(1)
 
     # Let users review resolved defaults via the shared Proceed / Change loop.

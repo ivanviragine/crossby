@@ -222,7 +222,7 @@ class TestPromptHelpers:
 
         pattern, from_tool, to_tool = _prompt_convert_args()
         assert pattern == "Bash(ls)"
-        tool_choices = ["canonical", "claude", "copilot", "cursor", "gemini"]
+        tool_choices = ["canonical", "claude", "copilot", "cursor"]
         assert from_tool == tool_choices[2]
         assert to_tool == tool_choices[1]
 

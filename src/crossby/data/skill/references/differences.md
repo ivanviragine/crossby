@@ -1,8 +1,8 @@
 # crossby cross-tool differences
 
-Per-surface mapping table for the eight tools `crossby` supports today:
-Claude, Cursor, Gemini, Codex, Copilot, OpenCode, VS Code, and
-Antigravity. Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
+Per-surface mapping table for the nine tools `crossby` supports today:
+Claude, Cursor, Codex, Copilot, OpenCode, VS Code, Antigravity, and
+Antigravity CLI. Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
 `Shell(myapp:*)` ↔ `myapp:*`) are listed once; lossy or unsupported
 edges are flagged.
 
@@ -13,7 +13,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `GEMINI.md` / `.github/copilot-instructions.md` | every other tool's instruction file | symlink (default) | All tools accept the same plain-markdown body; symlink keeps every target in lockstep with the source. |
+| `CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.github/copilot-instructions.md` | every other tool's instruction file (`AGENTS.md` is shared by Codex and Antigravity CLI) | symlink (default) | All tools accept the same plain-markdown body; symlink keeps every target in lockstep with the source. |
 | Source content with Claude-only markers (`/hooks`, `.claude/agents/`, `Subagent`, `permissionMode`, `ExitPlanMode`, `TodoWrite`) | every non-Claude target | force-copy with `<!-- crossby:manual-fix -->` | Crossby refuses to symlink so target-tool semantics aren't silently overridden. Edit the copy and remove the manual-fix block when done. |
 | Source content with Codex-only markers (`.codex/`, `sandbox_mode`, `developer_instructions`) | every non-Codex target | force-copy with manual-fix | Same idea, reversed direction. |
 
@@ -21,7 +21,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `.claude/agents/<name>.md` (markdown + YAML frontmatter) | `.cursor/agents/`, `.gemini/agents/`, `.github/agents/` | directory symlink | All four markdown-shape tools accept the same on-disk format. |
+| `.claude/agents/<name>.md` (markdown + YAML frontmatter) | `.cursor/agents/`, `.agents/agents/` (Antigravity CLI), `.github/agents/` | directory symlink | All four markdown-shape tools accept the same on-disk format. |
 | `.claude/agents/<name>.md` | `.codex/agents/<name>.toml` | per-file translate | TOML schema differs; `name`, `description`, `developer_instructions`, plus mapped `model`, `model_reasoning_effort`, `sandbox_mode`. |
 | Frontmatter `permissionMode: acceptEdits` / `readOnly` | `sandbox_mode: workspace-write` / `read-only` | direct mapping | Other Claude modes (`default`, `dontAsk`, `plan`, `bypassPermissions`) carry through as a `<!-- crossby:manual-fix -->` block — Codex has no equivalent. |
 | Frontmatter `model: claude-opus-*` | `model = "gpt-5.4"` | family mapping | `claude-sonnet-*` and `claude-haiku-*` map to `gpt-5.4-mini`. |
@@ -39,26 +39,26 @@ tool's docs and confirm the schemas before trusting these rows.
 | Source `scripts/`, `references/`, `assets/` subdirs | mirrored into the translated target skill dir | translate strategy | Support files are copied verbatim. |
 | `.claude/commands/<name>.md` (Claude slash command) | `<target-skills-dir>/claude-command-<slug>/SKILL.md` | translate strategy, only when target ≠ Claude | The body is wrapped under a `## Command Template` heading; runtime expansion (`$ARGUMENTS`, `!\`shell\``, `@file`, `{{tpl}}`) becomes a manual-fix note. |
 | `.cursor/commands/<name>.md` (Cursor slash command) | `<target-skills-dir>/cursor-command-<slug>/SKILL.md` | translate strategy, only when target ≠ Cursor | Plain-markdown body wrapped under `## Command Template`; no Cursor runtime expansion is currently detected, so only the generic "this was a slash command" manual-fix note is emitted. |
-| `.gemini/commands/<name>.md` (Gemini slash command) | `<target-skills-dir>/gemini-command-<slug>/SKILL.md` | translate strategy, only when target ≠ Gemini | The Gemini `{{args}}` template placeholder becomes a manual-fix note; everything else passes through verbatim. |
 
 ## MCP and config
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `.mcp.json` (project scope), `.claude/settings.json`, `~/.claude.json` (user scope) `mcpServers` | `.cursor/mcp.json`, `.gemini/settings.json`, `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. All three Claude sources are scanned most-specific-first (project `.mcp.json` wins on a name collision), so name collisions between them are resolved silently rather than reported as a conflict. |
+| `.mcp.json` (project scope), `.claude/settings.json`, `~/.claude.json` (user scope) `mcpServers` | `.cursor/mcp.json`, `.agents/mcp_config.json` (Antigravity CLI), `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. All three Claude sources are scanned most-specific-first (project `.mcp.json` wins on a name collision), so name collisions between them are resolved silently rather than reported as a conflict. |
 | `headers: {Authorization: "Bearer ${TOKEN}"}` | Codex `bearer_token_env_var = "TOKEN"` | regex rewrite | Only the `Bearer ${VAR}` shape is rewritten; `${VAR:-default}` fallbacks are dropped and the key is reported. |
 | `headers: {X-Foo: "${VAR}"}` | Codex `env_http_headers = {X-Foo = "VAR"}` | regex rewrite | Static headers stay in `http_headers`. |
 | `env: {KEY: "${KEY}"}` (self-reference) | Codex `env_vars = ["KEY"]` | regex rewrite | Other `${VAR}` env values stay literal so source tools can interpolate them. |
 | `enabled: false` / `disabled: true` | dropped from the target | merge | Disabled servers in the source are removed from every target. |
 | `oauth: {...}` (`callbackPort`, `clientId`, `authServerMetadataUrl`, ...) | not written to any target | report-only | No writer ports OAuth config across tools; a `manual-fix` row is reported per server instead of silently dropping it (`Not Added` in the sync report). Configure OAuth manually for each target. |
+| Remote (http/sse) server `url` | Antigravity CLI `serverUrl` | key rename | Antigravity CLI's `.agents/mcp_config.json` uses `serverUrl` instead of `url`/`httpUrl` for remote servers; stdio servers are unaffected. |
 
 ## Permissions
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
 | `.claude/settings.json` `permissions.allow` (`Bash(cmd:*)`) | canonical `cmd:*` | reverse parse | Only `Bash(...)` entries are read; non-Bash patterns are skipped. |
-| Canonical `cmd:*` | `Bash(cmd:*)` (Claude), `Shell(cmd:*)` (Cursor), `commandPrefix = "cmd"` (Gemini policy TOML) | per-tool translator | Symmetrical: every supported tool can be source or target. |
-| Cursor / Gemini specific shapes (`Shell(cmd:*)`, policy TOML rules) | canonical | reverse parse | Allows any tool to seed the canonical pattern set. |
+| Canonical `cmd:*` | `Bash(cmd:*)` (Claude), `Shell(cmd:*)` (Cursor) | per-tool translator | Symmetrical: every supported tool can be source or target. Antigravity CLI has no persistent allowlist file — permissions are launch-time flags (`--dangerously-skip-permissions`/`--sandbox`), so it's outside this table (same as Codex's sandbox mode). |
+| Cursor-specific shape (`Shell(cmd:*)`) | canonical | reverse parse | Allows any tool to seed the canonical pattern set. |
 
 ## Hooks
 
@@ -78,7 +78,8 @@ Per-tool supported events:
 | Codex | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop` | `pre_tool_use`, `post_tool_use`, `session_start` only |
 | Cursor | `pre_tool_use`, `stop` | `pre_tool_use` only |
 | Copilot | `pre_tool_use` | none — Copilot hooks apply to every tool |
-| Gemini | `pre_tool_use` (`BeforeTool`), `post_tool_use` (`AfterTool`) | both |
+
+Antigravity CLI has no hook system at all, so it has no row here.
 
 ## Plugins
 
@@ -103,9 +104,9 @@ Per-tool supported events:
 | `.codex/config.toml` parses as TOML | error | Manual edits that broke the file. |
 | `.codex/agents/*.toml` carries `name` / `description` / `developer_instructions` | error | Translated agent files that lost a required field. |
 | `<tool>/skills/<name>/SKILL.md` carries `name` / `description` | error | Stripped or hand-edited skill frontmatter. |
-| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.claude.json`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json` | warning | Missing binary on the host; users see this before the first invocation fails. Env-var-templated commands like `${HOME}/bin/foo` are expanded via `os.path.expandvars` before the lookup. |
-| `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursorrules` / `.github/copilot-instructions.md` ≤ 32KB | warning | Instructions creeping past the size threshold beyond which review becomes painful. |
-| Tool-specific JSON files parse as JSON | error | `.claude/settings.json`, `.cursor/cli.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.gemini/settings.json`. |
+| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.claude.json`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json` | warning | Missing binary on the host; users see this before the first invocation fails. Env-var-templated commands like `${HOME}/bin/foo` are expanded via `os.path.expandvars` before the lookup. |
+| `AGENTS.md` / `CLAUDE.md` / `.cursorrules` / `.github/copilot-instructions.md` ≤ 32KB | warning | Instructions creeping past the size threshold beyond which review becomes painful. |
+| Tool-specific JSON files parse as JSON | error | `.claude/settings.json`, `.cursor/cli.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json`. |
 
 ## Directional caveats
 
@@ -121,12 +122,10 @@ the concerns below) aren't wired yet.
 | Claude → Codex | mcp | `headers` with `${VAR:-default}` fallbacks; `oauth` (whole block — reported as a manual-fix row, not written to any target); `type: sse` |
 | Claude → Cursor | hooks | every event except `pre_tool_use` and `stop`; `tools` filter on `stop` |
 | Claude → Copilot | hooks | every event except `pre_tool_use`; the `tools` filter (Copilot has no per-tool scope) |
-| Claude → Gemini | hooks | every event except `pre_tool_use` and `post_tool_use` (kept as `BeforeTool` / `AfterTool`) |
 | Codex → Claude | agents | `model_reasoning_effort` (Claude has no equivalent); `[permissions]` table |
-| Codex → Cursor / Gemini / Copilot | mcp | TOML-specific `bearer_token_env_var` → header rewrite back into `Authorization: Bearer ${VAR}` form |
-| Cursor / Gemini → Codex | hooks | same drops as Claude → Codex (matcher on `UserPromptSubmit` / `Stop`, unsupported events) |
+| Codex → Cursor / Copilot / Antigravity CLI | mcp | TOML-specific `bearer_token_env_var` → header rewrite back into `Authorization: Bearer ${VAR}` form |
+| Cursor → Codex | hooks | same drops as Claude → Codex (matcher on `UserPromptSubmit` / `Stop`, unsupported events) |
 | Cursor → any non-Cursor | commands | wrapped as `cursor-command-<slug>` skill; slash invocation is lost |
-| Gemini → any non-Gemini | commands | wrapped as `gemini-command-<slug>` skill; `{{args}}` template flagged for manual rewrite |
 | Any tool with Claude-only markers in its instructions file → any non-Claude target | rules | symlink downgraded to copy with a `crossby:manual-fix` block; per-tool marker list lives in `instruction_markers.py` |
 | Any source → any target | plugins | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; migrate by hand |
 

@@ -23,9 +23,9 @@ class AIToolID(StrEnum):
 
     CLAUDE = "claude"
     COPILOT = "copilot"
-    GEMINI = "gemini"
     CODEX = "codex"
     ANTIGRAVITY = "antigravity"
+    ANTIGRAVITY_CLI = "antigravity-cli"
     VSCODE = "vscode"
     OPENCODE = "opencode"
     CURSOR = "cursor"
@@ -57,7 +57,7 @@ class HookOutputDialect(StrEnum):
     - ``PERMISSION`` — a ``{"permission": "allow"|"deny", ...}`` object on
       stdout (Cursor).
     - ``EXIT_CODE`` — no structured stdout contract; the exit code is the only
-      block signal, with a human message on stderr (Gemini, Copilot).
+      block signal, with a human message on stderr (Copilot).
 
     A deny always also exits non-zero (2) so the block is honored even by tools
     that ignore stdout — the dialect only governs the stdout payload shape.

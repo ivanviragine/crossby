@@ -31,7 +31,7 @@ def _split_servers(
 
 
 def _to_stdio_entry(server: MCPServerConfig) -> dict[str, Any]:
-    """Convert a stdio server to the standard JSON entry (Claude/Cursor/Gemini)."""
+    """Convert a stdio server to the standard JSON entry (Claude/Cursor)."""
     entry: dict[str, Any] = {"command": server.command}
     if server.args:
         entry["args"] = server.args
@@ -51,10 +51,29 @@ def _to_http_entry(server: MCPServerConfig) -> dict[str, Any]:
 
 
 def _to_json_entry(server: MCPServerConfig) -> dict[str, Any]:
-    """Convert a server to the standard JSON entry (Claude/Cursor/Gemini format)."""
+    """Convert a server to the standard JSON entry (Claude/Cursor format)."""
     if server.command is not None:
         return _to_stdio_entry(server)
     return _to_http_entry(server)
+
+
+def _to_antigravity_cli_entry(server: MCPServerConfig) -> dict[str, Any]:
+    """Convert a server to Antigravity CLI's JSON entry.
+
+    Remote (http/sse) servers use ``serverUrl`` instead of ``url`` — the one
+    documented deviation from the standard Claude/Cursor JSON shape. Note a
+    project-local ``.antigravitycli/mcp_config.json`` is discovered by the
+    CLI but its ``mcpServers`` is silently ignored, so this must land in
+    ``.agents/mcp_config.json``.
+    """
+    if server.command is not None:
+        return _to_stdio_entry(server)
+    entry: dict[str, Any] = {"serverUrl": server.url}
+    if server.env:
+        entry["env"] = server.env
+    if server.headers:
+        entry["headers"] = server.headers
+    return entry
 
 
 def _to_copilot_entry(server: MCPServerConfig) -> dict[str, Any]:
@@ -115,7 +134,7 @@ def _to_toml_entry(server: MCPServerConfig) -> dict[str, Any]:
 
 
 class _JsonMCPWriter(AbstractSyncWriter):
-    """Base class for JSON-based MCP writers (Claude, Cursor, Gemini, Copilot)."""
+    """Base class for JSON-based MCP writers (Claude, Cursor, Copilot, Antigravity CLI)."""
 
     concern = SyncConcern.MCP
 
@@ -200,18 +219,25 @@ class CopilotMCPWriter(_JsonMCPWriter):
         return _to_copilot_entry(server)
 
 
-class GeminiMCPWriter(_JsonMCPWriter):
-    """Merges MCP servers into .gemini/settings.json → mcpServers."""
+class AntigravityCLIMCPWriter(_JsonMCPWriter):
+    """Merges MCP servers into .agents/mcp_config.json → mcpServers.
 
-    tool_id = AIToolID.GEMINI
+    Remote servers use ``serverUrl`` rather than ``url``/``httpUrl`` — see
+    :func:`_to_antigravity_cli_entry`.
+    """
+
+    tool_id = AIToolID.ANTIGRAVITY_CLI
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
-        return ".gemini", "settings.json"
+        return ".agents", "mcp_config.json"
 
     @property
     def _mcp_key(self) -> str:
         return "mcpServers"
+
+    def _to_entry(self, server: MCPServerConfig) -> dict[str, Any]:
+        return _to_antigravity_cli_entry(server)
 
 
 class CodexMCPWriter(AbstractSyncWriter):

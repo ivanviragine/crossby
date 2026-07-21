@@ -37,8 +37,8 @@ _AGENT_TARGET_PATHS: dict[str, str] = {
     "claude": ".claude/agents",
     "copilot": ".github/agents",
     "cursor": ".cursor/agents",
-    "gemini": ".gemini/agents",
     "codex": ".codex/agents",
+    "antigravity-cli": ".agents/agents",
 }
 
 
@@ -205,7 +205,6 @@ def _warn_legacy_codex_agents_path(project_root: Path) -> None:
 _SOURCE_TOOL_BY_PATH: dict[str, str] = {
     ".claude/agents": "claude",
     ".cursor/agents": "cursor",
-    ".gemini/agents": "gemini",
     ".github/agents": "copilot",
     ".codex/agents": "codex",
 }
@@ -215,8 +214,10 @@ def _infer_source_tool(source_dir: Path) -> str:
     """Return the subagents tool name (`claude`, `cursor`, …) for a source dir.
 
     Falls back to ``claude`` for tool-neutral paths (markdown + YAML
-    frontmatter is the prevailing shape across Claude / Cursor / Gemini /
-    Copilot, and the Claude parser is the most lenient).
+    frontmatter is the prevailing shape across Claude / Cursor / Copilot,
+    and the Claude parser is the most lenient). Also the fallback for
+    Antigravity CLI's ``.agents/agents`` — that tool has no dedicated
+    subagents parser/emitter yet.
     """
     s = source_dir.as_posix()
     for needle, tool in _SOURCE_TOOL_BY_PATH.items():
@@ -278,8 +279,8 @@ def _translate_markdown_agent(
     """Translate a markdown-shape agent file and embed manual-fix notes.
 
     Returns the rendered markdown for the target tool. Used by
-    :class:`_BaseAgentsWriter._sync_translate` for the four markdown-shape
-    targets (Claude / Cursor / Gemini / Copilot). For Codex output see
+    :class:`_BaseAgentsWriter._sync_translate` for the markdown-shape
+    targets (Claude / Cursor / Copilot). For Codex output see
     :func:`_translate_codex_agent`.
 
     ``source_path`` is forwarded to the parser so name inference can
@@ -740,11 +741,11 @@ class CursorAgentsWriter(_BaseAgentsWriter):
     _target_rel = ".cursor/agents"
 
 
-class GeminiAgentsWriter(_BaseAgentsWriter):
-    """Sync agents → .gemini/agents/"""
+class AntigravityCLIAgentsWriter(_BaseAgentsWriter):
+    """Sync agents → .agents/agents/"""
 
-    tool_id = AIToolID.GEMINI
-    _target_rel = ".gemini/agents"
+    tool_id = AIToolID.ANTIGRAVITY_CLI
+    _target_rel = ".agents/agents"
 
 
 class CodexAgentsWriter(AbstractSyncWriter):
@@ -753,7 +754,7 @@ class CodexAgentsWriter(AbstractSyncWriter):
     Codex agents use a TOML schema (``name``, ``description``,
     ``developer_instructions`` plus optional ``model``,
     ``model_reasoning_effort``, ``sandbox_mode``). When the source is a
-    different tool (Claude/Cursor/Gemini/Copilot all use markdown +
+    different tool (Claude/Cursor/Copilot all use markdown +
     YAML frontmatter), we translate per file via
     :mod:`crossby.sync.agent_models`. Lossy fields (``permissionMode:
     plan``, ``allowed-tools``, etc.) become a ``crossby:manual-fix``

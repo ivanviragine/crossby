@@ -2,16 +2,16 @@ r"""Convert tool-specific slash commands into one-file skills for other tools.
 
 Several source tools have a ``/<name>`` slash-command primitive that doesn't
 exist on the target side of a Crossby sync. Today that includes Claude's
-``.claude/commands/<name>.md``, Cursor's ``.cursor/commands/<name>.md``, and
-Gemini's ``.gemini/commands/<name>.md``. When syncing one of these to a tool
-without a command surface, each command file is wrapped as a single-file
-skill at ``<target-skills-dir>/<source>-command-<slug>/SKILL.md`` so the
-prompt body survives.
+``.claude/commands/<name>.md`` and Cursor's ``.cursor/commands/<name>.md``.
+When syncing one of these to a tool without a command surface, each command
+file is wrapped as a single-file skill at
+``<target-skills-dir>/<source>-command-<slug>/SKILL.md`` so the prompt body
+survives.
 
 Tool-specific runtime expansion that the target won't honour — Claude's
-``$ARGUMENTS`` / ``$1``, ``!`shell```, ``@file-reference``, ``{{template}}``;
-Gemini's ``{{args}}`` — is preserved as text and a ``crossby:manual-fix``
-block lists the surfaces that need human attention.
+``$ARGUMENTS`` / ``$1``, ``!`shell```, ``@file-reference``, ``{{template}}``
+— is preserved as text and a ``crossby:manual-fix`` block lists the surfaces
+that need human attention.
 
 This module owns parsing and conversion. Idempotency, write-out, and stale
 cleanup happen in the skills writer.
@@ -31,7 +31,6 @@ from crossby.sync.manual_fix import ManualFixNote
 _COMMAND_SOURCES: dict[AIToolID, Path] = {
     AIToolID.CLAUDE: Path(".claude") / "commands",
     AIToolID.CURSOR: Path(".cursor") / "commands",
-    AIToolID.GEMINI: Path(".gemini") / "commands",
 }
 
 # Source-tool → skill-name namespace prefix. Keeps `pr-review.md` from
@@ -40,7 +39,6 @@ _COMMAND_SOURCES: dict[AIToolID, Path] = {
 _SKILL_NAME_PREFIXES: dict[AIToolID, str] = {
     AIToolID.CLAUDE: "claude-command-",
     AIToolID.CURSOR: "cursor-command-",
-    AIToolID.GEMINI: "gemini-command-",
 }
 
 # Runtime constructs that need a manual-review note when copied verbatim into
@@ -76,14 +74,6 @@ _RUNTIME_PATTERNS_BY_TOOL: dict[AIToolID, tuple[tuple[re.Pattern[str], str, str]
         ),
     ),
     AIToolID.CURSOR: (),
-    AIToolID.GEMINI: (
-        (
-            re.compile(r"\{\{\s*args?\s*\}\}", re.IGNORECASE),
-            "gemini-args-template",
-            "Source uses Gemini `{{args}}` argument template. The target tool does not "
-            "interpolate it; rewrite into natural-language instructions.",
-        ),
-    ),
 }
 
 

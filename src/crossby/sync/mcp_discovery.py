@@ -76,8 +76,11 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
         result["env"] = entry["env"]
     if entry.get("headers"):
         result["headers"] = entry["headers"]
+    # Antigravity CLI uses "serverUrl" instead of "url" for remote servers.
     if "url" in entry:
         result["url"] = entry["url"]
+    elif "serverUrl" in entry:
+        result["url"] = entry["serverUrl"]
 
     return result
 
@@ -93,7 +96,7 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
     - ~/.claude.json → mcpServers (Claude's user-scope file)
     - .cursor/mcp.json → mcpServers
     - .vscode/mcp.json → servers (Copilot format)
-    - .gemini/settings.json → mcpServers
+    - .agents/mcp_config.json → mcpServers (Antigravity CLI)
     - .codex/config.toml → mcp_servers
 
     Claude sources are scanned most-specific-first (project .mcp.json, then
@@ -112,7 +115,7 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
         ("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers"),
         ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers"),
         ("copilot", project_root / ".vscode" / "mcp.json", "servers"),
-        ("gemini", project_root / ".gemini" / "settings.json", "mcpServers"),
+        ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers"),
     ]
 
     for tool, path, key in sources:

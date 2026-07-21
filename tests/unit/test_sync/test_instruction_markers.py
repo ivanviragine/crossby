@@ -40,10 +40,6 @@ class TestDetectToolMarkers:
         found = detect_tool_markers("See .github/copilot-instructions.md for the contract.")
         assert AIToolID.COPILOT in found
 
-    def test_gemini(self) -> None:
-        found = detect_tool_markers("Run with --approval-mode plan in .gemini/.")
-        assert AIToolID.GEMINI in found
-
     def test_multi_tool_content(self) -> None:
         found = detect_tool_markers("Use ExitPlanMode in Claude or sandbox_mode in .codex/.")
         assert AIToolID.CLAUDE in found
@@ -64,7 +60,7 @@ class TestIsNeutralForTarget:
         assert is_neutral_for_target("Use ExitPlanMode.", AIToolID.CLAUDE) is True
 
     def test_target_does_not_own_markers(self) -> None:
-        assert is_neutral_for_target("Use ExitPlanMode.", AIToolID.GEMINI) is False
+        assert is_neutral_for_target("Use ExitPlanMode.", AIToolID.COPILOT) is False
 
     def test_mixed_with_target_marker_present(self) -> None:
         # Content names both Claude *and* Codex; for a Claude target only the
@@ -87,8 +83,8 @@ class TestForeignMarkers:
 class TestManualFixNotes:
     def test_one_note_per_foreign_tool(self) -> None:
         text = "Use ExitPlanMode and configure sandbox_mode."
-        notes = manual_fix_notes_for_target(text, AIToolID.GEMINI)
-        # Both Claude and Codex are foreign to a Gemini target.
+        notes = manual_fix_notes_for_target(text, AIToolID.COPILOT)
+        # Both Claude and Codex are foreign to a Copilot target.
         categories = {note.category for note in notes}
         assert {str(AIToolID.CLAUDE), str(AIToolID.CODEX)} <= categories
 
@@ -184,28 +180,6 @@ class TestExpandedCopilotMarkers:
     def test_no_copilot_marker(self) -> None:
         found = detect_tool_markers("Plain prose.")
         assert AIToolID.COPILOT not in found
-
-
-class TestExpandedGeminiMarkers:
-    def test_gemini_agents_path(self) -> None:
-        found = detect_tool_markers("See .gemini/agents/release-lead.md")
-        assert AIToolID.GEMINI in found
-
-    def test_gemini_commands_path(self) -> None:
-        found = detect_tool_markers("See .gemini/commands/sum.md")
-        assert AIToolID.GEMINI in found
-
-    def test_beforetool_event(self) -> None:
-        found = detect_tool_markers("Use the BeforeTool hook to gate writes.")
-        assert AIToolID.GEMINI in found
-
-    def test_aftertool_event(self) -> None:
-        found = detect_tool_markers("Use the AfterTool hook to audit.")
-        assert AIToolID.GEMINI in found
-
-    def test_no_gemini_marker(self) -> None:
-        found = detect_tool_markers("Plain prose.")
-        assert AIToolID.GEMINI not in found
 
 
 class TestNeutralStillNeutral:
