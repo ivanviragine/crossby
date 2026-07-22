@@ -48,7 +48,7 @@ class TestUserPromptSubmitHookSupport:
             assert _caps(tool).supports_user_prompt_submit_hook is True
 
     def test_unsupported(self) -> None:
-        for tool in (AIToolID.COPILOT, AIToolID.GEMINI):
+        for tool in (AIToolID.COPILOT, AIToolID.ANTIGRAVITY_CLI):
             assert _caps(tool).supports_user_prompt_submit_hook is False
 
 
