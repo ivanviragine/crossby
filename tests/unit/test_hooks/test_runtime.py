@@ -199,11 +199,17 @@ class TestEmitDecisionContext:
         assert payload["hookSpecificOutput"]["additionalContext"] == "hello"
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
-    @pytest.mark.parametrize("dialect", [HookOutputDialect.PERMISSION, HookOutputDialect.EXIT_CODE])
-    def test_context_no_op_for_other_dialects(self, dialect: HookOutputDialect) -> None:
-        em = emit_decision(HookDecision.context("hello"), dialect)
+    def test_context_no_op_for_other_dialects(self) -> None:
+        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
+
+    def test_context_injected_for_permission_dialect(self) -> None:
+        # Cursor injects context via a top-level `additional_context` field on
+        # its beforeSubmitPrompt event, not hookSpecificOutput.
+        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"additional_context": "hello"}
 
 
 class TestEmitStopDecision:

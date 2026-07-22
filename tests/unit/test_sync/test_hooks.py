@@ -421,6 +421,27 @@ class TestCursorHooksWriter:
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "updated"
 
+    def test_user_prompt_submit_maps_to_before_submit_prompt(self, tmp_path: Path) -> None:
+        hook = HookEntry(event="user_prompt_submit", command="python3 ./scripts/context.py")
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.action == "created"
+        assert result.message is None
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert data["beforeSubmitPrompt"] == [
+            {"event": "beforeSubmitPrompt", "command": "python3 ./scripts/context.py"}
+        ]
+
+    def test_user_prompt_submit_tools_filter_dropped_with_note(self, tmp_path: Path) -> None:
+        hook = HookEntry(
+            event="user_prompt_submit", command="python3 ./scripts/context.py", tools=["Edit"]
+        )
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.message is not None
+        assert "manual_fix" in result.message
+        assert "hooks.user_prompt_submit.tools" in result.message
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert "tools" not in data["beforeSubmitPrompt"][0]
+
 
 # ---------------------------------------------------------------------------
 # CopilotHooksWriter
@@ -985,10 +1006,9 @@ class TestCrossWriterUnsupportedEvents:
     @pytest.mark.parametrize(
         ("writer_cls", "unsupported_event"),
         [
-            # Cursor only supports pre_tool_use + stop.
+            # Cursor only supports pre_tool_use + user_prompt_submit + stop.
             ("CursorHooksWriter", "post_tool_use"),
             ("CursorHooksWriter", "session_start"),
-            ("CursorHooksWriter", "user_prompt_submit"),
             ("CursorHooksWriter", "notification"),
             # Copilot only supports pre_tool_use.
             ("CopilotHooksWriter", "post_tool_use"),

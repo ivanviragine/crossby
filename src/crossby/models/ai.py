@@ -108,6 +108,9 @@ class AIToolCapabilities(BaseModel, frozen=True):
     """Tool fires a Stop / agent-turn-complete hook that can block completion."""
     supports_session_start_hook: bool = False
     """Tool fires a SessionStart hook that can inject additional context."""
+    supports_user_prompt_submit_hook: bool = False
+    """Tool fires a prompt-submit hook that can inject context (Claude/Codex
+    ``UserPromptSubmit``, Cursor ``beforeSubmitPrompt``)."""
     sandboxes_writes: bool = False
     """Tool hard-confines file writes to its trusted/workspace dirs (e.g. Codex
     ``--sandbox workspace-write``). When True, an out-of-worktree write is
