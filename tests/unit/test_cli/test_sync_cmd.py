@@ -319,9 +319,7 @@ class TestSyncDefaultsBypassWizard:
 
         monkeypatch.setattr(
             "crossby.ai_tools.base.AbstractAITool.detect_installed",
-            classmethod(
-                lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.ANTIGRAVITY_CLI]
-            ),
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.ANTIGRAVITY_CLI]),
         )
         monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
         monkeypatch.setattr("crossby.sync.readers.build_sync_data", fake_build_sync_data)

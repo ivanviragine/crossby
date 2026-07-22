@@ -64,8 +64,7 @@ class TestGetSkillsTarget:
         assert get_skills_target(AIToolID.CURSOR, tmp_path) == tmp_path / ".cursor" / "skills"
         assert get_skills_target(AIToolID.CODEX, tmp_path) == tmp_path / ".agents" / "skills"
         assert (
-            get_skills_target(AIToolID.ANTIGRAVITY_CLI, tmp_path)
-            == tmp_path / ".agents" / "skills"
+            get_skills_target(AIToolID.ANTIGRAVITY_CLI, tmp_path) == tmp_path / ".agents" / "skills"
         )
 
     def test_returns_none_for_unknown_tool(self, tmp_path: Path) -> None:

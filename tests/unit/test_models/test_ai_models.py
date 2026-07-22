@@ -367,9 +367,7 @@ class TestNormalizeModelFormat:
 
     def test_antigravity_cli_passthrough(self) -> None:
         adapter = AbstractAITool.get("antigravity-cli")
-        assert (
-            adapter.normalize_model_format("gemini-3.6-flash-high") == "gemini-3.6-flash-high"
-        )
+        assert adapter.normalize_model_format("gemini-3.6-flash-high") == "gemini-3.6-flash-high"
 
     def test_opencode_passthrough(self) -> None:
         """opencode passes provider/model IDs through unchanged."""

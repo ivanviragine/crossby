@@ -373,9 +373,7 @@ class TestMCPCommandPaths:
             {"mcpServers": {"fake": {"command": self._absent()}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
-        assert any(
-            f.tool_id == AIToolID.ANTIGRAVITY_CLI and f.level == "warning" for f in findings
-        )
+        assert any(f.tool_id == AIToolID.ANTIGRAVITY_CLI and f.level == "warning" for f in findings)
 
     def test_ok_when_present(self, tmp_path: Path) -> None:
         _write_json(

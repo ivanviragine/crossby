@@ -393,5 +393,3 @@ class TestPatternTranslators:
     def test_canonical_to_cursor(self) -> None:
         assert canonical_to_cursor("myapp:*") == "Shell(myapp:*)"
         assert canonical_to_cursor("./scripts/run.sh") == "Shell(./scripts/run.sh)"
-
-
