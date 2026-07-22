@@ -100,8 +100,11 @@ class TestConfirmSyncDefaultsChangePaths:
         assert ("Target tool", ["(all installed)", "cursor", "codex"]) in recorder.calls
 
     def test_change_concern_path(self, tty: None, monkeypatch: pytest.MonkeyPatch) -> None:
-        # menu: Change concern (3) -> select "permissions" (1) -> Proceed (0)
-        recorder = _PromptRecorder([3, 1, 0])
+        # Derive the menu index so the test survives SyncConcern reordering.
+        chosen = SyncConcern.PERMISSIONS
+        concern_idx = list(SyncConcern).index(chosen) + 1  # +1 for "(all concerns)"
+        # menu: Change concern (3) -> select the concern -> Proceed (0)
+        recorder = _PromptRecorder([3, concern_idx, 0])
         _install_select(monkeypatch, recorder)
 
         source, target, concern = _confirm_sync_defaults(
@@ -116,15 +119,18 @@ class TestConfirmSyncDefaultsChangePaths:
 
         assert source == AIToolID.CLAUDE
         assert target is None
-        assert concern == SyncConcern.PERMISSIONS
+        assert concern == chosen
         assert isinstance(concern, SyncConcern)
 
     def test_change_all_three_paths(self, tty: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Derive the concern menu index so the test survives SyncConcern reordering.
+        chosen_concern = SyncConcern.RULES
+        concern_idx = list(SyncConcern).index(chosen_concern) + 1  # +1 for "(all concerns)"
         # menu Change source (1) -> "cursor" (1)
         # menu Change target (2) -> "claude" (1, choices exclude cursor)
-        # menu Change concern (3) -> "rules" (2)
+        # menu Change concern (3) -> chosen concern
         # menu Proceed (0)
-        recorder = _PromptRecorder([1, 1, 2, 1, 3, 2, 0])
+        recorder = _PromptRecorder([1, 1, 2, 1, 3, concern_idx, 0])
         _install_select(monkeypatch, recorder)
 
         source, target, concern = _confirm_sync_defaults(
@@ -140,7 +146,7 @@ class TestConfirmSyncDefaultsChangePaths:
         assert (source, target, concern) == (
             AIToolID.CURSOR,
             AIToolID.CLAUDE,
-            SyncConcern.RULES,
+            chosen_concern,
         )
         # After switching source to cursor, the target picker excludes cursor.
         assert ("Target tool", ["(all installed)", "claude", "codex"]) in recorder.calls
