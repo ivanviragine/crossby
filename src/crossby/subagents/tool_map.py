@@ -4,7 +4,6 @@ Each tool spells the same capability differently:
 
     Claude   Read         Edit        Bash         Grep      Glob       WebSearch
     Copilot  read         edit        shell        search    glob       web_search
-    Gemini   read_file    edit        run_shell_command  grep_search  glob  google_web_search
     Cursor   (no allowlist — uses readonly: bool)
     Codex    (no allowlist — uses sandbox_mode)
 
@@ -21,24 +20,22 @@ from __future__ import annotations
 
 # canonical → per-tool name
 CANONICAL_TOOLS: dict[str, dict[str, str]] = {
-    "read_file": {"claude": "Read", "copilot": "read", "gemini": "read_file"},
-    "write_file": {"claude": "Write", "copilot": "write", "gemini": "write_file"},
-    "edit_file": {"claude": "Edit", "copilot": "edit", "gemini": "edit"},
-    "bash": {"claude": "Bash", "copilot": "shell", "gemini": "run_shell_command"},
-    "grep": {"claude": "Grep", "copilot": "search", "gemini": "grep_search"},
-    "glob": {"claude": "Glob", "copilot": "glob", "gemini": "glob"},
+    "read_file": {"claude": "Read", "copilot": "read"},
+    "write_file": {"claude": "Write", "copilot": "write"},
+    "edit_file": {"claude": "Edit", "copilot": "edit"},
+    "bash": {"claude": "Bash", "copilot": "shell"},
+    "grep": {"claude": "Grep", "copilot": "search"},
+    "glob": {"claude": "Glob", "copilot": "glob"},
     "web_search": {
         "claude": "WebSearch",
         "copilot": "web_search",
-        "gemini": "google_web_search",
     },
-    "web_fetch": {"claude": "WebFetch", "copilot": "web_fetch", "gemini": "web_fetch"},
-    "agent": {"claude": "Agent", "copilot": "agent", "gemini": "agent"},
-    "todo_write": {"claude": "TodoWrite", "copilot": "todo_write", "gemini": "todo_write"},
+    "web_fetch": {"claude": "WebFetch", "copilot": "web_fetch"},
+    "agent": {"claude": "Agent", "copilot": "agent"},
+    "todo_write": {"claude": "TodoWrite", "copilot": "todo_write"},
     "notebook_edit": {
         "claude": "NotebookEdit",
         "copilot": "notebook_edit",
-        "gemini": "notebook_edit",
     },
 }
 

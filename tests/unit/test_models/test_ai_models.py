@@ -20,9 +20,9 @@ class TestSelfRegistration:
         registered = AbstractAITool.available_tools()
         assert AIToolID.CLAUDE in registered
         assert AIToolID.COPILOT in registered
-        assert AIToolID.GEMINI in registered
         assert AIToolID.CODEX in registered
         assert AIToolID.ANTIGRAVITY in registered
+        assert AIToolID.ANTIGRAVITY_CLI in registered
         assert AIToolID.OPENCODE in registered
         assert AIToolID.CURSOR in registered
 
@@ -52,10 +52,11 @@ class TestCapabilities:
         assert caps.binary == "copilot"
         assert caps.headless_flag == "--prompt"
 
-    def test_gemini_capabilities(self) -> None:
-        caps = AbstractAITool.get("gemini").capabilities()
+    def test_antigravity_cli_capabilities(self) -> None:
+        caps = AbstractAITool.get("antigravity-cli").capabilities()
+        assert caps.binary == "agy"
         assert caps.supports_headless is True
-        assert caps.headless_flag == "-p"
+        assert caps.headless_flag == "--print"
         assert caps.supports_resume is True
 
     def test_antigravity_capabilities(self) -> None:
@@ -112,10 +113,10 @@ class TestModelCompatibility:
         adapter = AbstractAITool.get("copilot")
         assert adapter.is_model_compatible("anything") is True
 
-    def test_gemini_accepts_gemini_models(self) -> None:
-        adapter = AbstractAITool.get("gemini")
-        assert adapter.is_model_compatible("gemini-2.0-flash") is True
-        assert adapter.is_model_compatible("claude-haiku") is False
+    def test_antigravity_cli_accepts_all(self) -> None:
+        adapter = AbstractAITool.get("antigravity-cli")
+        assert adapter.is_model_compatible("gemini-3.6-flash-high") is True
+        assert adapter.is_model_compatible("claude-sonnet-4-6") is True
 
     def test_codex_accepts_codex_gpt_o(self) -> None:
         adapter = AbstractAITool.get("codex")
@@ -303,9 +304,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("claude")
         assert adapter.plan_mode_args() == ["--permission-mode", "plan"]
 
-    def test_gemini_plan_mode(self) -> None:
-        adapter = AbstractAITool.get("gemini")
-        assert adapter.plan_mode_args() == ["--approval-mode", "plan"]
+    def test_antigravity_cli_plan_mode(self) -> None:
+        adapter = AbstractAITool.get("antigravity-cli")
+        assert adapter.plan_mode_args() == ["--mode", "plan"]
 
     def test_copilot_plan_mode(self) -> None:
         adapter = AbstractAITool.get("copilot")
@@ -364,9 +365,11 @@ class TestNormalizeModelFormat:
         adapter = AbstractAITool.get("copilot")
         assert adapter.normalize_model_format("gpt-4o") == "gpt-4o"
 
-    def test_gemini_passthrough(self) -> None:
-        adapter = AbstractAITool.get("gemini")
-        assert adapter.normalize_model_format("gemini-2.0-flash") == "gemini-2.0-flash"
+    def test_antigravity_cli_passthrough(self) -> None:
+        adapter = AbstractAITool.get("antigravity-cli")
+        assert (
+            adapter.normalize_model_format("gemini-3.6-flash-high") == "gemini-3.6-flash-high"
+        )
 
     def test_opencode_passthrough(self) -> None:
         """opencode passes provider/model IDs through unchanged."""

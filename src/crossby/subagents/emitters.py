@@ -1,6 +1,6 @@
 """Per-tool emitters — render a SubagentIR into a tool-specific file body.
 
-Each emitter returns ``(payload, warnings)``.  For four of the five tools
+Each emitter returns ``(payload, warnings)``.  For three of the four tools
 ``payload`` is a single string (the markdown file).  For Codex it's a
 :class:`CodexEmission` carrying both the agent ``.toml`` body and the
 fragment that needs to be merged into ``~/.codex/config.toml`` — Codex is
@@ -43,7 +43,6 @@ def emit(tool: str, ir: SubagentIR) -> tuple[Any, list[ConversionWarning]]:
     emitters = {
         "claude": emit_claude,
         "cursor": emit_cursor,
-        "gemini": emit_gemini,
         "copilot": emit_copilot,
         "codex": emit_codex,
     }
@@ -210,47 +209,6 @@ def emit_cursor(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini CLI
-# ---------------------------------------------------------------------------
-
-
-def emit_gemini(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
-    warnings: list[ConversionWarning] = []
-    fm: dict[str, Any] = {"name": ir.name}
-    if ir.description is not None:
-        fm["description"] = ir.description
-    if ir.kind:
-        fm["kind"] = ir.kind
-    if ir.model:
-        fm["model"] = ir.model
-    if ir.tools is not None:
-        fm["tools"] = [from_canonical(t, "gemini") for t in ir.tools]
-    if ir.mcp_servers:
-        fm["mcpServers"] = ir.mcp_servers
-    if ir.temperature is not None:
-        fm["temperature"] = ir.temperature
-    if ir.max_turns is not None:
-        fm["max_turns"] = ir.max_turns
-    if ir.timeout_mins is not None:
-        fm["timeout_mins"] = ir.timeout_mins
-
-    # Lossy-warn for Gemini-unsupported fields
-    for field, value, reason in [
-        ("disallowed_tools", ir.disallowed_tools, "Gemini has no denylist; only an allowlist"),
-        ("permission_mode", ir.permission_mode, "Claude-only"),
-        ("sandbox_mode", ir.sandbox_mode, "Codex-only"),
-        ("readonly", ir.readonly, "Cursor-only"),
-        ("hooks", ir.hooks, "not part of Gemini agent frontmatter"),
-        ("target", ir.target, "Copilot-only"),
-    ]:
-        if value:
-            warnings.append(_warn_dropped(field, "Gemini", reason))
-
-    fm.update(_extras_for(ir, "gemini"))
-    return _render_markdown(fm, ir.body), warnings
-
-
-# ---------------------------------------------------------------------------
 # GitHub Copilot CLI
 # ---------------------------------------------------------------------------
 
@@ -352,7 +310,7 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     # Three signals can drive sandbox_mode, in priority order: an explicit
     # ir.sandbox_mode (Codex source), ir.permission_mode (Claude source —
     # the three values that map cleanly), or the tools/readonly allowlist
-    # intent (Cursor / Gemini / Copilot source).
+    # intent (Cursor / Copilot source).
     _claude_to_sandbox = {
         "acceptEdits": "workspace-write",
         "readOnly": "read-only",
@@ -397,8 +355,6 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
         ("hooks", ir.hooks, "not part of Codex agent format"),
         ("target", ir.target, "Copilot-only"),
         ("max_turns", ir.max_turns, "no per-agent turn cap; managed via config.toml"),
-        ("temperature", ir.temperature, "Codex has no per-agent temperature"),
-        ("timeout_mins", ir.timeout_mins, "Codex uses job_max_runtime_seconds globally"),
     ]:
         if value:
             warnings.append(_warn_dropped(field, "Codex", reason))

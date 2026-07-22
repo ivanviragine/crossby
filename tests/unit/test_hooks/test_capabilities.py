@@ -18,9 +18,14 @@ class TestHookOutputDialect:
     def test_cursor_uses_permission(self) -> None:
         assert _caps(AIToolID.CURSOR).hook_output_dialect is HookOutputDialect.PERMISSION
 
-    def test_copilot_and_gemini_use_exit_code(self) -> None:
+    def test_copilot_uses_exit_code(self) -> None:
         assert _caps(AIToolID.COPILOT).hook_output_dialect is HookOutputDialect.EXIT_CODE
-        assert _caps(AIToolID.GEMINI).hook_output_dialect is HookOutputDialect.EXIT_CODE
+
+    def test_antigravity_cli_uses_hook_specific_output_default(self) -> None:
+        # AntigravityCLIAdapter.capabilities() doesn't override this field,
+        # so it falls back to the base-class default.
+        caps = _caps(AIToolID.ANTIGRAVITY_CLI)
+        assert caps.hook_output_dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT
 
 
 class TestStopHookSupport:
@@ -29,8 +34,12 @@ class TestStopHookSupport:
             assert _caps(tool).supports_stop_hook is True
 
     def test_unsupported(self) -> None:
-        for tool in (AIToolID.COPILOT, AIToolID.GEMINI):
-            assert _caps(tool).supports_stop_hook is False
+        assert _caps(AIToolID.COPILOT).supports_stop_hook is False
+
+    def test_antigravity_cli_has_no_hook_system(self) -> None:
+        # agy has no hook system at all, by design — unlike Codex.
+        assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_stop_hook is False
+        assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_session_start_hook is False
 
 
 class TestUserPromptSubmitHookSupport:
@@ -39,7 +48,7 @@ class TestUserPromptSubmitHookSupport:
             assert _caps(tool).supports_user_prompt_submit_hook is True
 
     def test_unsupported(self) -> None:
-        for tool in (AIToolID.COPILOT, AIToolID.GEMINI):
+        for tool in (AIToolID.COPILOT, AIToolID.ANTIGRAVITY_CLI):
             assert _caps(tool).supports_user_prompt_submit_hook is False
 
 
@@ -56,7 +65,7 @@ class TestSandboxAndFailOpen:
         assert _caps(AIToolID.CURSOR).hook_fail_open_default is True
 
     def test_others_fail_closed_by_default(self) -> None:
-        for tool in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.COPILOT, AIToolID.GEMINI):
+        for tool in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.COPILOT):
             assert _caps(tool).hook_fail_open_default is False
 
 

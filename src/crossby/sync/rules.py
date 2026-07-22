@@ -31,8 +31,8 @@ TOOL_TARGETS: dict[str, str] = {
     "claude": "CLAUDE.md",
     "cursor": ".cursorrules",
     "copilot": ".github/copilot-instructions.md",
-    "gemini": "GEMINI.md",
     "codex": "AGENTS.md",
+    "antigravity-cli": "AGENTS.md",
 }
 
 # ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ def _render_copy_body(source_text: str, target_tool: AIToolID) -> str:
 
     When source content references surfaces that belong to a different tool
     (e.g. a Claude ``CLAUDE.md`` mentioning ``ExitPlanMode`` being copied to
-    ``GEMINI.md``), append a manual-fix block enumerating the lossy edges.
+    ``.cursorrules``), append a manual-fix block enumerating the lossy edges.
     """
     notes = manual_fix_notes_for_target(source_text, target_tool)
     if not notes:
@@ -249,7 +249,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
         # we force a copy whenever the source mentions surfaces specific to a
         # tool other than ``self.tool_id`` — that way every target gets a
         # locally-edited file with a manual-fix block instead of silently
-        # propagating Claude/Gemini/etc-only semantics.
+        # propagating Claude/Cursor/etc-only semantics.
         effective_strategy = data.rules_strategy
         force_copy_reason: str | None = None
         try:
@@ -360,13 +360,22 @@ class CopilotRulesWriter(_BaseRulesWriter):
     _target_rel = ".github/copilot-instructions.md"
 
 
-class GeminiRulesWriter(_BaseRulesWriter):
-    tool_id = AIToolID.GEMINI
-    _target_rel = "GEMINI.md"
-
-
 class CodexRulesWriter(_BaseRulesWriter):
+    """Codex and Antigravity CLI intentionally share ``AGENTS.md`` as their
+    target — both tools read the same file by convention, so syncing both
+    is idempotent (whichever writer runs second sees the file already
+    up to date). If the two tools' instruction conventions ever diverge,
+    this shared target becomes a real constraint, not just duplication.
+    """
+
     tool_id = AIToolID.CODEX
+    _target_rel = "AGENTS.md"
+
+
+class AntigravityCLIRulesWriter(_BaseRulesWriter):
+    """See :class:`CodexRulesWriter` — shares ``AGENTS.md`` with Codex."""
+
+    tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = "AGENTS.md"
 
 

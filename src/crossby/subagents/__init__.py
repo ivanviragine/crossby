@@ -6,7 +6,7 @@ Public API::
 
     ir, warnings = parse("claude", path.read_text(), source_path=path)
     out, warnings = emit("codex", ir)        # out is a CodexEmission for codex
-    result = convert("claude", "gemini", path.read_text())
+    result = convert("claude", "cursor", path.read_text())
 """
 
 from __future__ import annotations

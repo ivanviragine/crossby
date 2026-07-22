@@ -50,8 +50,8 @@ class TestFullSyncMCP:
         assert "context7" in data["servers"]
         assert data["servers"]["context7"]["type"] == "stdio"
 
-        # Gemini
-        data = json.loads((tmp_path / ".gemini" / "settings.json").read_text())
+        # Antigravity CLI
+        data = json.loads((tmp_path / ".agents" / "mcp_config.json").read_text())
         assert "context7" in data["mcpServers"]
 
         # Codex
@@ -124,7 +124,7 @@ class TestFullSyncMCP:
         for path, key, entry_key in [
             (tmp_path / ".claude" / "settings.json", "mcpServers", "github"),
             (tmp_path / ".cursor" / "mcp.json", "mcpServers", "github"),
-            (tmp_path / ".gemini" / "settings.json", "mcpServers", "github"),
+            (tmp_path / ".agents" / "mcp_config.json", "mcpServers", "github"),
             (tmp_path / ".vscode" / "mcp.json", "servers", "github"),
         ]:
             data = json.loads(path.read_text())

@@ -9,11 +9,11 @@ Re-parse each tool's output files and surface structural issues that
   ``description`` / ``developer_instructions``.
 - ``<tool>/skills/<name>/SKILL.md`` carries ``name`` and ``description``
   frontmatter.
-- ``AGENTS.md`` / ``CLAUDE.md`` / ``GEMINI.md`` / ``.cursorrules`` /
+- ``AGENTS.md`` / ``CLAUDE.md`` / ``.cursorrules`` /
   ``.github/copilot-instructions.md`` are under a 32KB review threshold.
 - Tool-specific JSON config files (``.claude/settings.json``,
   ``.cursor/cli.json``, ``.cursor/mcp.json``, ``.vscode/mcp.json``,
-  ``.gemini/settings.json``) parse cleanly.
+  ``.agents/mcp_config.json``) parse cleanly.
 
 Findings are tool-neutral; the CLI renders them as a Rich table.
 """
@@ -280,23 +280,28 @@ _SKILLS_LOCATIONS: dict[AIToolID, Path] = {
     AIToolID.CLAUDE: Path(".claude") / "skills",
     AIToolID.CURSOR: Path(".cursor") / "skills",
     AIToolID.CODEX: Path(".agents") / "skills",
-    AIToolID.GEMINI: Path(".gemini") / "skills",
+    AIToolID.ANTIGRAVITY_CLI: Path(".agents") / "skills",
     AIToolID.COPILOT: Path(".github") / "skills",
 }
 
 
 def validate_skill_frontmatter(project_root: Path) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
+    seen: set[Path] = set()
     for tool, rel in _SKILLS_LOCATIONS.items():
         root = project_root / rel
         if not root.is_dir():
             continue
         # Resolve symlinks so we walk the underlying tree once even if multiple
-        # tool dirs symlink to the same canonical source.
+        # tool dirs symlink to the same canonical source (or, as with Codex and
+        # Antigravity CLI, share the same literal .agents/skills path).
         try:
             real_root = root.resolve()
         except OSError:
             real_root = root
+        if real_root in seen:
+            continue
+        seen.add(real_root)
         for skill_md in sorted(real_root.glob("*/SKILL.md")):
             data = _parse_skill_frontmatter(skill_md)
             relative = _relative(skill_md, project_root)
@@ -343,7 +348,7 @@ def validate_skill_frontmatter(project_root: Path) -> list[ValidationFinding]:
 _INSTRUCTION_FILES: dict[AIToolID, Path] = {
     AIToolID.CLAUDE: Path("CLAUDE.md"),
     AIToolID.CODEX: Path("AGENTS.md"),
-    AIToolID.GEMINI: Path("GEMINI.md"),
+    AIToolID.ANTIGRAVITY_CLI: Path("AGENTS.md"),
     AIToolID.CURSOR: Path(".cursorrules"),
     AIToolID.COPILOT: Path(".github") / "copilot-instructions.md",
 }
@@ -409,8 +414,8 @@ _JSON_MCP_LOCATIONS: dict[AIToolID, list[tuple[Path, str]]] = {
     AIToolID.COPILOT: [
         (Path(".vscode") / "mcp.json", "servers"),
     ],
-    AIToolID.GEMINI: [
-        (Path(".gemini") / "settings.json", "mcpServers"),
+    AIToolID.ANTIGRAVITY_CLI: [
+        (Path(".agents") / "mcp_config.json", "mcpServers"),
     ],
 }
 
@@ -420,7 +425,7 @@ def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
 
     Codex is handled separately by :func:`validate_codex_config` because its
     config lives in TOML rather than JSON. This walker covers the JSON-shape
-    tools — Claude, Cursor, Copilot (via the VS Code mcp.json), and Gemini.
+    tools — Claude, Cursor, Copilot (via the VS Code mcp.json), and Antigravity CLI.
     JSON parse failures are silently skipped here; :func:`validate_json_configs`
     surfaces them with full detail.
     """
@@ -454,8 +459,8 @@ def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
 # ---------------------------------------------------------------------------
 
 
-# Each entry is (relative path, concern). Claude/Gemini settings.json hold both
-# MCP servers and hooks, so we tag them MCP (validation is just JSON parseability).
+# Each entry is (relative path, concern). Claude's settings.json holds both
+# MCP servers and hooks, so we tag it MCP (validation is just JSON parseability).
 # `.claude.json` and `.mcp.json` ship with the MCP PATH walker, so we list them
 # here too — otherwise malformed JSON in those files would be silently dropped
 # by the walker without any "invalid JSON" finding from elsewhere.
@@ -470,7 +475,7 @@ _JSON_CONFIGS: dict[AIToolID, list[tuple[Path, SyncConcern]]] = {
         (Path(".cursor") / "mcp.json", SyncConcern.MCP),
         (Path(".cursor") / "hooks.json", SyncConcern.HOOKS),
     ],
-    AIToolID.GEMINI: [(Path(".gemini") / "settings.json", SyncConcern.MCP)],
+    AIToolID.ANTIGRAVITY_CLI: [(Path(".agents") / "mcp_config.json", SyncConcern.MCP)],
     AIToolID.COPILOT: [
         (Path(".vscode") / "mcp.json", SyncConcern.MCP),
         (Path(".github") / "hooks" / "hooks.json", SyncConcern.HOOKS),

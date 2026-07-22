@@ -61,7 +61,7 @@ def convert_cmd(
 
     Examples::
 
-        crossby agents convert --from claude --to gemini .claude/agents/researcher.md
+        crossby agents convert --from claude --to cursor .claude/agents/researcher.md
         crossby agents convert --from codex --to copilot ~/.codex/agents/worker.toml
         crossby agents convert --from claude --to codex agent.md --output ./out/
     """

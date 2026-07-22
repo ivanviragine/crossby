@@ -10,7 +10,7 @@ from crossby.subagents.emitters import emit as _emit
 from crossby.subagents.ir import ConversionWarning, SubagentIR
 from crossby.subagents.parsers import parse as _parse
 
-SUPPORTED_TOOLS: tuple[str, ...] = ("claude", "cursor", "gemini", "copilot", "codex")
+SUPPORTED_TOOLS: tuple[str, ...] = ("claude", "cursor", "copilot", "codex")
 
 
 @dataclass

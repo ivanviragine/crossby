@@ -134,13 +134,13 @@ class TestRenderPlan:
             _result(
                 action="created",
                 concern=SyncConcern.RULES,
-                tool_id=AIToolID.GEMINI,
+                tool_id=AIToolID.ANTIGRAVITY_CLI,
                 message="foreign markers in source",
             )
         ]
         out = render_plan(summarize_plan(results))
         assert "manual review: 1 item" in out
-        assert "gemini" in out
+        assert "antigravity-cli" in out
         assert "rules" in out
 
     def test_renders_no_manual_review_when_clean(self) -> None:

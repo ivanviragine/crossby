@@ -23,7 +23,7 @@ class TestParseEventDialects:
     @pytest.mark.parametrize(
         "payload",
         [
-            # Claude / Gemini
+            # Claude
             {"tool_name": "Write", "tool_input": {"file_path": "/repo/a.py"}},
             {"tool_name": "Write", "tool_input": {"path": "/repo/a.py"}},
             # Cursor

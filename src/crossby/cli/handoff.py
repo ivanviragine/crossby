@@ -12,9 +12,12 @@ import typer
 
 from crossby.ui.console import console
 
-_UNSUPPORTED_SOURCES = {"gemini", "opencode", "antigravity", "vscode"}
+_UNSUPPORTED_SOURCES = {"antigravity-cli", "opencode", "antigravity", "vscode"}
 _UNSUPPORTED_REASONS = {
-    "gemini": "Gemini CLI does not persist full transcripts to disk (see follow-up issue).",
+    "antigravity-cli": (
+        "Antigravity CLI stores conversations as opaque per-conversation SQLite "
+        "databases that are not yet supported (see follow-up issue)."
+    ),
     "opencode": (
         "OpenCode stores sessions in a SQLite database that is not yet supported "
         "(see follow-up issue)."

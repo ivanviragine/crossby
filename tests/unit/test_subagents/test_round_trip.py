@@ -20,19 +20,6 @@ model: sonnet
 You are a research assistant.
 """
 
-GEMINI_AGENT = """\
----
-name: searcher
-description: Searches files
-tools:
-  - read_file
-  - grep_search
-model: gemini-2.5-pro
-temperature: 0.5
----
-Body content.
-"""
-
 CODEX_AGENT = """\
 name = "worker"
 description = "Does work"
@@ -56,12 +43,11 @@ Helper body.
     "from_tool,source",
     [
         ("claude", CLAUDE_AGENT),
-        ("gemini", GEMINI_AGENT),
         ("codex", CODEX_AGENT),
         ("copilot", COPILOT_AGENT),
     ],
 )
-@pytest.mark.parametrize("to_tool", ["claude", "gemini", "copilot", "cursor", "codex"])
+@pytest.mark.parametrize("to_tool", ["claude", "copilot", "cursor", "codex"])
 def test_convert_does_not_raise_for_any_pair(from_tool: str, source: str, to_tool: str) -> None:
     """Every (source, target) pair should produce a parseable output."""
     result = convert(from_tool, to_tool, source)
@@ -76,14 +62,6 @@ def test_claude_round_trip_preserves_tools() -> None:
     assert ir2.tools == ["read_file", "grep", "bash"]
     assert ir2.name == "researcher"
     assert ir2.model == "sonnet"
-
-
-def test_claude_to_gemini_translates_tool_names() -> None:
-    result = convert("claude", "gemini", CLAUDE_AGENT)
-    assert "read_file" in result.payload
-    assert "run_shell_command" in result.payload
-    # Original Claude CamelCase names should not survive.
-    assert "Read\n" not in result.payload
 
 
 def test_codex_to_claude_recovers_body() -> None:
@@ -112,7 +90,7 @@ def test_cursor_drops_write_tools_with_warning() -> None:
 def test_extras_only_round_trip_to_same_tool() -> None:
     """Tool-specific extras should not leak into a foreign target."""
     text = "---\nname: a\ndescription: D\ncustomFoo: 7\n---\nbody\n"
-    cross = convert("claude", "gemini", text)
+    cross = convert("claude", "cursor", text)
     assert "customFoo" not in cross.payload
     same = convert("claude", "claude", text)
     assert "customFoo" in same.payload

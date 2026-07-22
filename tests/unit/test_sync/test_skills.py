@@ -13,11 +13,11 @@ from crossby.models.ai import AIToolID
 from crossby.sync.base import SyncConcern, SyncData
 from crossby.sync.skills import (
     _GITIGNORE_BLOCK_ID,
+    AntigravityCLISkillsWriter,
     ClaudeSkillsWriter,
     CodexSkillsWriter,
     CopilotSkillsWriter,
     CursorSkillsWriter,
-    GeminiSkillsWriter,
     _is_managed_skills_dir,
     update_skills_gitignore,
 )
@@ -289,7 +289,7 @@ class TestConcreteWriterAttributes:
             (ClaudeSkillsWriter, AIToolID.CLAUDE, ".claude/skills"),
             (CursorSkillsWriter, AIToolID.CURSOR, ".cursor/skills"),
             (CodexSkillsWriter, AIToolID.CODEX, ".agents/skills"),
-            (GeminiSkillsWriter, AIToolID.GEMINI, ".gemini/skills"),
+            (AntigravityCLISkillsWriter, AIToolID.ANTIGRAVITY_CLI, ".agents/skills"),
             (CopilotSkillsWriter, AIToolID.COPILOT, ".github/skills"),
         ],
     )
@@ -310,7 +310,7 @@ class TestConcreteWriterAttributes:
             (ClaudeSkillsWriter, ".claude/skills"),
             (CursorSkillsWriter, ".cursor/skills"),
             (CodexSkillsWriter, ".agents/skills"),
-            (GeminiSkillsWriter, ".gemini/skills"),
+            (AntigravityCLISkillsWriter, ".agents/skills"),
             (CopilotSkillsWriter, ".github/skills"),
         ],
     )
@@ -362,7 +362,7 @@ class TestUpdateSkillsGitignore:
         assert ".claude/skills" in content
         assert ".cursor/skills" in content
         assert ".github/skills" not in content
-        assert ".gemini/skills" not in content
+        assert ".agents/skills" not in content
 
     def test_installed_tools_none_includes_all(self, tmp_path: Path) -> None:
         data = _data()
@@ -371,7 +371,6 @@ class TestUpdateSkillsGitignore:
         assert ".claude/skills" in content
         assert ".cursor/skills" in content
         assert ".github/skills" in content
-        assert ".gemini/skills" in content
         assert ".agents/skills" in content
 
     def test_idempotent(self, tmp_path: Path) -> None:

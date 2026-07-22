@@ -33,7 +33,7 @@ Run `./scripts/check-all.sh` before opening a PR.
 src/crossby/
 ├── cli/          # Typer commands (entry point: cli/main.py:cli_main)
 ├── services/    # High-level orchestrators (sync, launch, handoff)
-├── ai_tools/     # Per-tool adapters (Claude, Copilot, Gemini, Codex, …)
+├── ai_tools/     # Per-tool adapters (Claude, Copilot, Codex, Antigravity CLI, …)
 ├── sync/         # Sync writers — translate and write config per tool
 ├── subagents/    # Subagent format translation (canonical IR + parsers/emitters)
 ├── handoff/      # Session readers, summarizer, prompt loader, handoff writer
@@ -47,7 +47,7 @@ src/crossby/
 ### Subagent format translation
 
 `src/crossby/subagents/` translates a single subagent definition between
-Claude Code, Cursor, Gemini, Copilot, and Codex.  The architecture is a
+Claude Code, Cursor, Copilot, and Codex.  The architecture is a
 canonical intermediate representation (`SubagentIR`) with one parser and one
 emitter per tool — no pairwise converters.  Tool-specific fields that don't
 generalize live in `SubagentIR.extras` and are only re-emitted when the
@@ -60,8 +60,7 @@ rather than silent drops — Cursor (no tool allowlist), Codex (only
 Codex is the asymmetric case: its emitter returns a `CodexEmission`
 containing both the agent `.toml` body and a `[agents.<name>]` fragment for
 `~/.codex/config.toml`.  Orchestration features (`/fleet`, `/multitask`,
-Gemini's A2A `kind: remote`, Codex `max_depth`) are out of scope and
-documented as not translatable.
+Codex `max_depth`) are out of scope and documented as not translatable.
 
 CLI: `crossby agents convert --from <tool> --to <tool> <input>`.
 
@@ -152,59 +151,65 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 
 ### Launch Flags
 
-| Crossby Flag  | Claude                             | Copilot           | Gemini                       | Codex                                      | OpenCode          | Cursor                     | VS Code | Antigravity |
-| ------------- | ---------------------------------- | ----------------- | ---------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | ----------- |
-| Binary        | `claude`                           | `copilot`         | `gemini`                     | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity` |
-| `--model`     | `--model`                          | `--model`         | `--model`                    | `--model`                                  | `--model`         | `--model`                  | —       | —           |
-| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--yolo`                     | `--yolo`                                   | —                 | `--force`                  | —       | —           |
-| `--plan`      | `--permission-mode plan`           | `--plan`          | `--approval-mode plan`       | —                                          | —                 | `--mode plan`              | —       | —           |
-| `--effort`    | `--effort <level>`                 | —                 | —                            | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —           |
-| `--prompt`    | positional                         | `-i <prompt>`     | positional                   | positional                                 | `--prompt <prompt>` | positional                | —       | —           |
-| `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper             | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —           |
-| `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--resume <id>`              | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —           |
-| `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--include-directories`      | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —           |
+| Crossby Flag  | Claude                             | Copilot           | Antigravity CLI                  | Codex                                      | OpenCode          | Cursor                     | VS Code | Antigravity |
+| ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | ----------- |
+| Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity` |
+| `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —           |
+| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —           |
+| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —           |
+| `--effort`    | `--effort <level>`                 | —                 | `--effort <level>`                | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —           |
+| `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —           |
+| `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —           |
+| `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —           |
+| `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--add-dir`                       | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —           |
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              |
-| ------------- | -------- | ------- | -------- | ------------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   |
-| `medium`      | `medium` | `medium`| `medium` | —                   |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI |
+| ------------- | -------- | ------- | -------- | ------------------- | ---------------- |
+| `low`         | `low`    | `low`   | `low`    | —                   | `low`            |
+| `medium`      | `medium` | `medium`| `medium` | —                   | `medium`         |
+| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `high`           |
+| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `high`           |
 
 ### Permission & Allowlist Configuration
 
 Crossby stores canonical command patterns (e.g. `myapp:*`) and writes them into each tool's native config format.
 
-| Feature            | Claude                      | Copilot                        | Gemini                 | Cursor                        |
-| ------------------ | --------------------------- | ------------------------------ | ---------------------- | ----------------------------- |
-| Config file        | `.claude/settings.json`     | `.github/hooks/hooks.json`     | `.gemini/settings.json`| `.cursor/cli.json`            |
-| Allowlist format   | `Bash(cmd:args)`            | `shell(cmd:args)`              | `shell(cmd:args)`      | `Shell(cmd:args)`             |
-| Launch flag        | `--allowedTools`            | `--allow-tool`                 | `--allowed-tools`      | — (config-file only)          |
-| Hook config        | `hooks.PreToolUse`          | `hooks.preToolUse`             | `hooks.BeforeTool`     | `preToolUse` in `hooks.json`  |
-| Hook guard matcher | `Edit\|Write\|NotebookEdit` | `Write\|Delete`                | file-write tools       | `Write\|Delete`               |
+Antigravity CLI has no per-project allowlist or hooks config — permissions
+are mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
+`--mode`) and it has no hook system at all, so `(ANTIGRAVITY_CLI,
+PERMISSIONS)` and `(ANTIGRAVITY_CLI, HOOKS)` have no writer (same as Codex
+having no permission writer).
+
+| Feature            | Claude                      | Copilot                        | Cursor                        |
+| ------------------ | --------------------------- | ------------------------------ | ----------------------------- |
+| Config file        | `.claude/settings.json`     | `.github/hooks/hooks.json`     | `.cursor/cli.json`            |
+| Allowlist format   | `Bash(cmd:args)`            | `shell(cmd:args)`              | `Shell(cmd:args)`             |
+| Launch flag        | `--allowedTools`            | `--allow-tool`                 | — (config-file only)          |
+| Hook config        | `hooks.PreToolUse`          | `hooks.preToolUse`             | `preToolUse` in `hooks.json`  |
+| Hook guard matcher | `Edit\|Write\|NotebookEdit` | `Write\|Delete`                | `Write\|Delete`               |
 
 ### Session Preservation & Resume
 
-| Feature                 | Claude                  | Copilot             | Gemini          | Codex              | OpenCode   | Cursor                   |
-| ----------------------- | ----------------------- | ------------------- | --------------- | ------------------ | ---------- | ------------------------ |
-| Resume command          | `claude --resume <id>`  | `copilot --resume=<id>` | `gemini --resume <id>` | `codex resume <id>` | `opencode -s <id>` | — |
-| Session data path       | `~/.claude/projects/`   | —                   | —               | —                  | —          | `~/.cursor/projects/`    |
-| Session data preserved  | Yes (worktree → main)   | —                   | —               | —                  | —          | Yes (worktree → main)    |
+| Feature                 | Claude                  | Copilot             | Antigravity CLI       | Codex              | OpenCode   | Cursor                   |
+| ----------------------- | ----------------------- | ------------------- | --------------------- | ------------------ | ---------- | ------------------------ |
+| Resume command          | `claude --resume <id>`  | `copilot --resume=<id>` | `agy --conversation <id>` | `codex resume <id>` | `opencode -s <id>` | — |
+| Session data path       | `~/.claude/projects/`   | —                   | —                      | —                  | —          | `~/.cursor/projects/`    |
+| Session data preserved  | Yes (worktree → main)   | —                   | —                      | —                  | —          | Yes (worktree → main)    |
 
 Session IDs are extracted automatically from transcripts when `--transcript` is used.
 
 ### Transcript Parsing (`crossby stats`)
 
-| Feature                  | Claude | Copilot | Gemini | Codex |
-| ------------------------ | ------ | ------- | ------ | ----- |
-| Total tokens             | Yes    | Yes     | Yes    | Yes   |
-| Input / output breakdown | Yes    | Yes     | Yes    | Yes   |
-| Cached tokens            | Yes    | Yes     | Yes    | Yes   |
-| Per-model breakdown      | —      | Yes     | Yes    | —     |
-| Premium requests         | —      | Yes     | —      | —     |
-| Session ID extraction    | Yes    | Yes     | Yes    | Yes   |
+| Feature                  | Claude | Copilot | Codex |
+| ------------------------ | ------ | ------- | ----- |
+| Total tokens             | Yes    | Yes     | Yes   |
+| Input / output breakdown | Yes    | Yes     | Yes   |
+| Cached tokens            | Yes    | Yes     | Yes   |
+| Per-model breakdown      | —      | Yes     | —     |
+| Premium requests         | —      | Yes     | —     |
+| Session ID extraction    | Yes    | Yes     | Yes   |
 
 ### Handoff Sources & Targets
 
@@ -214,17 +219,17 @@ Session IDs are extracted automatically from transcripts when `--transcript` is 
 | Cursor                                | ✓ (`~/.cursor/projects/<encoded>/chat.json`)         | ✓               |
 | Codex                                 | ✓ (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`)   | ✓               |
 | Copilot                               | ✓ (`~/.copilot/session-state/<id>/events.jsonl`)     | ✓               |
-| Gemini, OpenCode, Antigravity, VS Code| —                                                    | ✓               |
+| Antigravity CLI, OpenCode, Antigravity, VS Code| —                                            | ✓               |
 
 ### Library API (not exposed via CLI)
 
 Available on each adapter for programmatic use:
 
-| Feature           | Claude                                   | Copilot             | Gemini                   | Codex        | OpenCode           | Cursor          |
-| ----------------- | ---------------------------------------- | ------------------- | ------------------------ | ------------ | ------------------ | --------------- |
-| Trusted dirs      | `--add-dir`                              | `--add-dir`         | `--include-directories`  | `--add-dir`  | —                  | —               |
-| Structured output | `--output-format json --json-schema …`   | —                   | `--output-format json`   | —            | —                  | —               |
-| Model format      | dashed (`claude-haiku-4-5`)              | dotted (`claude-haiku-4.5`) | as-is            | as-is        | `provider/model`   | as-is           |
+| Feature           | Claude                                   | Copilot             | Antigravity CLI | Codex        | OpenCode           | Cursor          |
+| ----------------- | ---------------------------------------- | ------------------- | ---------------- | ------------ | ------------------ | --------------- |
+| Trusted dirs      | `--add-dir`                              | `--add-dir`         | `--add-dir`      | `--add-dir`  | —                  | —               |
+| Structured output | `--output-format json --json-schema …`   | —                   | —                | —            | —                  | —               |
+| Model format      | dashed (`claude-haiku-4-5`)              | dotted (`claude-haiku-4.5`) | as-is     | as-is        | `provider/model`   | as-is           |
 
 ## Commit Conventions
 
@@ -242,7 +247,7 @@ Common types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`.
 
 Examples:
 ```
-feat(sync): add allowlist conversion for Gemini
+feat(ai_tools): add Antigravity CLI adapter
 fix(cli): handle missing .crossby.yml gracefully
 docs: update compatibility table for Codex effort levels
 ```

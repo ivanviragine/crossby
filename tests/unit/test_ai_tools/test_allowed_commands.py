@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter
 from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.codex import CodexAdapter
 from crossby.ai_tools.copilot import CopilotAdapter
 from crossby.ai_tools.cursor import CursorAdapter
-from crossby.ai_tools.gemini import GeminiAdapter
 from crossby.ai_tools.opencode import OpenCodeAdapter
 
 
@@ -62,20 +62,16 @@ class TestCopilotAllowedCommands:
         assert result == ["--allow-tool", "shell(./scripts/fmt.sh)"]
 
 
-class TestGeminiAllowedCommands:
-    """Tests for GeminiAdapter.allowed_commands_args().
-
-    Gemini uses the Policy Engine (TOML files) instead of CLI flags.
-    The method always returns an empty list.
-    """
+class TestAntigravityCLIAllowedCommands:
+    """Tests for AntigravityCLIAdapter — returns empty (no support)."""
 
     def test_returns_empty(self) -> None:
-        adapter = GeminiAdapter()
+        adapter = AntigravityCLIAdapter()
         result = adapter.allowed_commands_args(["crossby:*"])
         assert result == []
 
     def test_returns_empty_with_multiple_patterns(self) -> None:
-        adapter = GeminiAdapter()
+        adapter = AntigravityCLIAdapter()
         result = adapter.allowed_commands_args(["crossby:*", "./scripts/check.sh:*"])
         assert result == []
 

@@ -11,8 +11,8 @@ INSTRUCTIONS_FILE: dict[AIToolID, str] = {
     AIToolID.CLAUDE: "CLAUDE.md",
     AIToolID.CURSOR: ".cursorrules",
     AIToolID.COPILOT: ".github/copilot-instructions.md",
-    AIToolID.GEMINI: "GEMINI.md",
     AIToolID.CODEX: "AGENTS.md",
+    AIToolID.ANTIGRAVITY_CLI: "AGENTS.md",
 }
 
 UNSUPPORTED_TOOLS = {AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY}

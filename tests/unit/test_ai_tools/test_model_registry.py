@@ -44,11 +44,11 @@ class TestRegistryGetModels:
         assert len(models) == len(get_models_for_tool("copilot"))
         assert "gpt-4.1" in [m.id for m in models]
 
-    def test_gemini_adapter_reads_registry(self) -> None:
-        adapter = AbstractAITool.get(AIToolID.GEMINI)
+    def test_antigravity_cli_adapter_reads_registry(self) -> None:
+        adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
         models = adapter.get_models()
-        assert len(models) == len(get_models_for_tool("gemini"))
-        assert "gemini-2.5-pro" in [m.id for m in models]
+        assert len(models) == len(get_models_for_tool("antigravity-cli"))
+        assert "gemini-3.6-flash-high" in [m.id for m in models]
 
     def test_codex_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)

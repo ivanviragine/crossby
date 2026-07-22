@@ -17,8 +17,8 @@ def stats(
 ) -> None:
     """Parse a session transcript and display token usage statistics.
 
-    Automatically detects the transcript format (Claude, Copilot, Gemini,
-    Codex, or generic). Optionally specify --tool for tool-specific parsing.
+    Automatically detects the transcript format (Claude, Copilot, Codex, or
+    generic). Optionally specify --tool for tool-specific parsing.
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.ai_tools.transcript import (

@@ -180,13 +180,13 @@ class TestDuplicateToolIDWarning:
 
                 # Define first adapter
                 class FirstAdapter(AbstractAITool):
-                    TOOL_ID: ClassVar[AIToolID] = AIToolID.GEMINI
+                    TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
 
                     def capabilities(self) -> AIToolCapabilities:
                         return AIToolCapabilities(
-                            tool_id=AIToolID.GEMINI,
-                            display_name="Gemini",
-                            binary="gemini",
+                            tool_id=AIToolID.CURSOR,
+                            display_name="Cursor",
+                            binary="cursor-agent",
                             tool_type=AIToolType.TERMINAL,
                         )
 

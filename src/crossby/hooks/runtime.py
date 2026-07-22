@@ -14,7 +14,7 @@ Dialects (grouped by output *shape*, not tool — see :class:`HookOutputDialect`
 
 - Claude / Codex → ``HOOK_SPECIFIC_OUTPUT``
 - Cursor → ``PERMISSION``
-- Gemini / Copilot → ``EXIT_CODE``
+- Copilot → ``EXIT_CODE``
 
 A deny always exits 2 regardless of dialect, so the block is honored even by a
 tool that ignores stdout; the dialect only governs the stdout payload.
@@ -140,7 +140,7 @@ def _first_str(source: dict[str, Any], keys: tuple[str, ...]) -> str | None:
 def _extract_file_path(data: dict[str, Any]) -> str | None:
     """Pull the target file path from any supported tool-input dialect.
 
-    Handles Claude/Cursor/Gemini (``tool_input``/``toolInput`` dict with
+    Handles Claude/Cursor (``tool_input``/``toolInput`` dict with
     ``file_path``/``filePath``/``path``/``notebook_path``), Copilot (``toolArgs``
     JSON string), and Cursor's event hooks that place the path at the payload
     *top level* (e.g. ``beforeReadFile``, which has no ``tool_input`` wrapper).
@@ -349,7 +349,7 @@ def emit_stop_decision(
     - ``HOOK_SPECIFIC_OUTPUT`` (Claude, Codex): ``{"decision": "block", "reason": …}``
     - ``PERMISSION`` (Cursor): ``{"followup_message": …}`` (auto-submitted; the
       tool bounds re-fires via its own ``loop_limit``).
-    - ``EXIT_CODE`` (Gemini, Copilot): no Stop-block channel — no-op allow. These
+    - ``EXIT_CODE`` (Copilot): no Stop-block channel — no-op allow. These
       tools also report ``supports_stop_hook = False``, so a Stop hook should not
       be installed for them in the first place.
 

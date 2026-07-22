@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter
 from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.codex import CodexAdapter
 from crossby.ai_tools.copilot import CopilotAdapter
-from crossby.ai_tools.gemini import GeminiAdapter
 
 
 class TestTrustedDirsLaunchCommand:
@@ -33,11 +33,11 @@ class TestTrustedDirsLaunchCommand:
         # sandbox flag must appear before --add-dir
         assert cmd.index("--sandbox") < cmd.index("--add-dir")
 
-    def test_gemini_trusted_dir_uses_include_directories(self) -> None:
-        cmd = GeminiAdapter().build_launch_command(trusted_dirs=["/tmp/plan"])
-        assert "--include-directories" in cmd
+    def test_antigravity_cli_trusted_dir_uses_add_dir(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(trusted_dirs=["/tmp/plan"])
+        assert "--add-dir" in cmd
         assert "/tmp/plan" in cmd
-        assert cmd[cmd.index("/tmp/plan") - 1] == "--include-directories"
+        assert cmd[cmd.index("/tmp/plan") - 1] == "--add-dir"
 
     def test_copilot_trusted_dir_uses_add_dir(self) -> None:
         cmd = CopilotAdapter().build_launch_command(trusted_dirs=["/tmp/plan"])

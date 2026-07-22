@@ -68,15 +68,6 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\.github/hooks/", "Copilot .github/hooks paths"),
         (r"\.vscode/mcp\.json\b", "Copilot .vscode/mcp.json"),
     ),
-    AIToolID.GEMINI: (
-        (r"\.gemini/", "Gemini config paths"),
-        (r"\bapproval-mode\b", "Gemini approval-mode flag"),
-        (r"\.gemini/agents/", "Gemini agents paths"),
-        (r"\.gemini/skills/", "Gemini skills paths"),
-        (r"\.gemini/commands/", "Gemini commands paths"),
-        (r"\bbeforetool\b", "Gemini BeforeTool hook event"),
-        (r"\baftertool\b", "Gemini AfterTool hook event"),
-    ),
 }
 
 

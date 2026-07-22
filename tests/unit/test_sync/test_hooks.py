@@ -1,4 +1,4 @@
-"""Tests for hooks sync writers (Claude, Cursor, Copilot, Gemini)."""
+"""Tests for hooks sync writers (Claude, Cursor, Copilot, Codex)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from crossby.sync.hooks import (
     ClaudeHooksWriter,
     CopilotHooksWriter,
     CursorHooksWriter,
-    GeminiHooksWriter,
     _tools_to_matcher,
     _translate_event,
     _translate_tools,
@@ -62,9 +61,6 @@ class TestTranslateEvent:
     def test_pre_tool_use_to_copilot(self) -> None:
         assert _translate_event("pre_tool_use", AIToolID.COPILOT) == "preToolUse"
 
-    def test_pre_tool_use_to_gemini(self) -> None:
-        assert _translate_event("pre_tool_use", AIToolID.GEMINI) == "BeforeTool"
-
     def test_unknown_event_passthrough(self) -> None:
         # `nonexistent_event` is not in any tool's mapping, so it falls through
         # unchanged. (Note: `post_tool_use` is now a canonical event with a
@@ -82,10 +78,6 @@ class TestTranslateTools:
     def test_copilot_name_lowercasing(self) -> None:
         result = _translate_tools(["Edit", "Write", "Bash"], AIToolID.COPILOT)
         assert result == ["edit", "write", "shell"]
-
-    def test_gemini_no_translation(self) -> None:
-        result = _translate_tools(["Edit", "Bash", "Write"], AIToolID.GEMINI)
-        assert result == ["Edit", "Bash", "Write"]
 
     def test_claude_no_translation(self) -> None:
         assert _translate_tools(["Edit", "Bash"], AIToolID.CLAUDE) == ["Edit", "Bash"]
@@ -595,152 +587,6 @@ class TestCopilotHooksWriter:
 
 
 # ---------------------------------------------------------------------------
-# GeminiHooksWriter
-# ---------------------------------------------------------------------------
-
-
-class TestGeminiHooksWriter:
-    writer = GeminiHooksWriter()
-
-    def test_no_hooks_config_skipped(self, tmp_path: Path) -> None:
-        result = self.writer.sync(SyncData(), tmp_path)
-        assert result.action == "skipped"
-
-    def test_creates_new_file(self, tmp_path: Path) -> None:
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        assert result.action == "created"
-        path = tmp_path / ".gemini" / "settings.json"
-        assert path.exists()
-        data = _read_json(path)
-        assert isinstance(data["hooks"], dict)
-        before_tool = data["hooks"]["BeforeTool"]
-        assert len(before_tool) == 1
-        assert before_tool[0]["matcher"] == "Edit|Write"
-        assert before_tool[0]["hooks"] == [
-            {"type": "command", "command": "python3 ./scripts/guard.py"}
-        ]
-
-    def test_empty_tools_uses_wildcard_matcher(self, tmp_path: Path) -> None:
-        self.writer.sync(_cfg(BARE_HOOK), tmp_path)
-        data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert data["hooks"]["BeforeTool"][0]["matcher"] == ".*"
-
-    def test_hooks_nested_object_not_flat_array(self, tmp_path: Path) -> None:
-        """Gemini stores hooks as a nested object keyed by event name."""
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        data = _read_json(tmp_path / ".gemini" / "settings.json")
-        assert isinstance(data["hooks"], dict)
-        assert "BeforeTool" in data["hooks"]
-
-    def test_merges_into_existing_file(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
-        path.parent.mkdir()
-        existing_entry = {
-            "matcher": ".*",
-            "hooks": [{"type": "command", "command": "echo old"}],
-        }
-        existing = {
-            "mcpServers": {"ctx": {"command": "npx"}},
-            "hooks": {"BeforeTool": [existing_entry]},
-        }
-        path.write_text(json.dumps(existing), encoding="utf-8")
-
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-
-        data = _read_json(path)
-        assert data["mcpServers"] == existing["mcpServers"]
-        assert len(data["hooks"]["BeforeTool"]) == 2
-
-    def test_migrates_old_flat_array_format(self, tmp_path: Path) -> None:
-        """Old flat-array hooks are converted to nested format, preserving commands."""
-        path = tmp_path / ".gemini" / "settings.json"
-        path.parent.mkdir()
-        old_format = {
-            "hooks": [{"event": "BeforeTool", "command": "echo old", "tools": [".*"]}],
-        }
-        path.write_text(json.dumps(old_format), encoding="utf-8")
-
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-
-        data = _read_json(path)
-        # After migration, hooks should be a dict
-        assert isinstance(data["hooks"], dict)
-        assert "BeforeTool" in data["hooks"]
-        # Both the migrated old hook and the new hook should be present
-        commands = [
-            h["command"] for entry in data["hooks"]["BeforeTool"] for h in entry.get("hooks", [])
-        ]
-        assert "echo old" in commands
-        assert "python3 ./scripts/guard.py" in commands
-
-    def test_preserves_other_gemini_settings(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
-        path.parent.mkdir()
-        path.write_text(json.dumps({"theme": "dark", "hooks": {}}), encoding="utf-8")
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        data = _read_json(path)
-        assert data["theme"] == "dark"
-
-    def test_idempotent_skipped(self, tmp_path: Path) -> None:
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        assert result.action == "skipped"
-
-    def test_dedup_by_command_widens_matcher(self, tmp_path: Path) -> None:
-        """Same command with different tools widens the existing matcher.
-
-        Before the widen fix, Gemini's writer left the matcher untouched on
-        a command match, so coverage grew via duplicate entries or got stuck
-        at the first sync's tools. Now the matcher unions both tool sets.
-        """
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        different_tools_hook = HookEntry(
-            event="pre_tool_use",
-            command="python3 ./scripts/guard.py",
-            tools=["Bash"],
-        )
-        result = self.writer.sync(_cfg(different_tools_hook), tmp_path)
-        assert result.action == "updated"
-        path = tmp_path / ".gemini" / "settings.json"
-        data = _read_json(path)
-        entries = data["hooks"]["BeforeTool"]
-        assert len(entries) == 1
-        tokens = entries[0]["matcher"].split("|")
-        assert set(tokens) == {"Edit", "Write", "Bash"}
-
-    def test_different_events_not_deduped(self, tmp_path: Path) -> None:
-        """Same command for different events is NOT a duplicate."""
-        hook2 = HookEntry(event="post_tool_use", command="python3 ./scripts/guard.py", tools=[])
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        result = self.writer.sync(_cfg(hook2), tmp_path)
-        assert result.action == "updated"
-
-    def test_dry_run_no_write(self, tmp_path: Path) -> None:
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path, dry_run=True)
-        assert result.action == "created"
-        assert not (tmp_path / ".gemini" / "settings.json").exists()
-
-    def test_dry_run_no_change(self, tmp_path: Path) -> None:
-        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path, dry_run=True)
-        assert result.action == "skipped"
-
-    def test_malformed_json_error(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
-        path.parent.mkdir()
-        path.write_text("{bad}", encoding="utf-8")
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        assert result.action == "error"
-
-    def test_updated_action_on_existing_file(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
-        path.parent.mkdir()
-        path.write_text(json.dumps({}), encoding="utf-8")
-        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
-        assert result.action == "updated"
-
-
-# ---------------------------------------------------------------------------
 # Config model validation
 # ---------------------------------------------------------------------------
 
@@ -1014,10 +860,6 @@ class TestCrossWriterUnsupportedEvents:
             ("CopilotHooksWriter", "post_tool_use"),
             ("CopilotHooksWriter", "stop"),
             ("CopilotHooksWriter", "user_prompt_submit"),
-            # Gemini supports pre_tool_use + post_tool_use.
-            ("GeminiHooksWriter", "stop"),
-            ("GeminiHooksWriter", "notification"),
-            ("GeminiHooksWriter", "user_prompt_submit"),
             # Codex supports everything except notification.
             ("CodexHooksWriter", "notification"),
         ],
