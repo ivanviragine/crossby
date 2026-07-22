@@ -484,7 +484,9 @@ def _confirm_sync_defaults(
     Returns ``(source_tool, target_tool, sync_concern)`` after any user edits.
     A no-op on non-TTY stdin (handled inside ``confirm_defaults``).
     """
+    from crossby.models.ai import AIToolID
     from crossby.services.confirm import ConfirmField, confirm_defaults
+    from crossby.sync.base import SyncConcern
     from crossby.ui import prompts
 
     tool_names = [str(t) for t in installed_tools]
