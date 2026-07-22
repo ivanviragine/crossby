@@ -144,3 +144,71 @@ class TestConfirmSyncDefaultsChangePaths:
         )
         # After switching source to cursor, the target picker excludes cursor.
         assert ("Target tool", ["(all installed)", "claude", "codex"]) in recorder.calls
+
+    def test_change_source_to_match_target_resets_target(
+        self, tty: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changing the source to the already-set target clears the target.
+
+        The target picker never offers the current source, so leaving a stale
+        ``target == source`` would schedule a redundant tool -> itself sync.
+        """
+        # menu: Change source tool (1) -> select "cursor" (1) -> Proceed (0)
+        recorder = _PromptRecorder([1, 1, 0])
+        _install_select(monkeypatch, recorder)
+
+        source, target, concern = _confirm_sync_defaults(
+            source_tool=AIToolID.CLAUDE,
+            target_tool=AIToolID.CURSOR,
+            sync_concern=None,
+            installed_tools=_INSTALLED,
+            from_explicit=False,
+            to_explicit=False,
+            concern_explicit=False,
+        )
+
+        assert source == AIToolID.CURSOR
+        assert target is None
+        assert concern is None
+
+    def test_change_target_to_all_installed_clears_target(
+        self, tty: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # menu: Change target tool (2) -> select "(all installed)" (0) -> Proceed (0)
+        recorder = _PromptRecorder([2, 0, 0])
+        _install_select(monkeypatch, recorder)
+
+        source, target, concern = _confirm_sync_defaults(
+            source_tool=AIToolID.CLAUDE,
+            target_tool=AIToolID.CURSOR,
+            sync_concern=None,
+            installed_tools=_INSTALLED,
+            from_explicit=False,
+            to_explicit=False,
+            concern_explicit=False,
+        )
+
+        assert source == AIToolID.CLAUDE
+        assert target is None
+        assert concern is None
+
+    def test_change_concern_to_all_clears_concern(
+        self, tty: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # menu: Change concern (3) -> select "(all concerns)" (0) -> Proceed (0)
+        recorder = _PromptRecorder([3, 0, 0])
+        _install_select(monkeypatch, recorder)
+
+        source, target, concern = _confirm_sync_defaults(
+            source_tool=AIToolID.CLAUDE,
+            target_tool=None,
+            sync_concern=SyncConcern.RULES,
+            installed_tools=_INSTALLED,
+            from_explicit=False,
+            to_explicit=False,
+            concern_explicit=False,
+        )
+
+        assert source == AIToolID.CLAUDE
+        assert target is None
+        assert concern is None
