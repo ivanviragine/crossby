@@ -42,6 +42,16 @@ class TestStopHookSupport:
         assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_session_start_hook is False
 
 
+class TestUserPromptSubmitHookSupport:
+    def test_supported(self) -> None:
+        for tool in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.CURSOR):
+            assert _caps(tool).supports_user_prompt_submit_hook is True
+
+    def test_unsupported(self) -> None:
+        for tool in (AIToolID.COPILOT, AIToolID.GEMINI):
+            assert _caps(tool).supports_user_prompt_submit_hook is False
+
+
 class TestSandboxAndFailOpen:
     def test_codex_sandboxes_writes(self) -> None:
         assert _caps(AIToolID.CODEX).sandboxes_writes is True

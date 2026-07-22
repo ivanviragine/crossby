@@ -76,7 +76,7 @@ Per-tool supported events:
 | --- | --- | --- |
 | Claude | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop`, `notification` | every event |
 | Codex | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop` | `pre_tool_use`, `post_tool_use`, `session_start` only |
-| Cursor | `pre_tool_use`, `stop` | `pre_tool_use` only |
+| Cursor | `pre_tool_use`, `user_prompt_submit`, `stop` | `pre_tool_use` only |
 | Copilot | `pre_tool_use` | none — Copilot hooks apply to every tool |
 
 Antigravity CLI has no hook system at all, so it has no row here.
@@ -120,7 +120,7 @@ the concerns below) aren't wired yet.
 | Claude → Codex | agents | `permissionMode: plan` / `dontAsk` / `bypassPermissions`; `tools` / `disallowedTools` / `skills` (become prompt guidance only) |
 | Claude → Codex | hooks | `Notification`; `matcher` on `UserPromptSubmit` / `Stop`; non-`command` hook types (`prompt`, `agent`, `http`, `async`) |
 | Claude → Codex | mcp | `headers` with `${VAR:-default}` fallbacks; `oauth` (whole block — reported as a manual-fix row, not written to any target); `type: sse` |
-| Claude → Cursor | hooks | every event except `pre_tool_use` and `stop`; `tools` filter on `stop` |
+| Claude → Cursor | hooks | every event except `pre_tool_use`, `user_prompt_submit`, and `stop`; `tools` filter on `user_prompt_submit` / `stop` |
 | Claude → Copilot | hooks | every event except `pre_tool_use`; the `tools` filter (Copilot has no per-tool scope) |
 | Codex → Claude | agents | `model_reasoning_effort` (Claude has no equivalent); `[permissions]` table |
 | Codex → Cursor / Copilot / Antigravity CLI | mcp | TOML-specific `bearer_token_env_var` → header rewrite back into `Authorization: Bearer ${VAR}` form |

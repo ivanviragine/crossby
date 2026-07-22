@@ -288,9 +288,11 @@ def emit_decision(
     - ``allow`` → exit 0, no output (every tool treats exit 0 as allow).
     - ``deny`` → exit 2 always (universal block), plus the dialect's stdout JSON
       and the reason on stderr (human-readable, honored by ``EXIT_CODE`` tools).
-    - ``context`` → exit 0; injects ``additional_context`` only for
-      ``HOOK_SPECIFIC_OUTPUT`` (the sole dialect with a context channel); a no-op
-      allow elsewhere.
+    - ``context`` → exit 0; injects ``additionalContext`` for
+      ``HOOK_SPECIFIC_OUTPUT`` (Claude/Codex) and a top-level
+      ``additional_context`` for ``PERMISSION`` (Cursor, via its
+      ``beforeSubmitPrompt`` event); a no-op allow for ``EXIT_CODE`` (no
+      context channel).
 
     Args:
         decision: The tool-neutral decision.
@@ -309,6 +311,11 @@ def emit_decision(
                 }
             }
             return HookEmission(stdout=json.dumps(ctx_payload), exit_code=0)
+        if dialect is HookOutputDialect.PERMISSION and decision.additional_context:
+            return HookEmission(
+                stdout=json.dumps({"additional_context": decision.additional_context}),
+                exit_code=0,
+            )
         return HookEmission(exit_code=0)
 
     # deny — always exit 2 so the block is honored regardless of dialect.
