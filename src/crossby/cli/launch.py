@@ -276,19 +276,26 @@ def launch(
 
     # Display the effective selection. Autonomy tiers are shown in ladder order;
     # the builder resolves precedence (yolo > auto > accept-edits > plan) at launch.
+    # The highest requested tier is the effective one ("on"); any lower tier the
+    # user also requested is shown as "superseded" so the summary never implies a
+    # moot tier is active.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
         console.kv("Model", resolved_model)
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
-    if resolved_yolo:
-        console.kv("YOLO mode", "on")
-    if resolved_auto:
-        console.kv("Auto mode", "on")
-    if resolved_accept_edits:
-        console.kv("Accept-edits mode", "on")
-    if plan:
-        console.kv("Plan mode", "on")
+    autonomy_tiers = (
+        ("YOLO mode", resolved_yolo),
+        ("Auto mode", resolved_auto),
+        ("Accept-edits mode", resolved_accept_edits),
+        ("Plan mode", plan),
+    )
+    effective_shown = False
+    for label, requested in autonomy_tiers:
+        if not requested:
+            continue
+        console.kv(label, "on" if not effective_shown else "superseded")
+        effective_shown = True
     console.empty()
 
     # Deliver prompt if tool doesn't support initial messages

@@ -572,6 +572,20 @@ class TestAcceptEditsAutoFlags:
         assert kwargs.get("accept_edits") is False
         assert kwargs.get("auto") is False
 
+    def test_superseded_tier_shown_as_superseded_not_on(self, tmp_path: Path) -> None:
+        # --yolo wins the ladder; the also-requested accept-edits is superseded
+        # at launch and must not be summarized as "on".
+        adapter, result = self._run(tmp_path, "--yolo", "--accept-edits")
+        assert result.exit_code == 0, result.output
+        assert "YOLO mode" in result.output
+        assert "Accept-edits mode" in result.output
+        assert "superseded" in result.output
+        assert result.output.count("superseded") == 1
+        # Both flags still forwarded to the builder, which resolves precedence.
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("yolo") is True
+        assert kwargs.get("accept_edits") is True
+
     def _run_unsupported(self, tmp_path: Path, *flags: str) -> tuple[MagicMock, Any]:
         """Launch a tool that supports neither accept-edits nor auto (e.g. a GUI)."""
         (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: vscode\n")
