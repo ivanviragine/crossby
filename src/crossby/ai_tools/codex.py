@@ -70,9 +70,19 @@ class CodexAdapter(AbstractAITool):
         """Codex uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]
 
-    def trusted_dirs_args(self, dirs: list[str]) -> list[str]:
-        """Codex requires workspace-write sandbox mode for --add-dir to take effect."""
-        result = ["--sandbox", "workspace-write"]
+    def trusted_dirs_args(
+        self, dirs: list[str], *, autonomy_args: list[str] | None = None
+    ) -> list[str]:
+        """Codex requires workspace-write sandbox mode for --add-dir to take effect.
+
+        Skip re-emitting ``--sandbox workspace-write`` when the resolved
+        autonomy tier already supplied it (accept-edits sets ``-s
+        workspace-write``, and auto downgrades to accept-edits on Codex),
+        so an accept-edits launch with trusted dirs doesn't pass Codex the
+        sandbox option twice.
+        """
+        sandbox_already_set = "workspace-write" in (autonomy_args or [])
+        result: list[str] = [] if sandbox_already_set else ["--sandbox", "workspace-write"]
         for d in dirs:
             result.extend(self.plan_dir_args(d))
         return result

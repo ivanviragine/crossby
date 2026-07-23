@@ -238,12 +238,19 @@ class AbstractAITool(ABC):
         """Get extra CLI args to grant write access to a plan output directory."""
         return []  # Default: no plan dir support
 
-    def trusted_dirs_args(self, dirs: list[str]) -> list[str]:
+    def trusted_dirs_args(
+        self, dirs: list[str], *, autonomy_args: list[str] | None = None
+    ) -> list[str]:
         """Get extra CLI args to grant access to a list of trusted directories.
 
         Default implementation delegates to plan_dir_args() per directory, so
         any adapter that overrides plan_dir_args() automatically supports this
         method. Adapters without directory-trust support return [].
+
+        *autonomy_args* carries the already-resolved autonomy/permission-mode
+        flags (from :meth:`_autonomy_launch_args`) so an adapter can avoid
+        re-emitting a flag the autonomy tier already supplied (e.g. Codex's
+        ``--sandbox workspace-write``). Ignored by the default implementation.
         """
         result: list[str] = []
         for d in dirs:
@@ -506,21 +513,20 @@ class AbstractAITool(ABC):
         if prompt and caps.supports_headless and caps.headless_flag:
             cmd.extend([caps.headless_flag, prompt])
 
-        cmd.extend(
-            self._autonomy_launch_args(
-                caps,
-                yolo=yolo,
-                auto=auto,
-                accept_edits=accept_edits,
-                plan_mode=plan_mode,
-            )
+        autonomy_args = self._autonomy_launch_args(
+            caps,
+            yolo=yolo,
+            auto=auto,
+            accept_edits=accept_edits,
+            plan_mode=plan_mode,
         )
+        cmd.extend(autonomy_args)
 
         if json_schema:
             cmd.extend(self.structured_output_args(json_schema))
 
         if trusted_dirs:
-            cmd.extend(self.trusted_dirs_args(trusted_dirs))
+            cmd.extend(self.trusted_dirs_args(trusted_dirs, autonomy_args=autonomy_args))
 
         # Effort args (tool-specific flags like --settings, --variant, etc.)
         if effort and caps.supports_effort:

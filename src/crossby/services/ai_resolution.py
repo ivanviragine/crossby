@@ -361,10 +361,15 @@ def confirm_ai_selection(
         updates: dict[str, Any] = {"tool": new_tool, "model": new_model}
         if state.get("effort") is not None and not supports_effort:
             updates["effort"] = None
-        if state.get("accept_edits") and not supports_accept_edits:
-            updates["accept_edits"] = False
+        # Mirror build_launch_command's autonomy cascade (auto → accept-edits →
+        # default): when the new tool can't honor an enabled auto request,
+        # downgrade to accept-edits if it supports it rather than silently
+        # dropping to default prompting.
         if state.get("auto") and not supports_auto:
             updates["auto"] = False
+            updates["accept_edits"] = supports_accept_edits
+        elif state.get("accept_edits") and not supports_accept_edits:
+            updates["accept_edits"] = False
         if state.get("yolo") and not supports_yolo:
             updates["yolo"] = False
         return updates

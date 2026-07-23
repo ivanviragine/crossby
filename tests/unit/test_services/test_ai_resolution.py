@@ -186,3 +186,52 @@ class TestResolveAuto:
 
     def test_default_false(self) -> None:
         assert resolve_auto(None, CrossbyConfig()) is False
+
+
+class TestConfirmAiSelectionToolSwitch:
+    """Interactive tool switch mirrors build_launch_command's autonomy cascade."""
+
+    def test_auto_escalates_to_accept_edits_when_new_tool_lacks_auto(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.ai_tools.base import AbstractAITool
+        from crossby.models.ai import AIToolID
+        from crossby.services.ai_resolution import confirm_ai_selection
+
+        monkeypatch.setattr("os.isatty", lambda _fd: True)
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: True)
+        monkeypatch.setattr(
+            AbstractAITool,
+            "detect_installed",
+            staticmethod(lambda: [AIToolID.CLAUDE, AIToolID.CODEX]),
+        )
+
+        # Scripted prompts.select answers, in call order:
+        #   1 -> confirm menu: "Change AI tool"
+        #   1 -> tool picker:  codex (index 1 of [claude, codex])
+        #   0 -> model picker: first codex model
+        #   0 -> confirm menu: "Proceed"
+        answers = iter([1, 1, 0, 0])
+        monkeypatch.setattr("crossby.ui.prompts.select", lambda *_a, **_k: next(answers))
+
+        tool, _model, _effort, accept_edits, auto, _yolo = confirm_ai_selection(
+            "claude",
+            "claude-sonnet-4-5",
+            tool_explicit=False,
+            model_explicit=True,
+            resolved_effort=None,
+            effort_explicit=True,
+            resolved_accept_edits=False,
+            accept_edits_explicit=True,
+            resolved_auto=True,
+            auto_explicit=True,
+            resolved_yolo=False,
+            yolo_explicit=True,
+        )
+
+        # Codex lacks classifier auto but supports accept-edits: an enabled auto
+        # request must downgrade to accept-edits, not silently drop to default
+        # prompting.
+        assert tool == "codex"
+        assert auto is False
+        assert accept_edits is True

@@ -14,6 +14,10 @@
   down: 0
   stale: 0
   up: 2
+801860a4:
+  down: 0
+  stale: 0
+  up: 1
 91c88418:
   down: 0
   stale: 0
@@ -22,7 +26,7 @@
   down: 0
   stale: 0
   superseded_by: e3fcf100
-  up: 0
+  up: 1
 '99616955':
   down: 0
   stale: 1
@@ -32,6 +36,10 @@ abee48e8:
   stale: 0
   up: 1
 b7079af0:
+  down: 0
+  stale: 0
+  up: 1
+e3fcf100:
   down: 0
   stale: 0
   up: 1
