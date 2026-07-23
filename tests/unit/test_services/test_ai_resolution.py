@@ -12,6 +12,7 @@ from crossby.models.config import (
     CrossbyConfig,
 )
 from crossby.services.ai_resolution import (
+    _downgrade_autonomy_tier,
     resolve_accept_edits,
     resolve_auto,
     resolve_effort,
@@ -235,3 +236,76 @@ class TestConfirmAiSelectionToolSwitch:
         assert tool == "codex"
         assert auto is False
         assert accept_edits is True
+
+
+class TestDowngradeAutonomyTier:
+    """`_downgrade_autonomy_tier` mirrors build_launch_command's autonomy ladder."""
+
+    def test_supported_tier_passes_through(self) -> None:
+        supports = {"yolo": True, "auto": True, "accept_edits": True}
+        assert _downgrade_autonomy_tier("yolo", supports) == "yolo"
+        assert _downgrade_autonomy_tier("auto", supports) == "auto"
+        assert _downgrade_autonomy_tier("accept_edits", supports) == "accept_edits"
+
+    def test_auto_downgrades_to_accept_edits(self) -> None:
+        # Codex-like: auto unsupported, accept-edits supported.
+        supports = {"yolo": True, "auto": False, "accept_edits": True}
+        assert _downgrade_autonomy_tier("auto", supports) == "accept_edits"
+
+    def test_yolo_downgrades_to_accept_edits_when_only_accept_edits(self) -> None:
+        # Hypothetical accept-edits-only tool (no registered adapter has this
+        # today): yolo must downgrade to accept-edits, not drop all autonomy.
+        supports = {"yolo": False, "auto": False, "accept_edits": True}
+        assert _downgrade_autonomy_tier("yolo", supports) == "accept_edits"
+
+    def test_never_escalates(self) -> None:
+        # An accept-edits request must never jump up to yolo/auto.
+        supports = {"yolo": True, "auto": True, "accept_edits": False}
+        assert _downgrade_autonomy_tier("accept_edits", supports) is None
+
+    def test_no_supported_tier_returns_none(self) -> None:
+        supports = {"yolo": False, "auto": False, "accept_edits": False}
+        for requested in ("yolo", "auto", "accept_edits"):
+            assert _downgrade_autonomy_tier(requested, supports) is None
+
+    def test_none_request_returns_none(self) -> None:
+        supports = {"yolo": True, "auto": True, "accept_edits": True}
+        assert _downgrade_autonomy_tier(None, supports) is None
+
+    def test_mirrors_builder_for_every_registered_tool(self) -> None:
+        """The helper's tier choice matches the args build_launch_command emits.
+
+        Building with a single autonomy flag and no other options yields
+        ``[binary, *autonomy_args]``, so ``cmd[1:]`` is exactly the effective
+        tier's args — which must equal the tier the helper resolves.
+        """
+        import warnings
+
+        from crossby.ai_tools.base import AbstractAITool
+
+        for tool in AbstractAITool.available_tools():
+            adapter = AbstractAITool.get(tool)
+            caps = adapter.capabilities()
+            supports = {
+                "yolo": caps.supports_yolo,
+                "auto": caps.supports_auto,
+                "accept_edits": caps.supports_accept_edits,
+            }
+            tier_args = {
+                "yolo": adapter.yolo_args(),
+                "auto": adapter.auto_args(),
+                "accept_edits": adapter.accept_edits_args(),
+            }
+            for requested in ("yolo", "auto", "accept_edits"):
+                effective = _downgrade_autonomy_tier(requested, supports)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    cmd = adapter.build_launch_command(
+                        yolo=requested == "yolo",
+                        auto=requested == "auto",
+                        accept_edits=requested == "accept_edits",
+                    )
+                expected = tier_args[effective] if effective is not None else []
+                assert cmd[1:] == expected, (
+                    f"{tool}: requested={requested} effective={effective} cmd={cmd}"
+                )

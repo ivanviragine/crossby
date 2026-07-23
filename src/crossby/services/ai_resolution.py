@@ -276,6 +276,27 @@ def resolve_auto(
     return bool(resolved)
 
 
+# Autonomy tiers in precedence order (most permissive first). Mirrors
+# ``_autonomy_launch_args`` in ``ai_tools/base.py``: a request collapses to the
+# highest tier the tool supports at or below it, walking *down* the ladder — it
+# never escalates.
+_AUTONOMY_TIERS: tuple[str, ...] = ("yolo", "auto", "accept_edits")
+
+
+def _downgrade_autonomy_tier(requested: str | None, supports: dict[str, bool]) -> str | None:
+    """Resolve a requested autonomy tier against a tool's capabilities.
+
+    Returns the highest tier the tool supports at or below *requested* (the
+    effective tier ``build_launch_command`` would launch), or ``None`` when the
+    request and every lower tier are unsupported (default prompting). Passing
+    ``None`` returns ``None``.
+    """
+    if requested is None:
+        return None
+    start = _AUTONOMY_TIERS.index(requested)
+    return next((tier for tier in _AUTONOMY_TIERS[start:] if supports[tier]), None)
+
+
 def confirm_ai_selection(
     resolved_tool: str | None,
     resolved_model: str | None,
@@ -361,17 +382,26 @@ def confirm_ai_selection(
         updates: dict[str, Any] = {"tool": new_tool, "model": new_model}
         if state.get("effort") is not None and not supports_effort:
             updates["effort"] = None
-        # Mirror build_launch_command's autonomy cascade (auto → accept-edits →
-        # default): when the new tool can't honor an enabled auto request,
-        # downgrade to accept-edits if it supports it rather than silently
-        # dropping to default prompting.
-        if state.get("auto") and not supports_auto:
-            updates["auto"] = False
-            updates["accept_edits"] = supports_accept_edits
-        elif state.get("accept_edits") and not supports_accept_edits:
-            updates["accept_edits"] = False
-        if state.get("yolo") and not supports_yolo:
-            updates["yolo"] = False
+        # Mirror build_launch_command's autonomy cascade (yolo > auto >
+        # accept-edits): collapse the highest requested tier to the highest tier
+        # the new tool supports at or below it, so an unsupported request
+        # downgrades (never escalates) instead of silently dropping all autonomy.
+        requested = next(
+            (tier for tier in _AUTONOMY_TIERS if state.get(tier)),
+            None,
+        )
+        if requested is not None:
+            effective = _downgrade_autonomy_tier(
+                requested,
+                {
+                    "yolo": supports_yolo,
+                    "auto": supports_auto,
+                    "accept_edits": supports_accept_edits,
+                },
+            )
+            updates["yolo"] = effective == "yolo"
+            updates["auto"] = effective == "auto"
+            updates["accept_edits"] = effective == "accept_edits"
         return updates
 
     def _model_change(_current: Any, state: dict[str, Any]) -> dict[str, Any]:
