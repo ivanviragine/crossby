@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crossby"
-version = "0.10.0"
+version = "0.10.1"
 description = "CROSSBY — Cross-platform Bridge for Your AI agents"
 readme = "README.md"
 license = "MIT"
