@@ -190,7 +190,7 @@ crossby handoff --from claude --to codex --prompt ./my-prompt.md
 
 The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
 
-Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Antigravity CLI, OpenCode, Antigravity, VS Code.
+Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Antigravity CLI, OpenCode, Antigravity IDE, VS Code.
 
 ## Optional: `.crossby.yml`
 
@@ -240,7 +240,9 @@ Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--accept
 | Antigravity CLI| ✓    | ✓      | —                 | ✓                |
 | OpenCode       | ✓    | ✓      | —                 | ✓                |
 | VS Code        | ✓    | ✓      | —                 | ✓                |
-| Antigravity    | ✓    | ✓      | —                 | ✓                |
+| Antigravity IDE| ✓    | ✓      | —                 | ✓                |
+
+The **Antigravity IDE** is a launch-only GUI tool. It reads the same project-level `.agents/` config as **Antigravity CLI** (`AGENTS.md`, `.agents/skills`, `.agents/agents`, `.agents/mcp_config.json`), so syncing to `antigravity-cli` provisions the IDE too — there is no separate IDE sync target.
 
 Per-tool flag mappings and adapter details live in [CONTRIBUTING.md](CONTRIBUTING.md#tool-reference).
 
