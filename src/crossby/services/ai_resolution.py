@@ -231,6 +231,72 @@ def resolve_yolo(
     return True
 
 
+def resolve_accept_edits(
+    accept_edits: bool | None,
+    config: CrossbyConfig,
+    command: str = "plan",
+) -> bool:
+    """Resolve accept-edits mode from args -> config -> False.
+
+    Fallback chain:
+      1. Explicit *accept_edits* arg (e.g. ``--accept-edits`` CLI flag)
+      2. Command-specific config (``ai.<command>.accept_edits``)
+      3. Global config (``ai.accept_edits``)
+
+    Unlike :func:`resolve_yolo`, tool support is **not** enforced here: the
+    accept-edits tier degrades gracefully (``build_launch_command`` warns and
+    falls back to default prompting on tools that lack it), so the request is
+    passed through unchanged rather than dropped or raised.
+    """
+    resolved: bool | None = accept_edits
+    if resolved is None:
+        resolved = config.get_accept_edits(command)
+    return bool(resolved)
+
+
+def resolve_auto(
+    auto: bool | None,
+    config: CrossbyConfig,
+    command: str = "plan",
+) -> bool:
+    """Resolve classifier auto mode from args -> config -> False.
+
+    Fallback chain mirrors :func:`resolve_accept_edits`:
+      1. Explicit *auto* arg (e.g. ``--auto`` CLI flag)
+      2. Command-specific config (``ai.<command>.auto``)
+      3. Global config (``ai.auto``)
+
+    Tool support is resolved at launch time: ``auto`` is Claude-only and
+    ``build_launch_command`` downgrades it to accept-edits, then default
+    prompting, on tools that lack a classifier mode — never escalating to yolo.
+    """
+    resolved: bool | None = auto
+    if resolved is None:
+        resolved = config.get_auto(command)
+    return bool(resolved)
+
+
+# Autonomy tiers in precedence order (most permissive first). Mirrors
+# ``_autonomy_launch_args`` in ``ai_tools/base.py``: a request collapses to the
+# highest tier the tool supports at or below it, walking *down* the ladder — it
+# never escalates.
+_AUTONOMY_TIERS: tuple[str, ...] = ("yolo", "auto", "accept_edits")
+
+
+def _downgrade_autonomy_tier(requested: str | None, supports: dict[str, bool]) -> str | None:
+    """Resolve a requested autonomy tier against a tool's capabilities.
+
+    Returns the highest tier the tool supports at or below *requested* (the
+    effective tier ``build_launch_command`` would launch), or ``None`` when the
+    request and every lower tier are unsupported (default prompting). Passing
+    ``None`` returns ``None``.
+    """
+    if requested is None:
+        return None
+    start = _AUTONOMY_TIERS.index(requested)
+    return next((tier for tier in _AUTONOMY_TIERS[start:] if supports[tier]), None)
+
+
 def confirm_ai_selection(
     resolved_tool: str | None,
     resolved_model: str | None,
@@ -239,43 +305,70 @@ def confirm_ai_selection(
     model_explicit: bool,
     resolved_effort: EffortLevel | None = None,
     effort_explicit: bool = False,
+    resolved_accept_edits: bool = False,
+    accept_edits_explicit: bool = True,
+    resolved_auto: bool = False,
+    auto_explicit: bool = True,
     resolved_yolo: bool = False,
     yolo_explicit: bool = True,
-) -> tuple[str | None, str | None, EffortLevel | None, bool]:
-    """Interactively confirm (and optionally change) the resolved AI tool/model/effort/yolo.
+) -> tuple[str | None, str | None, EffortLevel | None, bool, bool, bool]:
+    """Confirm (and optionally change) the resolved AI tool/model/effort/autonomy.
 
     Fires only when stdin is a TTY and at least one of the flags was not
     explicitly provided by the caller. When all flags are explicit, this
     is a no-op.
 
-    Returns the (tool, model, effort, yolo) tuple after any user-driven changes.
+    Returns the ``(tool, model, effort, accept_edits, auto, yolo)`` tuple after
+    any user-driven changes.
     """
     from crossby.services.confirm import ConfirmField, confirm_defaults
 
+    _result = (
+        resolved_tool,
+        resolved_model,
+        resolved_effort,
+        resolved_accept_edits,
+        resolved_auto,
+        resolved_yolo,
+    )
+
     # No tool resolved → nothing to confirm; the caller handles the error.
     if resolved_tool is None:
-        return resolved_tool, resolved_model, resolved_effort, resolved_yolo
+        return _result
 
     # Preserve non-interactive and all-explicit fast paths before any adapter
     # detection, since detect_installed() probes every registered tool.
     if not os.isatty(0):
-        return resolved_tool, resolved_model, resolved_effort, resolved_yolo
+        return _result
 
-    if tool_explicit and model_explicit and effort_explicit and yolo_explicit:
-        return resolved_tool, resolved_model, resolved_effort, resolved_yolo
+    if (
+        tool_explicit
+        and model_explicit
+        and effort_explicit
+        and accept_edits_explicit
+        and auto_explicit
+        and yolo_explicit
+    ):
+        return _result
 
     installed = AbstractAITool.detect_installed()
 
-    def _caps_for(tool_value: str | None) -> tuple[bool, bool]:
-        """Return ``(supports_effort, supports_yolo)`` for *tool_value*."""
+    def _caps_for(tool_value: str | None) -> tuple[bool, bool, bool, bool]:
+        """Return ``(supports_effort, supports_yolo, supports_accept_edits,
+        supports_auto)`` for *tool_value*."""
         if not tool_value:
-            return False, False
+            return False, False, False, False
         try:
             adapter = AbstractAITool.get(AIToolID(tool_value))
         except (ValueError, KeyError):
-            return False, False
+            return False, False, False, False
         caps = adapter.capabilities()
-        return caps.supports_effort, caps.supports_yolo
+        return (
+            caps.supports_effort,
+            caps.supports_yolo,
+            caps.supports_accept_edits,
+            caps.supports_auto,
+        )
 
     def _tool_change(current: Any, state: dict[str, Any]) -> dict[str, Any]:
         tool_names = [str(t) for t in installed]
@@ -285,12 +378,30 @@ def confirm_ai_selection(
         if new_tool == current:
             return {"tool": current}
         new_model = _prompt_model_selection(new_tool)
-        supports_effort, supports_yolo = _caps_for(new_tool)
+        supports_effort, supports_yolo, supports_accept_edits, supports_auto = _caps_for(new_tool)
         updates: dict[str, Any] = {"tool": new_tool, "model": new_model}
         if state.get("effort") is not None and not supports_effort:
             updates["effort"] = None
-        if state.get("yolo") and not supports_yolo:
-            updates["yolo"] = False
+        # Mirror build_launch_command's autonomy cascade (yolo > auto >
+        # accept-edits): collapse the highest requested tier to the highest tier
+        # the new tool supports at or below it, so an unsupported request
+        # downgrades (never escalates) instead of silently dropping all autonomy.
+        requested = next(
+            (tier for tier in _AUTONOMY_TIERS if state.get(tier)),
+            None,
+        )
+        if requested is not None:
+            effective = _downgrade_autonomy_tier(
+                requested,
+                {
+                    "yolo": supports_yolo,
+                    "auto": supports_auto,
+                    "accept_edits": supports_accept_edits,
+                },
+            )
+            updates["yolo"] = effective == "yolo"
+            updates["auto"] = effective == "auto"
+            updates["accept_edits"] = effective == "accept_edits"
         return updates
 
     def _model_change(_current: Any, state: dict[str, Any]) -> dict[str, Any]:
@@ -298,6 +409,12 @@ def confirm_ai_selection(
 
     def _effort_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
         return {"effort": _prompt_effort_selection(current)}
+
+    def _accept_edits_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"accept_edits": not bool(current)}
+
+    def _auto_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"auto": not bool(current)}
 
     def _yolo_change(current: Any, _state: dict[str, Any]) -> dict[str, Any]:
         return {"yolo": not bool(current)}
@@ -328,6 +445,26 @@ def confirm_ai_selection(
             render_value=lambda v: v.value if v else None,
         ),
         ConfirmField(
+            name="accept_edits",
+            label="Accept-edits mode",
+            current_value=resolved_accept_edits,
+            explicit=accept_edits_explicit,
+            change_fn=_accept_edits_change,
+            visible_when=lambda state: _caps_for(state.get("tool"))[2],
+            render_value=lambda v: "on" if v else None,
+            menu_label=lambda v: "Turn off accept-edits mode" if v else "Turn on accept-edits mode",
+        ),
+        ConfirmField(
+            name="auto",
+            label="Auto mode",
+            current_value=resolved_auto,
+            explicit=auto_explicit,
+            change_fn=_auto_change,
+            visible_when=lambda state: _caps_for(state.get("tool"))[3],
+            render_value=lambda v: "on" if v else None,
+            menu_label=lambda v: "Turn off auto mode" if v else "Turn on auto mode",
+        ),
+        ConfirmField(
             name="yolo",
             label="YOLO mode",
             current_value=resolved_yolo,
@@ -340,7 +477,14 @@ def confirm_ai_selection(
     ]
 
     result = confirm_defaults(fields, title="Confirm AI selection")
-    return result["tool"], result["model"], result["effort"], result["yolo"]
+    return (
+        result["tool"],
+        result["model"],
+        result["effort"],
+        result["accept_edits"],
+        result["auto"],
+        result["yolo"],
+    )
 
 
 def _select_tool(tool_names: list[str], current_idx: int) -> int:

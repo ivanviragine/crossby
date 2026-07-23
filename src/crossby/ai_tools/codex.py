@@ -44,6 +44,7 @@ class CodexAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            supports_accept_edits=True,
             supports_stop_hook=True,
             supports_session_start_hook=True,
             supports_user_prompt_submit_hook=True,
@@ -69,9 +70,19 @@ class CodexAdapter(AbstractAITool):
         """Codex uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]
 
-    def trusted_dirs_args(self, dirs: list[str]) -> list[str]:
-        """Codex requires workspace-write sandbox mode for --add-dir to take effect."""
-        result = ["--sandbox", "workspace-write"]
+    def trusted_dirs_args(
+        self, dirs: list[str], *, autonomy_args: list[str] | None = None
+    ) -> list[str]:
+        """Codex requires workspace-write sandbox mode for --add-dir to take effect.
+
+        Skip re-emitting ``--sandbox workspace-write`` when the resolved
+        autonomy tier already supplied it (accept-edits sets ``-s
+        workspace-write``, and auto downgrades to accept-edits on Codex),
+        so an accept-edits launch with trusted dirs doesn't pass Codex the
+        sandbox option twice.
+        """
+        sandbox_already_set = "workspace-write" in (autonomy_args or [])
+        result: list[str] = [] if sandbox_already_set else ["--sandbox", "workspace-write"]
         for d in dirs:
             result.extend(self.plan_dir_args(d))
         return result
@@ -88,6 +99,16 @@ class CodexAdapter(AbstractAITool):
         """Codex uses ``-c model_reasoning_effort="<mapped>"``."""
         mapped = _CODEX_EFFORT_MAP.get(effort, effort.value)
         return ["-c", f'model_reasoning_effort="{mapped}"']
+
+    def accept_edits_args(self) -> list[str]:
+        """Codex accept-edits: workspace-write sandbox auto-applies edits while
+        untrusted shell commands still escalate for approval.
+
+        ``-s workspace-write -a untrusted``. The old ``--approval-mode
+        auto-edit`` flag was removed in the Rust CLI (v0.14x) and must not be
+        used.
+        """
+        return ["-s", "workspace-write", "-a", "untrusted"]
 
     def yolo_args(self) -> list[str]:
         """Codex skips approval prompts with ``-a never`` while keeping its

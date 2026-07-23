@@ -142,6 +142,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         default_model=ai_raw.get("default_model"),
         effort=ai_raw.get("effort"),
         yolo=ai_raw.get("yolo"),
+        accept_edits=ai_raw.get("accept_edits"),
+        auto=ai_raw.get("auto"),
         commands=commands,
     )
 
@@ -177,6 +179,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             model=profile_raw.get("model"),
             effort=profile_raw.get("effort"),
             yolo=profile_raw.get("yolo"),
+            accept_edits=profile_raw.get("accept_edits"),
+            auto=profile_raw.get("auto"),
         )
 
     # Parse sync_defaults / handoff_defaults sections
@@ -246,4 +250,6 @@ def _parse_command_config(raw: dict[str, Any]) -> CommandConfig:
         model=raw.get("model") or None,  # Treat empty string as None
         effort=raw.get("effort"),
         yolo=raw.get("yolo"),
+        accept_edits=raw.get("accept_edits"),
+        auto=raw.get("auto"),
     )

@@ -50,6 +50,8 @@ class AntigravityAdapter(AbstractAITool):
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
+        accept_edits: bool = False,
+        auto: bool = False,
     ) -> int:
         cmd = [self.capabilities().binary, "."]
         logger.info("ai_tool.launch", tool="antigravity", cwd=str(working_dir))

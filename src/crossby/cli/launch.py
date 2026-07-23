@@ -18,6 +18,24 @@ def launch(
     plan: bool = typer.Option(
         False, "--plan", help="Start in the tool's native plan/approval mode."
     ),
+    accept_edits: bool | None = typer.Option(
+        None,
+        "--accept-edits",
+        help=(
+            "Permission mode (not model selection): auto-approve file edits, "
+            "still prompt for shell. Falls back to default prompting where "
+            "unsupported (OpenCode, GUIs)."
+        ),
+    ),
+    auto: bool | None = typer.Option(
+        None,
+        "--auto",
+        help=(
+            "Permission mode (not model selection): request the classifier-"
+            "mediated auto mode where available (Claude); downgrades to accept-"
+            "edits, then default prompting, elsewhere. Never escalates to yolo."
+        ),
+    ),
     command: str | None = typer.Option(
         None, "--command", "-c", help="Command name for config lookup."
     ),
@@ -51,7 +69,9 @@ def launch(
     from crossby.config.loader import ConfigError, load_config
     from crossby.services.ai_resolution import (
         confirm_ai_selection,
+        resolve_accept_edits,
         resolve_ai_tool,
+        resolve_auto,
         resolve_effort,
         resolve_model,
         resolve_yolo,
@@ -96,6 +116,10 @@ def launch(
             effort = prof.effort
         if yolo is None and prof.yolo is not None:
             yolo = prof.yolo
+        if accept_edits is None and prof.accept_edits is not None:
+            accept_edits = prof.accept_edits
+        if auto is None and prof.auto is not None:
+            auto = prof.auto
 
     # Resolve relative transcript path against work_dir so that mkdir and the
     # subprocess cwd=work_dir agree on where the file lands.
@@ -175,18 +199,31 @@ def launch(
             tool=resolved_tool,
             strict=yolo is not None,
         )
+        resolved_accept_edits = resolve_accept_edits(accept_edits, config, command or "default")
+        resolved_auto = resolve_auto(auto, config, command or "default")
     except ValueError as e:
         console.error(str(e))
         raise typer.Exit(1) from e
 
     # Interactive confirmation
-    resolved_tool, resolved_model, resolved_effort, resolved_yolo = confirm_ai_selection(
+    (
+        resolved_tool,
+        resolved_model,
+        resolved_effort,
+        resolved_accept_edits,
+        resolved_auto,
+        resolved_yolo,
+    ) = confirm_ai_selection(
         resolved_tool,
         resolved_model,
         tool_explicit=tool is not None,
         model_explicit=model is not None,
         resolved_effort=resolved_effort,
         effort_explicit=effort is not None,
+        resolved_accept_edits=resolved_accept_edits,
+        accept_edits_explicit=accept_edits is not None,
+        resolved_auto=resolved_auto,
+        auto_explicit=auto is not None,
         resolved_yolo=resolved_yolo,
         yolo_explicit=yolo is not None,
     )
@@ -207,22 +244,58 @@ def launch(
         console.error(f"{caps.display_name} does not support --trusted-dir.")
         raise typer.Exit(1)
 
-    # YOLO supersedes plan_mode in build_launch_command(), so don't error on
-    # tools that support YOLO but not plan mode when both flags are set.
-    if plan and not caps.supports_plan_mode and not resolved_yolo:
+    # Normalize accept-edits/auto against the tool's capabilities and surface any
+    # downgrade through crossby's own UI. resolve_accept_edits()/resolve_auto()
+    # intentionally don't validate tool support — the downgrade lives in
+    # build_launch_command(). But GUI adapters (VS Code, Antigravity IDE) override
+    # launch() and never reach the builder, so an unsupported flag would be
+    # dropped silently; normalizing here keeps the summary honest for every tool.
+    if resolved_auto and not caps.supports_auto:
+        if caps.supports_accept_edits:
+            console.warn(f"{caps.display_name} does not support --auto; using accept-edits.")
+            resolved_accept_edits = True
+        else:
+            console.warn(f"{caps.display_name} does not support --auto; using default prompting.")
+        resolved_auto = False
+    if resolved_accept_edits and not caps.supports_accept_edits:
+        console.warn(
+            f"{caps.display_name} does not support --accept-edits; using default prompting."
+        )
+        resolved_accept_edits = False
+
+    # A higher autonomy tier (yolo/auto/accept-edits) supersedes plan_mode in
+    # build_launch_command(), so don't error on tools that lack plan mode when
+    # any of those flags are also set.
+    if (
+        plan
+        and not caps.supports_plan_mode
+        and not (resolved_yolo or resolved_auto or resolved_accept_edits)
+    ):
         console.error(f"{caps.display_name} does not support --plan.")
         raise typer.Exit(1)
 
-    # Display selection
+    # Display the effective selection. Autonomy tiers are shown in ladder order;
+    # the builder resolves precedence (yolo > auto > accept-edits > plan) at launch.
+    # The highest requested tier is the effective one ("on"); any lower tier the
+    # user also requested is shown as "superseded" so the summary never implies a
+    # moot tier is active.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
         console.kv("Model", resolved_model)
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
-    if resolved_yolo:
-        console.kv("YOLO mode", "on")
-    if plan:
-        console.kv("Plan mode", "on")
+    autonomy_tiers = (
+        ("YOLO mode", resolved_yolo),
+        ("Auto mode", resolved_auto),
+        ("Accept-edits mode", resolved_accept_edits),
+        ("Plan mode", plan),
+    )
+    effective_shown = False
+    for label, requested in autonomy_tiers:
+        if not requested:
+            continue
+        console.kv(label, "on" if not effective_shown else "superseded")
+        effective_shown = True
     console.empty()
 
     # Deliver prompt if tool doesn't support initial messages
@@ -247,6 +320,8 @@ def launch(
         effort=resolved_effort,
         yolo=resolved_yolo,
         plan_mode=plan,
+        accept_edits=resolved_accept_edits,
+        auto=resolved_auto,
     )
 
     if exit_code != 0:

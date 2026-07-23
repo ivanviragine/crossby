@@ -102,6 +102,13 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_resume: bool = False
     supports_trusted_dirs: bool = False
     supports_plan_mode: bool = False
+    supports_accept_edits: bool = False
+    """Tool can auto-approve file edits at launch while still prompting for
+    shell/commands (the accept-edits autonomy tier)."""
+    supports_auto: bool = False
+    """Tool exposes a classifier-mediated ``auto`` mode at launch (a separate
+    model reviews each non-read action). Claude-only among the CLIs crossby
+    drives; ``auto`` downgrades to accept-edits elsewhere."""
 
     # --- Hook lifecycle & runtime I/O (consumed by crossby.hooks.runtime) ---
     supports_stop_hook: bool = False

@@ -49,6 +49,8 @@ class VSCodeAdapter(AbstractAITool):
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
+        accept_edits: bool = False,
+        auto: bool = False,
     ) -> int:
         cmd = ["code", str(working_dir)]
         logger.info("ai_tool.launch", tool="vscode", cwd=str(working_dir))

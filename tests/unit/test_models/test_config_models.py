@@ -89,6 +89,35 @@ class TestCrossbyConfig:
         assert config.get_yolo("implement") is True
         assert config.get_yolo("other") is False
 
+    def test_get_accept_edits_fallback(self):
+        config = CrossbyConfig(
+            ai=AIConfig(
+                accept_edits=False,
+                commands={"implement": CommandConfig(accept_edits=True)},
+            )
+        )
+        assert config.get_accept_edits("implement") is True
+        assert config.get_accept_edits("other") is False
+        assert CrossbyConfig().get_accept_edits() is None
+
+    def test_get_auto_fallback(self):
+        config = CrossbyConfig(
+            ai=AIConfig(
+                auto=True,
+                commands={"review": CommandConfig(auto=False)},
+            )
+        )
+        assert config.get_auto("review") is False
+        assert config.get_auto("other") is True
+        assert CrossbyConfig().get_auto() is None
+
+    def test_profile_persists_accept_edits_and_auto(self):
+        from crossby.models.config import ProfileConfig
+
+        prof = ProfileConfig(tool="claude", accept_edits=True, auto=True)
+        assert prof.accept_edits is True
+        assert prof.auto is True
+
     def test_profiles_empty_default(self):
         config = CrossbyConfig()
         assert config.profiles == {}

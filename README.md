@@ -23,7 +23,7 @@ Already on Claude? `crossby sync --from claude` works the same way — any tool 
 
 - **Every new tool inherits your setup.** Install a new AI CLI tomorrow and one `crossby sync` gives it your rules, agents, permissions, hooks, and MCP servers — translated into whatever format that tool expects.
 - **Pick any tool as your source.** `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, Copilot instructions — whatever you already write in becomes canonical. No migration, no lock-in.
-- **One set of launch flags for every tool.** `--model`, `--effort`, `--yolo`, `--plan`, `--resume` — crossby handles the per-tool translation. Unsupported flags raise errors instead of silently disappearing.
+- **One set of launch flags for every tool.** `--model`, `--effort`, `--plan`, `--accept-edits`, `--auto`, `--yolo`, `--resume` — crossby handles the per-tool translation. The four-tier autonomy ladder (`plan < accept-edits < auto < yolo`) maps to each tool's native flag or degrades gracefully (see [Launch autonomy modes](#launch-autonomy-modes)).
 - **Cross-tool session handoff.** Mid-session in one CLI and want to continue in another? `crossby handoff` summarizes the transcript and hands it off — so you never re-explain what you're doing.
 - **Stateless by default.** Works without a config file: `crossby sync` reads directly from each tool's standard paths. Drop in a `.crossby.yml` only when you want saved profiles or defaults.
 
@@ -124,6 +124,37 @@ crossby launch --tool codex --model claude-sonnet-4.6 --effort high
 
 Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-5.4` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
 
+## Launch autonomy modes
+
+`crossby launch` exposes a four-tier **autonomy ladder** — how much the agent may do without asking. These are *permission* modes, not model selection:
+
+```
+--plan  <  --accept-edits  <  --auto  <  --yolo
+read-only   auto-edit,        classifier-       skip all
+            ask shell         guarded           prompts
+```
+
+- `--plan` — read-only planning; the agent proposes but doesn't act.
+- `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of 6 CLIs support it at launch).
+- `--auto` — Claude Code's classifier-mediated guarded autonomy (a separate model reviews each non-read action). **Claude-only** among the CLIs crossby drives; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
+- `--yolo` — skip all permission prompts.
+
+**Precedence (most permissive wins):** `yolo > auto > accept-edits > plan`. If you pass several, the highest applies. A requested tier that a tool doesn't support downgrades to the next lower *autonomy* tier it does support (emitting a `UserWarning`), stopping at default prompting — it never escalates.
+
+Per-tool mapping (verified against official docs, July 2026 — flags drift between versions, so crossby re-checks against `<tool> --help`):
+
+| Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
+| --------------- | ------------------------------------- | ----------------------------------------- |
+| Claude          | `--permission-mode acceptEdits`       | `--permission-mode auto`                  |
+| Codex           | `-s workspace-write -a untrusted`     | ↓ downgrades to accept-edits              |
+| Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | ↓ downgrades to accept-edits |
+| Copilot         | `--allow-tool write`                  | ↓ downgrades to accept-edits              |
+| Antigravity CLI | `--mode accept-edits`                 | ↓ downgrades to accept-edits              |
+| OpenCode        | ↓ default prompting (config-only)     | ↓ default prompting                       |
+| VS Code, Antigravity IDE | ↓ default prompting (GUI)    | ↓ default prompting                       |
+
+> Codex's old `--approval-mode auto-edit` was **removed** in the Rust CLI — crossby never emits it. Note Cursor CLI's default *is* accept-edits (the inverse of the Cursor IDE default), so `--accept-edits` is honored with no extra flag and no warning.
+
 ## Agent-readable runbook
 
 `crossby init --install-skill` copies the bundled `crossby-sync` skill into every installed tool's skills directory. From inside Claude Code / Codex / Cursor / etc., the LLM can drive the full sync loop end-to-end — scan, plan, fix manual-fix blocks, validate — without leaving the session. The bundle is at `src/crossby/data/skill/`; the `references/differences.md` file in the bundle has the per-surface mapping table.
@@ -194,7 +225,7 @@ handoff_defaults:                 # fed into `crossby handoff`
   token_budget: 32000
 ```
 
-Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
+Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile. The autonomy fields (`accept_edits`, `auto`, `yolo`) also work under `ai:` as global or per-command defaults.
 
 `sync_defaults` and `handoff_defaults` feed the interactive prompts for those commands — CLI flags still win, and you always get the "Proceed / Change X" review before anything runs. `crossby sync` does **not** require this file — it reads directly from each tool's standard paths.
 
