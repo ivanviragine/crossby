@@ -363,35 +363,6 @@ def test_claude_unwrap_passthrough_for_markdown() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GeminiAdapter.unwrap_structured_output unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_gemini_unwrap_extracts_response() -> None:
-    from crossby.ai_tools.gemini import GeminiAdapter
-
-    adapter = GeminiAdapter()
-    payload_json = json.dumps(_FULL_PAYLOAD)
-    envelope = json.dumps(
-        {
-            "session_id": "gemini-session",
-            "response": payload_json,
-            "stats": {"models": {}},
-        }
-    )
-    result = adapter.unwrap_structured_output(envelope)
-    assert result == payload_json
-
-
-def test_gemini_unwrap_passthrough_for_non_envelope() -> None:
-    from crossby.ai_tools.gemini import GeminiAdapter
-
-    adapter = GeminiAdapter()
-    plain = json.dumps(_FULL_PAYLOAD)
-    assert adapter.unwrap_structured_output(plain) == plain
-
-
-# ---------------------------------------------------------------------------
 # End-to-end regression: Claude envelope → summarizer produces populated doc
 # ---------------------------------------------------------------------------
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from crossby.subagents.ir import ConversionWarning, SubagentIR, WarningSeverity
+from crossby.subagents.ir import ConversionWarning, SubagentIR
 from crossby.subagents.tool_map import to_canonical
 
 
@@ -29,7 +29,6 @@ def parse(
     parsers = {
         "claude": parse_claude,
         "cursor": parse_cursor,
-        "gemini": parse_gemini,
         "copilot": parse_copilot,
         "codex": parse_codex,
     }
@@ -74,9 +73,8 @@ def _normalize_tools(value: Any) -> list[str] | None:
 
     ``None`` is returned only when the field is genuinely absent.  An explicit
     empty list (``tools: []``) or an empty/whitespace string is returned as
-    ``[]`` — Claude, Copilot, and Gemini all treat that as "no tools" rather
-    than "inherit all", and we must not collapse the two into the same IR
-    state.
+    ``[]`` — Claude and Copilot both treat that as "no tools" rather than
+    "inherit all", and we must not collapse the two into the same IR state.
     """
     if value is _MISSING or value is None:
         return None
@@ -192,61 +190,6 @@ def parse_cursor(
         extras=extras,
     )
     return ir, []
-
-
-# ---------------------------------------------------------------------------
-# Gemini CLI (.gemini/agents/<name>.md)
-# ---------------------------------------------------------------------------
-
-_GEMINI_KNOWN_FIELDS = {
-    "name",
-    "description",
-    "kind",
-    "tools",
-    "mcpServers",
-    "model",
-    "temperature",
-    "max_turns",
-    "timeout_mins",
-}
-
-
-def parse_gemini(
-    content: str, source_path: Path | None = None
-) -> tuple[SubagentIR, list[ConversionWarning]]:
-    fm, body = _split_frontmatter(content)
-    warnings: list[ConversionWarning] = []
-    raw_tools = _get_tools(fm, "tools")
-    extras = {k: v for k, v in fm.items() if k not in _GEMINI_KNOWN_FIELDS}
-
-    if fm.get("kind") == "remote":
-        warnings.append(
-            ConversionWarning(
-                field="kind",
-                severity=WarningSeverity.LOSSY,
-                message=(
-                    "kind=remote uses Gemini's A2A protocol — "
-                    "other tools cannot reproduce remote-agent dispatch."
-                ),
-            )
-        )
-
-    ir = SubagentIR(
-        name=str(fm.get("name") or _name_from_path(source_path)),
-        description=fm.get("description"),
-        body=body,
-        model=fm.get("model"),
-        tools=[to_canonical(t, "gemini") for t in raw_tools] if raw_tools is not None else None,
-        mcp_servers=fm.get("mcpServers"),
-        temperature=fm.get("temperature"),
-        max_turns=fm.get("max_turns"),
-        timeout_mins=fm.get("timeout_mins"),
-        kind=fm.get("kind"),
-        source_tool="gemini",
-        source_path=str(source_path) if source_path else None,
-        extras=extras,
-    )
-    return ir, warnings
 
 
 # ---------------------------------------------------------------------------

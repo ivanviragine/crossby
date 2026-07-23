@@ -12,7 +12,6 @@ from crossby.subagents.emitters import (
     emit_codex,
     emit_copilot,
     emit_cursor,
-    emit_gemini,
 )
 from crossby.subagents.ir import SubagentIR, WarningSeverity
 
@@ -67,19 +66,6 @@ class TestEmitCursor:
         fm = _frontmatter(out)
         assert "readonly" not in fm
         assert any(w.severity == WarningSeverity.DROPPED for w in warnings)
-
-
-class TestEmitGemini:
-    def test_writes_snake_case_tools(self) -> None:
-        ir = _ir(tools=["read_file", "bash"])
-        out, _ = emit_gemini(ir)
-        fm = _frontmatter(out)
-        assert fm["tools"] == ["read_file", "run_shell_command"]
-
-    def test_warns_on_disallowed(self) -> None:
-        ir = _ir(disallowed_tools=["bash"])
-        _, warnings = emit_gemini(ir)
-        assert any(w.field == "disallowed_tools" for w in warnings)
 
 
 class TestEmitCopilot:
@@ -155,11 +141,5 @@ class TestEmitPreservesEmptyTools:
     def test_copilot_emits_empty_list(self) -> None:
         ir = _ir(tools=[])
         out, _ = emit_copilot(ir)
-        fm = _frontmatter(out)
-        assert fm["tools"] == []
-
-    def test_gemini_emits_empty_list(self) -> None:
-        ir = _ir(tools=[])
-        out, _ = emit_gemini(ir)
         fm = _frontmatter(out)
         assert fm["tools"] == []

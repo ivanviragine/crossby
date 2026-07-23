@@ -196,7 +196,7 @@ def sync(
     installed_tools = AbstractAITool.detect_installed()
     if not installed_tools:
         console.error("No AI tools found in PATH.")
-        console.hint("Install at least one AI tool (claude, copilot, gemini, codex, cursor, etc.)")
+        console.hint("Install at least one AI tool (claude, copilot, codex, cursor, etc.)")
         raise typer.Exit(1)
 
     # Let users review resolved defaults via the shared Proceed / Change loop.
@@ -484,16 +484,26 @@ def _confirm_sync_defaults(
     Returns ``(source_tool, target_tool, sync_concern)`` after any user edits.
     A no-op on non-TTY stdin (handled inside ``confirm_defaults``).
     """
+    from crossby.models.ai import AIToolID
     from crossby.services.confirm import ConfirmField, confirm_defaults
+    from crossby.sync.base import SyncConcern
     from crossby.ui import prompts
 
     tool_names = [str(t) for t in installed_tools]
 
-    def _change_from(current: AIToolID | None, _state: dict[str, Any]) -> dict[str, Any]:
+    def _change_from(current: AIToolID | None, state: dict[str, Any]) -> dict[str, Any]:
         current_name = str(current) if current is not None else tool_names[0]
         default_idx = tool_names.index(current_name) if current_name in tool_names else 0
         idx = prompts.select("Source tool", tool_names, default=default_idx)
-        return {"from": AIToolID(tool_names[idx])}
+        new_source = AIToolID(tool_names[idx])
+        updates: dict[str, Any] = {"from": new_source}
+        # Keep source/target consistent: the target picker never offers the
+        # current source, so if the newly chosen source equals an already-set
+        # target, clear the target back to "all installed" to avoid a
+        # redundant tool -> itself sync.
+        if state.get("to") == new_source:
+            updates["to"] = None
+        return updates
 
     def _change_to(current: AIToolID | None, state: dict[str, Any]) -> dict[str, Any]:
         _ = current

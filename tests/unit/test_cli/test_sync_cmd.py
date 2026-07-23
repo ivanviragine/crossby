@@ -297,7 +297,8 @@ class TestSyncDefaultsBypassWizard:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_yaml = (
-            "version: 1\nsync_defaults:\n  from: cursor\n  to: gemini\n  concern: permissions\n"
+            "version: 1\nsync_defaults:\n"
+            "  from: cursor\n  to: antigravity-cli\n  concern: permissions\n"
         )
         (tmp_path / ".crossby.yml").write_text(config_yaml, encoding="utf-8")
 
@@ -318,7 +319,7 @@ class TestSyncDefaultsBypassWizard:
 
         monkeypatch.setattr(
             "crossby.ai_tools.base.AbstractAITool.detect_installed",
-            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.GEMINI]),
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.ANTIGRAVITY_CLI]),
         )
         monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
         monkeypatch.setattr("crossby.sync.readers.build_sync_data", fake_build_sync_data)
@@ -329,8 +330,8 @@ class TestSyncDefaultsBypassWizard:
         assert result.exit_code == 0, result.output
         assert captured["build_from"] is AIToolID.CURSOR
         assert captured["run_kwargs"]["concern"] is SyncConcern.PERMISSIONS
-        assert captured["run_kwargs"]["installed_tools"] == [AIToolID.GEMINI]
-        assert captured["run_kwargs"]["tool_id"] is AIToolID.GEMINI
+        assert captured["run_kwargs"]["installed_tools"] == [AIToolID.ANTIGRAVITY_CLI]
+        assert captured["run_kwargs"]["tool_id"] is AIToolID.ANTIGRAVITY_CLI
 
 
 class TestValidateTarget:

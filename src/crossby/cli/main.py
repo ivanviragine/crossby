@@ -156,7 +156,7 @@ def _prompt_convert_args() -> tuple[str, str, str]:
     from crossby.ui import prompts
 
     pattern = prompts.input_prompt("Pattern")
-    tool_choices = ["canonical", "claude", "copilot", "cursor", "gemini"]
+    tool_choices = ["canonical", "claude", "copilot", "cursor"]
     from_idx = prompts.select("Source tool", tool_choices)
     to_idx = prompts.select("Target tool", tool_choices)
     return pattern, tool_choices[from_idx], tool_choices[to_idx]

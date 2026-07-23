@@ -17,6 +17,7 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HookOutputDialect,
 )
 
 logger = structlog.get_logger()
@@ -57,6 +58,11 @@ class CursorAdapter(AbstractAITool):
             supports_effort=True,
             supports_yolo=True,
             supports_plan_mode=True,
+            supports_accept_edits=True,
+            supports_stop_hook=True,
+            supports_user_prompt_submit_hook=True,
+            hook_output_dialect=HookOutputDialect.PERMISSION,
+            hook_fail_open_default=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
@@ -80,6 +86,15 @@ class CursorAdapter(AbstractAITool):
     def yolo_args(self) -> list[str]:
         """Cursor uses ``--force`` (``--yolo`` is an alias)."""
         return ["--force"]
+
+    def accept_edits_args(self) -> list[str]:
+        """No flag needed — the Cursor CLI's default Agent mode *is* accept-edits
+        (auto-applies edits, prompts for shell). Declaring
+        ``supports_accept_edits=True`` while returning ``[]`` means ``--accept-edits``
+        is honored with no warning. (This is the inverse of the Cursor *IDE*
+        default, which confirms edits and auto-runs allowlisted commands — the
+        CLI and IDE differ.)"""
+        return []
 
     def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
         """For high/xhigh/max effort, append ``-thinking`` to the model ID.

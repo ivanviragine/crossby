@@ -116,22 +116,29 @@ class TestDiscoverMCPServers:
         # type field should not appear in canonical format (it's stdio default)
         assert "type" not in result.servers["ctx"].data
 
-    def test_discovers_gemini_servers(self, tmp_path: Path) -> None:
-        path = tmp_path / ".gemini" / "settings.json"
+    def test_discovers_antigravity_cli_servers(self, tmp_path: Path) -> None:
+        path = tmp_path / ".agents" / "mcp_config.json"
         path.parent.mkdir()
         path.write_text(
-            json.dumps(
-                {
-                    "hooks": [],
-                    "mcpServers": {"gemini-srv": {"command": "npx"}},
-                }
-            ),
+            json.dumps({"mcpServers": {"agy-srv": {"command": "npx"}}}),
             encoding="utf-8",
         )
 
         result = discover_mcp_servers(tmp_path)
-        assert "gemini-srv" in result.servers
-        assert result.servers["gemini-srv"].source_tool == "gemini"
+        assert "agy-srv" in result.servers
+        assert result.servers["agy-srv"].source_tool == "antigravity-cli"
+
+    def test_normalizes_server_url_field(self, tmp_path: Path) -> None:
+        """Antigravity CLI uses `serverUrl` instead of `url` for remote servers."""
+        path = tmp_path / ".agents" / "mcp_config.json"
+        path.parent.mkdir()
+        path.write_text(
+            json.dumps({"mcpServers": {"remote": {"serverUrl": "https://example.com/mcp"}}}),
+            encoding="utf-8",
+        )
+
+        result = discover_mcp_servers(tmp_path)
+        assert result.servers["remote"].data["url"] == "https://example.com/mcp"
 
     def test_discovers_codex_toml_servers(self, tmp_path: Path) -> None:
         tomli_w = pytest.importorskip("tomli_w")

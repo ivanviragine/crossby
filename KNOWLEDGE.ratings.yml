@@ -1,12 +1,49 @@
+0bb66acc:
+  down: 0
+  stale: 0
+  up: 1
 0dfee0b6:
   down: 0
+  stale: 0
   up: 1
+196d703f:
+  down: 0
+  stale: 0
+  up: 2
 2a38e22d:
   down: 0
+  stale: 0
+  up: 2
+801860a4:
+  down: 0
+  stale: 0
   up: 1
+91c88418:
+  down: 0
+  stale: 0
+  up: 1
+987aeb2b:
+  down: 0
+  stale: 0
+  superseded_by: e3fcf100
+  up: 1
+'99616955':
+  down: 0
+  stale: 1
+  up: 0
 abee48e8:
   down: 0
+  stale: 0
+  up: 1
+b7079af0:
+  down: 0
+  stale: 0
+  up: 1
+e3fcf100:
+  down: 0
+  stale: 0
   up: 1
 eb391f2d:
   down: 0
+  stale: 0
   up: 2

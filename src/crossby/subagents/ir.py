@@ -1,7 +1,7 @@
 """Canonical intermediate representation for subagents.
 
-The IR holds the union of fields observed across Claude, Cursor, Gemini,
-Copilot, and Codex.  Each parser populates the subset its source format
+The IR holds the union of fields observed across Claude, Cursor, Copilot,
+and Codex.  Each parser populates the subset its source format
 exposes; each emitter reads the subset its target format understands and
 emits structured warnings for fields it cannot represent.
 
@@ -66,9 +66,7 @@ class SubagentIR(BaseModel):
     mcp_servers: dict[str, Any] | None = None
 
     # Behavioural knobs
-    temperature: float | None = None  # Gemini
-    max_turns: int | None = None  # Gemini, Claude
-    timeout_mins: int | None = None  # Gemini
+    max_turns: int | None = None  # Claude
     effort: str | None = None  # Claude / Codex (low|medium|high|max)
 
     # Permission posture (cross-tool)
@@ -82,7 +80,6 @@ class SubagentIR(BaseModel):
     disable_model_invocation: bool | None = None  # Copilot
     is_background: bool | None = None  # Cursor
     background: bool | None = None  # Claude
-    kind: str | None = None  # Gemini: local|remote
     color: str | None = None  # Claude
     isolation: str | None = None  # Claude: worktree
     memory: str | None = None  # Claude: user|project|local

@@ -137,6 +137,8 @@ class AbstractAITool(ABC):
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
+        accept_edits: bool = False,
+        auto: bool = False,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -158,6 +160,12 @@ class AbstractAITool(ABC):
             allowed_commands: Optional list of canonical command patterns to
                 pre-authorize (e.g. ``["myapp:*", "./scripts/check.sh:*"]``).
             yolo: If True, skip all permission prompts (YOLO mode).
+            plan_mode: If True, start in the tool's read-only plan/approval mode.
+            accept_edits: If True, auto-approve file edits while still prompting
+                for shell/commands (the accept-edits tier).
+            auto: If True, request the tool's classifier-mediated auto mode
+                (Claude-only); downgrades to accept-edits, then default
+                prompting, on tools that lack it.
 
         Returns:
             Exit code from the tool process (0 for detached).
@@ -172,6 +180,8 @@ class AbstractAITool(ABC):
             effort=effort,
             allowed_commands=allowed_commands,
             yolo=yolo,
+            accept_edits=accept_edits,
+            auto=auto,
         )
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
         return run_with_transcript(cmd, transcript_path, cwd=working_dir)
@@ -228,12 +238,19 @@ class AbstractAITool(ABC):
         """Get extra CLI args to grant write access to a plan output directory."""
         return []  # Default: no plan dir support
 
-    def trusted_dirs_args(self, dirs: list[str]) -> list[str]:
+    def trusted_dirs_args(
+        self, dirs: list[str], *, autonomy_args: list[str] | None = None
+    ) -> list[str]:
         """Get extra CLI args to grant access to a list of trusted directories.
 
         Default implementation delegates to plan_dir_args() per directory, so
         any adapter that overrides plan_dir_args() automatically supports this
         method. Adapters without directory-trust support return [].
+
+        *autonomy_args* carries the already-resolved autonomy/permission-mode
+        flags (from :meth:`_autonomy_launch_args`) so an adapter can avoid
+        re-emitting a flag the autonomy tier already supplied (e.g. Codex's
+        ``--sandbox workspace-write``). Ignored by the default implementation.
         """
         result: list[str] = []
         for d in dirs:
@@ -302,6 +319,25 @@ class AbstractAITool(ABC):
         """
         return []
 
+    def accept_edits_args(self) -> list[str]:
+        """Get extra CLI args for the accept-edits tier (auto-apply file edits,
+        still prompt for shell/commands).
+
+        Default: return empty list. Override per tool. A tool may declare
+        ``supports_accept_edits=True`` yet still return ``[]`` when its default
+        launch mode already *is* accept-edits (e.g. Cursor CLI).
+        """
+        return []
+
+    def auto_args(self) -> list[str]:
+        """Get extra CLI args for the classifier-mediated auto tier.
+
+        Default: return empty list. Override only on tools that expose a real
+        launch-time classifier mode (Claude). Other tools leave
+        ``supports_auto=False`` so ``auto`` downgrades to accept-edits.
+        """
+        return []
+
     def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
         """Resolve model variant based on effort level.
 
@@ -348,6 +384,73 @@ class AbstractAITool(ABC):
         """
         return None
 
+    def _autonomy_launch_args(
+        self,
+        caps: AIToolCapabilities,
+        *,
+        yolo: bool,
+        auto: bool,
+        accept_edits: bool,
+        plan_mode: bool,
+    ) -> list[str]:
+        """Resolve the autonomy/permission-mode CLI args via one precedence chain.
+
+        Ladder, most permissive first: ``yolo`` > ``auto`` > ``accept_edits`` >
+        default prompting > ``plan`` (read-only). The highest *requested* tier
+        that the tool supports wins. When the tool lacks a requested tier the
+        request downgrades to the next lower *autonomy* tier it supports (never
+        escalating), emitting a one-line warning. Downgrades stop at default
+        prompting — an unmet autonomy request never crosses into read-only plan
+        mode. Plan mode is emitted only when explicitly requested and no
+        autonomy tier applies (preserving the historical ``--yolo --plan``
+        fallback).
+
+        The cascade collapses the requested flags to the single highest tier and
+        walks *down* from there, so it relies on the capability invariant that a
+        tool supporting a higher tier also supports every lower one (auto ⇒ yolo
+        and accept_edits). All adapters honor this today; a violation would let a
+        request land on a tier the user never asked for. ``TestCapabilityInvariants``
+        in ``test_autonomy_modes.py`` guards it.
+        """
+        _tier_labels = {"yolo": "YOLO", "auto": "classifier auto", "accept_edits": "accept-edits"}
+
+        requested = "yolo" if yolo else "auto" if auto else "accept_edits" if accept_edits else None
+        if requested is None:
+            return self.plan_mode_args() if plan_mode else []
+
+        tiers = ("yolo", "auto", "accept_edits")
+        supports = {
+            "yolo": caps.supports_yolo,
+            "auto": caps.supports_auto,
+            "accept_edits": caps.supports_accept_edits,
+        }
+        args_fns = {
+            "yolo": self.yolo_args,
+            "auto": self.auto_args,
+            "accept_edits": self.accept_edits_args,
+        }
+
+        for tier in tiers[tiers.index(requested) :]:
+            if supports[tier]:
+                if tier != requested:
+                    warnings.warn(
+                        f"{caps.display_name} does not support {_tier_labels[requested]} mode; "
+                        f"downgrading to {_tier_labels[tier]}.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                return args_fns[tier]()
+
+        # No autonomy tier is supported. Honor an explicit plan request as the
+        # documented lower fallback; otherwise degrade to default prompting.
+        landing = "falling back to plan mode" if plan_mode else "using default prompting"
+        warnings.warn(
+            f"{caps.display_name} does not support {_tier_labels[requested]} mode; {landing}.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return self.plan_mode_args() if plan_mode else []
+
     def build_launch_command(
         self,
         model: str | None = None,
@@ -359,6 +462,8 @@ class AbstractAITool(ABC):
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
         yolo: bool = False,
+        accept_edits: bool = False,
+        auto: bool = False,
     ) -> list[str]:
         """Build the command line for launching this tool."""
         caps = self.capabilities()
@@ -408,29 +513,20 @@ class AbstractAITool(ABC):
         if prompt and caps.supports_headless and caps.headless_flag:
             cmd.extend([caps.headless_flag, prompt])
 
-        # YOLO mode supersedes plan_mode: YOLO grants full-auto permissions
-        # which is a superset of plan permissions. If the tool doesn't support
-        # YOLO, emit a warning and fall back to plan_mode_args.
-        if yolo:
-            if caps.supports_yolo:
-                cmd.extend(self.yolo_args())
-            else:
-                warnings.warn(
-                    f"{caps.display_name} does not support YOLO mode; "
-                    f"{'falling back to plan mode' if plan_mode else 'ignoring yolo'}",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                if plan_mode:
-                    cmd.extend(self.plan_mode_args())
-        elif plan_mode:
-            cmd.extend(self.plan_mode_args())
+        autonomy_args = self._autonomy_launch_args(
+            caps,
+            yolo=yolo,
+            auto=auto,
+            accept_edits=accept_edits,
+            plan_mode=plan_mode,
+        )
+        cmd.extend(autonomy_args)
 
         if json_schema:
             cmd.extend(self.structured_output_args(json_schema))
 
         if trusted_dirs:
-            cmd.extend(self.trusted_dirs_args(trusted_dirs))
+            cmd.extend(self.trusted_dirs_args(trusted_dirs, autonomy_args=autonomy_args))
 
         # Effort args (tool-specific flags like --settings, --variant, etc.)
         if effort and caps.supports_effort:

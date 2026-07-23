@@ -47,9 +47,9 @@ class SkillSchema(StrEnum):
 SKILL_SCHEMA_BY_TOOL: dict[AIToolID, SkillSchema] = {
     AIToolID.CLAUDE: SkillSchema.MARKDOWN,
     AIToolID.CURSOR: SkillSchema.MARKDOWN,
-    AIToolID.GEMINI: SkillSchema.MARKDOWN,
     AIToolID.COPILOT: SkillSchema.MARKDOWN,
     AIToolID.CODEX: SkillSchema.MARKDOWN,
+    AIToolID.ANTIGRAVITY_CLI: SkillSchema.MARKDOWN,
 }
 
 

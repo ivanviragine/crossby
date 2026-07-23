@@ -93,6 +93,30 @@ class TestLoadConfig:
         assert config.profiles["fast"].tool == "claude"
         assert config.profiles["fast"].effort == "low"
 
+    def test_accept_edits_and_auto_parsed(self, tmp_path):
+        data = {
+            "version": 1,
+            "ai": {
+                "default_tool": "claude",
+                "accept_edits": True,
+                "auto": False,
+                "commands": {
+                    "implement": {"auto": True},
+                },
+            },
+            "profiles": {
+                "guarded": {"tool": "claude", "auto": True, "accept_edits": True},
+            },
+        }
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        config = load_config(tmp_path)
+        assert config.ai.accept_edits is True
+        assert config.ai.auto is False
+        assert config.ai.commands["implement"].auto is True
+        assert config.get_auto("implement") is True
+        assert config.profiles["guarded"].auto is True
+        assert config.profiles["guarded"].accept_edits is True
+
     def test_invalid_yaml(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text(": invalid: yaml: [")
         with pytest.raises(ConfigError):

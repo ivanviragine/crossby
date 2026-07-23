@@ -13,7 +13,6 @@ from crossby.config.copilot_hooks import (
     configure_worktree_hooks as copilot_configure_worktree_hooks,
 )
 from crossby.config.cursor_hooks import configure_worktree_hooks as cursor_configure_worktree_hooks
-from crossby.config.gemini_hooks import configure_worktree_hooks as gemini_configure_worktree_hooks
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -217,73 +216,6 @@ class TestCopilotConfigureWorktreeHooks:
 
 
 # ---------------------------------------------------------------------------
-# Gemini
-# ---------------------------------------------------------------------------
-
-
-class TestGeminiConfigureWorktreeHooks:
-    """configure_worktree_hooks writes to .gemini/settings.json → hooks.BeforeTool[]."""
-
-    def test_fresh_install(self, tmp_path: Path) -> None:
-        guard = _guard(tmp_path)
-        gemini_configure_worktree_hooks(tmp_path, guard)
-
-        settings = tmp_path / ".gemini" / "settings.json"
-        assert settings.is_file()
-        data = json.loads(settings.read_text(encoding="utf-8"))
-        before_tool = data["hooks"]["BeforeTool"]
-        assert isinstance(before_tool, list)
-        assert len(before_tool) == 1
-        entry = before_tool[0]
-        assert entry["matcher"] == "Edit|Write"
-        assert entry["hooks"] == [{"type": "command", "command": str(guard)}]
-
-    def test_idempotent(self, tmp_path: Path) -> None:
-        guard = _guard(tmp_path)
-        gemini_configure_worktree_hooks(tmp_path, guard)
-        gemini_configure_worktree_hooks(tmp_path, guard)
-
-        data = json.loads((tmp_path / ".gemini" / "settings.json").read_text(encoding="utf-8"))
-        commands = [
-            inner["command"]
-            for entry in data["hooks"]["BeforeTool"]
-            for inner in entry.get("hooks", [])
-            if isinstance(inner, dict)
-        ]
-        assert commands.count(str(guard)) == 1
-
-    def test_coexists_with_existing_hooks(self, tmp_path: Path) -> None:
-        settings_path = tmp_path / ".gemini" / "settings.json"
-        settings_path.parent.mkdir(parents=True)
-        existing = {
-            "hooks": {
-                "BeforeTool": [
-                    {
-                        "matcher": "Bash",
-                        "hooks": [{"type": "command", "command": "/usr/local/bin/existing"}],
-                    }
-                ]
-            },
-            "theme": "dark",
-        }
-        settings_path.write_text(json.dumps(existing), encoding="utf-8")
-
-        guard = _guard(tmp_path)
-        gemini_configure_worktree_hooks(tmp_path, guard)
-
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        assert data["theme"] == "dark"
-        commands = [
-            inner["command"]
-            for entry in data["hooks"]["BeforeTool"]
-            for inner in entry.get("hooks", [])
-            if isinstance(inner, dict)
-        ]
-        assert "/usr/local/bin/existing" in commands
-        assert str(guard) in commands
-
-
-# ---------------------------------------------------------------------------
 # Error path: malformed JSON emits warnings.warn, does not raise
 # ---------------------------------------------------------------------------
 
@@ -314,11 +246,4 @@ class TestMalformedJsonWarns:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             copilot_configure_worktree_hooks(tmp_path, _guard(tmp_path))
-        assert any("invalid JSON" in str(warning.message) for warning in w)
-
-    def test_gemini_warns_on_bad_json(self, tmp_path: Path) -> None:
-        self._write_bad_json(tmp_path / ".gemini" / "settings.json")
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            gemini_configure_worktree_hooks(tmp_path, _guard(tmp_path))
         assert any("invalid JSON" in str(warning.message) for warning in w)

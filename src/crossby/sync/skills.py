@@ -343,7 +343,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         removed.
 
         When a source tool that has a slash-command primitive (Claude /
-        Cursor / Gemini today) lives in the project and ``self.tool_id`` is
+        Cursor today) lives in the project and ``self.tool_id`` is
         different, each of that tool's commands is wrapped as a single-file
         skill named ``<source>-command-<slug>`` so the prompt body survives
         the migration. See :mod:`crossby.sync.slash_commands` for the
@@ -533,17 +533,24 @@ class CursorSkillsWriter(_BaseSkillsWriter):
 
 
 class CodexSkillsWriter(_BaseSkillsWriter):
-    """Sync skills → .agents/skills/"""
+    """Sync skills → .agents/skills/.
+
+    Codex and Antigravity CLI intentionally share this directory. Both
+    writers point at the same physical path, so `detect_skills_source()`'s
+    scan order (`config/skills.py:_SCAN_ORDER`) — not the writer — decides
+    which `AIToolID` a shared directory is attributed to when both are
+    installed.
+    """
 
     tool_id = AIToolID.CODEX
     _target_rel = SKILLS_DIR[AIToolID.CODEX]
 
 
-class GeminiSkillsWriter(_BaseSkillsWriter):
-    """Sync skills → .gemini/skills/"""
+class AntigravityCLISkillsWriter(_BaseSkillsWriter):
+    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex."""
 
-    tool_id = AIToolID.GEMINI
-    _target_rel = SKILLS_DIR[AIToolID.GEMINI]
+    tool_id = AIToolID.ANTIGRAVITY_CLI
+    _target_rel = SKILLS_DIR[AIToolID.ANTIGRAVITY_CLI]
 
 
 class CopilotSkillsWriter(_BaseSkillsWriter):

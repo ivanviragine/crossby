@@ -19,11 +19,11 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         complex="claude-sonnet-4.6",
         very_complex="claude-opus-4.6",
     ),
-    AIToolID.GEMINI: ComplexityModelMapping(
-        easy="gemini-3-flash-preview",
-        medium="gemini-3.1-pro-preview",
-        complex="gemini-3.1-pro-preview",
-        very_complex="gemini-3.1-pro-preview",
+    AIToolID.ANTIGRAVITY_CLI: ComplexityModelMapping(
+        easy="gemini-3.6-flash-low",
+        medium="claude-sonnet-4-6",
+        complex="claude-sonnet-4-6",
+        very_complex="claude-opus-4-6-thinking",
     ),
     AIToolID.CODEX: ComplexityModelMapping(
         easy="gpt-5.4-mini",

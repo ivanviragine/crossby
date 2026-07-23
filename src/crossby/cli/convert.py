@@ -63,7 +63,7 @@ def convert(
         crossby convert "Bash(myapp:*)" --from claude --to cursor
         crossby convert "myapp:*" --from canonical --to claude
     """
-    supported = {"claude", "cursor", "copilot", "gemini", "canonical"}
+    supported = {"claude", "cursor", "copilot", "canonical"}
 
     if from_tool not in supported:
         supported_str = ", ".join(sorted(supported))
@@ -78,13 +78,6 @@ def convert(
     # Step 1: Convert to canonical format
     if from_tool == "canonical":
         canonical = pattern
-    elif from_tool == "gemini":
-        console.error(
-            "Gemini CLI no longer uses --allowed-tools flags. "
-            "Permissions are managed via .gemini/policies/crossby.toml "
-            "(written automatically by 'crossby sync')."
-        )
-        raise typer.Exit(1)
     else:
         strip_fn = _get_to_canonical(from_tool)
         canonical = strip_fn(pattern) if strip_fn and callable(strip_fn) else pattern
@@ -92,13 +85,6 @@ def convert(
     # Step 2: Convert from canonical to target format
     if to_tool == "canonical":
         result = canonical
-    elif to_tool == "gemini":
-        console.error(
-            "Gemini CLI no longer uses --allowed-tools flags. "
-            "Permissions are managed via .gemini/policies/crossby.toml "
-            "(written automatically by 'crossby sync')."
-        )
-        raise typer.Exit(1)
     else:
         translate_fn = _get_from_canonical(to_tool)
         result = translate_fn(canonical) if translate_fn and callable(translate_fn) else canonical

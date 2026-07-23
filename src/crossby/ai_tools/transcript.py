@@ -1,6 +1,6 @@
 """Transcript parsing — extract token usage from AI CLI session output.
 
-Supports: Claude, Copilot, Gemini, Codex, and a generic fallback.
+Supports: Claude, Copilot, Codex, and a generic fallback.
 Each AI tool has a distinct output format for reporting token usage.
 """
 
@@ -112,87 +112,6 @@ def read_transcript_excerpt(transcript_path: Path, max_lines: int = 400) -> str:
 # ---------------------------------------------------------------------------
 # Tool-specific token usage extractors
 # ---------------------------------------------------------------------------
-
-
-def _extract_last_number(text: str) -> str | None:
-    """Extract the last numeric fragment from a string.
-
-    Matches: "12,345", "1.2k", "2m", "614"
-    """
-    matches: list[str] = re.findall(r"[\d,]+(?:\.\d+)?[kKmM]?", text)
-    if matches:
-        return matches[-1]
-    return None
-
-
-def _extract_gemini_table(text: str) -> tuple[TokenUsage | None, list[ModelBreakdown]]:
-    """Parse Gemini CLI 'Model Usage' table rows.
-
-    Format: <model> <requests> <input> <cache> <output>
-    Example: gemini-2.0-flash 12 45,234 12,345 8,901
-
-    This is the most structured format and gets highest priority.
-    """
-    # Pattern: model_name requests input_tokens cache_tokens output_tokens
-    row_re = re.compile(
-        r"^\s*"
-        r"([a-z0-9._-]+)"  # model name
-        r"\s+"
-        r"(\d+)"  # request count
-        r"\s+"
-        r"([\d,]+(?:\.\d+)?[kKmM]?)"  # input tokens
-        r"\s+"
-        r"([\d,]+(?:\.\d+)?[kKmM]?)"  # cache tokens
-        r"\s+"
-        r"([\d,]+(?:\.\d+)?[kKmM]?)"  # output tokens
-        r"\s*$",
-        re.MULTILINE,
-    )
-
-    breakdowns: dict[str, list[int]] = {}  # model -> [input, output, cached]
-    model_order: list[str] = []
-
-    for m in row_re.finditer(text):
-        model = m.group(1)
-        inp = parse_token_count(m.group(3)) or 0
-        cache = parse_token_count(m.group(4)) or 0
-        out = parse_token_count(m.group(5)) or 0
-
-        if model not in breakdowns:
-            breakdowns[model] = [0, 0, 0]
-            model_order.append(model)
-
-        breakdowns[model][0] += inp
-        breakdowns[model][1] += out
-        breakdowns[model][2] += cache
-
-    if not breakdowns:
-        return None, []
-
-    total_in = sum(v[0] for v in breakdowns.values())
-    total_out = sum(v[1] for v in breakdowns.values())
-    total_cache = sum(v[2] for v in breakdowns.values())
-    total = total_in + total_out + total_cache
-
-    model_breakdowns = [
-        ModelBreakdown(
-            model=model,
-            input_tokens=breakdowns[model][0],
-            output_tokens=breakdowns[model][1],
-            cached_tokens=breakdowns[model][2],
-        )
-        for model in model_order
-    ]
-
-    usage = TokenUsage(
-        total_tokens=total if total > 0 else None,
-        input_tokens=total_in if total_in > 0 else None,
-        output_tokens=total_out if total_out > 0 else None,
-        cached_tokens=total_cache if total_cache > 0 else None,
-        model_breakdown=model_breakdowns,
-    )
-
-    return usage, model_breakdowns
 
 
 def _extract_copilot_summary(text: str) -> tuple[TokenUsage | None, list[ModelBreakdown]]:
@@ -508,8 +427,6 @@ _SESSION_ID_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"copilot\s+--resume=(" + _UUID_RE + r")", re.IGNORECASE),
     # Codex CLI: "codex resume <uuid>"
     re.compile(r"codex\s+resume\s+(" + _UUID_RE + r")", re.IGNORECASE),
-    # Gemini CLI: "Session ID: <uuid>"
-    re.compile(r"Session\s+ID:\s+(" + _UUID_RE + r")", re.IGNORECASE),
     # OpenCode: "opencode -s ses_<alphanum>"
     re.compile(r"opencode\s+-s\s+(ses_[A-Za-z0-9]+)"),
 ]
@@ -536,11 +453,10 @@ def extract_token_usage_from_text(text: str) -> TokenUsage:
     """Extract token usage from transcript text using cascading strategies.
 
     Priority order (most structured → least):
-    1. Gemini table format
-    2. Copilot summary format
-    3. Claude footer format
-    4. Codex footer format
-    5. Generic keyword-based fallback
+    1. Copilot summary format
+    2. Claude footer format
+    3. Codex footer format
+    4. Generic keyword-based fallback
 
     Session ID is extracted independently and attached to the result.
     """
@@ -549,30 +465,24 @@ def extract_token_usage_from_text(text: str) -> TokenUsage:
 
     usage: TokenUsage | None = None
 
-    # Strategy 1: Gemini table (most structured, highest priority)
-    gemini_usage, _gemini_breakdowns = _extract_gemini_table(text)
-    if gemini_usage is not None:
-        usage = gemini_usage
+    # Strategy 1: Copilot summary (includes per-model + premium)
+    copilot_usage, _copilot_breakdowns = _extract_copilot_summary(text)
+    if copilot_usage is not None:
+        usage = copilot_usage
 
-    # Strategy 2: Copilot summary (includes per-model + premium)
-    if usage is None:
-        copilot_usage, _copilot_breakdowns = _extract_copilot_summary(text)
-        if copilot_usage is not None:
-            usage = copilot_usage
-
-    # Strategy 3: Claude footer
+    # Strategy 2: Claude footer
     if usage is None:
         claude_usage = _extract_claude_footer(text)
         if claude_usage is not None:
             usage = claude_usage
 
-    # Strategy 4: Codex footer
+    # Strategy 3: Codex footer
     if usage is None:
         codex_usage = _extract_codex_footer(text)
         if codex_usage is not None:
             usage = codex_usage
 
-    # Strategy 5: Generic fallback
+    # Strategy 4: Generic fallback
     if usage is None:
         generic_usage = _extract_generic_tokens(text)
         if generic_usage is not None:
@@ -589,15 +499,10 @@ def extract_token_usage_from_text(text: str) -> TokenUsage:
 def extract_model_breakdown_from_text(text: str) -> list[ModelBreakdown]:
     """Extract per-model token breakdown from transcript text.
 
-    Tries Gemini table format, then Copilot per-model format.
+    Tries Copilot per-model format.
     """
     if not text.strip():
         return []
-
-    # Try Gemini table
-    _, gemini_breakdowns = _extract_gemini_table(text)
-    if gemini_breakdowns:
-        return gemini_breakdowns
 
     # Try Copilot per-model
     _, copilot_breakdowns = _extract_copilot_summary(text)

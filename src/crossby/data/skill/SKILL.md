@@ -1,6 +1,6 @@
 ---
 name: crossby-sync
-description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across Claude Code, Codex, Cursor, Gemini, GitHub Copilot, OpenCode, VS Code, or Antigravity. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
+description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across Claude Code, Codex, Cursor, GitHub Copilot, OpenCode, VS Code, Antigravity, or Antigravity CLI. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
 metadata:
   short-description: Sync AI tool config across every installed CLI
 ---
@@ -21,8 +21,8 @@ generated files, and re-run checks without stopping for confirmation.
 If the user has not selected a source tool, infer one from the project
 (prefer Codex's `AGENTS.md`, then `CLAUDE.md`) and proceed. Do not edit
 the source tool's files (`.claude/settings.json`, `.claude/agents/`,
-etc.); manual fixes belong in the **generated** Codex / Cursor / Gemini
-/ Copilot artifacts. Preserve unrelated existing config entries in
+etc.); manual fixes belong in the **generated** Codex / Cursor / Copilot /
+Antigravity CLI artifacts. Preserve unrelated existing config entries in
 target files (e.g. `[mcp_servers]` Crossby didn't write, hand-curated
 hook entries, custom JSON keys) — do not ask about them unless they
 fail validation or directly conflict with the sync.
@@ -65,20 +65,24 @@ Run in this order for each project:
      when the content references another tool's surfaces (`/hooks`,
      `ExitPlanMode`, `permissionMode`, `.claude/agents/`, etc.).
    - **agents**: directory symlink between markdown-shape tools
-     (Claude / Cursor / Gemini / Copilot); per-file translation to
-     `.codex/agents/<name>.toml` for Codex.
+     (Claude / Cursor / Copilot / Antigravity CLI); per-file translation
+     to `.codex/agents/<name>.toml` for Codex.
    - **skills**: directory symlink by default; per-file translation
      when `--strategy translate` is set so `allowed-tools` etc. become
      manual-fix notes for non-Claude targets. Claude slash commands
      under `.claude/commands/` become `claude-command-<slug>` skills
      for non-Claude targets.
    - **mcp**: merged into each tool's native shape (JSON for Claude /
-     Cursor / Gemini / Copilot; TOML for Codex). `Authorization: Bearer
-     ${VAR}` becomes Codex `bearer_token_env_var`; `${VAR}` headers
+     Cursor / Copilot / Antigravity CLI — the latter using `serverUrl`
+     instead of `url` for remote servers; TOML for Codex). `Authorization:
+     Bearer ${VAR}` becomes Codex `bearer_token_env_var`; `${VAR}` headers
      become `env_http_headers`; env-var self-references become
      `env_vars`.
    - **permissions**: per-tool allowlist translation between canonical
-     `cmd:args` and `Bash(...)` / `Shell(...)` / Gemini policy TOML.
+     `cmd:args` and `Bash(...)` / `Shell(...)`. Antigravity CLI has no
+     persistent allowlist file — permissions are launch-time flags
+     (`--dangerously-skip-permissions`/`--sandbox`), so it's skipped
+     here (same as Codex's sandbox mode).
    - **hooks**: dedup by `(event, command)` with matcher widening.
    - **plugins**: detect-only; emits `Not Added` rows for `.claude/
      plugins/`, `plugin-marketplaces.json`, and `.claude-plugin/
@@ -119,7 +123,7 @@ Run in this order for each project:
    ```markdown
    | Status | Item | Notes |
    | --- | --- | --- |
-   | `Added` | `Rule` GEMINI.md | foreign markers in source |
+   | `Added` | `Rule` .cursorrules | foreign markers in source |
    | `Added` | `Agent` release-lead | translated to TOML |
    | `Check before using` | `Skill` claude-command-pr-review | Converted from a Claude slash command |
    | `Not Added` | `Plugin` team-macros | Plugin needs manual setup |
