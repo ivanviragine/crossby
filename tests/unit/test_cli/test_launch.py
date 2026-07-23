@@ -49,7 +49,7 @@ class TestTranscriptRelativePath:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -95,7 +95,7 @@ class TestTranscriptParentDir:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -123,7 +123,7 @@ class TestTranscriptParentDir:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude"])
@@ -156,7 +156,7 @@ class TestResumeFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
             patch("crossby.utils.process.run_with_transcript", return_value=0) as mock_run,
         ):
@@ -182,7 +182,7 @@ class TestResumeFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("cursor", None, None, False),
+                return_value=("cursor", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -203,7 +203,7 @@ class TestResumeFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -230,7 +230,7 @@ class TestResumeFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
             patch("crossby.utils.process.run_with_transcript", return_value=0),
         ):
@@ -278,7 +278,7 @@ class TestTrustedDirFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -301,7 +301,7 @@ class TestTrustedDirFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -333,7 +333,7 @@ class TestTrustedDirFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("cursor", None, None, False),
+                return_value=("cursor", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -362,7 +362,7 @@ class TestProfileFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, True),
+                return_value=("claude", None, None, False, False, True),
             ),
         ):
             result = runner.invoke(
@@ -396,7 +396,7 @@ class TestProfileFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", "opus", None, False),
+                return_value=("claude", "opus", None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -426,7 +426,7 @@ class TestProfileFlag:
             ),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(
@@ -463,7 +463,7 @@ class TestPlanFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=(tool, None, None, False),
+                return_value=(tool, None, None, False, False, False),
             ),
         ):
             result = runner.invoke(app, ["launch", str(tmp_path), "--tool", tool, "--plan"])
@@ -507,7 +507,7 @@ class TestPlanFlag:
             patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
             patch(
                 "crossby.services.ai_resolution.confirm_ai_selection",
-                return_value=("claude", None, None, False),
+                return_value=("claude", None, None, False, False, False),
             ),
         ):
             result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude"])
@@ -515,3 +515,149 @@ class TestPlanFlag:
         assert result.exit_code == 0, result.output
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("plan_mode") is False
+
+
+class TestAcceptEditsAutoFlags:
+    """`--accept-edits` / `--auto` resolve and forward to the adapter."""
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        """Behave like confirm_ai_selection's non-TTY fast path (identity)."""
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    def _run(self, tmp_path: Path, *flags: str) -> tuple[MagicMock, Any]:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude", *flags])
+        return adapter, result
+
+    def test_accept_edits_forwards_true(self, tmp_path: Path) -> None:
+        adapter, result = self._run(tmp_path, "--accept-edits")
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("accept_edits") is True
+        assert kwargs.get("auto") is False
+
+    def test_auto_forwards_true(self, tmp_path: Path) -> None:
+        adapter, result = self._run(tmp_path, "--auto")
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("auto") is True
+        assert kwargs.get("accept_edits") is False
+
+    def test_neither_flag_forwards_false(self, tmp_path: Path) -> None:
+        adapter, result = self._run(tmp_path)
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("accept_edits") is False
+        assert kwargs.get("auto") is False
+
+    def _run_unsupported(self, tmp_path: Path, *flags: str) -> tuple[MagicMock, Any]:
+        """Launch a tool that supports neither accept-edits nor auto (e.g. a GUI)."""
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: vscode\n")
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="VS Code",
+            supports_initial_message=False,
+            supports_trusted_dirs=False,
+            supports_plan_mode=False,
+            supports_accept_edits=False,
+            supports_auto=False,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "vscode", *flags])
+        return adapter, result
+
+    def test_accept_edits_unsupported_warns_and_not_shown_on(self, tmp_path: Path) -> None:
+        # GUI adapters never reach build_launch_command(); the CLI must surface
+        # the downgrade and never claim the mode is "on".
+        adapter, result = self._run_unsupported(tmp_path, "--accept-edits")
+        assert result.exit_code == 0, result.output
+        assert "does not support --accept-edits" in result.output
+        assert "Accept-edits mode" not in result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("accept_edits") is False
+
+    def test_auto_unsupported_downgrades_to_default_prompting(self, tmp_path: Path) -> None:
+        adapter, result = self._run_unsupported(tmp_path, "--auto")
+        assert result.exit_code == 0, result.output
+        assert "does not support --auto" in result.output
+        assert "Auto mode" not in result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("auto") is False
+        assert kwargs.get("accept_edits") is False
+
+    def test_accept_edits_from_config(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\nai:\n  default_tool: claude\n  accept_edits: true\n"
+        )
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude"])
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("accept_edits") is True
+
+    def test_profile_persists_accept_edits_and_auto(self, tmp_path: Path) -> None:
+        config = {
+            "version": 1,
+            "profiles": {"guarded": {"tool": "claude", "accept_edits": True, "auto": True}},
+        }
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(config))
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--profile", "guarded"])
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs.get("accept_edits") is True
+        assert kwargs.get("auto") is True

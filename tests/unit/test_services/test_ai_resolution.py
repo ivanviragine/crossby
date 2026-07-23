@@ -12,6 +12,8 @@ from crossby.models.config import (
     CrossbyConfig,
 )
 from crossby.services.ai_resolution import (
+    resolve_accept_edits,
+    resolve_auto,
     resolve_effort,
     resolve_model,
     resolve_yolo,
@@ -130,3 +132,57 @@ class TestResolveYoloStrict:
         config = CrossbyConfig()
         result = resolve_yolo(True, config, tool="claude", strict=True)
         assert result is True
+
+
+class TestResolveAcceptEdits:
+    """resolve_accept_edits() fallback chain: arg -> command -> global -> False."""
+
+    def test_explicit_arg_wins(self) -> None:
+        assert resolve_accept_edits(True, CrossbyConfig()) is True
+
+    def test_explicit_false_overrides_config(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(accept_edits=True))
+        assert resolve_accept_edits(False, config) is False
+
+    def test_command_config_used(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(commands={"plan": CommandConfig(accept_edits=True)}))
+        assert resolve_accept_edits(None, config, command="plan") is True
+
+    def test_global_config_used(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(accept_edits=True))
+        assert resolve_accept_edits(None, config) is True
+
+    def test_command_overrides_global(self) -> None:
+        config = CrossbyConfig(
+            ai=AIConfig(accept_edits=True, commands={"plan": CommandConfig(accept_edits=False)})
+        )
+        assert resolve_accept_edits(None, config, command="plan") is False
+
+    def test_default_false(self) -> None:
+        assert resolve_accept_edits(None, CrossbyConfig()) is False
+
+    def test_unsupported_tool_is_not_dropped(self) -> None:
+        # Unlike yolo, accept-edits is passed through (builder degrades it).
+        assert resolve_accept_edits(True, CrossbyConfig()) is True
+
+
+class TestResolveAuto:
+    """resolve_auto() fallback chain mirrors resolve_accept_edits()."""
+
+    def test_explicit_arg_wins(self) -> None:
+        assert resolve_auto(True, CrossbyConfig()) is True
+
+    def test_explicit_false_overrides_config(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(auto=True))
+        assert resolve_auto(False, config) is False
+
+    def test_command_config_used(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(commands={"plan": CommandConfig(auto=True)}))
+        assert resolve_auto(None, config, command="plan") is True
+
+    def test_global_config_used(self) -> None:
+        config = CrossbyConfig(ai=AIConfig(auto=True))
+        assert resolve_auto(None, config) is True
+
+    def test_default_false(self) -> None:
+        assert resolve_auto(None, CrossbyConfig()) is False

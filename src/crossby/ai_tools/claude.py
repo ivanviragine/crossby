@@ -50,6 +50,8 @@ class ClaudeAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             supports_plan_mode=True,
+            supports_accept_edits=True,
+            supports_auto=True,
             supports_stop_hook=True,
             supports_session_start_hook=True,
             supports_user_prompt_submit_hook=True,
@@ -213,3 +215,16 @@ class ClaudeAdapter(AbstractAITool):
     def yolo_args(self) -> list[str]:
         """Claude uses ``--dangerously-skip-permissions``."""
         return ["--dangerously-skip-permissions"]
+
+    def accept_edits_args(self) -> list[str]:
+        """Claude auto-applies edits with ``--permission-mode acceptEdits``."""
+        return ["--permission-mode", "acceptEdits"]
+
+    def auto_args(self) -> list[str]:
+        """Claude's classifier-mediated guarded autonomy: ``--permission-mode auto``.
+
+        This is a real launch flag. Claude itself reports "unavailable" and
+        degrades if the account/model is ineligible — that is a Claude-side
+        decision, not a crossby error.
+        """
+        return ["--permission-mode", "auto"]

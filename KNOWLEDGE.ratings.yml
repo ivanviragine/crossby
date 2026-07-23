@@ -18,6 +18,11 @@
   down: 0
   stale: 0
   up: 1
+987aeb2b:
+  down: 0
+  stale: 0
+  superseded_by: e3fcf100
+  up: 0
 '99616955':
   down: 0
   stale: 1

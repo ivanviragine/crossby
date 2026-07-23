@@ -118,6 +118,8 @@ class CommandConfig(BaseModel):
     model: str | None = None
     effort: str | None = None
     yolo: bool | None = None
+    accept_edits: bool | None = None
+    auto: bool | None = None
 
 
 class AIConfig(BaseModel):
@@ -127,6 +129,8 @@ class AIConfig(BaseModel):
     default_model: str | None = None
     effort: str | None = None
     yolo: bool | None = None
+    accept_edits: bool | None = None
+    auto: bool | None = None
     commands: dict[str, CommandConfig] = {}
 
 
@@ -152,6 +156,8 @@ class ProfileConfig(BaseModel):
     model: str | None = None
     effort: str | None = None
     yolo: bool | None = None
+    accept_edits: bool | None = None
+    auto: bool | None = None
 
 
 class SyncDefaults(BaseModel):
@@ -266,6 +272,28 @@ class CrossbyConfig(BaseModel):
             if cmd_config.yolo is not None:
                 return cmd_config.yolo
         return self.ai.yolo
+
+    def get_accept_edits(self, command: str | None = None) -> bool | None:
+        """Get the accept-edits setting for a command, with fallback chain.
+
+        Fallback: command-specific accept_edits → global ai.accept_edits → None.
+        """
+        if command and command in self.ai.commands:
+            cmd_config = self.ai.commands[command]
+            if cmd_config.accept_edits is not None:
+                return cmd_config.accept_edits
+        return self.ai.accept_edits
+
+    def get_auto(self, command: str | None = None) -> bool | None:
+        """Get the auto (classifier) setting for a command, with fallback chain.
+
+        Fallback: command-specific auto → global ai.auto → None.
+        """
+        if command and command in self.ai.commands:
+            cmd_config = self.ai.commands[command]
+            if cmd_config.auto is not None:
+                return cmd_config.auto
+        return self.ai.auto
 
     def get_profile(self, name: str) -> ProfileConfig | None:
         """Get a named launch profile."""

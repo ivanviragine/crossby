@@ -46,6 +46,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             supports_plan_mode=True,
+            supports_accept_edits=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
@@ -57,6 +58,11 @@ class AntigravityCLIAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """agy's ``--mode`` flag accepts ``accept-edits`` or ``plan``."""
         return ["--mode", "plan"]
+
+    def accept_edits_args(self) -> list[str]:
+        """agy's ``--mode accept-edits`` auto-applies edits on the execution-mode
+        axis; shell stays gated by the separate permissions axis."""
+        return ["--mode", "accept-edits"]
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """agy uses --add-dir (repeatable) to grant workspace access."""

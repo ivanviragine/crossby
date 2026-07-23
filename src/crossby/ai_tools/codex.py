@@ -44,6 +44,7 @@ class CodexAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            supports_accept_edits=True,
             supports_stop_hook=True,
             supports_session_start_hook=True,
             supports_user_prompt_submit_hook=True,
@@ -88,6 +89,16 @@ class CodexAdapter(AbstractAITool):
         """Codex uses ``-c model_reasoning_effort="<mapped>"``."""
         mapped = _CODEX_EFFORT_MAP.get(effort, effort.value)
         return ["-c", f'model_reasoning_effort="{mapped}"']
+
+    def accept_edits_args(self) -> list[str]:
+        """Codex accept-edits: workspace-write sandbox auto-applies edits while
+        untrusted shell commands still escalate for approval.
+
+        ``-s workspace-write -a untrusted``. The old ``--approval-mode
+        auto-edit`` flag was removed in the Rust CLI (v0.14x) and must not be
+        used.
+        """
+        return ["-s", "workspace-write", "-a", "untrusted"]
 
     def yolo_args(self) -> list[str]:
         """Codex skips approval prompts with ``-a never`` while keeping its

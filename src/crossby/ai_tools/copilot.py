@@ -35,6 +35,7 @@ class CopilotAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             supports_plan_mode=True,
+            supports_accept_edits=True,
             hook_output_dialect=HookOutputDialect.EXIT_CODE,
         )
 
@@ -82,6 +83,11 @@ class CopilotAdapter(AbstractAITool):
             pattern = f"shell({binary}:{args})" if args else f"shell({binary})"
             result.extend(["--allow-tool", pattern])
         return result
+
+    def accept_edits_args(self) -> list[str]:
+        """Copilot auto-approves file writes with ``--allow-tool write`` while
+        ``shell`` stays gated."""
+        return ["--allow-tool", "write"]
 
     def yolo_args(self) -> list[str]:
         """Copilot uses ``--yolo`` (alias for ``--allow-all``)."""
