@@ -37,9 +37,7 @@ class TestTrustedDirsLaunchCommand:
         # accept-edits already sets ``-s workspace-write``; trusted-dir handling
         # must not re-emit ``--sandbox workspace-write`` (Codex/clap rejects the
         # duplicate flag).
-        cmd = CodexAdapter().build_launch_command(
-            accept_edits=True, trusted_dirs=["/tmp/plan"]
-        )
+        cmd = CodexAdapter().build_launch_command(accept_edits=True, trusted_dirs=["/tmp/plan"])
         assert "--sandbox" not in cmd
         assert cmd.count("workspace-write") == 1
         assert "--add-dir" in cmd
