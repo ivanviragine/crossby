@@ -11,7 +11,7 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         easy="claude-haiku-4.5",
         medium="claude-sonnet-5",
         complex="claude-sonnet-5",
-        very_complex="claude-opus-4.8",
+        very_complex="claude-opus-5",
     ),
     AIToolID.COPILOT: ComplexityModelMapping(
         easy="claude-haiku-4.5",
