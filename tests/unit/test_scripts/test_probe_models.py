@@ -32,6 +32,7 @@ class TestClaudeScrapePattern:
     def test_matches_single_number_versions(self) -> None:
         assert re.findall(CLAUDE_PATTERN, "claude-sonnet-5") == ["claude-sonnet-5"]
         assert re.findall(CLAUDE_PATTERN, "claude-fable-5") == ["claude-fable-5"]
+        assert re.findall(CLAUDE_PATTERN, "claude-opus-5") == ["claude-opus-5"]
 
     def test_matches_dotted_versions(self) -> None:
         assert re.findall(CLAUDE_PATTERN, "claude-opus-4.8") == ["claude-opus-4.8"]

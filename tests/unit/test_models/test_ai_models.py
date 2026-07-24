@@ -279,6 +279,7 @@ class TestClassifyTierUniversal:
 
     def test_powerful_tier_keywords(self) -> None:
         assert classify_tier_universal("claude-opus-4-6") == ModelTier.POWERFUL
+        assert classify_tier_universal("claude-opus-5") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-2.5-pro") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-ultra") == ModelTier.POWERFUL
 
@@ -457,9 +458,9 @@ class TestCrossProviderModelTranslation:
         with pytest.warns(UserWarning, match="Translating model"):
             cmd = adapter.build_launch_command(model="gpt-5.4")
         idx = cmd.index("--model")
-        # gpt-5.4 reverse-maps to claude-opus-4.7, then normalize_model_format
-        # converts dotted → dashed for Claude.
-        assert cmd[idx + 1] == "claude-opus-4-7"
+        # gpt-5.4 reverse-maps to claude-opus-5; normalize_model_format leaves
+        # it unchanged (no dotted digit pair to dash).
+        assert cmd[idx + 1] == "claude-opus-5"
 
     def test_native_model_not_translated(self) -> None:
         # Claude → Claude with a native id should not warn.

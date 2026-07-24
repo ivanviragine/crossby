@@ -25,7 +25,7 @@ class TestModelRegistry:
     def test_claude_registry_includes_current_models(self) -> None:
         """The Claude catalog tracks the current generation (WADE #309 port)."""
         claude_models = get_models_for_tool("claude")
-        for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-fable-5"):
+        for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-opus-5", "claude-fable-5"):
             assert model in claude_models
 
 

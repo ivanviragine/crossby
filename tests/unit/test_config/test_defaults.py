@@ -39,4 +39,4 @@ class TestClaudeTierDefaults:
         assert mapping.easy == "claude-haiku-4.5"
         assert mapping.medium == "claude-sonnet-5"
         assert mapping.complex == "claude-sonnet-5"
-        assert mapping.very_complex == "claude-opus-4.8"
+        assert mapping.very_complex == "claude-opus-5"

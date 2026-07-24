@@ -65,6 +65,13 @@ class TestModelFamily:
         assert mapping is not None
         assert mapping.codex_model == "gpt-5.4"
 
+    def test_find_opus_5(self) -> None:
+        # Opus 5 resolves via the existing claude-opus family prefix (no code change).
+        mapping = find_claude_family("claude-opus-5")
+        assert mapping is not None
+        assert mapping.claude_prefix == "claude-opus"
+        assert mapping.codex_model == "gpt-5.4"
+
     def test_find_sonnet(self) -> None:
         mapping = find_claude_family("claude-sonnet-4.6")
         assert mapping is not None
@@ -99,7 +106,8 @@ class TestModelTranslation:
     @pytest.mark.parametrize(
         ("codex", "claude"),
         [
-            ("gpt-5.4", "claude-opus-4.7"),
+            ("gpt-5.4", "claude-opus-5"),
+            ("gpt-5.5", "claude-opus-5"),
             ("gpt-5.4-mini", "claude-sonnet-4.6"),
         ],
     )
