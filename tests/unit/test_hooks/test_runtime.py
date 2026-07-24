@@ -94,6 +94,8 @@ class TestParseEventEvents:
         [
             ("PreToolUse", "pre_tool_use"),
             ("preToolUse", "pre_tool_use"),
+            # agy (Gemini-family successor) emits Claude-style Pre/PostToolUse.
+            ("PostToolUse", "post_tool_use"),
             ("SessionStart", "session_start"),
             ("Stop", "stop"),
         ],
@@ -101,6 +103,13 @@ class TestParseEventEvents:
     def test_event_from_payload(self, raw_name: str, canonical: str) -> None:
         ev = parse_event(json.dumps({"hook_event_name": raw_name}))
         assert ev.event == canonical
+
+    @pytest.mark.parametrize("gemini_name", ["BeforeTool", "AfterTool"])
+    def test_removed_gemini_event_names_pass_through(self, gemini_name: str) -> None:
+        # Gemini CLI was removed (#69); its BeforeTool/AfterTool names have no
+        # emitter, so they are no longer normalized and pass through unchanged.
+        ev = parse_event(json.dumps({"hook_event_name": gemini_name}))
+        assert ev.event == gemini_name
 
     def test_event_override_used_when_absent(self) -> None:
         ev = parse_event(json.dumps({"tool_name": "Write"}), event="stop")

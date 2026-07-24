@@ -49,10 +49,12 @@ _PASCAL_EVENT_NAMES: dict[str, str] = {
 }
 
 # Reverse map: incoming tool event name (any casing) → canonical.
+# Gemini's BeforeTool/AfterTool names were dropped with the Gemini CLI (#69);
+# agy — its Gemini-family successor — emits Claude-style PreToolUse/PostToolUse,
+# so no Gemini-specific entry is needed here.
 _CANONICAL_EVENT_NAMES: dict[str, str] = {
     "pretooluse": "pre_tool_use",
     "posttooluse": "post_tool_use",
-    "beforetool": "pre_tool_use",
     "sessionstart": "session_start",
     "userpromptsubmit": "user_prompt_submit",
     "stop": "stop",
