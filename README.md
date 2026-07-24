@@ -240,7 +240,7 @@ Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--accept
 | Antigravity CLI| ✓    | ✓      | —                 | ✓                |
 | OpenCode       | ✓    | ✓      | —                 | ✓                |
 | VS Code        | ✓    | ✓      | —                 | ✓                |
-| Antigravity IDE| ✓    | ✓      | —                 | ✓                |
+| Antigravity IDE| ✓ via Antigravity CLI | ✓      | —                 | ✓                |
 
 The **Antigravity IDE** is a launch-only GUI tool. It reads the same project-level `.agents/` config as **Antigravity CLI** (`AGENTS.md`, `.agents/skills`, `.agents/agents`, `.agents/mcp_config.json`), so syncing to `antigravity-cli` provisions the IDE too — there is no separate IDE sync target.
 
