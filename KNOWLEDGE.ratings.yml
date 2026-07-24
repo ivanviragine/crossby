@@ -9,7 +9,7 @@
 196d703f:
   down: 0
   stale: 0
-  up: 2
+  up: 3
 2a38e22d:
   down: 0
   stale: 0
@@ -47,3 +47,8 @@ eb391f2d:
   down: 0
   stale: 0
   up: 2
+f7a8c38e:
+  down: 0
+  stale: 0
+  superseded_by: c39fe2c3
+  up: 0
