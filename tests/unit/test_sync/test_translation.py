@@ -107,6 +107,7 @@ class TestModelTranslation:
         ("codex", "claude"),
         [
             ("gpt-5.4", "claude-opus-5"),
+            ("gpt-5.5", "claude-opus-5"),
             ("gpt-5.4-mini", "claude-sonnet-4.6"),
         ],
     )
