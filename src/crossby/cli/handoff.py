@@ -22,7 +22,7 @@ _UNSUPPORTED_REASONS = {
         "OpenCode stores sessions in a SQLite database that is not yet supported "
         "(see follow-up issue)."
     ),
-    "antigravity": "Antigravity sessions are not on disk in a readable form.",
+    "antigravity": "Antigravity IDE sessions are not on disk in a readable form.",
     "vscode": "VS Code chat sessions are not exposed on disk.",
 }
 

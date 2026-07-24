@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -60,7 +61,12 @@ class TestCapabilities:
         assert caps.supports_resume is True
 
     def test_antigravity_capabilities(self) -> None:
+        # The IDE is a GUI launcher (same shape as VS Code), distinct from the
+        # Antigravity CLI (agy). Display name must read unambiguously as the IDE.
         caps = AbstractAITool.get("antigravity").capabilities()
+        assert caps.binary == "antigravity"
+        assert caps.display_name == "Antigravity IDE"
+        assert caps.tool_type == AIToolType.GUI
         assert caps.supports_model_flag is False
         assert caps.supports_initial_message is False
         assert caps.blocks_until_exit is False
@@ -334,6 +340,31 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("claude")
         cmd = adapter.build_launch_command(plan_mode=False)
         assert "--approval-mode" not in cmd
+
+
+class TestAntigravityIDELaunch:
+    """The IDE is a GUI launcher that overrides launch() (never reaches
+    build_launch_command()); it opens the workspace by path, like VS Code."""
+
+    def test_launch_opens_workspace_by_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import crossby.ai_tools.antigravity as antigravity_mod
+
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd: list[str], transcript_path: Path | None, cwd: Path) -> int:
+            captured["cmd"] = cmd
+            captured["cwd"] = cwd
+            return 0
+
+        monkeypatch.setattr(antigravity_mod, "run_with_transcript", fake_run)
+        adapter = AbstractAITool.get("antigravity")
+        rc = adapter.launch(tmp_path)
+
+        assert rc == 0
+        assert captured["cmd"] == ["antigravity", str(tmp_path)]
+        assert captured["cwd"] == tmp_path
 
 
 class TestNormalizeModelFormat:

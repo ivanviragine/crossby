@@ -1,6 +1,6 @@
 ---
 name: crossby-sync
-description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across Claude Code, Codex, Cursor, GitHub Copilot, OpenCode, VS Code, Antigravity, or Antigravity CLI. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
+description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across Claude Code, Codex, Cursor, GitHub Copilot, OpenCode, VS Code, Antigravity IDE, or Antigravity CLI. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
 metadata:
   short-description: Sync AI tool config across every installed CLI
 ---

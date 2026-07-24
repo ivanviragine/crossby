@@ -1,7 +1,7 @@
 # crossby cross-tool differences
 
 Per-surface mapping table for the eight tools `crossby` supports today:
-Claude, Cursor, Codex, Copilot, OpenCode, VS Code, Antigravity, and
+Claude, Cursor, Codex, Copilot, OpenCode, VS Code, Antigravity IDE, and
 Antigravity CLI. Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
 `Shell(myapp:*)` ↔ `myapp:*`) are listed once; lossy or unsupported
 edges are flagged.
@@ -112,7 +112,7 @@ Antigravity CLI has no hook system at all, so it has no row here.
 
 The lossy edges Crossby actually emits today, grouped by source → target. A
 missing row means the source ↔ target pair is non-lossy for that concern;
-absent pairs (OpenCode / VS Code / Antigravity as direct source/target for
+absent pairs (OpenCode / VS Code / Antigravity IDE as direct source/target for
 the concerns below) aren't wired yet.
 
 | Source → Target | Concern | What gets dropped or rewritten |
