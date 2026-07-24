@@ -15,6 +15,12 @@ INSTRUCTIONS_FILE: dict[AIToolID, str] = {
     AIToolID.ANTIGRAVITY_CLI: "AGENTS.md",
 }
 
+# Tools with no crossby-writable instruction target of their own.
+# ANTIGRAVITY is the IDE, a launch-only GUI tool. It reads the same shared
+# ``.agents/`` layout as the Antigravity CLI (``AGENTS.md`` etc.), so its
+# instructions are provisioned transitively by syncing to ANTIGRAVITY_CLI —
+# a dedicated IDE target would only duplicate that path. Do not confuse it
+# with ANTIGRAVITY_CLI, which is a supported instruction target above.
 UNSUPPORTED_TOOLS = {AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY}
 
 

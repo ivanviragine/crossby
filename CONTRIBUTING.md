@@ -151,17 +151,17 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 
 ### Launch Flags
 
-| Crossby Flag  | Claude                             | Copilot           | Antigravity CLI                  | Codex                                      | OpenCode          | Cursor                     | VS Code | Antigravity |
-| ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | ----------- |
-| Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity` |
-| `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —           |
-| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —           |
-| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —           |
-| `--effort`    | `--effort <level>`                 | —                 | `--effort <level>`                | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —           |
-| `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —           |
-| `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —           |
-| `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —           |
-| `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--add-dir`                       | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —           |
+| Crossby Flag  | Claude                             | Copilot           | Antigravity CLI                  | Codex                                      | OpenCode          | Cursor                     | VS Code | Antigravity IDE |
+| ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | --------------- |
+| Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
+| `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
+| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —               |
+| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
+| `--effort`    | `--effort <level>`                 | —                 | `--effort <level>`                | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
+| `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
+| `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
+| `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
+| `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--add-dir`                       | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —               |
 
 ### Effort Level Mapping
 
@@ -219,7 +219,7 @@ Session IDs are extracted automatically from transcripts when `--transcript` is 
 | Cursor                                | ✓ (`~/.cursor/projects/<encoded>/chat.json`)         | ✓               |
 | Codex                                 | ✓ (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`)   | ✓               |
 | Copilot                               | ✓ (`~/.copilot/session-state/<id>/events.jsonl`)     | ✓               |
-| Antigravity CLI, OpenCode, Antigravity, VS Code| —                                            | ✓               |
+| Antigravity CLI, OpenCode, Antigravity IDE, VS Code| —                                        | ✓               |
 
 ### Library API (not exposed via CLI)
 
