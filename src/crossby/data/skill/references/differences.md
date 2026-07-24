@@ -64,7 +64,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| Canonical events `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop`, `notification` | per-tool event names (PascalCase / camelCase / BeforeTool / etc.) | event-name translation | Each writer also drops events its tool can't represent and records a `manual_fix` note in the report row. |
+| Canonical events `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop`, `notification` | per-tool event names (PascalCase `PreToolUse` / camelCase `preToolUse` / etc.) | event-name translation | Each writer also drops events its tool can't represent and records a `manual_fix` note in the report row. |
 | Source hook with `tools` filter | `.cursor/hooks.json` only honours `tools` on its tool-execution events; Cursor `stop`, Codex `Stop` / `UserPromptSubmit` ignore matcher | partial mapping | The `tools` / `matcher` field is stripped on write and the dropped scope shows up as a `hooks.<event>.matcher` manual-fix note. |
 | Source hook of unsupported event for the target (e.g. Claude `Notification` → Codex, anything but `pre_tool_use` → Copilot) | dropped from the target | manual-fix | Each unique unsupported event produces one `hooks.<event>` manual-fix note so the user knows what didn't make it across. |
 | Any hook written to `.codex/hooks.json` | inert until `[features].codex_hooks = true` is set in `.codex/config.toml` | always-on manual-fix | Codex won't load the file otherwise. `CodexHooksWriter` always emits the `features.codex_hooks` reminder, even when every event mapped cleanly. |

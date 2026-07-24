@@ -14,6 +14,10 @@
   down: 0
   stale: 0
   up: 2
+3d8f2bc6:
+  down: 0
+  stale: 0
+  up: 1
 74bba59d:
   down: 0
   stale: 0
@@ -43,6 +47,10 @@ b7079af0:
   down: 0
   stale: 0
   up: 1
+c39fe2c3:
+  down: 0
+  stale: 0
+  up: 1
 e3fcf100:
   down: 0
   stale: 0
@@ -53,6 +61,6 @@ eb391f2d:
   up: 2
 f7a8c38e:
   down: 0
-  stale: 0
+  stale: 1
   superseded_by: c39fe2c3
   up: 0
