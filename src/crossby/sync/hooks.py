@@ -656,6 +656,33 @@ def _agy_command_present(container_map: dict[str, Any], agy_event: str, command:
     return False
 
 
+def _agy_find_matcher_entry(
+    container_map: dict[str, Any], agy_event: str, command: str
+) -> dict[str, Any] | None:
+    """Return the matcher-wrapped entry registering ``command``, or ``None``.
+
+    Used to *widen* an existing PreToolUse/PostToolUse entry's ``matcher`` on
+    re-sync when the desired tool coverage has grown — mirroring the
+    upgrade-safe merge the Claude/Codex writers perform — instead of silently
+    dropping the newly-covered tools.
+    """
+    for container in container_map.values():
+        if not isinstance(container, dict):
+            continue
+        event_list = container.get(agy_event)
+        if not isinstance(event_list, list):
+            continue
+        for entry in event_list:
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get("hooks")
+            if isinstance(inner, list) and any(
+                isinstance(h, dict) and h.get("command") == command for h in inner
+            ):
+                return entry
+    return None
+
+
 class AntigravityCLIHooksWriter(AbstractSyncWriter):
     """Merges hooks into .agents/hooks.json for Antigravity CLI (``agy``).
 
@@ -725,7 +752,22 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             if not allow_matcher and desired_tools:
                 dropped_matcher_events.add(hook.event)
 
-            if _agy_command_present(existing, agy_event, command):
+            if allow_matcher:
+                # Upgrade-safe: if this command is already registered, widen its
+                # matcher when the desired tool coverage has grown (never narrow),
+                # mirroring the Claude/Codex writers. Prevents a re-sync from
+                # silently dropping newly-covered tools from a guard.
+                existing_entry = _agy_find_matcher_entry(existing, agy_event, command)
+                if existing_entry is not None:
+                    existing_matcher = existing_entry.get("matcher")
+                    base = existing_matcher if isinstance(existing_matcher, str) else None
+                    widened = _widen_matcher(base, desired_tools)
+                    if widened != existing_matcher:
+                        existing_entry["matcher"] = widened
+                        changed = True
+                    continue
+            elif _agy_command_present(existing, agy_event, command):
+                # Stop: no matcher to widen — a present command is a no-op.
                 continue
 
             container_name = _agy_slug(hook.description) or f"crossby-{agy_event.lower()}"

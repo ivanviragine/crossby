@@ -52,16 +52,20 @@ class AntigravityCLIAdapter(AbstractAITool):
             # Pre/PostInvocation/Stop). It reads decisions as a top-level
             # {"decision": …} object (the DECISION dialect) and fails *closed*
             # on a PreToolUse hook that errors — a non-zero exit denies the tool
-            # call — so hook_fail_open_default stays False.
+            # call (observed in agy integrations, e.g. cmux issue #4768 where a
+            # failing PreToolUse hook blocks every tool call) — so
+            # hook_fail_open_default stays False.
             supports_stop_hook=True,
             hook_output_dialect=HookOutputDialect.DECISION,
             hook_fail_open_default=False,
-            # agy confines writes to its granted workspace dirs (the terminal
-            # sandbox, mirroring Codex ``--sandbox``), so an out-of-worktree
-            # write is already blocked without a wade worktree-containment guard.
-            # Its own bundled plugin registers no PreToolUse hook at all, so the
-            # PreToolUse path is best-effort; Stop is the reliable surface.
-            sandboxes_writes=True,
+            # sandboxes_writes stays False deliberately: agy's write sandbox is an
+            # opt-in flag (``--sandbox``, passed only in yolo_args), not a verified
+            # default, so we do NOT tell wade an out-of-worktree write is already
+            # confined — wade keeps its own containment guard rather than trusting
+            # an unconfirmed native sandbox. agy's own bundled plugin registers no
+            # PreToolUse hook, so that guard is best-effort there; Stop is the
+            # reliable enforcement surface.
+            sandboxes_writes=False,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:

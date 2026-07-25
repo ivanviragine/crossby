@@ -83,10 +83,11 @@ Per-tool supported events:
 
 Antigravity CLI (`agy`) has no `session_start` / `user_prompt_submit` equivalent
 (its `PreInvocation` / `PostInvocation` fire per model call, not once at session
-start), so those events are dropped with a manual-fix note. agy confines writes
-to its granted workspace dirs, and its own bundled plugin registers no
-`PreToolUse` hook — so `PreToolUse` guards are best-effort there and `Stop` is
-the reliable enforcement surface.
+start), so those events are dropped with a manual-fix note. Its own bundled
+plugin registers no `PreToolUse` hook — so `PreToolUse` guards are best-effort
+there and `Stop` is the reliable enforcement surface. agy's `Stop` stdin carries
+no `stop_hook_active`-style re-entry flag, so a single-shot `Stop` guard must
+track its own "already nudged" state rather than rely on the payload.
 
 ## Plugins
 

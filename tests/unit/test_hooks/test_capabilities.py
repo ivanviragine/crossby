@@ -56,13 +56,13 @@ class TestSandboxAndFailOpen:
     def test_codex_sandboxes_writes(self) -> None:
         assert _caps(AIToolID.CODEX).sandboxes_writes is True
 
-    def test_antigravity_cli_sandboxes_writes_and_fails_closed(self) -> None:
-        # agy confines writes to its workspace dirs and denies a tool call when
-        # its PreToolUse hook errors (non-zero exit), so a worktree guard is
-        # redundant and a security guard stays fail-closed there.
+    def test_antigravity_cli_fails_closed_but_sandbox_unclaimed(self) -> None:
+        # agy denies a tool call when its PreToolUse hook errors (fail-closed),
+        # but its write sandbox is an opt-in flag, not a verified default — so we
+        # do NOT claim sandboxes_writes, keeping wade's own containment guard.
         caps = _caps(AIToolID.ANTIGRAVITY_CLI)
-        assert caps.sandboxes_writes is True
         assert caps.hook_fail_open_default is False
+        assert caps.sandboxes_writes is False
 
     def test_claude_does_not_hard_sandbox(self) -> None:
         # Claude adds trusted dirs but prompts rather than hard-blocking.

@@ -951,6 +951,45 @@ class TestAntigravityCLIHooksWriter:
         assert result.action == "skipped"
         assert _read_json(self._path(tmp_path)) == first
 
+    def test_resync_widens_matcher_when_coverage_grows(self, tmp_path: Path) -> None:
+        # A guard whose tool scope grows across syncs must widen its matcher, not
+        # silently drop the newly-covered tools (upgrade-safe merge).
+        narrow = HookEntry(
+            event="pre_tool_use", command="guard", tools=["Edit"], description="grow guard"
+        )
+        wide = HookEntry(
+            event="pre_tool_use",
+            command="guard",
+            tools=["Edit", "Write"],
+            description="grow guard",
+        )
+        self.writer.sync(_cfg(narrow), tmp_path)
+        assert _read_json(self._path(tmp_path))["grow-guard"]["PreToolUse"][0]["matcher"] == "Edit"
+
+        result = self.writer.sync(_cfg(wide), tmp_path)
+        assert result.action == "updated"
+        entry = _read_json(self._path(tmp_path))["grow-guard"]["PreToolUse"][0]
+        assert set(entry["matcher"].split("|")) == {"Edit", "Write"}
+        # Still one entry — widened in place, not duplicated.
+        assert len(_read_json(self._path(tmp_path))["grow-guard"]["PreToolUse"]) == 1
+
+    def test_resync_never_narrows_matcher(self, tmp_path: Path) -> None:
+        # A later sync with a subset must NOT shrink existing coverage.
+        wide = HookEntry(
+            event="pre_tool_use",
+            command="guard",
+            tools=["Edit", "Write"],
+            description="grow guard",
+        )
+        narrow = HookEntry(
+            event="pre_tool_use", command="guard", tools=["Edit"], description="grow guard"
+        )
+        self.writer.sync(_cfg(wide), tmp_path)
+        result = self.writer.sync(_cfg(narrow), tmp_path)
+        assert result.action == "skipped"
+        entry = _read_json(self._path(tmp_path))["grow-guard"]["PreToolUse"][0]
+        assert set(entry["matcher"].split("|")) == {"Edit", "Write"}
+
     def test_preserves_hand_authored_container(self, tmp_path: Path) -> None:
         path = self._path(tmp_path)
         path.parent.mkdir(parents=True)
