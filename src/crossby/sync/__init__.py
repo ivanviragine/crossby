@@ -15,6 +15,7 @@ from crossby.sync.agents import (
 )
 from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
 from crossby.sync.hooks import (
+    AntigravityCLIHooksWriter,
     ClaudeHooksWriter,
     CodexHooksWriter,
     CopilotHooksWriter,
@@ -76,6 +77,7 @@ _registry.register(ClaudeHooksWriter())
 _registry.register(CursorHooksWriter())
 _registry.register(CopilotHooksWriter())
 _registry.register(CodexHooksWriter())
+_registry.register(AntigravityCLIHooksWriter())
 _registry.register(ClaudeSkillsWriter())
 _registry.register(CursorSkillsWriter())
 _registry.register(CodexSkillsWriter())

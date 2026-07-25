@@ -68,6 +68,7 @@ tool's docs and confirm the schemas before trusting these rows.
 | Source hook with `tools` filter | `.cursor/hooks.json` only honours `tools` on its tool-execution events; Cursor `stop`, Codex `Stop` / `UserPromptSubmit` ignore matcher | partial mapping | The `tools` / `matcher` field is stripped on write and the dropped scope shows up as a `hooks.<event>.matcher` manual-fix note. |
 | Source hook of unsupported event for the target (e.g. Claude `Notification` → Codex, anything but `pre_tool_use` → Copilot) | dropped from the target | manual-fix | Each unique unsupported event produces one `hooks.<event>` manual-fix note so the user knows what didn't make it across. |
 | Any hook written to `.codex/hooks.json` | inert until `[features].codex_hooks = true` is set in `.codex/config.toml` | always-on manual-fix | Codex won't load the file otherwise. `CodexHooksWriter` always emits the `features.codex_hooks` reminder, even when every event mapped cleanly. |
+| Any hook written to `.agents/hooks.json` (Antigravity CLI) | container-wrapped `{name: {Event: [...]}}`; `Stop` handlers sit directly under the event key, `PreToolUse`/`PostToolUse` wrap them in `{matcher, hooks}` | shape split | agy nests every hook under an arbitrary container name and drops the matcher on `Stop`; the runtime emits agy's `{"decision": …}` dialect (a `Stop` blocks via `{"decision": "continue"}`, the inverse of the other tools' `continue` boolean). |
 | Multiple sources defining the same `(event, command)` | matcher widened (union of tools) | merge | Re-running with a broader matcher upgrades coverage instead of duplicating entries. |
 
 Per-tool supported events:
@@ -78,8 +79,15 @@ Per-tool supported events:
 | Codex | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop` | `pre_tool_use`, `post_tool_use`, `session_start` only |
 | Cursor | `pre_tool_use`, `user_prompt_submit`, `stop` | `pre_tool_use` only |
 | Copilot | `pre_tool_use` | none — Copilot hooks apply to every tool |
+| Antigravity CLI | `pre_tool_use`, `post_tool_use`, `stop` | `pre_tool_use`, `post_tool_use` only |
 
-Antigravity CLI has no hook system at all, so it has no row here.
+Antigravity CLI (`agy`) has no `session_start` / `user_prompt_submit` equivalent
+(its `PreInvocation` / `PostInvocation` fire per model call, not once at session
+start), so those events are dropped with a manual-fix note. Its own bundled
+plugin registers no `PreToolUse` hook — so `PreToolUse` guards are best-effort
+there and `Stop` is the reliable enforcement surface. agy's `Stop` stdin carries
+no `stop_hook_active`-style re-entry flag, so a single-shot `Stop` guard must
+track its own "already nudged" state rather than rely on the payload.
 
 ## Plugins
 
@@ -122,6 +130,7 @@ the concerns below) aren't wired yet.
 | Claude → Codex | mcp | `headers` with `${VAR:-default}` fallbacks; `oauth` (whole block — reported as a manual-fix row, not written to any target); `type: sse` |
 | Claude → Cursor | hooks | every event except `pre_tool_use`, `user_prompt_submit`, and `stop`; `tools` filter on `user_prompt_submit` / `stop` |
 | Claude → Copilot | hooks | every event except `pre_tool_use`; the `tools` filter (Copilot has no per-tool scope) |
+| Claude → Antigravity CLI | hooks | `session_start` / `user_prompt_submit` / `notification` (no agy equivalent); `matcher` on `Stop`; non-`command` hook types |
 | Codex → Claude | agents | `model_reasoning_effort` (Claude has no equivalent); `[permissions]` table |
 | Codex → Cursor / Copilot / Antigravity CLI | mcp | TOML-specific `bearer_token_env_var` → header rewrite back into `Authorization: Bearer ${VAR}` form |
 | Cursor → Codex | hooks | same drops as Claude → Codex (matcher on `UserPromptSubmit` / `Stop`, unsupported events) |

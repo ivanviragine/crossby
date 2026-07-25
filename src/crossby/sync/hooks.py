@@ -53,6 +53,11 @@ _EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
         "user_prompt_submit": "UserPromptSubmit",
         "stop": "Stop",
     },
+    AIToolID.ANTIGRAVITY_CLI: {
+        "pre_tool_use": "PreToolUse",
+        "post_tool_use": "PostToolUse",
+        "stop": "Stop",
+    },
 }
 
 
@@ -582,6 +587,231 @@ class CopilotHooksWriter(AbstractSyncWriter):
         if not dry_run:
             existing["version"] = 1
             existing["hooks"] = hooks_section
+            write_json_file(path, existing)
+
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=path,
+            message=_message_with_notes(None, notes),
+        )
+
+
+# ---------------------------------------------------------------------------
+# AntigravityCLIHooksWriter
+# ---------------------------------------------------------------------------
+
+
+# agy exposes PreToolUse/PostToolUse/Pre/PostInvocation/Stop. Among crossby's
+# canonical events only these three map cleanly; session_start / user_prompt_submit
+# have no agy equivalent (agy's Pre/PostInvocation fire per model call, not once
+# at session start) and are dropped with a manual-fix note.
+_ANTIGRAVITY_CLI_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "post_tool_use", "stop"}
+)
+# agy honours a `matcher` (regex over tool names) only on the tool-execution
+# events; Stop handlers sit directly under the event key with no matcher.
+_ANTIGRAVITY_CLI_MATCHER_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "post_tool_use"})
+
+
+def _agy_slug(text: str) -> str:
+    """Lowercase, hyphen-separated slug of ``text`` (alnum runs → single ``-``)."""
+    out: list[str] = []
+    prev_hyphen = False
+    for ch in text.strip().lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_hyphen = False
+        elif not prev_hyphen:
+            out.append("-")
+            prev_hyphen = True
+    return "".join(out).strip("-")
+
+
+def _agy_command_present(container_map: dict[str, Any], agy_event: str, command: str) -> bool:
+    """True if ``command`` is already registered under ``agy_event`` anywhere.
+
+    agy's file maps arbitrary *container* names → ``{event: [...]}``. A
+    tool-execution event's entries wrap handlers in ``{"matcher", "hooks": [...]}``;
+    Stop's entries are handlers (``{"type", "command"}``) directly. This scans
+    every container so a re-sync dedups against a hand-authored container too.
+    """
+    for container in container_map.values():
+        if not isinstance(container, dict):
+            continue
+        event_list = container.get(agy_event)
+        if not isinstance(event_list, list):
+            continue
+        for entry in event_list:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("command") == command:
+                return True  # Stop-shape handler
+            inner = entry.get("hooks")
+            if isinstance(inner, list) and any(
+                isinstance(h, dict) and h.get("command") == command for h in inner
+            ):
+                return True  # matcher-wrapped handler
+    return False
+
+
+def _agy_find_matcher_entry(
+    container_map: dict[str, Any], agy_event: str, command: str
+) -> dict[str, Any] | None:
+    """Return the matcher-wrapped entry registering ``command``, or ``None``.
+
+    Used to *widen* an existing PreToolUse/PostToolUse entry's ``matcher`` on
+    re-sync when the desired tool coverage has grown — mirroring the
+    upgrade-safe merge the Claude/Codex writers perform — instead of silently
+    dropping the newly-covered tools.
+    """
+    for container in container_map.values():
+        if not isinstance(container, dict):
+            continue
+        event_list = container.get(agy_event)
+        if not isinstance(event_list, list):
+            continue
+        for entry in event_list:
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get("hooks")
+            if isinstance(inner, list) and any(
+                isinstance(h, dict) and h.get("command") == command for h in inner
+            ):
+                return entry
+    return None
+
+
+class AntigravityCLIHooksWriter(AbstractSyncWriter):
+    """Merges hooks into .agents/hooks.json for Antigravity CLI (``agy``).
+
+    agy's format maps arbitrary hook *container* names to per-event configs::
+
+        {
+          "crossby-pretooluse": {
+            "PreToolUse": [
+              {"matcher": "Edit|Write",
+               "hooks": [{"type": "command", "command": "..."}]}
+            ]
+          },
+          "crossby-stop": {
+            "Stop": [{"type": "command", "command": "..."}]
+          }
+        }
+
+    Tool-execution events (PreToolUse/PostToolUse) wrap their handlers in a
+    ``{"matcher", "hooks": [...]}`` object; ``Stop`` lists handlers directly and
+    ignores any matcher (dropped on write with a note). agy has no
+    session_start / user_prompt_submit event, so those are dropped too. Dedup key
+    is the handler ``command`` across every container.
+    """
+
+    tool_id = AIToolID.ANTIGRAVITY_CLI
+    concern = SyncConcern.HOOKS
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        if not data.hooks:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="no hooks config",
+            )
+
+        path = project_root / ".agents" / "hooks.json"
+        file_data, error, was_new = read_json_file(path)
+        if error is not None:
+            msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
+            warnings.warn(msg, stacklevel=2)
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                file_path=path,
+                message=msg,
+            )
+
+        kept, notes = _filter_supported_hooks(data.hooks, _ANTIGRAVITY_CLI_SUPPORTED_EVENTS)
+        existing = file_data if isinstance(file_data, dict) else {}
+        changed = False
+        dropped_matcher_events: set[str] = set()
+
+        for hook in kept:
+            agy_event = _translate_event(hook.event, self.tool_id)
+            command = hook.command
+            allow_matcher = hook.event in _ANTIGRAVITY_CLI_MATCHER_EVENTS
+            desired_tools = hook.tools or []
+            if not allow_matcher and desired_tools:
+                dropped_matcher_events.add(hook.event)
+
+            if allow_matcher:
+                # Upgrade-safe: if this command is already registered, widen its
+                # matcher when the desired tool coverage has grown (never narrow),
+                # mirroring the Claude/Codex writers. Prevents a re-sync from
+                # silently dropping newly-covered tools from a guard.
+                existing_entry = _agy_find_matcher_entry(existing, agy_event, command)
+                if existing_entry is not None:
+                    existing_matcher = existing_entry.get("matcher")
+                    base = existing_matcher if isinstance(existing_matcher, str) else None
+                    widened = _widen_matcher(base, desired_tools)
+                    if widened != existing_matcher:
+                        existing_entry["matcher"] = widened
+                        changed = True
+                    continue
+            elif _agy_command_present(existing, agy_event, command):
+                # Stop: no matcher to widen — a present command is a no-op.
+                continue
+
+            container_name = _agy_slug(hook.description) or f"crossby-{agy_event.lower()}"
+            container = existing.get(container_name)
+            if not isinstance(container, dict):
+                container = {}
+            event_list = container.get(agy_event)
+            if not isinstance(event_list, list):
+                event_list = []
+
+            handler: dict[str, Any] = {"type": "command", "command": command}
+            if allow_matcher:
+                event_list.append({"matcher": _tools_to_matcher(desired_tools), "hooks": [handler]})
+            else:
+                # Stop: handlers sit directly under the event key, no matcher.
+                event_list.append(handler)
+
+            container[agy_event] = event_list
+            existing[container_name] = container
+            changed = True
+
+        for event in sorted(dropped_matcher_events):
+            notes.append(
+                ManualFixNote(
+                    category=f"hooks.{event}.matcher",
+                    message=(
+                        f"Antigravity CLI ignores `matcher` on "
+                        f"`{_translate_event(event, self.tool_id)}`; tool scope was "
+                        "dropped on write."
+                    ),
+                )
+            )
+
+        if not changed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=path,
+                message=_message_with_notes(None, notes),
+            )
+
+        action: _HookAction = "created" if was_new else "updated"
+        if not dry_run:
             write_json_file(path, existing)
 
         return SyncResult(

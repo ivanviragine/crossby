@@ -64,6 +64,20 @@ class TestParseEventDialects:
         assert ev.command == "rm -rf /"
         assert ev.file_path is None
 
+    @pytest.mark.parametrize("key", ["file_path", "filePath", "path"])
+    def test_antigravity_cli_toolcall_wrapper(self, key: str) -> None:
+        # agy nests the call as {"toolCall": {"name", "args": {...}}}.
+        payload = {"toolCall": {"name": "write_file", "args": {key: "/repo/a.py"}}}
+        ev = parse_event(json.dumps(payload))
+        assert ev.tool_name == "write_file"
+        assert ev.file_path == "/repo/a.py"
+
+    def test_antigravity_cli_toolcall_command(self) -> None:
+        payload = {"toolCall": {"name": "run_command", "args": {"command": "git push"}}}
+        ev = parse_event(json.dumps(payload))
+        assert ev.tool_name == "run_command"
+        assert ev.command == "git push"
+
     def test_cursor_top_level_command(self) -> None:
         # Cursor beforeShellExecution puts command at the top level, no wrapper.
         ev = parse_event(json.dumps({"command": "git push --force"}))
@@ -154,11 +168,21 @@ class TestIsWrite:
 
 
 class TestEmitDecisionAllow:
-    @pytest.mark.parametrize("dialect", list(HookOutputDialect))
+    @pytest.mark.parametrize(
+        "dialect",
+        [d for d in HookOutputDialect if d is not HookOutputDialect.DECISION],
+    )
     def test_allow_is_silent_exit_zero(self, dialect: HookOutputDialect) -> None:
         em = emit_decision(HookDecision.allow(), dialect)
         assert em.exit_code == 0
         assert em.stdout == ""
+        assert em.stderr == ""
+
+    def test_allow_emits_empty_object_for_decision_dialect(self) -> None:
+        # agy rejects a truly empty stdout; {} is its "no opinion, proceed" no-op.
+        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {}
         assert em.stderr == ""
 
 
@@ -191,6 +215,14 @@ class TestEmitDecisionDeny:
         assert em.stdout == ""
         assert em.stderr == "blocked"
 
+    def test_decision_dialect(self) -> None:
+        # agy blocks a tool call via a top-level {"decision": "deny"}; exit 2
+        # keeps the guard fail-closed even if agy ignores the stdout decision.
+        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.DECISION)
+        assert em.exit_code == 2
+        assert em.stderr == "nope"
+        assert json.loads(em.stdout) == {"decision": "deny", "reason": "nope"}
+
     @pytest.mark.parametrize("dialect", list(HookOutputDialect))
     def test_deny_always_exits_two(self, dialect: HookOutputDialect) -> None:
         assert emit_decision(HookDecision.deny("x"), dialect).exit_code == 2
@@ -212,6 +244,13 @@ class TestEmitDecisionContext:
         em = emit_decision(HookDecision.context("hello"), HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
+
+    def test_context_no_op_for_decision_dialect(self) -> None:
+        # agy has no verified context-injection field, so context degrades to a
+        # bare {} proceed rather than blocking or injecting.
+        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {}
 
     def test_context_injected_for_permission_dialect(self) -> None:
         # Cursor injects context via a top-level `additional_context` field on
@@ -238,6 +277,19 @@ class TestEmitStopDecision:
         em = emit_stop_decision(False, "unused", HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
+
+    def test_no_block_emits_empty_object_for_decision_dialect(self) -> None:
+        # agy's Stop no-op is a bare {} — a top-level {"continue": true} is not a
+        # key it recognizes, and {"decision": "continue"} would *block* the stop.
+        em = emit_stop_decision(False, "unused", HookOutputDialect.DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {}
+
+    def test_block_decision_dialect_continues(self) -> None:
+        # agy blocks a Stop by telling the agent to continue.
+        em = emit_stop_decision(True, "finish first", HookOutputDialect.DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"decision": "continue", "reason": "finish first"}
 
     def test_block_hook_specific_output(self) -> None:
         em = emit_stop_decision(True, "finish first", HookOutputDialect.HOOK_SPECIFIC_OUTPUT)
@@ -275,6 +327,24 @@ class TestDetectToolId:
     def test_cursor_wins_over_codex_and_claude(self) -> None:
         payload = {"conversation_id": "c", "model": "x", "session_id": "s"}
         assert detect_tool_id(payload) is AIToolID.CURSOR
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"workspacePaths": ["/repo"]},
+            {"conversationId": "c1"},
+            {"artifactDirectoryPath": "/repo/.artifacts"},
+            {"toolCall": {"name": "write_file", "args": {}}},
+        ],
+    )
+    def test_antigravity_cli_by_camelcase_shape(self, payload: dict) -> None:
+        assert detect_tool_id(payload) is AIToolID.ANTIGRAVITY_CLI
+
+    def test_antigravity_cli_wins_over_codex_model_field(self) -> None:
+        # agy hook stdin can also carry `model`; its camelCase shape must win so
+        # it isn't misread as Codex.
+        payload = {"workspacePaths": ["/repo"], "model": "gemini-3-flash"}
+        assert detect_tool_id(payload) is AIToolID.ANTIGRAVITY_CLI
 
     def test_unknown_returns_none(self) -> None:
         # No distinguishing field → None, so the caller applies its own default.

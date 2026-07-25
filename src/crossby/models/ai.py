@@ -58,14 +58,20 @@ class HookOutputDialect(StrEnum):
       stdout (Cursor).
     - ``EXIT_CODE`` — no structured stdout contract; the exit code is the only
       block signal, with a human message on stderr (Copilot).
+    - ``DECISION`` — a ``{"decision": "deny"|"allow"|"ask", "reason": …}`` object
+      on stdout, with a Stop hook blocking via ``{"decision": "continue"}``
+      (Antigravity CLI / ``agy``). Field names are top-level and camelCase; an
+      empty ``{}`` is the tool's documented "no opinion, proceed" signal.
 
     A deny always also exits non-zero (2) so the block is honored even by tools
-    that ignore stdout — the dialect only governs the stdout payload shape.
+    that ignore stdout, and so a security guard stays fail-*closed* — the dialect
+    only governs the stdout payload shape.
     """
 
     HOOK_SPECIFIC_OUTPUT = "hook_specific_output"
     PERMISSION = "permission"
     EXIT_CODE = "exit_code"
+    DECISION = "decision"
 
 
 class AIModel(BaseModel, frozen=True):
