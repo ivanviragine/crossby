@@ -912,6 +912,24 @@ class TestAntigravityCLIHooksWriter:
         assert entry["matcher"] == "Edit|Write"
         assert entry["hooks"] == [{"type": "command", "command": "python3 ./scripts/guard.py"}]
 
+    def test_post_tool_use_is_matcher_wrapped(self, tmp_path: Path) -> None:
+        hook = HookEntry(
+            event="post_tool_use",
+            command="python3 ./scripts/audit.py",
+            tools=["Edit"],
+            description="audit",
+        )
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.action == "created"
+        entry = _read_json(self._path(tmp_path))["audit"]["PostToolUse"][0]
+        assert entry["matcher"] == "Edit"
+        assert entry["hooks"] == [{"type": "command", "command": "python3 ./scripts/audit.py"}]
+
+    def test_dry_run_reports_created_without_writing(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path, dry_run=True)
+        assert result.action == "created"
+        assert not self._path(tmp_path).exists()
+
     def test_stop_handlers_are_direct_no_matcher(self, tmp_path: Path) -> None:
         stop_hook = HookEntry(
             event="stop", command="wade hook stop", tools=[], description="session complete"
