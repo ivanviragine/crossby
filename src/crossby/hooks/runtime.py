@@ -15,9 +15,11 @@ Dialects (grouped by output *shape*, not tool — see :class:`HookOutputDialect`
 - Claude / Codex → ``HOOK_SPECIFIC_OUTPUT``
 - Cursor → ``PERMISSION``
 - Copilot → ``EXIT_CODE``
+- Antigravity CLI (``agy``) → ``DECISION``
 
 A deny always exits 2 regardless of dialect, so the block is honored even by a
-tool that ignores stdout; the dialect only governs the stdout payload.
+tool that ignores stdout (and a security guard stays fail-*closed*); the dialect
+only governs the stdout payload.
 """
 
 from __future__ import annotations
@@ -139,21 +141,40 @@ def _first_str(source: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _tool_call_args(data: dict[str, Any]) -> dict[str, Any]:
+    """Return Antigravity CLI's ``toolCall.args`` dict, or ``{}``.
+
+    agy nests the tool-call arguments one level deeper than the other tools:
+    ``{"toolCall": {"name": …, "args": {…}}}`` instead of a flat
+    ``tool_input``/``toolInput`` wrapper.
+    """
+    tool_call = data.get("toolCall")
+    if isinstance(tool_call, dict):
+        args = tool_call.get("args")
+        if isinstance(args, dict):
+            return args
+    return {}
+
+
 def _extract_file_path(data: dict[str, Any]) -> str | None:
     """Pull the target file path from any supported tool-input dialect.
 
     Handles Claude/Cursor (``tool_input``/``toolInput`` dict with
     ``file_path``/``filePath``/``path``/``notebook_path``), Copilot (``toolArgs``
-    JSON string), and Cursor's event hooks that place the path at the payload
-    *top level* (e.g. ``beforeReadFile``, which has no ``tool_input`` wrapper).
-    ``notebook_path`` covers NotebookEdit, whose target lives in a
-    differently-named field.
+    JSON string), Antigravity CLI (``toolCall.args`` dict), and Cursor's event
+    hooks that place the path at the payload *top level* (e.g. ``beforeReadFile``,
+    which has no ``tool_input`` wrapper). ``notebook_path`` covers NotebookEdit,
+    whose target lives in a differently-named field.
     """
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(tool_input, dict):
         found = _first_str(tool_input, _FILE_PATH_KEYS)
         if found:
             return found
+
+    found = _first_str(_tool_call_args(data), _FILE_PATH_KEYS)
+    if found:
+        return found
 
     tool_args = data.get("toolArgs")
     if isinstance(tool_args, str):
@@ -182,6 +203,10 @@ def _extract_command(data: dict[str, Any]) -> str | None:
         val = tool_input.get("command")
         if isinstance(val, str) and val:
             return val
+    # Antigravity CLI nests args under toolCall.args.
+    args_val = _tool_call_args(data).get("command")
+    if isinstance(args_val, str) and args_val:
+        return args_val
     tool_args = data.get("toolArgs")
     if isinstance(tool_args, str):
         try:
@@ -203,6 +228,12 @@ def _extract_tool_name(data: dict[str, Any]) -> str | None:
         val = data.get(key)
         if isinstance(val, str) and val:
             return val.lower()
+    # Antigravity CLI nests the name under toolCall.name.
+    tool_call = data.get("toolCall")
+    if isinstance(tool_call, dict):
+        name = tool_call.get("name")
+        if isinstance(name, str) and name:
+            return name.lower()
     return None
 
 
@@ -229,6 +260,11 @@ def detect_tool_id(data: dict[str, Any]) -> AIToolID | None:
 
     - **Cursor** — a ``conversation_id`` string, or a non-empty
       ``workspace_roots`` array (Cursor names both differently from the others).
+    - **Antigravity CLI** — camelCase ``workspacePaths``/``conversationId`` or an
+      ``artifactDirectoryPath``/``toolCall`` wrapper (agy's stdin uses camelCase
+      and nests the tool call, so its keys never collide with Cursor's
+      snake_case ``workspace_roots``/``conversation_id``). Checked before Codex
+      because agy hook stdin can also carry a ``model`` field.
     - **Codex** — a top-level ``model`` string (Codex puts it in hook stdin;
       Claude and Cursor do not).
     - **Claude** — a ``session_id`` string with none of the above (Codex also
@@ -239,6 +275,14 @@ def detect_tool_id(data: dict[str, Any]) -> AIToolID | None:
     workspace_roots = data.get("workspace_roots")
     if isinstance(workspace_roots, list) and workspace_roots:
         return AIToolID.CURSOR
+    workspace_paths = data.get("workspacePaths")
+    if (
+        (isinstance(workspace_paths, list) and workspace_paths)
+        or isinstance(data.get("conversationId"), str)
+        or isinstance(data.get("artifactDirectoryPath"), str)
+        or isinstance(data.get("toolCall"), dict)
+    ):
+        return AIToolID.ANTIGRAVITY_CLI
     if isinstance(data.get("model"), str):
         return AIToolID.CODEX
     if isinstance(data.get("session_id"), str):
@@ -287,14 +331,18 @@ def emit_decision(
 ) -> HookEmission:
     """Serialize a :class:`HookDecision` into a tool's stdout/stderr/exit contract.
 
-    - ``allow`` → exit 0, no output (every tool treats exit 0 as allow).
+    - ``allow`` → exit 0, no output (every tool treats exit 0 as allow), except
+      ``DECISION`` (agy), which gets an explicit ``{}`` — its documented "no
+      opinion, proceed" signal — since a truly empty stdout risks an
+      "invalid hook output" rejection.
     - ``deny`` → exit 2 always (universal block), plus the dialect's stdout JSON
       and the reason on stderr (human-readable, honored by ``EXIT_CODE`` tools).
     - ``context`` → exit 0; injects ``additionalContext`` for
       ``HOOK_SPECIFIC_OUTPUT`` (Claude/Codex) and a top-level
       ``additional_context`` for ``PERMISSION`` (Cursor, via its
-      ``beforeSubmitPrompt`` event); a no-op allow for ``EXIT_CODE`` (no
-      context channel).
+      ``beforeSubmitPrompt`` event); a no-op allow for ``EXIT_CODE`` and
+      ``DECISION`` (no verified context-injection channel — agy's
+      PreInvocation-based injection is out of scope, so it degrades to proceed).
 
     Args:
         decision: The tool-neutral decision.
@@ -302,6 +350,8 @@ def emit_decision(
         event: Canonical event name, used for the ``hookEventName`` field.
     """
     if decision.action == "allow":
+        if dialect is HookOutputDialect.DECISION:
+            return HookEmission(stdout=json.dumps({}), exit_code=0)
         return HookEmission(exit_code=0)
 
     if decision.action == "context":
@@ -318,10 +368,17 @@ def emit_decision(
                 stdout=json.dumps({"additional_context": decision.additional_context}),
                 exit_code=0,
             )
+        if dialect is HookOutputDialect.DECISION:
+            return HookEmission(stdout=json.dumps({}), exit_code=0)
         return HookEmission(exit_code=0)
 
     # deny — always exit 2 so the block is honored regardless of dialect.
     reason = decision.reason
+    if dialect is HookOutputDialect.DECISION:
+        # agy blocks a tool call via a top-level {"decision": "deny"}; exit 2
+        # keeps the guard fail-closed if agy ever ignores the stdout decision.
+        agy_deny: dict[str, Any] = {"decision": "deny", "reason": reason}
+        return HookEmission(stdout=json.dumps(agy_deny), stderr=reason, exit_code=2)
     if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
         deny_payload: dict[str, Any] = {
             "hookSpecificOutput": {
@@ -351,21 +408,27 @@ def emit_stop_decision(
     - ``HOOK_SPECIFIC_OUTPUT`` (Claude, Codex): ``{"decision": "block", "reason": …}``
     - ``PERMISSION`` (Cursor): ``{"followup_message": …}`` (auto-submitted; the
       tool bounds re-fires via its own ``loop_limit``).
+    - ``DECISION`` (agy): ``{"decision": "continue", "reason": …}`` — agy blocks a
+      Stop by telling the agent to *continue*, the inverse polarity of the
+      top-level ``continue`` boolean the other stdout dialects use for a no-op.
     - ``EXIT_CODE`` (Copilot): no Stop-block channel — no-op allow. These
       tools also report ``supports_stop_hook = False``, so a Stop hook should not
       be installed for them in the first place.
 
     ``should_block=False`` → the turn ends normally, but a *no-op still emits
-    ``{"continue": true}`` on the stdout-reading dialects*: Codex rejects an
-    empty-stdout Stop hook with "invalid stop hook JSON output" (confirmed
-    against a live Codex session), so a silent no-op would surface an error to
-    the user on every clean stop. ``{"continue": true}`` is the universal no-op
-    — a harmless allow for Claude and Cursor too. ``EXIT_CODE`` tools ignore
-    stdout, so they stay truly silent.
+    JSON on the stdout-reading dialects*: Codex rejects an empty-stdout Stop hook
+    with "invalid stop hook JSON output" (confirmed against a live Codex
+    session), so a silent no-op would surface an error to the user on every clean
+    stop. ``{"continue": true}`` is the no-op for Claude/Codex/Cursor; agy uses a
+    bare ``{}`` instead, because to agy a top-level ``continue`` is not a
+    recognized key and ``{"decision": "continue"}`` would *block* the stop.
+    ``EXIT_CODE`` tools ignore stdout, so they stay truly silent.
     """
     if not should_block:
         if dialect is HookOutputDialect.EXIT_CODE:
             return HookEmission(exit_code=0)
+        if dialect is HookOutputDialect.DECISION:
+            return HookEmission(stdout=json.dumps({}), exit_code=0)
         return HookEmission(stdout=json.dumps({"continue": True}), exit_code=0)
     if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
         stop_payload: dict[str, Any] = {"decision": "block", "reason": reason}
@@ -373,4 +436,7 @@ def emit_stop_decision(
     if dialect is HookOutputDialect.PERMISSION:
         followup_payload: dict[str, Any] = {"followup_message": reason}
         return HookEmission(stdout=json.dumps(followup_payload), exit_code=0)
+    if dialect is HookOutputDialect.DECISION:
+        agy_continue: dict[str, Any] = {"decision": "continue", "reason": reason}
+        return HookEmission(stdout=json.dumps(agy_continue), exit_code=0)
     return HookEmission(exit_code=0)

@@ -862,6 +862,10 @@ class TestCrossWriterUnsupportedEvents:
             ("CopilotHooksWriter", "user_prompt_submit"),
             # Codex supports everything except notification.
             ("CodexHooksWriter", "notification"),
+            # Antigravity CLI supports pre_tool_use + post_tool_use + stop.
+            ("AntigravityCLIHooksWriter", "session_start"),
+            ("AntigravityCLIHooksWriter", "user_prompt_submit"),
+            ("AntigravityCLIHooksWriter", "notification"),
         ],
     )
     def test_writer_drops_unsupported_event(
@@ -880,3 +884,106 @@ class TestCrossWriterUnsupportedEvents:
         )
         assert "manual_fix" in result.message
         assert f"hooks.{unsupported_event}" in result.message
+
+
+# ---------------------------------------------------------------------------
+# AntigravityCLIHooksWriter
+# ---------------------------------------------------------------------------
+
+
+class TestAntigravityCLIHooksWriter:
+    """AntigravityCLIHooksWriter — agy's container-wrapped `.agents/hooks.json`."""
+
+    def setup_method(self) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        self.writer = AntigravityCLIHooksWriter()
+
+    def _path(self, root: Path) -> Path:
+        return root / ".agents" / "hooks.json"
+
+    def test_pre_tool_use_is_matcher_wrapped(self, tmp_path: Path) -> None:
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "created"
+        data = _read_json(self._path(tmp_path))
+        # One container keyed by the description slug, holding a PreToolUse entry.
+        container = data["plan-write-guard"]
+        entry = container["PreToolUse"][0]
+        assert entry["matcher"] == "Edit|Write"
+        assert entry["hooks"] == [{"type": "command", "command": "python3 ./scripts/guard.py"}]
+
+    def test_stop_handlers_are_direct_no_matcher(self, tmp_path: Path) -> None:
+        stop_hook = HookEntry(
+            event="stop", command="wade hook stop", tools=[], description="session complete"
+        )
+        result = self.writer.sync(_cfg(stop_hook), tmp_path)
+        assert result.action == "created"
+        data = _read_json(self._path(tmp_path))
+        stop_entries = data["session-complete"]["Stop"]
+        # Stop handlers sit directly under the event key — no matcher wrapper.
+        assert stop_entries == [{"type": "command", "command": "wade hook stop"}]
+
+    def test_stop_drops_matcher_with_note(self, tmp_path: Path) -> None:
+        stop_with_tools = HookEntry(event="stop", command="wade hook stop", tools=["Bash"])
+        result = self.writer.sync(_cfg(stop_with_tools), tmp_path)
+        assert result.action == "created"
+        data = _read_json(self._path(tmp_path))
+        # No "matcher" key anywhere in the Stop entry.
+        for container in data.values():
+            for entry in container.get("Stop", []):
+                assert "matcher" not in entry
+        assert result.message is not None
+        assert "hooks.stop.matcher" in result.message
+
+    def test_drops_session_start_event(self, tmp_path: Path) -> None:
+        hook = HookEntry(event="session_start", command="echo hi", tools=[])
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.message is not None
+        assert "hooks.session_start" in result.message
+        # Nothing supported was kept, so no file is written.
+        assert not self._path(tmp_path).exists()
+
+    def test_resync_is_idempotent(self, tmp_path: Path) -> None:
+        cfg = _cfg(GUARD_HOOK)
+        self.writer.sync(cfg, tmp_path)
+        first = _read_json(self._path(tmp_path))
+        result = self.writer.sync(cfg, tmp_path)
+        assert result.action == "skipped"
+        assert _read_json(self._path(tmp_path)) == first
+
+    def test_preserves_hand_authored_container(self, tmp_path: Path) -> None:
+        path = self._path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"my-own": {"PreToolUse": [{"matcher": ".*", "hooks": []}]}}),
+            encoding="utf-8",
+        )
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        data = _read_json(path)
+        # The user's container survives; crossby's is added alongside it.
+        assert "my-own" in data
+        assert "plan-write-guard" in data
+
+    def test_dedups_command_across_containers(self, tmp_path: Path) -> None:
+        path = self._path(tmp_path)
+        path.parent.mkdir(parents=True)
+        # Same command already present under a differently-named container.
+        path.write_text(
+            json.dumps(
+                {
+                    "hand-rolled": {
+                        "PreToolUse": [
+                            {
+                                "matcher": ".*",
+                                "hooks": [{"type": "command", "command": GUARD_HOOK.command}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "skipped"
+        data = _read_json(path)
+        assert "plan-write-guard" not in data

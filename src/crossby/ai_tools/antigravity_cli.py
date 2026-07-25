@@ -11,6 +11,7 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HookOutputDialect,
     TokenUsage,
 )
 
@@ -47,6 +48,20 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_trusted_dirs=True,
             supports_plan_mode=True,
             supports_accept_edits=True,
+            # agy exposes a Claude-style hook system (PreToolUse/PostToolUse/
+            # Pre/PostInvocation/Stop). It reads decisions as a top-level
+            # {"decision": …} object (the DECISION dialect) and fails *closed*
+            # on a PreToolUse hook that errors — a non-zero exit denies the tool
+            # call — so hook_fail_open_default stays False.
+            supports_stop_hook=True,
+            hook_output_dialect=HookOutputDialect.DECISION,
+            hook_fail_open_default=False,
+            # agy confines writes to its granted workspace dirs (the terminal
+            # sandbox, mirroring Codex ``--sandbox``), so an out-of-worktree
+            # write is already blocked without a wade worktree-containment guard.
+            # Its own bundled plugin registers no PreToolUse hook at all, so the
+            # PreToolUse path is best-effort; Stop is the reliable surface.
+            sandboxes_writes=True,
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:

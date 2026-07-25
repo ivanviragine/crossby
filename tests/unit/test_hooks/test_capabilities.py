@@ -21,11 +21,10 @@ class TestHookOutputDialect:
     def test_copilot_uses_exit_code(self) -> None:
         assert _caps(AIToolID.COPILOT).hook_output_dialect is HookOutputDialect.EXIT_CODE
 
-    def test_antigravity_cli_uses_hook_specific_output_default(self) -> None:
-        # AntigravityCLIAdapter.capabilities() doesn't override this field,
-        # so it falls back to the base-class default.
+    def test_antigravity_cli_uses_decision(self) -> None:
+        # agy reads a hook decision as a top-level {"decision": …} object.
         caps = _caps(AIToolID.ANTIGRAVITY_CLI)
-        assert caps.hook_output_dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT
+        assert caps.hook_output_dialect is HookOutputDialect.DECISION
 
 
 class TestStopHookSupport:
@@ -36,9 +35,10 @@ class TestStopHookSupport:
     def test_unsupported(self) -> None:
         assert _caps(AIToolID.COPILOT).supports_stop_hook is False
 
-    def test_antigravity_cli_has_no_hook_system(self) -> None:
-        # agy has no hook system at all, by design — unlike Codex.
-        assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_stop_hook is False
+    def test_antigravity_cli_supports_stop_but_not_session_start(self) -> None:
+        # agy fires a Stop hook (the reliable enforcement surface) but has no
+        # session_start / user_prompt_submit event.
+        assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_stop_hook is True
         assert _caps(AIToolID.ANTIGRAVITY_CLI).supports_session_start_hook is False
 
 
@@ -55,6 +55,14 @@ class TestUserPromptSubmitHookSupport:
 class TestSandboxAndFailOpen:
     def test_codex_sandboxes_writes(self) -> None:
         assert _caps(AIToolID.CODEX).sandboxes_writes is True
+
+    def test_antigravity_cli_sandboxes_writes_and_fails_closed(self) -> None:
+        # agy confines writes to its workspace dirs and denies a tool call when
+        # its PreToolUse hook errors (non-zero exit), so a worktree guard is
+        # redundant and a security guard stays fail-closed there.
+        caps = _caps(AIToolID.ANTIGRAVITY_CLI)
+        assert caps.sandboxes_writes is True
+        assert caps.hook_fail_open_default is False
 
     def test_claude_does_not_hard_sandbox(self) -> None:
         # Claude adds trusted dirs but prompts rather than hard-blocking.
