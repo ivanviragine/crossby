@@ -39,6 +39,7 @@ from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncRes
 from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
+    clear_conflicting_type,
     has_managed_marker,
     is_same_path,
     mirror_tree,
@@ -517,10 +518,13 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
         source_names.add(child.name)
         dest = target_dir / child.name
         if child.is_dir() and not child.is_symlink():
+            changed |= clear_conflicting_type(dest, want_dir=True)
             if mirror_tree(child, dest):
                 changed = True
-        elif child.is_file() and write_if_different(dest, child.read_bytes()):
-            changed = True
+        elif child.is_file():
+            changed |= clear_conflicting_type(dest, want_dir=False)
+            if write_if_different(dest, child.read_bytes()):
+                changed = True
 
     for child in target_dir.iterdir():
         if child.name in source_names or child.name == MANAGED_MARKER_NAME:

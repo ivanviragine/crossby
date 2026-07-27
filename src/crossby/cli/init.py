@@ -18,6 +18,7 @@ from typing import Any
 import typer
 import yaml
 
+from crossby.config.json_utils import atomic_write_text
 from crossby.ui.console import console
 
 _CUSTOM = "Custom…"
@@ -87,7 +88,7 @@ def init(
         console.info(f"Backed up existing config to {backup.name}")
 
     rendered = _render_init_yaml(answers, preserved)
-    target.write_text(rendered, encoding="utf-8")
+    atomic_write_text(target, rendered)
 
     # Sanity check — the file must round-trip through the real loader.
     try:

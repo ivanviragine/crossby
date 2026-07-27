@@ -31,6 +31,8 @@ _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 @dataclass(frozen=True)
 class _Header:
+    """One ``[table]`` / ``[[array]]`` header and where it sits in the text."""
+
     parts: tuple[str, ...]
     is_array: bool
     start: int  # offset of the start of the header's line
@@ -39,6 +41,8 @@ class _Header:
 
 @dataclass(frozen=True)
 class _Assign:
+    """One ``key = value`` assignment and the span of text it occupies."""
+
     parts: tuple[str, ...]
     start: int  # offset of the first character of the key
     end: int  # offset just past the assignment's final newline
@@ -75,6 +79,7 @@ def _find_multiline_end(text: str, start: int, delim: str) -> int | None:
 
 
 def _unquote(raw: str) -> str:
+    """Strip the surrounding quotes from a quoted key segment."""
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
         return raw[1:-1]
     return raw
@@ -248,6 +253,7 @@ def _scan(text: str) -> tuple[list[_Header], list[_Assign]] | None:
 
 
 def _find_table(headers: list[_Header], parts: tuple[str, ...]) -> int | None:
+    """Return the index of the ``[parts]`` table header, or None if absent."""
     for idx, header in enumerate(headers):
         if not header.is_array and header.parts == parts:
             return idx
@@ -306,10 +312,12 @@ def _has_detached_child(headers: list[_Header], parts: tuple[str, ...], end: int
 
 
 def _render_key(parts: tuple[str, ...]) -> str:
+    """Render a dotted key, quoting any segment that isn't a bare key."""
     return ".".join(p if _BARE_KEY.match(p) else '"' + p.replace('"', '\\"') + '"' for p in parts)
 
 
 def _append_block(text: str, block: str) -> str:
+    """Append *block* to *text*, separated by exactly one blank line."""
     if not text:
         return block
     separator = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")

@@ -867,9 +867,11 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
 
     path = project_root / ".codex" / "config.toml"
     existing: dict[str, Any] = {}
+    original = ""
     if path.exists():
         try:
-            existing = tomllib.loads(path.read_text(encoding="utf-8"))
+            original = path.read_text(encoding="utf-8")
+            existing = tomllib.loads(original)
         except (tomllib.TOMLDecodeError, OSError, ValueError):
             return _CODEX_FEATURES_FLAG_NOTE
 
@@ -887,7 +889,7 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
 
     # Splice the one key in textually so the user's comments and key ordering
     # survive; fall back to the (lossy) full dump only if that can't be done.
-    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    # Reuses the text read above — a second read could see a different file.
     new_text = splice_or_none(set_scalar(original, ("features",), "codex_hooks", "true"), existing)
     if new_text is None:
         new_text = tomli_w.dumps(existing)

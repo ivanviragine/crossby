@@ -208,6 +208,39 @@ class TestSkillsCopyIsNotDestructive:
         assert result.action == "updated"
         assert "second" in (target / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
 
+    def test_source_directory_over_a_target_file(self, tmp_path: Path) -> None:
+        """A leftover target *file* must not block a same-named source skill.
+
+        The stale-cleanup pass only removes directories, so such a file sticks
+        around; mirroring a skill dir onto it used to raise FileExistsError and
+        abort the whole sync with a traceback.
+        """
+        source = tmp_path / ".crossby" / "skills"
+        _make_skill(source, "skill-a")
+        target = tmp_path / ".claude" / "skills"
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        (target / "skill-a").write_text("stale file in the way\n", encoding="utf-8")
+
+        result = ClaudeSkillsWriter().sync(_skills_data(), tmp_path)
+
+        assert result.action == "updated"
+        assert (target / "skill-a" / "SKILL.md").is_file()
+
+    def test_source_file_over_a_target_directory(self, tmp_path: Path) -> None:
+        """The mirror image: a target directory where the source has a file."""
+        source = tmp_path / ".crossby" / "skills"
+        source.mkdir(parents=True)
+        (source / "NOTES.md").write_text("notes\n", encoding="utf-8")
+        target = tmp_path / ".claude" / "skills"
+        (target / "NOTES.md").mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+
+        result = ClaudeSkillsWriter().sync(_skills_data(), tmp_path)
+
+        assert result.action == "updated"
+        assert (target / "NOTES.md").read_text(encoding="utf-8") == "notes\n"
+
     def test_stale_file_inside_a_skill_is_removed(self, tmp_path: Path) -> None:
         """Inside a skill directory crossby owns everything, so it mirrors exactly."""
         source = tmp_path / ".crossby" / "skills"
@@ -395,6 +428,33 @@ class TestInitForcePreservesConfig:
         config = parse_config_file(target)
         assert config.models["claude"].very_complex == "claude-opus-5"
         assert config.profiles["ccyolo"].tool == AIToolID.CLAUDE
+
+    def test_previous_config_is_restored_when_the_new_one_is_invalid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The safety net: a config we wrote but can't load must not replace theirs."""
+        import crossby.config.loader as loader
+
+        target = tmp_path / ".crossby.yml"
+        target.write_text(_HAND_WRITTEN_CROSSBY_YML, encoding="utf-8")
+
+        def _always_fails(_path: Path) -> None:
+            raise ValueError("simulated loader rejection")
+
+        monkeypatch.setattr(loader, "parse_config_file", _always_fails)
+
+        from typer.testing import CliRunner
+
+        from crossby.cli.main import app
+
+        result = CliRunner().invoke(
+            app, ["init", "--force", "--non-interactive", "--path", str(tmp_path)]
+        )
+
+        assert result.exit_code == 1
+        assert target.read_text(encoding="utf-8") == _HAND_WRITTEN_CROSSBY_YML
+        # The restored file is the config again, so the backup is cleaned up.
+        assert not (tmp_path / ".crossby.yml.bak").exists()
 
     def test_unreadable_config_is_still_backed_up(self, tmp_path: Path) -> None:
         target = tmp_path / ".crossby.yml"

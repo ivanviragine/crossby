@@ -63,12 +63,39 @@ def is_same_path(source: Path, target: Path) -> bool:
     return False
 
 
+def clear_conflicting_type(dest: Path, *, want_dir: bool) -> bool:
+    """Remove *dest* when it exists as the opposite kind of thing.
+
+    Without this, mirroring a source directory onto a target *file* raises
+    ``FileExistsError`` from ``mkdir``, and writing a source file over a target
+    *directory* raises ``IsADirectoryError`` — either one aborts the whole sync
+    with a traceback instead of a graceful result. Symlinks are left alone;
+    the callers decide what to do with those.
+
+    Returns True when something was removed.
+    """
+    if dest.is_symlink() or not dest.exists():
+        return False
+    if want_dir and not dest.is_dir():
+        dest.unlink()
+        return True
+    if not want_dir and dest.is_dir():
+        shutil.rmtree(dest)
+        return True
+    return False
+
+
 def write_if_different(path: Path, content: bytes) -> bool:
     """Write *content* to *path* only when it differs from what's there.
 
     Returns True when the file was written. Keeping unchanged files untouched
     is what lets writers report an honest ``skipped`` and keeps re-syncs out of
     ``git status``.
+
+    The write itself goes through a temp file plus rename, so an interrupted
+    sync leaves the previous content intact rather than a truncated file — the
+    same guarantee :func:`crossby.config.json_utils.atomic_write_text` gives
+    the config writers.
     """
     try:
         if path.is_file() and path.read_bytes() == content:
@@ -76,7 +103,13 @@ def write_if_different(path: Path, content: bytes) -> bool:
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    tmp = path.with_name(path.name + ".crossby-tmp")
+    try:
+        tmp.write_bytes(content)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return True
 
 
@@ -101,16 +134,11 @@ def mirror_tree(
         wanted.add(child.name)
         dest = target_dir / child.name
         if child.is_dir() and not child.is_symlink():
-            # A file sitting where a directory should go has to make way.
-            if dest.exists() and not dest.is_dir():
-                dest.unlink()
-                changed = True
+            changed |= clear_conflicting_type(dest, want_dir=True)
             if mirror_tree(child, dest):
                 changed = True
         elif child.is_file():
-            if dest.is_dir() and not dest.is_symlink():
-                shutil.rmtree(dest)
-                changed = True
+            changed |= clear_conflicting_type(dest, want_dir=False)
             if write_if_different(dest, child.read_bytes()):
                 changed = True
 
