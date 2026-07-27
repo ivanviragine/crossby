@@ -297,14 +297,20 @@ def _extent(text: str, headers: list[_Header], idx: int) -> tuple[int, int]:
     return start, len(text)
 
 
-def _has_detached_child(headers: list[_Header], parts: tuple[str, ...], end: int) -> bool:
-    """True when a child table lives outside its parent's contiguous block.
+def _has_detached_child(
+    headers: list[_Header], parts: tuple[str, ...], span: tuple[int, int]
+) -> bool:
+    """True when a child table lives outside its parent's block *span*.
 
-    Replacing the parent would then leave a duplicate definition behind, so the
-    caller must fall back to a full rewrite.
+    Replacing the parent would then leave a stale definition behind. The child
+    can sit either after the parent (separated by an unrelated table) or above
+    it — ``[a.b.c]`` before ``[a.b]`` is legal TOML — so the whole document is
+    checked rather than just what follows. The caller falls back to a full
+    rewrite when this fires.
     """
+    start, end = span
     return any(
-        header.start >= end
+        not (start <= header.start < end)
         and len(header.parts) > len(parts)
         and header.parts[: len(parts)] == parts
         for header in headers
@@ -335,20 +341,25 @@ def upsert_table(text: str, parts: tuple[str, ...], rendered: str) -> str | None
 
     idx = _find_table(headers, parts)
     if idx is None:
-        if _has_detached_child(headers, parts, 0):
+        if _has_detached_child(headers, parts, (0, 0)):
             return None  # child tables exist without their parent — too odd to splice
         return _append_block(text, rendered)
 
     start, end = _extent(text, headers, idx)
-    if _has_detached_child(headers, parts, end):
+    if _has_detached_child(headers, parts, (start, end)):
         return None
     return text[:start] + rendered + text[end:]
 
 
 def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
-    """Remove the ``[parts]`` table and any child tables trailing it.
+    """Remove the ``[parts]`` table along with every child table of it.
 
-    A comment sitting above the removed header is left in place rather than
+    A table can exist purely by implication: ``[mcp_servers.alpha.env]`` with
+    no ``[mcp_servers.alpha]`` header still defines ``alpha``. Treating that as
+    "not present" would leave the server behind, so every descendant block is
+    removed too — from last to first, so earlier offsets stay valid.
+
+    A comment sitting above a removed header is left in place rather than
     deleted with it — an orphaned comment is a much smaller surprise than
     silently deleting a line the user wrote.
     """
@@ -356,13 +367,29 @@ def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     if scan is None:
         return None
     headers, _ = scan
-    idx = _find_table(headers, parts)
-    if idx is None:
+
+    targets = [
+        idx
+        for idx, header in enumerate(headers)
+        if not header.is_array
+        and header.parts[: len(parts)] == parts
+        and len(header.parts) >= len(parts)
+    ]
+    if not targets:
         return text
-    start, end = _extent(text, headers, idx)
-    if _has_detached_child(headers, parts, end):
-        return None
-    return text[:start] + text[end:]
+
+    # Removing back-to-front keeps the offsets of earlier blocks valid. Nested
+    # descendants are already swallowed by their parent's extent, so skip any
+    # block that a later (earlier-starting) removal will cover.
+    spans = sorted({_extent(text, headers, idx) for idx in targets}, reverse=True)
+    result = text
+    covered_from = len(text)
+    for start, end in spans:
+        if start >= covered_from:
+            continue
+        result = result[:start] + result[min(end, covered_from) :]
+        covered_from = start
+    return result
 
 
 def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str | None:

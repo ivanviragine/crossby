@@ -8,9 +8,11 @@ never produce a document that says something other than what was intended.
 
 from __future__ import annotations
 
+import random
 import tomllib
 
 import pytest
+import tomli_w
 
 from crossby.sync.toml_edit import remove_table, set_scalar, splice_or_none, upsert_table
 
@@ -122,6 +124,47 @@ class TestSpliceOrNone:
         assert splice_or_none(None, {"a": 1}) is None
 
 
+class TestImplicitlyDefinedTables:
+    """A table can exist purely by implication, via a sub-table header.
+
+    ``[mcp_servers.alpha.env]`` with no ``[mcp_servers.alpha]`` still defines
+    ``alpha``. Both orderings are legal TOML, including the child written above
+    its parent.
+    """
+
+    def test_remove_takes_an_implicit_parent_with_it(self) -> None:
+        text = '# keep\n[mcp_servers.alpha.env]\nK = "v"\n'
+        out = remove_table(text, ("mcp_servers", "alpha"))
+        assert out is not None
+        assert "mcp_servers" not in tomllib.loads(out)
+
+    def test_remove_clears_every_descendant(self) -> None:
+        text = (
+            '[mcp_servers.alpha]\nc = "a"\n'
+            '[mcp_servers.alpha.env]\nK = "v"\n'
+            "[other]\nx = 1\n"
+            '[mcp_servers.alpha.headers]\nH = "v"\n'
+        )
+        out = remove_table(text, ("mcp_servers", "alpha"))
+        assert out is not None
+        parsed = tomllib.loads(out)
+        assert "mcp_servers" not in parsed
+        assert parsed["other"] == {"x": 1}
+
+    def test_upsert_bails_when_a_child_sits_above_its_parent(self) -> None:
+        """Replacing the parent block alone would strand the earlier child."""
+        text = '[mcp_servers.alpha.env]\nK = "v"\n[mcp_servers.alpha]\ncommand = "a"\n'
+        assert upsert_table(text, ("mcp_servers", "alpha"), "[mcp_servers.alpha]\n") is None
+
+    def test_upsert_bails_when_a_child_is_detached_after_its_parent(self) -> None:
+        text = (
+            '[mcp_servers.alpha]\ncommand = "a"\n'
+            "[unrelated]\nx = 1\n"
+            '[mcp_servers.alpha.env]\nK = "v"\n'
+        )
+        assert upsert_table(text, ("mcp_servers", "alpha"), "[mcp_servers.alpha]\n") is None
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -145,3 +188,90 @@ def test_set_scalar_never_corrupts_a_valid_document(text: str) -> None:
         if key == "features":
             continue
         assert after[key] == value
+
+
+# ---------------------------------------------------------------------------
+# Differential property test
+# ---------------------------------------------------------------------------
+
+_FRAGMENTS = (
+    "# a comment\n",
+    "\n",
+    "top = 1\n",
+    'name = "x"\n',
+    'multi = """\n[features]\nfake = 1\n"""\n',
+    "lit = '''\n[nope]\n'''\n",
+    "arr = [\n  [1, 2],\n  [3, 4],\n]\n",
+    "inline = { a = 1, b = 2 }\n",
+    '[sandbox]\nmode = "rw"  # trailing\n',
+    "[features]\nother = true\n",
+    '[mcp_servers.alpha]\ncommand = "a"\n',
+    '[mcp_servers.alpha.env]\nK = "v"\n',
+    '[mcp_servers.beta]\nurl = "https://x"\n',
+    '[profiles.fast]\nmodel = "m"\n',
+    '[[jobs]]\nname = "j"\n',
+    "dotted.key = 5\n",
+    '"quoted key" = 6\n',
+)
+
+
+def _documents(seed: int, count: int) -> list[str]:
+    """Deterministically assemble pseudo-random TOML documents."""
+    rng = random.Random(seed)
+    docs = []
+    for _ in range(count):
+        docs.append("".join(rng.choice(_FRAGMENTS) for _ in range(rng.randint(1, 7))))
+    return docs
+
+
+def test_splices_never_disagree_with_the_intended_data() -> None:
+    """The core guarantee: a splice either matches intent exactly, or bails.
+
+    Every edit is compared against the data a full ``tomli_w`` round trip would
+    have produced. Anything else is a corrupted or silently-wrong config file,
+    which is the failure mode this module exists to avoid. Returning ``None``
+    (fall back to the round trip) is always an acceptable answer.
+    """
+    checked = 0
+    for text in _documents(seed=1234, count=600):
+        try:
+            before = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            continue  # only valid documents carry a meaningful expectation
+
+        cases: list[tuple[str | None, dict[str, object]]] = []
+
+        features = {**(before.get("features") or {}), "codex_hooks": True}
+        cases.append(
+            (
+                set_scalar(text, ("features",), "codex_hooks", "true"),
+                {**before, "features": features},
+            )
+        )
+
+        entry = {"command": "new"}
+        servers = {**(before.get("mcp_servers") or {}), "alpha": entry}
+        cases.append(
+            (
+                upsert_table(
+                    text,
+                    ("mcp_servers", "alpha"),
+                    tomli_w.dumps({"mcp_servers": {"alpha": entry}}),
+                ),
+                {**before, "mcp_servers": servers},
+            )
+        )
+
+        remaining = {k: v for k, v in (before.get("mcp_servers") or {}).items() if k != "alpha"}
+        expected_removed = {k: v for k, v in before.items() if k != "mcp_servers"}
+        if remaining:
+            expected_removed["mcp_servers"] = remaining
+        cases.append((remove_table(text, ("mcp_servers", "alpha")), expected_removed))
+
+        for spliced, expected in cases:
+            if spliced is None:
+                continue  # bailing is always allowed
+            assert tomllib.loads(spliced) == expected, f"input:\n{text}\ngot:\n{spliced}"
+            checked += 1
+
+    assert checked > 500, f"property test degenerated to {checked} real assertions"
