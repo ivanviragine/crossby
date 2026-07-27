@@ -275,3 +275,26 @@ def test_splices_never_disagree_with_the_intended_data() -> None:
             checked += 1
 
     assert checked > 500, f"property test degenerated to {checked} real assertions"
+
+
+class TestRemoveTableBailsOnHeaderlessDefinitions:
+    """A table defined without a header of its own can't be removed textually.
+
+    Returning the unchanged document would be indistinguishable from a real
+    removal, so these must bail and let the caller fall back.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "text"),
+        [
+            ("array of tables", '[[mcp_servers.alpha]]\ncommand = "a"\n'),
+            ("inline table", '[mcp_servers]\nalpha = { command = "a" }\n'),
+            ("dotted key", '[mcp_servers]\nalpha.command = "a"\n'),
+        ],
+    )
+    def test_bails(self, label: str, text: str) -> None:
+        assert remove_table(text, ("mcp_servers", "alpha")) is None, label
+
+    def test_genuinely_absent_is_still_a_no_op(self) -> None:
+        text = "[other]\nx = 1\n"
+        assert remove_table(text, ("mcp_servers", "alpha")) == text

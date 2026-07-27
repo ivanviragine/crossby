@@ -24,6 +24,7 @@ see :func:`splice_or_none`.
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass
 
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -351,6 +352,24 @@ def upsert_table(text: str, parts: tuple[str, ...], rendered: str) -> str | None
     return text[:start] + rendered + text[end:]
 
 
+def _is_defined(text: str, parts: tuple[str, ...]) -> bool:
+    """True when *parts* resolves to something in the parsed document.
+
+    A table doesn't need a header of its own to exist: ``[[a.b]]``,
+    ``[a]`` + ``b = { ... }``, and ``[a]`` + ``b.c = 1`` all define ``a.b``.
+    Only the parsed data can settle it.
+    """
+    try:
+        node: object = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
 def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     """Remove the ``[parts]`` table along with every child table of it.
 
@@ -358,6 +377,11 @@ def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     no ``[mcp_servers.alpha]`` header still defines ``alpha``. Treating that as
     "not present" would leave the server behind, so every descendant block is
     removed too — from last to first, so earlier offsets stay valid.
+
+    Returns ``None`` when the table is defined by something other than a
+    header — an array of tables, an inline table, a dotted key — since a
+    textual block removal can't express that. Reporting the unchanged document
+    as success would look identical to a real removal to the caller.
 
     A comment sitting above a removed header is left in place rather than
     deleted with it — an orphaned comment is a much smaller surprise than
@@ -371,12 +395,10 @@ def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     targets = [
         idx
         for idx, header in enumerate(headers)
-        if not header.is_array
-        and header.parts[: len(parts)] == parts
-        and len(header.parts) >= len(parts)
+        if not header.is_array and header.parts[: len(parts)] == parts
     ]
     if not targets:
-        return text
+        return None if _is_defined(text, parts) else text
 
     # Removing back-to-front keeps the offsets of earlier blocks valid. Nested
     # descendants are already swallowed by their parent's extent, so skip any
@@ -427,8 +449,6 @@ def splice_or_none(spliced: str | None, expected: dict[str, object]) -> str | No
     """
     if spliced is None:
         return None
-    import tomllib
-
     try:
         if tomllib.loads(spliced) == expected:
             return spliced
