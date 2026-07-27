@@ -16,11 +16,17 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from crossby.config.json_utils import read_json_file, write_json_file
+from crossby.config.json_utils import atomic_write_text, read_json_file, write_json_file
 
 SyncAction = Literal["created", "updated", "skipped", "error"]
 
-__all__ = ["SyncAction", "read_json_file", "read_merge_write_json", "write_json_file"]
+__all__ = [
+    "SyncAction",
+    "atomic_write_text",
+    "read_json_file",
+    "read_merge_write_json",
+    "write_json_file",
+]
 
 
 def read_merge_write_json(

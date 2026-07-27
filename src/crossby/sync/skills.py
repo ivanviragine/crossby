@@ -40,6 +40,9 @@ from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
     has_managed_marker,
+    is_same_path,
+    mirror_tree,
+    write_if_different,
     write_managed_marker,
 )
 from crossby.sync.gitignore_utils import update_managed_block
@@ -156,19 +159,15 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         target_dir = project_root / self._target_rel
 
         # Circular source/target guard — skip when source and target are literally the same
-        # real directory (e.g. syncing claude → claude). Does not fire when target_dir is
-        # an existing symlink that points to source_dir; that is the idempotent re-run case
-        # handled below by create_symlink.
-        try:
-            if not target_dir.is_symlink() and source_dir.resolve() == target_dir.resolve():
-                return SyncResult(
-                    tool_id=self.tool_id,
-                    concern=self.concern,
-                    action="skipped",
-                    message="source and target resolve to the same path; nothing to do",
-                )
-        except OSError:
-            pass
+        # real directory (e.g. syncing claude → claude). See :func:`is_same_path` for why an
+        # existing symlinked target isn't a collision.
+        if is_same_path(source_dir, target_dir):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="source and target resolve to the same path; nothing to do",
+            )
 
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
@@ -307,20 +306,30 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         )
 
     def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+        target_existed = target_dir.is_dir()
+        action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="created",
+                action=action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
-        _copy_skills_dir(source_dir, target_dir)
+        wrote = _copy_skills_dir(source_dir, target_dir)
         write_managed_marker(target_dir)
+        if not wrote and target_existed:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                file_path=target_dir,
+                message="already copied",
+            )
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
-            action="created",
+            action=action,
             file_path=target_dir,
         )
 
@@ -485,12 +494,43 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         )
 
 
-def _copy_skills_dir(source_dir: Path, target_dir: Path) -> None:
-    """Copy skills directory structure from source to target (one subdir per skill)."""
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    shutil.copytree(str(source_dir), str(target_dir))
+def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
+    """Copy the skills tree from source to target (one subdir per skill).
+
+    Compare-then-write, not ``rmtree`` + ``copytree``: the previous
+    implementation wiped the whole target on every run, so anything a user kept
+    alongside the synced skills was destroyed on a re-sync and an interrupted
+    copy left the tool with no skills at all.
+
+    Cleanup is targeted the same way :meth:`_BaseSkillsWriter._sync_translate`
+    targets it — a skill *directory* whose source disappeared is removed, while
+    unrelated top-level files (and the crossby marker) are left alone. Inside a
+    skill directory crossby owns everything, so those are mirrored exactly.
+
+    Returns True when any file was written or removed.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    changed = False
+    source_names: set[str] = set()
+
+    for child in sorted(source_dir.iterdir()):
+        source_names.add(child.name)
+        dest = target_dir / child.name
+        if child.is_dir() and not child.is_symlink():
+            if mirror_tree(child, dest):
+                changed = True
+        elif child.is_file() and write_if_different(dest, child.read_bytes()):
+            changed = True
+
+    for child in target_dir.iterdir():
+        if child.name in source_names or child.name == MANAGED_MARKER_NAME:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+            logger.info("skills.stale_removed", path=str(child))
+            changed = True
+
+    return changed
 
 
 _SUPPORT_DIRS = ("scripts", "references", "assets")

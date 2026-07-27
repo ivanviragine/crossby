@@ -60,6 +60,11 @@ def init(
         )
         raise typer.Exit(1)
 
+    # --force replaces a file the user may have hand-maintained. Read the
+    # sections the renderer can't produce (models:, profiles:, anything added
+    # to the schema later) so they survive, and keep a backup regardless.
+    preserved = _read_preserved_sections(target) if target.exists() else {}
+
     installed = AbstractAITool.detect_installed()
 
     if non_interactive:
@@ -73,21 +78,58 @@ def init(
             raise typer.Exit(1)
         answers = _interactive_wizard(installed)
 
-    rendered = _render_init_yaml(answers)
+    backup: Path | None = None
+    if target.exists():
+        from crossby.sync.file_utils import backup_path
+
+        backup = backup_path(target)
+        backup.write_bytes(target.read_bytes())
+        console.info(f"Backed up existing config to {backup.name}")
+
+    rendered = _render_init_yaml(answers, preserved)
     target.write_text(rendered, encoding="utf-8")
 
     # Sanity check — the file must round-trip through the real loader.
     try:
         parse_config_file(target)
     except Exception as exc:  # pragma: no cover — keeps user out of a broken state
-        console.error(f"Wrote invalid config ({exc}); removing and aborting.")
         target.unlink(missing_ok=True)
+        if backup is not None:
+            # Don't leave the user with no config at all just because we wrote
+            # a bad one — put theirs back exactly as it was.
+            target.write_bytes(backup.read_bytes())
+            backup.unlink(missing_ok=True)
+            console.error(f"Wrote invalid config ({exc}); restored the previous one and aborted.")
+        else:
+            console.error(f"Wrote invalid config ({exc}); removing and aborting.")
         raise typer.Exit(1) from exc
 
     console.success(f"Wrote {target}")
 
     if install_skill:
         _install_skill_bundle(project_root, installed)
+
+
+# Sections _render_init_yaml knows how to write. Anything else in an existing
+# file is carried over verbatim on --force rather than dropped — the loader
+# reads `models:` and `profiles:` that the wizard has never been able to
+# produce, so overwriting without this discards hand-written config.
+_RENDERED_SECTIONS = frozenset({"version", "ai", "sync_defaults", "handoff_defaults"})
+
+
+def _read_preserved_sections(target: Path) -> dict[str, Any]:
+    """Return the top-level sections of *target* that the renderer can't emit."""
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        console.warn(
+            f"Could not read the existing config to preserve its sections ({exc}); "
+            "it will be backed up but not carried over."
+        )
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k not in _RENDERED_SECTIONS and v is not None}
 
 
 def _install_skill_bundle(project_root: Path, installed: list) -> None:  # type: ignore[type-arg]
@@ -395,13 +437,17 @@ def _pick_token_budget() -> int | None:
     return value
 
 
-def _render_init_yaml(answers: dict[str, Any]) -> str:
+def _render_init_yaml(answers: dict[str, Any], preserved: dict[str, Any] | None = None) -> str:
     """Assemble the commented YAML document.
 
     PyYAML strips comments, so each section is dumped individually and
     concatenated with hand-written header blocks. ``exclude_none=True`` on the
     Pydantic dumps keeps unset fields out of the file — users see only what
     they explicitly chose.
+
+    ``preserved`` carries top-level sections read back from an existing file on
+    ``--force`` (``models:``, ``profiles:``, anything the schema grows later)
+    and is appended verbatim so a re-init doesn't discard them.
     """
     from crossby.models.config import (
         AIConfig,
@@ -446,5 +492,9 @@ def _render_init_yaml(answers: dict[str, Any]) -> str:
     _section("AI launch defaults.", "ai", ai_payload)
     _section("Defaults for `crossby sync`.", "sync_defaults", sync_payload)
     _section("Defaults for `crossby handoff`.", "handoff_defaults", handoff_payload)
+
+    for key, value in (preserved or {}).items():
+        parts.append("\n# Carried over from the previous .crossby.yml.\n")
+        parts.append(yaml.safe_dump({key: value}, sort_keys=False, default_flow_style=False))
 
     return "".join(parts)

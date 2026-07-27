@@ -19,8 +19,9 @@ from typing import Any, Literal
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.json_utils import read_json_file, write_json_file
+from crossby.sync.json_utils import atomic_write_text, read_json_file, write_json_file
 from crossby.sync.manual_fix import ManualFixNote
+from crossby.sync.toml_edit import set_scalar, splice_or_none
 
 _HookAction = Literal["created", "updated", "skipped", "error"]
 
@@ -883,9 +884,16 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
 
     features["codex_hooks"] = True
     existing["features"] = features
+
+    # Splice the one key in textually so the user's comments and key ordering
+    # survive; fall back to the (lossy) full dump only if that can't be done.
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    new_text = splice_or_none(set_scalar(original, ("features",), "codex_hooks", "true"), existing)
+    if new_text is None:
+        new_text = tomli_w.dumps(existing)
+
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(tomli_w.dumps(existing), encoding="utf-8")
+        atomic_write_text(path, new_text)
     except OSError:
         return _CODEX_FEATURES_FLAG_NOTE
     return None
