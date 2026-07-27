@@ -18,6 +18,7 @@ from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
     has_managed_marker,
+    is_same_path,
     write_managed_marker,
 )
 from crossby.sync.gitignore_utils import update_managed_block
@@ -425,6 +426,14 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 
         target_dir = project_root / self._target_rel
 
+        if is_same_path(source_dir, target_dir):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="source and target resolve to the same path; nothing to do",
+            )
+
         # For copy strategy, explicitly guard against following a symlinked target
         # directory — copies would land in the symlink's destination, potentially
         # outside the project root.
@@ -810,6 +819,14 @@ class CodexAgentsWriter(AbstractSyncWriter):
 
         target_dir = project_root / self._target_rel
 
+        if is_same_path(source_dir, target_dir):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="source and target resolve to the same path; nothing to do",
+            )
+
         if target_dir.is_symlink():
             if not force:
                 return SyncResult(
@@ -986,6 +1003,14 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             )
 
         target_dir = project_root / self._target_rel
+
+        if is_same_path(source_dir, target_dir):
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="skipped",
+                message="source and target resolve to the same path; nothing to do",
+            )
 
         # If the target exists as a symlink, error by default to avoid writing into the
         # symlink target (which may be outside the project). With --force, replace the

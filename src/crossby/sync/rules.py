@@ -14,7 +14,7 @@ import structlog
 from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.file_utils import backup_path
+from crossby.sync.file_utils import backup_path, is_same_path
 from crossby.sync.gitignore_utils import update_managed_block
 from crossby.sync.instruction_markers import (
     is_neutral_for_target,
@@ -235,9 +235,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
 
         # Circular symlink guard — compare canonical paths WITHOUT following
         # the target symlink (otherwise all existing symlinks look "circular").
-        source_canonical = source_path.parent.resolve() / source_path.name
-        target_canonical = target_path.parent.resolve() / target_path.name
-        if source_canonical == target_canonical:
+        if is_same_path(source_path, target_path):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,

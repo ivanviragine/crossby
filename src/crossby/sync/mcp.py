@@ -18,7 +18,8 @@ from typing import Any
 from crossby.models.ai import AIToolID
 from crossby.models.config import MCPServerConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.json_utils import SyncAction, read_merge_write_json
+from crossby.sync.json_utils import SyncAction, atomic_write_text, read_merge_write_json
+from crossby.sync.toml_edit import remove_table, splice_or_none, upsert_table
 
 
 def _split_servers(
@@ -278,9 +279,11 @@ class CodexMCPWriter(AbstractSyncWriter):
 
         was_new = not path.exists()
         existing: dict[str, Any] = {}
+        original = ""
         if not was_new:
             try:
-                existing = tomllib.loads(path.read_text(encoding="utf-8"))
+                original = path.read_text(encoding="utf-8")
+                existing = tomllib.loads(original)
             except Exception as e:
                 msg = (
                     f"{path} contains invalid TOML — skipping MCP sync for Codex. "
@@ -294,15 +297,19 @@ class CodexMCPWriter(AbstractSyncWriter):
             mcp_section = {}
 
         changed = False
+        written: list[str] = []
+        removed: list[str] = []
         for name, server in enabled.items():
             entry = _to_toml_entry(server)
             if mcp_section.get(name) != entry:
                 mcp_section[name] = entry
+                written.append(name)
                 changed = True
 
         for name in disabled:
             if name in mcp_section:
                 del mcp_section[name]
+                removed.append(name)
                 changed = True
 
         if not changed:
@@ -311,7 +318,49 @@ class CodexMCPWriter(AbstractSyncWriter):
         if dry_run:
             return ("created" if was_new else "updated"), ""
 
-        existing["mcp_servers"] = mcp_section
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(tomli_w.dumps(existing), encoding="utf-8")
+        if mcp_section:
+            existing["mcp_servers"] = mcp_section
+        else:
+            # Removing the last server drops the table rather than leaving an
+            # empty `[mcp_servers]` behind — and keeps the textual splice
+            # matching, so the user's comments survive that case too.
+            existing.pop("mcp_servers", None)
+
+        new_text = self._splice(original, existing, written, removed)
+        if new_text is None:
+            # Couldn't edit in place — fall back to a full dump, which is
+            # correct but drops the user's comments and key ordering.
+            new_text = tomli_w.dumps(existing)
+        atomic_write_text(path, new_text)
         return ("created" if was_new else "updated"), ""
+
+    @staticmethod
+    def _splice(
+        original: str,
+        expected: dict[str, Any],
+        written: list[str],
+        removed: list[str],
+    ) -> str | None:
+        """Apply the server add/remove edits to *original* textually.
+
+        ``.codex/config.toml`` belongs to the user — their model, sandbox and
+        profile settings live beside our ``[mcp_servers.*]`` tables — so a
+        ``tomllib`` → ``tomli_w`` round-trip that discards every comment in the
+        file is too blunt for adding one server. Returns ``None`` when the edit
+        can't be applied safely, leaving the caller to round-trip instead.
+        """
+        import tomli_w
+
+        text = original
+        for name in removed:
+            spliced = remove_table(text, ("mcp_servers", name))
+            if spliced is None:
+                return None
+            text = spliced
+        for name in written:
+            rendered = tomli_w.dumps({"mcp_servers": {name: expected["mcp_servers"][name]}})
+            spliced = upsert_table(text, ("mcp_servers", name), rendered)
+            if spliced is None:
+                return None
+            text = spliced
+        return splice_or_none(text, expected)

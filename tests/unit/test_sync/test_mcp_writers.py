@@ -451,7 +451,9 @@ class TestCodexMCPWriter:
         )
         self.writer.sync(_cfg({"old": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-        assert "old" not in data["mcp_servers"]
+        # Removing the last server drops the table entirely rather than leaving
+        # an empty `[mcp_servers]` behind.
+        assert "old" not in data.get("mcp_servers", {})
 
     def test_dry_run(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)

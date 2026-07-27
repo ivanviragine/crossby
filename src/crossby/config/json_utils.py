@@ -1,4 +1,4 @@
-"""JSON read/write utilities shared across config and sync layers."""
+"""File read/write utilities shared across config and sync layers."""
 
 from __future__ import annotations
 
@@ -28,14 +28,27 @@ def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]
     return raw, None, False
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* via a temp file plus rename.
+
+    A crash or interrupt part-way through leaves the original file intact
+    rather than truncated — which matters most for the config files crossby
+    merges into rather than owns (``.codex/config.toml``, tool settings).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def write_json_file(path: Path, data: dict[str, Any]) -> None:
     """Atomic write of a JSON dict with consistent formatting.
 
     Uses 2-space indent, sorted keys, and a tmp+replace pattern to avoid
     partial writes on crash.
     """
-    json_text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json_text, encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")

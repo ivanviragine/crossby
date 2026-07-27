@@ -168,14 +168,17 @@ class TestClaudeSkillsWriter:
         assert "same path" in (result.message or "")
 
     def test_managed_real_dir_re_synced_via_copy(self, tmp_path: Path) -> None:
-        """A crossby-marked real dir is replaced via copy without --force."""
+        """A crossby-marked real dir is refreshed via copy without --force."""
         _make_source(tmp_path, ["skill-a"])
         target = tmp_path / ".claude" / "skills"
         target.mkdir(parents=True)
         _make_skill(target, "old-skill")
         (target / ".crossby-managed").write_text("", encoding="utf-8")
         result = self.writer.sync(_data(), tmp_path)
-        assert result.action == "created"
+        # The directory already existed, so the honest action is "updated".
+        assert result.action == "updated"
+        assert (target / "skill-a" / "SKILL.md").is_file()
+        assert not (target / "old-skill").exists()
 
     def test_unmanaged_real_dir_blocked_without_force(self, tmp_path: Path) -> None:
         """An unmarked real dir is treated as user-owned and blocked without --force."""
