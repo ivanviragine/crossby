@@ -199,6 +199,9 @@ _FRAGMENTS = (
     "\n",
     "top = 1\n",
     'name = "x"\n',
+    "features = { other = 1 }\n",
+    "features.other = 1\n",
+    'mcp_servers = { beta = { command = "b" } }\n',
     'multi = """\n[features]\nfake = 1\n"""\n',
     "lit = '''\n[nope]\n'''\n",
     "arr = [\n  [1, 2],\n  [3, 4],\n]\n",
@@ -321,3 +324,28 @@ def test_remove_handles_a_contiguous_array_of_tables_descendant() -> None:
     parsed = tomllib.loads(out)
     assert "mcp_servers" not in parsed
     assert parsed["other"] == {"y": 2}
+
+
+class TestNeverReturnsInvalidToml:
+    """The splicers guarantee: return value is ``None`` or valid TOML.
+
+    Appending a ``[features]`` header to a document that already defines
+    ``features`` as an inline table or dotted key is a redefinition error. A
+    caller trusting the returned string would write a broken config.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "text"),
+        [
+            ("inline table", "features = { other = 1 }\n"),
+            ("dotted key", "features.other = 1\n"),
+            ("array of tables", "[[features]]\nx = 1\n"),
+        ],
+    )
+    def test_set_scalar_bails_rather_than_redefining(self, label: str, text: str) -> None:
+        assert set_scalar(text, ("features",), "codex_hooks", "true") is None, label
+
+    def test_upsert_bails_when_the_parent_is_an_inline_table(self) -> None:
+        text = 'mcp_servers = { beta = { command = "b" } }\n'
+        rendered = tomli_w.dumps({"mcp_servers": {"alpha": {"command": "new"}}})
+        assert upsert_table(text, ("mcp_servers", "alpha"), rendered) is None
