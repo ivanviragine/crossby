@@ -210,6 +210,7 @@ _FRAGMENTS = (
     '[mcp_servers.beta]\nurl = "https://x"\n',
     '[profiles.fast]\nmodel = "m"\n',
     '[[jobs]]\nname = "j"\n',
+    '[[mcp_servers.alpha.jobs]]\nname = "j"\n',
     "dotted.key = 5\n",
     '"quoted key" = 6\n',
 )
@@ -298,3 +299,25 @@ class TestRemoveTableBailsOnHeaderlessDefinitions:
     def test_genuinely_absent_is_still_a_no_op(self) -> None:
         text = "[other]\nx = 1\n"
         assert remove_table(text, ("mcp_servers", "alpha")) == text
+
+
+def test_remove_bails_on_a_detached_array_of_tables_descendant() -> None:
+    """``[[a.b.jobs]]`` split from ``[a.b]`` can't be folded into the removal.
+
+    Removing only the table block would leave the array behind, so ``a.b`` would
+    still be defined — a half-removal reported as success.
+    """
+    text = (
+        '[mcp_servers.alpha]\nx = 1\n[unrelated]\ny = 2\n[[mcp_servers.alpha.jobs]]\nname = "j"\n'
+    )
+    assert remove_table(text, ("mcp_servers", "alpha")) is None
+
+
+def test_remove_handles_a_contiguous_array_of_tables_descendant() -> None:
+    """When it trails its parent directly, the extent already covers it."""
+    text = '[mcp_servers.alpha]\nx = 1\n[[mcp_servers.alpha.jobs]]\nname = "j"\n[other]\ny = 2\n'
+    out = remove_table(text, ("mcp_servers", "alpha"))
+    assert out is not None
+    parsed = tomllib.loads(out)
+    assert "mcp_servers" not in parsed
+    assert parsed["other"] == {"y": 2}

@@ -400,10 +400,24 @@ def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     if not targets:
         return None if _is_defined(text, parts) else text
 
+    spans = sorted({_extent(text, headers, idx) for idx in targets}, reverse=True)
+
+    # An array-of-tables descendant — ``[[mcp_servers.alpha.jobs]]`` — isn't a
+    # removal target of its own, and ``_extent`` only swallows children that sit
+    # contiguously after their parent. One separated by an unrelated table would
+    # survive and keep ``parts`` defined, so bail instead of half-removing.
+    if any(
+        header.is_array
+        and len(header.parts) >= len(parts)
+        and header.parts[: len(parts)] == parts
+        and not any(start <= header.start < end for start, end in spans)
+        for header in headers
+    ):
+        return None
+
     # Removing back-to-front keeps the offsets of earlier blocks valid. Nested
     # descendants are already swallowed by their parent's extent, so skip any
     # block that a later (earlier-starting) removal will cover.
-    spans = sorted({_extent(text, headers, idx) for idx in targets}, reverse=True)
     result = text
     covered_from = len(text)
     for start, end in spans:
