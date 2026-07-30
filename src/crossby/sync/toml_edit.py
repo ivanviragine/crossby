@@ -16,14 +16,16 @@ textually and leave everything they don't own byte-for-byte intact:
 
 Every function is best-effort and returns ``None`` when it can't apply the edit
 confidently (an unterminated string, a table defined inline, a non-contiguous
-child table). Callers are expected to fall back to the full round-trip in that
-case, and to verify the spliced result with ``tomllib`` before writing it —
-see :func:`splice_or_none`.
+child table). They guarantee two things: the return value is either ``None`` or
+valid TOML, and they never silently report a no-op as a completed edit. Callers
+still verify the *data* against their intent with :func:`splice_or_none` before
+writing, and fall back to the full round-trip when it disagrees.
 """
 
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass
 
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -297,14 +299,20 @@ def _extent(text: str, headers: list[_Header], idx: int) -> tuple[int, int]:
     return start, len(text)
 
 
-def _has_detached_child(headers: list[_Header], parts: tuple[str, ...], end: int) -> bool:
-    """True when a child table lives outside its parent's contiguous block.
+def _has_detached_child(
+    headers: list[_Header], parts: tuple[str, ...], span: tuple[int, int]
+) -> bool:
+    """True when a child table lives outside its parent's block *span*.
 
-    Replacing the parent would then leave a duplicate definition behind, so the
-    caller must fall back to a full rewrite.
+    Replacing the parent would then leave a stale definition behind. The child
+    can sit either after the parent (separated by an unrelated table) or above
+    it — ``[a.b.c]`` before ``[a.b]`` is legal TOML — so the whole document is
+    checked rather than just what follows. The caller falls back to a full
+    rewrite when this fires.
     """
+    start, end = span
     return any(
-        header.start >= end
+        not (start <= header.start < end)
         and len(header.parts) > len(parts)
         and header.parts[: len(parts)] == parts
         for header in headers
@@ -324,6 +332,22 @@ def _append_block(text: str, block: str) -> str:
     return text + separator + block
 
 
+def _still_parses(result: str) -> str | None:
+    """Return *result* only if it's still valid TOML, else ``None``.
+
+    The last line of defence for this module's contract. Appending a
+    ``[features]`` header to a document that already defines ``features`` as an
+    inline table or a dotted key produces a redefinition error, and a caller
+    that trusted the returned string would write a broken config. Every splice
+    is cheap to re-parse, and returning ``None`` costs only a fallback.
+    """
+    try:
+        tomllib.loads(result)
+    except tomllib.TOMLDecodeError:
+        return None
+    return result
+
+
 def upsert_table(text: str, parts: tuple[str, ...], rendered: str) -> str | None:
     """Add or replace the ``[parts]`` table with *rendered* (header included)."""
     scan = _scan(text)
@@ -335,20 +359,48 @@ def upsert_table(text: str, parts: tuple[str, ...], rendered: str) -> str | None
 
     idx = _find_table(headers, parts)
     if idx is None:
-        if _has_detached_child(headers, parts, 0):
+        if _has_detached_child(headers, parts, (0, 0)):
             return None  # child tables exist without their parent — too odd to splice
-        return _append_block(text, rendered)
+        return _still_parses(_append_block(text, rendered))
 
     start, end = _extent(text, headers, idx)
-    if _has_detached_child(headers, parts, end):
+    if _has_detached_child(headers, parts, (start, end)):
         return None
-    return text[:start] + rendered + text[end:]
+    return _still_parses(text[:start] + rendered + text[end:])
+
+
+def _is_defined(text: str, parts: tuple[str, ...]) -> bool:
+    """True when *parts* resolves to something in the parsed document.
+
+    A table doesn't need a header of its own to exist: ``[[a.b]]``,
+    ``[a]`` + ``b = { ... }``, and ``[a]`` + ``b.c = 1`` all define ``a.b``.
+    Only the parsed data can settle it.
+    """
+    try:
+        node: object = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
 
 
 def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
-    """Remove the ``[parts]`` table and any child tables trailing it.
+    """Remove the ``[parts]`` table along with every child table of it.
 
-    A comment sitting above the removed header is left in place rather than
+    A table can exist purely by implication: ``[mcp_servers.alpha.env]`` with
+    no ``[mcp_servers.alpha]`` header still defines ``alpha``. Treating that as
+    "not present" would leave the server behind, so every descendant block is
+    removed too — from last to first, so earlier offsets stay valid.
+
+    Returns ``None`` when the table is defined by something other than a
+    header — an array of tables, an inline table, a dotted key — since a
+    textual block removal can't express that. Reporting the unchanged document
+    as success would look identical to a real removal to the caller.
+
+    A comment sitting above a removed header is left in place rather than
     deleted with it — an orphaned comment is a much smaller surprise than
     silently deleting a line the user wrote.
     """
@@ -356,13 +408,41 @@ def remove_table(text: str, parts: tuple[str, ...]) -> str | None:
     if scan is None:
         return None
     headers, _ = scan
-    idx = _find_table(headers, parts)
-    if idx is None:
-        return text
-    start, end = _extent(text, headers, idx)
-    if _has_detached_child(headers, parts, end):
+
+    targets = [
+        idx
+        for idx, header in enumerate(headers)
+        if not header.is_array and header.parts[: len(parts)] == parts
+    ]
+    if not targets:
+        return None if _is_defined(text, parts) else text
+
+    spans = sorted({_extent(text, headers, idx) for idx in targets}, reverse=True)
+
+    # An array-of-tables descendant — ``[[mcp_servers.alpha.jobs]]`` — isn't a
+    # removal target of its own, and ``_extent`` only swallows children that sit
+    # contiguously after their parent. One separated by an unrelated table would
+    # survive and keep ``parts`` defined, so bail instead of half-removing.
+    if any(
+        header.is_array
+        and len(header.parts) >= len(parts)
+        and header.parts[: len(parts)] == parts
+        and not any(start <= header.start < end for start, end in spans)
+        for header in headers
+    ):
         return None
-    return text[:start] + text[end:]
+
+    # Removing back-to-front keeps the offsets of earlier blocks valid. Nested
+    # descendants are already swallowed by their parent's extent, so skip any
+    # block that a later (earlier-starting) removal will cover.
+    result = text
+    covered_from = len(text)
+    for start, end in spans:
+        if start >= covered_from:
+            continue
+        result = result[:start] + result[min(end, covered_from) :]
+        covered_from = start
+    return _still_parses(result)
 
 
 def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str | None:
@@ -379,15 +459,18 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
 
     idx = _find_table(headers, table)
     if idx is None:
-        return _append_block(text, f"[{_render_key(table)}]\n{line}")
+        return _still_parses(_append_block(text, f"[{_render_key(table)}]\n{line}"))
 
+    # Only the table's own body, not the child tables ``_extent`` would swallow:
+    # a same-named key under ``[table.child]`` must not be mistaken for this
+    # one, or the splice rewrites the child's line and never sets the key here.
     header = headers[idx]
-    _, end = _extent(text, headers, idx)
+    body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)
     for assign in assigns:
-        if assign.parts == (key,) and header.body_start <= assign.start < end:
-            return text[: assign.start] + line + text[assign.end :]
+        if assign.parts == (key,) and header.body_start <= assign.start < body_end:
+            return _still_parses(text[: assign.start] + line + text[assign.end :])
 
-    return text[: header.body_start] + line + text[header.body_start :]
+    return _still_parses(text[: header.body_start] + line + text[header.body_start :])
 
 
 def splice_or_none(spliced: str | None, expected: dict[str, object]) -> str | None:
@@ -400,8 +483,6 @@ def splice_or_none(spliced: str | None, expected: dict[str, object]) -> str | No
     """
     if spliced is None:
         return None
-    import tomllib
-
     try:
         if tomllib.loads(spliced) == expected:
             return spliced

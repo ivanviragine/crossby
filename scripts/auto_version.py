@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 INIT_FILE = ROOT_DIR / "src" / "crossby" / "__init__.py"
 PYPROJECT_FILE = ROOT_DIR / "pyproject.toml"
+LOCK_FILE = ROOT_DIR / "uv.lock"
 
 
 def read_version() -> str:
@@ -56,6 +57,33 @@ def update_pyproject(current: str, new: str) -> None:
     content = PYPROJECT_FILE.read_text()
     updated = content.replace(f'version = "{current}"', f'version = "{new}"', 1)
     PYPROJECT_FILE.write_text(updated)
+
+
+def update_lockfile() -> bool:
+    """Re-lock so ``uv.lock`` records the new project version.
+
+    The bump used to touch only ``pyproject.toml`` and ``__init__.py``, so
+    every release left the lockfile asserting the *previous* version and the
+    next contributor to run ``uv sync`` picked up an unrelated diff.
+
+    A failure here is reported but not fatal — a stale lockfile shouldn't
+    abort a release.
+    """
+    if not LOCK_FILE.exists():
+        return False
+    before = LOCK_FILE.read_bytes()
+    try:
+        result = subprocess.run(
+            ["uv", "lock"], cwd=ROOT_DIR, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        print(f"warning: could not run `uv lock` ({exc}); {LOCK_FILE.name} left unchanged")
+        return False
+    if result.returncode != 0:
+        print(f"warning: `uv lock` failed; {LOCK_FILE.name} left unchanged:")
+        print(result.stderr.strip())
+        return False
+    return LOCK_FILE.read_bytes() != before
 
 
 def is_git_repo() -> bool:
@@ -103,9 +131,14 @@ def main() -> None:
     update_pyproject(current, new)
     print(f"Updated version in {PYPROJECT_FILE.relative_to(ROOT_DIR)}")
 
+    staged = [str(INIT_FILE), str(PYPROJECT_FILE)]
+    if update_lockfile():
+        staged.append(str(LOCK_FILE))
+        print(f"Updated {LOCK_FILE.relative_to(ROOT_DIR)}")
+
     if is_git_repo():
         subprocess.run(
-            ["git", "add", str(INIT_FILE), str(PYPROJECT_FILE)],
+            ["git", "add", *staged],
             cwd=ROOT_DIR,
             check=True,
         )
