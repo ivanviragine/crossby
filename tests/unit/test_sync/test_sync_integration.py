@@ -136,3 +136,63 @@ class TestFullSyncMCP:
 
         toml_data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
         assert toml_data["mcp_servers"]["github"]["env"]["TOKEN"] == "${GITHUB_TOKEN}"
+
+
+class TestMCPScopeAndRoundTrip:
+    def test_claude_mcp_round_trips_through_mcp_json(self, tmp_path: Path) -> None:
+        # A server Claude already has in .mcp.json is read from and written back
+        # to that one file; settings.json only ever carries the approval list.
+        from crossby.sync.readers import build_sync_data
+
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"ctx": {"command": "npx", "args": ["-y", "ctx"]}}}),
+            encoding="utf-8",
+        )
+        data = build_sync_data(tmp_path, from_tool=AIToolID.CLAUDE)
+        assert "ctx" in data.mcp_servers
+
+        run_sync(
+            data,
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            concern=SyncConcern.MCP,
+            installed_tools=[AIToolID.CLAUDE],
+        )
+        assert "ctx" in json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]
+        settings = tmp_path / ".claude" / "settings.json"
+        if settings.exists():
+            assert "mcpServers" not in json.loads(settings.read_text())
+
+    def test_user_scope_servers_stay_out_of_project_files_by_default(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        from crossby.sync import mcp_discovery
+        from crossby.sync.readers import build_sync_data
+
+        home = tmp_path / "home" / ".claude.json"
+        home.parent.mkdir()
+        home.write_text(
+            json.dumps({"mcpServers": {"personal": {"command": "npx", "env": {"S": "secret"}}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", home)
+
+        # Default build: user-scope servers are never discovered...
+        data = build_sync_data(tmp_path, from_tool=AIToolID.CLAUDE)
+        assert data.mcp_servers == {}
+
+        # ...and a full sync writes nothing into any committed project file.
+        run_sync(data, tmp_path, concern=SyncConcern.MCP, installed_tools=list(AIToolID))
+        for rel in (
+            ".mcp.json",
+            ".cursor/mcp.json",
+            ".vscode/mcp.json",
+            ".agents/mcp_config.json",
+            ".codex/config.toml",
+            ".claude/settings.json",
+        ):
+            assert not (tmp_path / rel).exists(), f"{rel} must not be created from user scope"
+
+        # Opting in surfaces them.
+        opted = build_sync_data(tmp_path, from_tool=AIToolID.CLAUDE, include_user_scope=True)
+        assert "personal" in opted.mcp_servers
