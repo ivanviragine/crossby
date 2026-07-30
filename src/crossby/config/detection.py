@@ -152,7 +152,15 @@ def _detect_mcp_servers(tool_id: AIToolID, root: Path, items: list[DetectedConfi
     n = 0
 
     if tool_id == AIToolID.CLAUDE:
-        n = _count_json_dict(root / ".claude" / "settings.json", "mcpServers")
+        # Claude reads project servers from .mcp.json; older/manual setups may
+        # still have some in .claude/settings.json. Count the union of names so
+        # a server in both files isn't counted twice.
+        names: set[str] = set()
+        for rel in (Path(".mcp.json"), Path(".claude") / "settings.json"):
+            value = _read_json_key(root / rel, "mcpServers")
+            if isinstance(value, dict):
+                names.update(value)
+        n = len(names)
     elif tool_id == AIToolID.CURSOR:
         n = _count_json_dict(root / ".cursor" / "mcp.json", "mcpServers")
     elif tool_id == AIToolID.COPILOT:

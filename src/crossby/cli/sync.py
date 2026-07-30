@@ -145,7 +145,7 @@ def sync(
         from crossby.sync.validate import has_errors
         from crossby.sync.validate import validate_target as _do_validate
 
-        findings = _do_validate(project_root)
+        findings = _do_validate(project_root, include_user_scope=include_user_scope)
         _display_validation(findings)
         if has_errors(findings):
             raise typer.Exit(1)
@@ -769,7 +769,7 @@ def _run_inspection(
     console.out.print(plan_text)
 
     if mode == "doctor":
-        validation = _do_validate(project_root)
+        validation = _do_validate(project_root, include_user_scope=include_user_scope)
         report = build_doctor(summary, validation)
         console.empty()
         console.out.print(render_doctor(report))

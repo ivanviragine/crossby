@@ -401,10 +401,14 @@ def validate_instruction_sizes(project_root: Path) -> list[ValidationFinding]:
 
 # Where each tool stores MCP server entries in a JSON file, and under which
 # top-level key the server table lives. ``.vscode/mcp.json`` (Copilot) uses
-# ``servers``; every other JSON-shape store uses ``mcpServers``.
+# ``servers``; every other JSON-shape store uses ``mcpServers``. Only the
+# project-relative, project-scope files live here; Claude's user-scope
+# ``~/.claude.json`` is validated separately and only under user scope (see
+# :func:`_global_claude_json_path`). The project-local ``.claude.json`` that
+# used to sit here is *not* a file Claude Code reads MCP servers from, so it
+# was dropped — discovery never read it either.
 _JSON_MCP_LOCATIONS: dict[AIToolID, list[tuple[Path, str]]] = {
     AIToolID.CLAUDE: [
-        (Path(".claude.json"), "mcpServers"),
         (Path(".mcp.json"), "mcpServers"),
         (Path(".claude") / "settings.json", "mcpServers"),
     ],
@@ -420,7 +424,22 @@ _JSON_MCP_LOCATIONS: dict[AIToolID, list[tuple[Path, str]]] = {
 }
 
 
-def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
+def _global_claude_json_path() -> Path:
+    """Claude's user-scope ``~/.claude.json``, resolved at call time.
+
+    Reads the discovery module's path attribute rather than capturing it, so a
+    test that monkeypatches ``mcp_discovery._GLOBAL_CLAUDE_JSON_PATH`` steers
+    both discovery and validation at the same fake home — keeping the two in
+    agreement, which is the whole point.
+    """
+    from crossby.sync.mcp_discovery import _GLOBAL_CLAUDE_JSON_PATH
+
+    return _GLOBAL_CLAUDE_JSON_PATH
+
+
+def validate_mcp_command_paths(
+    project_root: Path, *, include_user_scope: bool = False
+) -> list[ValidationFinding]:
     """Validate that every tool's MCP server ``command`` resolves on ``PATH``.
 
     Codex is handled separately by :func:`validate_codex_config` because its
@@ -428,29 +447,38 @@ def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
     tools — Claude, Cursor, Copilot (via the VS Code mcp.json), and Antigravity CLI.
     JSON parse failures are silently skipped here; :func:`validate_json_configs`
     surfaces them with full detail.
+
+    Claude's user-scope ``~/.claude.json`` is only checked when
+    *include_user_scope* is set, matching what discovery reads for that flag.
     """
     findings: list[ValidationFinding] = []
-    for tool, entries in _JSON_MCP_LOCATIONS.items():
-        for rel, key in entries:
-            path = project_root / rel
-            if not path.is_file():
-                continue
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if not isinstance(raw, dict):
-                continue
-            servers = raw.get(key)
-            if not isinstance(servers, dict):
-                continue
-            _validate_mcp_commands_on_path(
-                findings,
-                project_root,
-                path,
-                tool_id=tool,
-                servers=servers,
-            )
+    locations: list[tuple[AIToolID, Path, str]] = [
+        (tool, project_root / rel, key)
+        for tool, entries in _JSON_MCP_LOCATIONS.items()
+        for rel, key in entries
+    ]
+    if include_user_scope:
+        locations.append((AIToolID.CLAUDE, _global_claude_json_path(), "mcpServers"))
+
+    for tool, path, key in locations:
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        servers = raw.get(key)
+        if not isinstance(servers, dict):
+            continue
+        _validate_mcp_commands_on_path(
+            findings,
+            project_root,
+            path,
+            tool_id=tool,
+            servers=servers,
+        )
     return findings
 
 
@@ -461,12 +489,12 @@ def validate_mcp_command_paths(project_root: Path) -> list[ValidationFinding]:
 
 # Each entry is (relative path, concern). Claude's settings.json holds both
 # MCP servers and hooks, so we tag it MCP (validation is just JSON parseability).
-# `.claude.json` and `.mcp.json` ship with the MCP PATH walker, so we list them
-# here too — otherwise malformed JSON in those files would be silently dropped
-# by the walker without any "invalid JSON" finding from elsewhere.
+# `.mcp.json` ships with the MCP PATH walker, so we list it here too — otherwise
+# malformed JSON in it would be silently dropped by the walker without any
+# "invalid JSON" finding from elsewhere. User-scope `~/.claude.json` is
+# parse-checked separately, only under user scope.
 _JSON_CONFIGS: dict[AIToolID, list[tuple[Path, SyncConcern]]] = {
     AIToolID.CLAUDE: [
-        (Path(".claude.json"), SyncConcern.MCP),
         (Path(".mcp.json"), SyncConcern.MCP),
         (Path(".claude") / "settings.json", SyncConcern.MCP),
     ],
@@ -483,35 +511,43 @@ _JSON_CONFIGS: dict[AIToolID, list[tuple[Path, SyncConcern]]] = {
 }
 
 
-def validate_json_configs(project_root: Path) -> list[ValidationFinding]:
+def validate_json_configs(
+    project_root: Path, *, include_user_scope: bool = False
+) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
-    for tool, entries in _JSON_CONFIGS.items():
-        for rel, concern in entries:
-            path = project_root / rel
-            if not path.is_file():
-                continue
-            try:
-                json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                findings.append(
-                    _error(
-                        project_root,
-                        path,
-                        f"invalid JSON: {exc}",
-                        tool_id=tool,
-                        concern=concern,
-                    )
-                )
-                continue
+    configs: list[tuple[AIToolID, Path, SyncConcern]] = [
+        (tool, project_root / rel, concern)
+        for tool, entries in _JSON_CONFIGS.items()
+        for rel, concern in entries
+    ]
+    if include_user_scope:
+        configs.append((AIToolID.CLAUDE, _global_claude_json_path(), SyncConcern.MCP))
+
+    for tool, path, concern in configs:
+        if not path.is_file():
+            continue
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
             findings.append(
-                _ok(
+                _error(
                     project_root,
                     path,
-                    "valid JSON",
+                    f"invalid JSON: {exc}",
                     tool_id=tool,
                     concern=concern,
                 )
             )
+            continue
+        findings.append(
+            _ok(
+                project_root,
+                path,
+                "valid JSON",
+                tool_id=tool,
+                concern=concern,
+            )
+        )
     return findings
 
 
@@ -520,20 +556,25 @@ def validate_json_configs(project_root: Path) -> list[ValidationFinding]:
 # ---------------------------------------------------------------------------
 
 
-def validate_target(project_root: Path) -> list[ValidationFinding]:
+def validate_target(
+    project_root: Path, *, include_user_scope: bool = False
+) -> list[ValidationFinding]:
     """Run every validator against ``project_root`` and return findings.
 
     MCP PATH checks run BEFORE :func:`validate_json_configs` so a malformed
     JSON file is reported as a parse error by the JSON validator rather than
     silently swallowed by the PATH walker.
+
+    When *include_user_scope* is set, Claude's user-scope ``~/.claude.json`` is
+    validated too — matching the files discovery reads under that flag.
     """
     findings: list[ValidationFinding] = []
     findings.extend(validate_codex_config(project_root))
     findings.extend(validate_codex_agents(project_root))
     findings.extend(validate_skill_frontmatter(project_root))
     findings.extend(validate_instruction_sizes(project_root))
-    findings.extend(validate_mcp_command_paths(project_root))
-    findings.extend(validate_json_configs(project_root))
+    findings.extend(validate_mcp_command_paths(project_root, include_user_scope=include_user_scope))
+    findings.extend(validate_json_configs(project_root, include_user_scope=include_user_scope))
     return findings
 
 
