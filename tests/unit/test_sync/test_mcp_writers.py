@@ -13,6 +13,7 @@ from crossby.sync.mcp import (
     CodexMCPWriter,
     CopilotMCPWriter,
     CursorMCPWriter,
+    report_dropped_default_fallbacks,
 )
 
 # ---------------------------------------------------------------------------
@@ -577,3 +578,44 @@ class TestCodexMCPWriter:
         entry = data["mcp_servers"]["svc"]
         assert entry["env_vars"] == ["API_TOKEN"]
         assert entry["env"] == {"DEBUG": "true"}
+
+
+# ---------------------------------------------------------------------------
+# report_dropped_default_fallbacks — the manual-fix note for ${VAR:-default}
+# ---------------------------------------------------------------------------
+
+
+class TestReportDroppedDefaultFallbacks:
+    def test_default_fallback_header_produces_a_note(self) -> None:
+        servers = {
+            "svc": MCPServerConfig(
+                transport="http",
+                url="https://api.example.com/mcp",
+                headers={"Authorization": "Bearer ${TOKEN:-fallback123}"},
+            )
+        }
+        rows = report_dropped_default_fallbacks(servers)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.file_path is None  # detect-only row, counts as Not Added
+        assert "svc" in row.message and "Authorization" in row.message
+        assert "${VAR:-default}" in row.message
+
+    def test_env_default_fallback_produces_a_note(self) -> None:
+        servers = {"svc": MCPServerConfig(command="npx", env={"KEY": "${KEY:-dev}"})}
+        rows = report_dropped_default_fallbacks(servers)
+        assert len(rows) == 1
+        assert "env var" in rows[0].message and "KEY" in rows[0].message
+
+    def test_no_note_without_a_default(self) -> None:
+        servers = {
+            "svc": MCPServerConfig(
+                command="npx",
+                env={"KEY": "${KEY}"},  # plain indirection, no default to drop
+            )
+        }
+        assert report_dropped_default_fallbacks(servers) == []
+
+    def test_disabled_server_is_ignored(self) -> None:
+        servers = {"svc": MCPServerConfig(command="npx", enabled=False, env={"KEY": "${KEY:-dev}"})}
+        assert report_dropped_default_fallbacks(servers) == []

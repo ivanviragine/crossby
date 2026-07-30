@@ -476,3 +476,49 @@ class CodexMCPWriter(AbstractSyncWriter):
                 return None
             text = spliced
         return splice_or_none(text, expected)
+
+
+def report_dropped_default_fallbacks(
+    servers: dict[str, MCPServerConfig],
+) -> list[SyncResult]:
+    """Manual-fix rows for ``${VAR:-default}`` defaults Codex can't represent.
+
+    :mod:`crossby.sync.mcp_transports` rewrites ``${VAR}`` indirection into
+    Codex's env-var fields but drops any ``${VAR:-default}`` fallback — its
+    module contract says the literal is written and "a manual-fix note is
+    emitted by the caller". Nothing read those ``dropped_default_fallbacks``
+    fields until now; this is that caller. One row per (server, field) so the
+    default can be restored directly in ``.codex/config.toml``. Same detect-only
+    shape as :func:`crossby.sync.mcp_discovery.report_oauth_configs`.
+    """
+    from crossby.sync.mcp_transports import rewrite_env_for_codex, rewrite_headers_for_codex
+
+    rows: list[SyncResult] = []
+    for name, server in servers.items():
+        if not server.enabled:
+            continue
+        dropped: list[tuple[str, str]] = []
+        if server.headers:
+            dropped += [
+                ("header", h)
+                for h in rewrite_headers_for_codex(server.headers).dropped_default_fallbacks
+            ]
+        if server.env:
+            dropped += [
+                ("env var", e) for e in rewrite_env_for_codex(server.env).dropped_default_fallbacks
+            ]
+        for kind, field_name in dropped:
+            rows.append(
+                SyncResult(
+                    tool_id=None,
+                    concern=SyncConcern.MCP,
+                    action="skipped",
+                    file_path=None,
+                    message=(
+                        f"MCP server `{name}` {kind} `{field_name}` uses a "
+                        "`${VAR:-default}` default that Codex's config can't represent; "
+                        "the default was dropped — set it directly in `.codex/config.toml`."
+                    ),
+                )
+            )
+    return rows
