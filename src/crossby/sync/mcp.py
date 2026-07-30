@@ -18,7 +18,13 @@ from typing import Any
 from crossby.models.ai import AIToolID
 from crossby.models.config import MCPServerConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.json_utils import SyncAction, atomic_write_text, read_merge_write_json
+from crossby.sync.json_utils import (
+    SyncAction,
+    atomic_write_text,
+    read_json_file,
+    read_merge_write_json,
+    write_json_file,
+)
 from crossby.sync.toml_edit import remove_table, splice_or_none, upsert_table
 
 
@@ -42,8 +48,14 @@ def _to_stdio_entry(server: MCPServerConfig) -> dict[str, Any]:
 
 
 def _to_http_entry(server: MCPServerConfig) -> dict[str, Any]:
-    """Convert an http/sse server to the standard JSON entry."""
-    entry: dict[str, Any] = {"url": server.url, "transport": server.transport}
+    """Convert an http/sse server to the standard JSON entry.
+
+    The transport goes in ``type``, not ``transport``: Claude Code reads a
+    remote entry with a ``url`` but no ``type`` as a stdio server, fails to
+    launch it, and reports ``has a "url" but no "type"``. Cursor reads the same
+    key, so both tools share this shape.
+    """
+    entry: dict[str, Any] = {"url": server.url, "type": server.transport}
     if server.env:
         entry["env"] = server.env
     if server.headers:
@@ -175,18 +187,118 @@ class _JsonMCPWriter(AbstractSyncWriter):
         )
 
 
+def _approve_mcp_json_servers(
+    settings_path: Path,
+    approve: set[str],
+    revoke: set[str],
+    *,
+    dry_run: bool,
+) -> bool:
+    """Record ``approve`` in (and drop ``revoke`` from) ``enabledMcpjsonServers``.
+
+    This is the one legitimate MCP use of ``.claude/settings.json``: a *narrow*
+    approval of exactly the servers crossby wrote to ``.mcp.json``, rather than
+    ``enableAllProjectMcpServers`` which would bless servers crossby never
+    touched. Returns True when the list changed.
+
+    A missing settings.json is created only when there's something to approve;
+    a malformed one is left byte-for-byte intact and the approval is skipped
+    with a warning (the servers are already safely in ``.mcp.json``).
+    """
+    if not approve and not revoke:
+        return False
+    data, error, was_new = read_json_file(settings_path)
+    if error is not None:
+        warnings.warn(
+            f"{settings_path} {error} — servers were written to .mcp.json but "
+            "could not be recorded in enabledMcpjsonServers. Fix the file manually.",
+            stacklevel=3,
+        )
+        return False
+    existing = data or {}
+    current = existing.get("enabledMcpjsonServers")
+    names = [n for n in current if isinstance(n, str)] if isinstance(current, list) else []
+    result = list(names)
+    for name in sorted(approve):
+        if name not in result:
+            result.append(name)
+    result = [n for n in result if n not in revoke]
+    if result == names:
+        return False
+    if was_new and not result:
+        return False  # nothing to record — don't create an empty settings.json
+    if dry_run:
+        return True
+    existing["enabledMcpjsonServers"] = result
+    write_json_file(settings_path, existing)
+    return True
+
+
 class ClaudeMCPWriter(_JsonMCPWriter):
-    """Merges MCP servers into .claude/settings.json → mcpServers."""
+    """Merges MCP servers into ``.mcp.json`` → ``mcpServers`` (what Claude reads).
+
+    Claude Code loads project MCP servers from ``.mcp.json``, *not* from
+    ``.claude/settings.json`` — that file holds only MCP *policy* keys. Older
+    crossby wrote servers into ``settings.json`` where Claude never read them,
+    so every such sync was inert. Servers now land in ``.mcp.json``; discovery
+    still reads ``.claude/settings.json`` too, so whatever a user or an older
+    crossby left there keeps working.
+
+    After the write, the names crossby wrote are approved narrowly via
+    ``enabledMcpjsonServers`` in ``.claude/settings.json``. Note: as of Claude
+    Code v2.1.196 these approval keys are ignored in an *untrusted* folder, so a
+    freshly cloned repo still shows the trust dialog on first open.
+    """
 
     tool_id = AIToolID.CLAUDE
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
-        return ".claude", "settings.json"
+        return "", ".mcp.json"
 
     @property
     def _mcp_key(self) -> str:
         return "mcpServers"
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        mcp_path = project_root / ".mcp.json"
+        settings_path = project_root / ".claude" / "settings.json"
+        enabled, disabled = _split_servers(data.mcp_servers)
+        updates = {name: self._to_entry(s) for name, s in enabled.items()}
+
+        action, message = read_merge_write_json(mcp_path, self._mcp_key, updates, disabled, dry_run)
+        if action == "error":
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action=action,
+                file_path=mcp_path,
+                message=message or None,
+            )
+
+        approved = _approve_mcp_json_servers(settings_path, set(enabled), disabled, dry_run=dry_run)
+        if action == "skipped" and approved:
+            action = "updated"
+
+        note: str | None = message or None
+        if approved and enabled:
+            note = (
+                f"approved {len(enabled)} server(s) in {settings_path.name} (enabledMcpjsonServers)"
+            )
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=mcp_path,
+            message=note,
+        )
 
 
 class CursorMCPWriter(_JsonMCPWriter):

@@ -63,8 +63,13 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Normalize a tool-specific entry to the canonical crossby format."""
     result: dict[str, Any] = {}
 
-    # Copilot adds a "type" field for transport — translate back
+    # Copilot adds a "type" field for transport — translate back. Claude Code
+    # accepts "streamable-http" as an alias for "http"; crossby's model only
+    # knows "http"/"sse"/"stdio", so fold the alias here or the server would
+    # fail validation and be silently dropped.
     transport = entry.get("type") or entry.get("transport")
+    if transport == "streamable-http":
+        transport = "http"
     if transport and transport != "stdio":
         result["transport"] = transport
 
@@ -203,4 +208,32 @@ def report_oauth_configs(project_root: Path) -> list[SyncResult]:
             ),
         )
         for name, source_tool in discovery.oauth_servers
+    ]
+
+
+def report_duplicate_claude_servers(project_root: Path) -> list[SyncResult]:
+    """One informational row per server defined in *both* Claude MCP files.
+
+    crossby writes servers to ``.mcp.json`` and deliberately leaves any copy in
+    ``.claude/settings.json`` (where an older crossby or a manual edit may have
+    put it) untouched — it never silently edits a key it no longer owns. A name
+    living in both files is a stale duplicate the user should resolve, so this
+    surfaces it rather than resolving it silently the way discovery's
+    first-seen-wins merge does.
+    """
+    mcp_json = _read_json_section(project_root / ".mcp.json", "mcpServers") or {}
+    settings = _read_json_section(project_root / ".claude" / "settings.json", "mcpServers") or {}
+    return [
+        SyncResult(
+            tool_id=None,
+            concern=SyncConcern.MCP,
+            action="skipped",
+            file_path=None,
+            message=(
+                f"MCP server `{name}` is defined in both `.mcp.json` and "
+                "`.claude/settings.json`; crossby writes `.mcp.json` and leaves the "
+                "settings.json copy in place — remove one to clear the duplicate."
+            ),
+        )
+        for name in sorted(set(mcp_json) & set(settings))
     ]

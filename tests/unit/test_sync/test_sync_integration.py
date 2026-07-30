@@ -37,8 +37,8 @@ class TestFullSyncMCP:
         }
         _sync_mcp(tmp_path, servers)
 
-        # Claude
-        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        # Claude — servers land in .mcp.json (what Claude Code reads), not settings.json
+        data = json.loads((tmp_path / ".mcp.json").read_text())
         assert "context7" in data["mcpServers"]
 
         # Cursor
@@ -78,7 +78,7 @@ class TestFullSyncMCP:
         )
 
         # Verify it's there
-        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        data = json.loads((tmp_path / ".mcp.json").read_text())
         assert "old" in data["mcpServers"]
 
         # Now disable it
@@ -88,14 +88,16 @@ class TestFullSyncMCP:
         )
 
         # Should be removed
-        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        data = json.loads((tmp_path / ".mcp.json").read_text())
         assert "old" not in data["mcpServers"]
 
         data = json.loads((tmp_path / ".cursor" / "mcp.json").read_text())
         assert "old" not in data["mcpServers"]
 
     def test_preserves_unmanaged_servers_in_all_tools(self, tmp_path: Path) -> None:
-        # Pre-populate each tool with a user-managed server
+        # A user server left in the legacy .claude/settings.json location must
+        # be preserved untouched — crossby writes .mcp.json and never edits the
+        # settings.json server table it no longer owns.
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".claude" / "settings.json").write_text(
             json.dumps({"mcpServers": {"user-srv": {"command": "node"}}}),
@@ -107,9 +109,11 @@ class TestFullSyncMCP:
             {"crossby-srv": {"command": "npx", "args": ["-y", "mcp"]}},
         )
 
-        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
-        assert "user-srv" in data["mcpServers"]
-        assert "crossby-srv" in data["mcpServers"]
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "user-srv" in settings["mcpServers"]  # untouched
+        assert json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"].keys() == {
+            "crossby-srv"
+        }
 
     def test_env_vars_preserved_across_all_formats(self, tmp_path: Path) -> None:
         servers = {
@@ -122,7 +126,7 @@ class TestFullSyncMCP:
         _sync_mcp(tmp_path, servers)
 
         for path, key, entry_key in [
-            (tmp_path / ".claude" / "settings.json", "mcpServers", "github"),
+            (tmp_path / ".mcp.json", "mcpServers", "github"),
             (tmp_path / ".cursor" / "mcp.json", "mcpServers", "github"),
             (tmp_path / ".agents" / "mcp_config.json", "mcpServers", "github"),
             (tmp_path / ".vscode" / "mcp.json", "servers", "github"),

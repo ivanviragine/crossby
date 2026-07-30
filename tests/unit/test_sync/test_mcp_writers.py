@@ -51,46 +51,61 @@ def _cfg(servers: dict[str, MCPServerConfig]) -> SyncData:
 class TestClaudeMCPWriter:
     writer = ClaudeMCPWriter()
 
-    def test_creates_new_file(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _mcp(tmp_path: Path) -> Path:
+        return tmp_path / ".mcp.json"
+
+    @staticmethod
+    def _settings(tmp_path: Path) -> Path:
+        return tmp_path / ".claude" / "settings.json"
+
+    def test_writes_to_mcp_json_not_settings(self, tmp_path: Path) -> None:
+        # Regression for #84: Claude Code reads project MCP servers from
+        # .mcp.json, not .claude/settings.json — the server table must land there.
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "created"
-        path = tmp_path / ".claude" / "settings.json"
-        assert path.exists()
-        data = _read_json(path)
-        assert data["mcpServers"]["context7"] == {
+        mcp = self._mcp(tmp_path)
+        assert mcp.exists()
+        assert _read_json(mcp)["mcpServers"]["context7"] == {
             "command": "npx",
             "args": ["-y", "@upstash/context7-mcp"],
         }
+        # settings.json holds only the narrow approval, never the server table.
+        settings = _read_json(self._settings(tmp_path))
+        assert "mcpServers" not in settings
 
-    def test_merges_into_existing_file(self, tmp_path: Path) -> None:
-        path = tmp_path / ".claude" / "settings.json"
-        path.parent.mkdir()
-        path.write_text(
-            json.dumps(
-                {
-                    "permissions": {"allow": ["Bash(git *)"]},
-                    "mcpServers": {"existing": {"command": "node", "args": ["server.js"]}},
-                }
-            ),
+    def test_approves_written_names_narrowly(self, tmp_path: Path) -> None:
+        self.writer.sync(_cfg({"context7": STDIO_SERVER, "api": HTTP_SERVER}), tmp_path)
+        settings = _read_json(self._settings(tmp_path))
+        assert settings["enabledMcpjsonServers"] == ["api", "context7"]
+        # Never the blanket approval that would bless servers crossby didn't write.
+        assert "enableAllProjectMcpServers" not in settings
+
+    def test_disabling_revokes_the_approval(self, tmp_path: Path) -> None:
+        self.writer.sync(_cfg({"old": STDIO_SERVER}), tmp_path)
+        assert "old" in _read_json(self._settings(tmp_path))["enabledMcpjsonServers"]
+        self.writer.sync(_cfg({"old": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
+        assert "old" not in _read_json(self._settings(tmp_path))["enabledMcpjsonServers"]
+        assert "old" not in _read_json(self._mcp(tmp_path)).get("mcpServers", {})
+
+    def test_merges_into_existing_mcp_json(self, tmp_path: Path) -> None:
+        mcp = self._mcp(tmp_path)
+        mcp.write_text(
+            json.dumps({"mcpServers": {"existing": {"command": "node", "args": ["server.js"]}}}),
             encoding="utf-8",
         )
-
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-
-        data = _read_json(path)
+        data = _read_json(mcp)
         assert "existing" in data["mcpServers"]
         assert "context7" in data["mcpServers"]
-        assert data["permissions"]["allow"] == ["Bash(git *)"]
 
     def test_preserves_unmanaged_servers(self, tmp_path: Path) -> None:
-        path = tmp_path / ".claude" / "settings.json"
-        path.parent.mkdir()
-        existing = {"mcpServers": {"user-server": {"command": "node"}}}
-        path.write_text(json.dumps(existing), encoding="utf-8")
-
+        mcp = self._mcp(tmp_path)
+        mcp.write_text(
+            json.dumps({"mcpServers": {"user-server": {"command": "node"}}}), encoding="utf-8"
+        )
         self.writer.sync(_cfg({"crossby-server": STDIO_SERVER}), tmp_path)
-
-        data = _read_json(path)
+        data = _read_json(mcp)
         assert "user-server" in data["mcpServers"]
         assert "crossby-server" in data["mcpServers"]
 
@@ -105,70 +120,79 @@ class TestClaudeMCPWriter:
         updated = MCPServerConfig(command="npx", args=["-y", "@upstash/context7-mcp", "--new-flag"])
         result = self.writer.sync(_cfg({"context7": updated}), tmp_path)
         assert result.action == "updated"
-        data = _read_json(tmp_path / ".claude" / "settings.json")
+        data = _read_json(self._mcp(tmp_path))
         assert "--new-flag" in data["mcpServers"]["context7"]["args"]
 
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
-        path = tmp_path / ".claude" / "settings.json"
-        path.parent.mkdir()
-        path.write_text(json.dumps({"mcpServers": {"old": {"command": "npx"}}}), encoding="utf-8")
-
+        mcp = self._mcp(tmp_path)
+        mcp.write_text(json.dumps({"mcpServers": {"old": {"command": "npx"}}}), encoding="utf-8")
         servers = {"old": MCPServerConfig(command="npx", enabled=False)}
         self.writer.sync(_cfg(servers), tmp_path)
-
-        data = _read_json(path)
-        assert "old" not in data["mcpServers"]
+        assert "old" not in _read_json(mcp)["mcpServers"]
 
     def test_disabled_server_not_added(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
-        # No enabled servers, nothing to write
+        # No enabled servers, nothing to write — and no empty settings.json created.
         assert result.action == "skipped"
+        assert not self._mcp(tmp_path).exists()
+        assert not self._settings(tmp_path).exists()
 
     def test_env_var_preserved(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"github": STDIO_WITH_ENV}), tmp_path)
-        data = _read_json(tmp_path / ".claude" / "settings.json")
+        data = _read_json(self._mcp(tmp_path))
         assert data["mcpServers"]["github"]["env"] == {
             "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}",
         }
 
-    def test_http_server_entry(self, tmp_path: Path) -> None:
+    def test_http_server_entry_has_type_not_transport(self, tmp_path: Path) -> None:
+        # Regression for #84: a remote entry with a url but no `type` is a
+        # config error Claude Code rejects. It must carry `type`, never `transport`.
         self.writer.sync(_cfg({"api": HTTP_SERVER}), tmp_path)
-        data = _read_json(tmp_path / ".claude" / "settings.json")
-        entry = data["mcpServers"]["api"]
+        entry = _read_json(self._mcp(tmp_path))["mcpServers"]["api"]
         assert entry["url"] == "http://localhost:8080/mcp"
+        assert entry["type"] == "http"
+        assert "transport" not in entry
         assert "command" not in entry
 
     def test_dry_run_no_write(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
         assert result.action == "created"
-        assert not (tmp_path / ".claude" / "settings.json").exists()
+        assert not self._mcp(tmp_path).exists()
+        assert not self._settings(tmp_path).exists()
 
     def test_dry_run_no_change(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
         assert result.action == "skipped"
 
-    def test_malformed_json_skipped(self, tmp_path: Path) -> None:
-        path = tmp_path / ".claude" / "settings.json"
-        path.parent.mkdir()
-        path.write_text("{invalid json!!", encoding="utf-8")
-        original_content = path.read_text()
-
+    def test_malformed_mcp_json_skipped(self, tmp_path: Path) -> None:
+        mcp = self._mcp(tmp_path)
+        mcp.write_text("{invalid json!!", encoding="utf-8")
+        original_content = mcp.read_text()
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "error"
         # File must not be truncated or overwritten
-        assert path.read_text() == original_content
+        assert mcp.read_text() == original_content
+
+    def test_malformed_settings_leaves_it_intact(self, tmp_path: Path) -> None:
+        # A broken settings.json can't take the approval, but the servers still
+        # reach .mcp.json and the malformed file is left byte-for-byte intact.
+        settings = self._settings(tmp_path)
+        settings.parent.mkdir()
+        settings.write_text("{broken", encoding="utf-8")
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "created"
+        assert "context7" in _read_json(self._mcp(tmp_path))["mcpServers"]
+        assert settings.read_text() == "{broken"
 
     def test_sorted_keys_output(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-        raw = (tmp_path / ".claude" / "settings.json").read_text()
-        # Verify keys are sorted (mcpServers should appear after any earlier key)
-        data = json.loads(raw)
+        data = json.loads(self._mcp(tmp_path).read_text())
         assert list(data.keys()) == sorted(data.keys())
 
     def test_consistent_two_space_indent(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-        raw = (tmp_path / ".claude" / "settings.json").read_text()
+        raw = self._mcp(tmp_path).read_text()
         assert '  "mcpServers"' in raw
 
 

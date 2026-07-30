@@ -198,9 +198,13 @@ def run_sync(
     # append manual-fix rows for source MCP servers with an `oauth` block
     # that no writer ports across tools.
     if tool_id is None and (concern is None or concern == SyncConcern.MCP):
-        from crossby.sync.mcp_discovery import report_oauth_configs
+        from crossby.sync.mcp_discovery import (
+            report_duplicate_claude_servers,
+            report_oauth_configs,
+        )
 
         results.extend(report_oauth_configs(project_root))
+        results.extend(report_duplicate_claude_servers(project_root))
 
     return results
 
