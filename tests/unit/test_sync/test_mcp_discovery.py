@@ -61,9 +61,13 @@ class TestDiscoverMCPServers:
         )
         monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", fake_home_config)
 
-        result = discover_mcp_servers(tmp_path / "project")
+        # Off by default: a bare scan never rakes in personal user-scope servers.
+        assert "user-srv" not in discover_mcp_servers(tmp_path / "project").servers
+
+        result = discover_mcp_servers(tmp_path / "project", include_user_scope=True)
         assert "user-srv" in result.servers
         assert result.servers["user-srv"].source_tool == "claude"
+        assert result.servers["user-srv"].scope == "user"
 
     def test_project_mcp_json_wins_over_claude_settings(self, tmp_path: Path) -> None:
         """Same server name in both Claude scopes: .mcp.json (most specific) wins,

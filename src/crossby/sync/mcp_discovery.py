@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from crossby.sync.base import SyncConcern, SyncResult
+
+Scope = Literal["project", "user"]
 
 
 @dataclass
@@ -21,6 +23,10 @@ class DiscoveredServer:
     name: str
     source_tool: str
     data: dict[str, Any]
+    # "project" for a repo-local file (``.mcp.json``, ``.cursor/mcp.json``, …);
+    # "user" only for the home-directory ``~/.claude.json``. Lets callers label
+    # each server and keep user-scoped ones out of committed project files.
+    scope: Scope = "project"
 
 
 @dataclass
@@ -90,7 +96,9 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
+def discover_mcp_servers(
+    project_root: Path, *, include_user_scope: bool = False
+) -> DiscoveryResult:
     """Scan all tool config files for MCP server definitions.
 
     Scans:
@@ -98,7 +106,10 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
       add --scope project``; this is the canonical location for most real
       projects, checked into version control)
     - .claude/settings.json → mcpServers (legacy/manual location)
-    - ~/.claude.json → mcpServers (Claude's user-scope file)
+    - ~/.claude.json → mcpServers (Claude's user-scope file) — **only when
+      ``include_user_scope`` is set**; by default it's skipped so a bare
+      ``crossby sync`` never rakes personal servers into committed project
+      files. Servers from it are tagged ``scope="user"``.
     - .cursor/mcp.json → mcpServers
     - .vscode/mcp.json → servers (Copilot format)
     - .agents/mcp_config.json → mcpServers (Antigravity CLI)
@@ -114,16 +125,19 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
     """
     result = DiscoveryResult()
 
-    sources: list[tuple[str, Path, str]] = [
-        ("claude", project_root / ".mcp.json", "mcpServers"),
-        ("claude", project_root / ".claude" / "settings.json", "mcpServers"),
-        ("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers"),
-        ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers"),
-        ("copilot", project_root / ".vscode" / "mcp.json", "servers"),
-        ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers"),
+    sources: list[tuple[str, Path, str, Scope]] = [
+        ("claude", project_root / ".mcp.json", "mcpServers", "project"),
+        ("claude", project_root / ".claude" / "settings.json", "mcpServers", "project"),
+    ]
+    if include_user_scope:
+        sources.append(("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers", "user"))
+    sources += [
+        ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers", "project"),
+        ("copilot", project_root / ".vscode" / "mcp.json", "servers", "project"),
+        ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers", "project"),
     ]
 
-    for tool, path, key in sources:
+    for tool, path, key, scope in sources:
         section = _read_json_section(path, key)
         if section is None:
             continue
@@ -142,7 +156,7 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
                     result.conflicts.append((name, existing_tool, tool))
             else:
                 result.servers[name] = DiscoveredServer(
-                    name=name, source_tool=tool, data=normalized
+                    name=name, source_tool=tool, data=normalized, scope=scope
                 )
                 if isinstance(entry.get("oauth"), dict):
                     result.oauth_servers.append((name, tool))

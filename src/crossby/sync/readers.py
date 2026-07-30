@@ -159,18 +159,22 @@ def suggest_skills_source(found: dict[AIToolID, str]) -> AIToolID | None:
 
 
 def discover_mcp(
-    project_root: Path, from_tool: AIToolID | None = None
+    project_root: Path,
+    from_tool: AIToolID | None = None,
+    *,
+    include_user_scope: bool = False,
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
     Uses the existing ``mcp_discovery`` module to scan all tool configs.
-    When *from_tool* is set, only that tool's config is scanned.
+    When *from_tool* is set, only that tool's config is scanned. User-scope
+    ``~/.claude.json`` is only read when *include_user_scope* is set.
 
     Returns server name → MCPServerConfig (validated).
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
-    discovery = discover_mcp_servers(project_root)
+    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
     for name, kept_from, ignored_from in discovery.conflicts:
         logger.warning(
             "mcp.conflict",
@@ -482,11 +486,18 @@ class ProjectScan:
     plugins: ConcernScan = field(default_factory=lambda: ConcernScan({}, ""))
 
 
-def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> ProjectScan:
+def scan_project(
+    project_root: Path,
+    installed_tools: list[AIToolID],
+    *,
+    include_user_scope: bool = False,
+) -> ProjectScan:
     """Scan the project for all sync-relevant data across all tools.
 
     Returns a :class:`ProjectScan` with per-concern findings, used by the
     interactive wizard to display what was found and ask for confirmation.
+    When *include_user_scope* is set, user-scope ``~/.claude.json`` MCP servers
+    are included in the MCP scan and labelled ``user``.
     """
     # Rules
     rules_found = detect_rules(project_root)
@@ -517,7 +528,7 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
     # MCP — scan per tool
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
-    discovery = discover_mcp_servers(project_root)
+    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
     mcp_by_tool: dict[AIToolID, list[str]] = {}
     for name, ds in discovery.servers.items():
         try:
@@ -525,11 +536,19 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
         except (ValueError, TypeError):
             continue
         mcp_by_tool.setdefault(tid, []).append(name)
-    mcp_summary = (
-        f"{len(discovery.servers)} server(s) from " + ", ".join(str(t) for t in mcp_by_tool)
-        if discovery.servers
-        else "none found"
-    )
+    if discovery.servers:
+        n_user = sum(1 for ds in discovery.servers.values() if ds.scope == "user")
+        n_project = len(discovery.servers) - n_user
+        scope_note = f" ({n_project} project, {n_user} user)" if n_user else ""
+        mcp_summary = (
+            f"{len(discovery.servers)} server(s) from "
+            + ", ".join(str(t) for t in mcp_by_tool)
+            + scope_note
+        )
+    else:
+        mcp_summary = "none found"
+        if not include_user_scope:
+            mcp_summary += " (pass --include-user-scope to also read ~/.claude.json)"
 
     # Permissions — scan per tool
     perm_by_tool: dict[AIToolID, list[str]] = {}
@@ -592,11 +611,15 @@ def scan_project(project_root: Path, installed_tools: list[AIToolID]) -> Project
 def build_sync_data(
     project_root: Path,
     from_tool: AIToolID | None = None,
+    *,
+    include_user_scope: bool = False,
 ) -> SyncData:
     """Build :class:`SyncData` by reading directly from tool configs.
 
     When *from_tool* is specified, only that tool's configs are read.
-    Otherwise all tool configs are scanned and auto-resolved.
+    Otherwise all tool configs are scanned and auto-resolved. User-scope
+    ``~/.claude.json`` MCP servers are included only when *include_user_scope*
+    is set — by default they stay out of the committed project files.
     """
     # Rules
     rules_found = detect_rules(project_root)
@@ -629,7 +652,9 @@ def build_sync_data(
             skills_source = skills_found[source_tool]
 
     # MCP, permissions, hooks
-    mcp_servers = discover_mcp(project_root, from_tool=from_tool)
+    mcp_servers = discover_mcp(
+        project_root, from_tool=from_tool, include_user_scope=include_user_scope
+    )
     allowed_commands = discover_permissions(project_root, from_tool=from_tool)
     hooks = discover_hooks(project_root, from_tool=from_tool)
 
