@@ -284,8 +284,12 @@ class ClaudeMCPWriter(_JsonMCPWriter):
             )
 
         approved = _approve_mcp_json_servers(settings_path, set(enabled), disabled, dry_run=dry_run)
+        # When only the approval changed, settings.json is the file that was
+        # touched — report it as the artifact rather than the unchanged .mcp.json.
+        changed_file = mcp_path
         if action == "skipped" and approved:
             action = "updated"
+            changed_file = settings_path
 
         note: str | None = message or None
         if approved and enabled:
@@ -296,7 +300,7 @@ class ClaudeMCPWriter(_JsonMCPWriter):
             tool_id=self.tool_id,
             concern=self.concern,
             action=action,
-            file_path=mcp_path,
+            file_path=changed_file,
             message=note,
         )
 
@@ -517,7 +521,8 @@ def report_dropped_default_fallbacks(
                     message=(
                         f"MCP server `{name}` {kind} `{field_name}` uses a "
                         "`${VAR:-default}` default that Codex's config can't represent; "
-                        "the default was dropped — set it directly in `.codex/config.toml`."
+                        "the default was dropped. This is a manual-fix — set it "
+                        "directly in `.codex/config.toml`."
                     ),
                 )
             )

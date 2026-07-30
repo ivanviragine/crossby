@@ -82,6 +82,21 @@ class TestClaudeMCPWriter:
         # Never the blanket approval that would bless servers crossby didn't write.
         assert "enableAllProjectMcpServers" not in settings
 
+    def test_approval_only_change_reports_settings_as_the_file(self, tmp_path: Path) -> None:
+        # .mcp.json already has the server, but the approval was removed. The
+        # re-sync changes only settings.json, so that's the file reported —
+        # not the byte-for-byte unchanged .mcp.json.
+        self.writer.sync(_cfg({"ctx": STDIO_SERVER}), tmp_path)
+        settings = self._settings(tmp_path)
+        settings.write_text(json.dumps({}), encoding="utf-8")  # drop the approval
+        mcp_before = self._mcp(tmp_path).read_text()
+
+        result = self.writer.sync(_cfg({"ctx": STDIO_SERVER}), tmp_path)
+        assert result.action == "updated"
+        assert result.file_path == settings
+        assert self._mcp(tmp_path).read_text() == mcp_before  # .mcp.json untouched
+        assert "ctx" in _read_json(settings)["enabledMcpjsonServers"]
+
     def test_disabling_revokes_the_approval(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"old": STDIO_SERVER}), tmp_path)
         assert "old" in _read_json(self._settings(tmp_path))["enabledMcpjsonServers"]
@@ -600,6 +615,22 @@ class TestReportDroppedDefaultFallbacks:
         assert row.file_path is None  # detect-only row, counts as Not Added
         assert "svc" in row.message and "Authorization" in row.message
         assert "${VAR:-default}" in row.message
+
+    def test_note_is_tallied_as_a_manual_fix(self) -> None:
+        # Parity with report_oauth_configs: the row must land in the doctor's
+        # manual-fix summary, not just render as "Not Added" in the table.
+        from crossby.sync.plan import summarize_plan
+
+        servers = {
+            "svc": MCPServerConfig(
+                transport="http",
+                url="https://api.example.com/mcp",
+                headers={"Authorization": "Bearer ${TOKEN:-fallback123}"},
+            )
+        }
+        rows = report_dropped_default_fallbacks(servers)
+        summary = summarize_plan(rows)
+        assert len(summary.manual_fix_results) == 1
 
     def test_env_default_fallback_produces_a_note(self) -> None:
         servers = {"svc": MCPServerConfig(command="npx", env={"KEY": "${KEY:-dev}"})}
