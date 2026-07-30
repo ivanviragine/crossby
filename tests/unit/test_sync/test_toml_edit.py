@@ -64,6 +64,18 @@ class TestSetScalar:
     def test_bails_on_unterminated_string(self) -> None:
         assert set_scalar('a = "oops\n[features]\n', ("features",), "k", "true") is None
 
+    def test_ignores_a_same_named_key_in_a_child_table(self) -> None:
+        # A key of the same name under [features.sub] must not be mistaken for
+        # the one we're setting on [features] — the child key stays untouched
+        # and the key is added to the parent, rather than the splice rewriting
+        # the wrong line and silently dropping to a lossy fallback.
+        text = "[features]\na = 1\n\n[features.sub]\ncodex_hooks = false\n"
+        out = set_scalar(text, ("features",), "codex_hooks", "true")
+        assert out is not None
+        parsed = tomllib.loads(out)
+        assert parsed["features"]["codex_hooks"] is True
+        assert parsed["features"]["sub"]["codex_hooks"] is False
+
 
 class TestUpsertTable:
     def test_appends_new_table(self) -> None:

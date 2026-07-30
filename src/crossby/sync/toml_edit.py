@@ -461,10 +461,13 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
     if idx is None:
         return _still_parses(_append_block(text, f"[{_render_key(table)}]\n{line}"))
 
+    # Only the table's own body, not the child tables ``_extent`` would swallow:
+    # a same-named key under ``[table.child]`` must not be mistaken for this
+    # one, or the splice rewrites the child's line and never sets the key here.
     header = headers[idx]
-    _, end = _extent(text, headers, idx)
+    body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)
     for assign in assigns:
-        if assign.parts == (key,) and header.body_start <= assign.start < end:
+        if assign.parts == (key,) and header.body_start <= assign.start < body_end:
             return _still_parses(text[: assign.start] + line + text[assign.end :])
 
     return _still_parses(text[: header.body_start] + line + text[header.body_start :])
