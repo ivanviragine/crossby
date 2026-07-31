@@ -245,6 +245,7 @@ def sync(
             dry_run=dry_run,
             force=force,
             installed_tools=target_tools,
+            include_user_scope=include_user_scope,
         )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
@@ -450,6 +451,7 @@ def sync(
             dry_run=dry_run,
             force=force,
             installed_tools=installed_tools,
+            include_user_scope=include_user_scope,
         )
     if data.allowed_commands and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
         results += run_sync(
@@ -762,6 +764,7 @@ def _run_inspection(
         dry_run=True,
         force=False,
         installed_tools=target_tools,
+        include_user_scope=include_user_scope,
     )
 
     summary = summarize_plan(results)

@@ -539,6 +539,17 @@ def validate_json_configs(
                 )
             )
             continue
+        except OSError as exc:
+            findings.append(
+                _error(
+                    project_root,
+                    path,
+                    f"could not be read: {exc}",
+                    tool_id=tool,
+                    concern=concern,
+                )
+            )
+            continue
         findings.append(
             _ok(
                 project_root,

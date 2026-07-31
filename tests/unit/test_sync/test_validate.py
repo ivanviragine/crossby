@@ -187,6 +187,30 @@ class TestJsonConfigs:
         findings = validate_json_configs(tmp_path)
         assert any(f.level == "error" for f in findings)
 
+    def test_unreadable_file_becomes_a_finding_not_a_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An existing file that raises OSError on read (e.g. PermissionError)
+        # must surface as an error finding rather than crash --validate-target.
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"x": 1}), encoding="utf-8")
+
+        real_read_text = Path.read_text
+
+        def boom(self: Path, *args: object, **kwargs: object) -> str:
+            if self == path:
+                raise PermissionError("permission denied")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", boom)
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f for f in findings if f.level == "error" and str(f.path).endswith("settings.json")
+        ]
+        assert len(errors) == 1
+        assert "could not be read" in errors[0].detail
+
     def test_invalid_cursor_hooks_json(self, tmp_path: Path) -> None:
         from crossby.sync.base import SyncConcern
 

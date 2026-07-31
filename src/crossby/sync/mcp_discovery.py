@@ -193,7 +193,9 @@ def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def report_oauth_configs(project_root: Path) -> list[SyncResult]:
+def report_oauth_configs(
+    project_root: Path, *, include_user_scope: bool = False
+) -> list[SyncResult]:
     """Report MCP servers whose source entry has an ``oauth`` block.
 
     No writer in :mod:`crossby.sync.mcp` ports OAuth config (``callbackPort``,
@@ -207,8 +209,12 @@ def report_oauth_configs(project_root: Path) -> list[SyncResult]:
     row is about) — it's what makes :func:`crossby.sync.report.classify_status`
     read the row as ``Not Added`` and :func:`crossby.sync.plan.summarize_plan`
     count it toward the doctor readiness score.
+
+    When *include_user_scope* is set the scan covers ``~/.claude.json`` too, so
+    a user-scope server being ported doesn't get its ``oauth`` block dropped
+    without a trace — matching the scope the sync itself is running at.
     """
-    discovery = discover_mcp_servers(project_root)
+    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
     return [
         SyncResult(
             tool_id=None,

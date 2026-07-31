@@ -95,6 +95,7 @@ def run_sync(
     force: bool = False,
     installed_tools: list[AIToolID] | None = None,
     registry: SyncRegistry | None = None,
+    include_user_scope: bool = False,
 ) -> list[SyncResult]:
     """Run all matching sync writers, collecting results.
 
@@ -204,7 +205,7 @@ def run_sync(
             report_oauth_configs,
         )
 
-        results.extend(report_oauth_configs(project_root))
+        results.extend(report_oauth_configs(project_root, include_user_scope=include_user_scope))
         results.extend(report_duplicate_claude_servers(project_root))
         results.extend(report_dropped_default_fallbacks(data.mcp_servers))
 

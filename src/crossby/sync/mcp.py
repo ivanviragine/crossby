@@ -193,20 +193,22 @@ def _approve_mcp_json_servers(
     revoke: set[str],
     *,
     dry_run: bool,
-) -> bool:
+) -> tuple[bool, int]:
     """Record ``approve`` in (and drop ``revoke`` from) ``enabledMcpjsonServers``.
 
     This is the one legitimate MCP use of ``.claude/settings.json``: a *narrow*
     approval of exactly the servers crossby wrote to ``.mcp.json``, rather than
     ``enableAllProjectMcpServers`` which would bless servers crossby never
-    touched. Returns True when the list changed.
+    touched. Returns ``(changed, newly_approved)`` — whether the list changed at
+    all (an add *or* a revoke), and how many names were *newly* added (so the
+    caller's message reflects the real delta, not the total enabled count).
 
     A missing settings.json is created only when there's something to approve;
     a malformed one is left byte-for-byte intact and the approval is skipped
     with a warning (the servers are already safely in ``.mcp.json``).
     """
     if not approve and not revoke:
-        return False
+        return False, 0
     data, error, was_new = read_json_file(settings_path)
     if error is not None:
         warnings.warn(
@@ -214,7 +216,7 @@ def _approve_mcp_json_servers(
             "could not be recorded in enabledMcpjsonServers. Fix the file manually.",
             stacklevel=3,
         )
-        return False
+        return False, 0
     existing = data or {}
     current = existing.get("enabledMcpjsonServers")
     names = [n for n in current if isinstance(n, str)] if isinstance(current, list) else []
@@ -224,14 +226,16 @@ def _approve_mcp_json_servers(
             result.append(name)
     result = [n for n in result if n not in revoke]
     if result == names:
-        return False
+        return False, 0
     if was_new and not result:
-        return False  # nothing to record — don't create an empty settings.json
+        return False, 0  # nothing to record — don't create an empty settings.json
+    before = set(names)
+    newly_approved = sum(1 for n in result if n not in before)
     if dry_run:
-        return True
+        return True, newly_approved
     existing["enabledMcpjsonServers"] = result
     write_json_file(settings_path, existing)
-    return True
+    return True, newly_approved
 
 
 class ClaudeMCPWriter(_JsonMCPWriter):
@@ -283,18 +287,21 @@ class ClaudeMCPWriter(_JsonMCPWriter):
                 message=message or None,
             )
 
-        approved = _approve_mcp_json_servers(settings_path, set(enabled), disabled, dry_run=dry_run)
+        approval_changed, newly_approved = _approve_mcp_json_servers(
+            settings_path, set(enabled), disabled, dry_run=dry_run
+        )
         # When only the approval changed, settings.json is the file that was
         # touched — report it as the artifact rather than the unchanged .mcp.json.
         changed_file = mcp_path
-        if action == "skipped" and approved:
+        if action == "skipped" and approval_changed:
             action = "updated"
             changed_file = settings_path
 
         note: str | None = message or None
-        if approved and enabled:
+        if newly_approved:
             note = (
-                f"approved {len(enabled)} server(s) in {settings_path.name} (enabledMcpjsonServers)"
+                f"approved {newly_approved} server(s) in {settings_path.name} "
+                "(enabledMcpjsonServers)"
             )
         return SyncResult(
             tool_id=self.tool_id,

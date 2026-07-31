@@ -82,6 +82,15 @@ class TestClaudeMCPWriter:
         # Never the blanket approval that would bless servers crossby didn't write.
         assert "enableAllProjectMcpServers" not in settings
 
+    def test_approval_note_counts_only_newly_approved(self, tmp_path: Path) -> None:
+        # "a" is already approved; adding "b" must report "approved 1", not 2 —
+        # the note reflects the delta, not the total enabled count.
+        self.writer.sync(_cfg({"a": STDIO_SERVER}), tmp_path)
+        result = self.writer.sync(_cfg({"a": STDIO_SERVER, "b": STDIO_WITH_ENV}), tmp_path)
+        assert result.message is not None
+        assert "approved 1 server(s)" in result.message
+        assert set(_read_json(self._settings(tmp_path))["enabledMcpjsonServers"]) == {"a", "b"}
+
     def test_approval_only_change_reports_settings_as_the_file(self, tmp_path: Path) -> None:
         # .mcp.json already has the server, but the approval was removed. The
         # re-sync changes only settings.json, so that's the file reported —
