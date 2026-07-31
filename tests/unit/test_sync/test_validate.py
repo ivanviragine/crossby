@@ -211,6 +211,19 @@ class TestJsonConfigs:
         assert len(errors) == 1
         assert "could not be read" in errors[0].detail
 
+    def test_non_utf8_file_becomes_a_finding_not_a_crash(self, tmp_path: Path) -> None:
+        # Invalid UTF-8 raises UnicodeDecodeError (a ValueError, not OSError)
+        # during read, before json.loads — it must be reported, not crash.
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'{"x": "\xff"}')
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f for f in findings if f.level == "error" and str(f.path).endswith("settings.json")
+        ]
+        assert len(errors) == 1
+        assert "could not be read" in errors[0].detail
+
     def test_invalid_cursor_hooks_json(self, tmp_path: Path) -> None:
         from crossby.sync.base import SyncConcern
 

@@ -539,7 +539,10 @@ def validate_json_configs(
                 )
             )
             continue
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError (a ValueError, not an OSError) fires before
+            # json.loads on non-UTF-8 bytes — treat it as unreadable too, the
+            # same way read_json_file does.
             findings.append(
                 _error(
                     project_root,

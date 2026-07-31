@@ -91,6 +91,17 @@ class TestClaudeMCPWriter:
         assert "approved 1 server(s)" in result.message
         assert set(_read_json(self._settings(tmp_path))["enabledMcpjsonServers"]) == {"a", "b"}
 
+    def test_revoke_only_note_reports_a_revocation(self, tmp_path: Path) -> None:
+        # Disabling one of two approved servers is a revocation, not an approval —
+        # the note must say so rather than reporting a bogus approval count.
+        self.writer.sync(_cfg({"a": STDIO_SERVER, "b": STDIO_WITH_ENV}), tmp_path)
+        result = self.writer.sync(
+            _cfg({"a": STDIO_SERVER, "b": MCPServerConfig(command="npx", enabled=False)}), tmp_path
+        )
+        assert result.message is not None
+        assert "revoked 1 server(s)" in result.message
+        assert "approved" not in result.message
+
     def test_approval_only_change_reports_settings_as_the_file(self, tmp_path: Path) -> None:
         # .mcp.json already has the server, but the approval was removed. The
         # re-sync changes only settings.json, so that's the file reported —
