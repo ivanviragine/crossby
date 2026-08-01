@@ -114,6 +114,8 @@ def run_sync(
         installed_tools: Override the installed-tools list.  Detected
             automatically when None.  Ignored when ``tool_id`` is set.
         registry: Custom registry (defaults to the global ``_registry``).
+        include_user_scope: Whether to include user-scope ``~/.claude.json``
+            in MCP discovery and validation.
 
     Returns:
         List of SyncResult, one per writer that ran.
