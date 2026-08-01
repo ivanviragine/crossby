@@ -2,8 +2,26 @@
 
 from __future__ import annotations
 
+import pytest
+
+from crossby.ai_tools.model_utils import classify_tier_universal
 from crossby.config.defaults import TOOL_DEFAULTS, get_defaults
-from crossby.models.ai import AIToolID
+from crossby.data import get_models_for_tool
+from crossby.models.ai import AIToolID, ModelTier
+
+_TIERS = ("easy", "medium", "complex", "very_complex")
+
+
+def _iter_tier_defaults() -> list[tuple[str, str, str]]:
+    """Flatten TOOL_DEFAULTS into (tool_id, tier, model_id) tuples."""
+    return [
+        (str(tool_id), tier, getattr(mapping, tier))
+        for tool_id, mapping in TOOL_DEFAULTS.items()
+        for tier in _TIERS
+    ]
+
+
+_ALL_DEFAULT_MODEL_IDS = sorted({model_id for _, _, model_id in _iter_tier_defaults()})
 
 
 class TestMediumTierDefaults:
@@ -28,7 +46,29 @@ class TestMediumTierDefaults:
 
     def test_cursor_medium_is_balanced(self) -> None:
         mapping = get_defaults(AIToolID.CURSOR)
-        assert mapping.medium == "sonnet-4.6"
+        assert mapping.medium == "composer-2.5"
+
+
+class TestDefaultsRegistryGuard:
+    """Every TOOL_DEFAULTS value must be a valid, classifiable registry entry.
+
+    This is the linchpin against registry/defaults drift: `get_defaults()` seeds
+    the model config written by `wade init` downstream, and every fallback pick
+    must be a member of that tool's `get_models_for_tool()` list (data/models.json).
+    """
+
+    @pytest.mark.parametrize(("tool_id", "tier", "model_id"), _iter_tier_defaults())
+    def test_default_is_registry_member(self, tool_id: str, tier: str, model_id: str) -> None:
+        registry = get_models_for_tool(tool_id)
+        assert model_id in registry, (
+            f"{tool_id}.{tier} default '{model_id}' is not in get_models_for_tool('{tool_id}')"
+        )
+
+    @pytest.mark.parametrize("model_id", _ALL_DEFAULT_MODEL_IDS)
+    def test_default_resolves_through_classifier(self, model_id: str) -> None:
+        # Cheap insurance: novel effort-encoded IDs (composer-2.5-fast,
+        # claude-opus-5-high, gemini-3.6-flash-*) must parse without raising.
+        assert isinstance(classify_tier_universal(model_id), ModelTier)
 
 
 class TestClaudeTierDefaults:
