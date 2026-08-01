@@ -95,6 +95,7 @@ def run_sync(
     force: bool = False,
     installed_tools: list[AIToolID] | None = None,
     registry: SyncRegistry | None = None,
+    include_user_scope: bool = False,
 ) -> list[SyncResult]:
     """Run all matching sync writers, collecting results.
 
@@ -113,6 +114,8 @@ def run_sync(
         installed_tools: Override the installed-tools list.  Detected
             automatically when None.  Ignored when ``tool_id`` is set.
         registry: Custom registry (defaults to the global ``_registry``).
+        include_user_scope: Whether to include user-scope ``~/.claude.json``
+            in MCP discovery and validation.
 
     Returns:
         List of SyncResult, one per writer that ran.
@@ -198,9 +201,15 @@ def run_sync(
     # append manual-fix rows for source MCP servers with an `oauth` block
     # that no writer ports across tools.
     if tool_id is None and (concern is None or concern == SyncConcern.MCP):
-        from crossby.sync.mcp_discovery import report_oauth_configs
+        from crossby.sync.mcp import report_dropped_default_fallbacks
+        from crossby.sync.mcp_discovery import (
+            report_duplicate_claude_servers,
+            report_oauth_configs,
+        )
 
-        results.extend(report_oauth_configs(project_root))
+        results.extend(report_oauth_configs(project_root, include_user_scope=include_user_scope))
+        results.extend(report_duplicate_claude_servers(project_root))
+        results.extend(report_dropped_default_fallbacks(data.mcp_servers))
 
     return results
 

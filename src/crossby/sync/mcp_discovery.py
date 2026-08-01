@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from crossby.sync.base import SyncConcern, SyncResult
+
+Scope = Literal["project", "user"]
 
 
 @dataclass
@@ -21,6 +23,10 @@ class DiscoveredServer:
     name: str
     source_tool: str
     data: dict[str, Any]
+    # "project" for a repo-local file (``.mcp.json``, ``.cursor/mcp.json``, …);
+    # "user" only for the home-directory ``~/.claude.json``. Lets callers label
+    # each server and keep user-scoped ones out of committed project files.
+    scope: Scope = "project"
 
 
 @dataclass
@@ -63,8 +69,13 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Normalize a tool-specific entry to the canonical crossby format."""
     result: dict[str, Any] = {}
 
-    # Copilot adds a "type" field for transport — translate back
+    # Copilot adds a "type" field for transport — translate back. Claude Code
+    # accepts "streamable-http" as an alias for "http"; crossby's model only
+    # knows "http"/"sse"/"stdio", so fold the alias here or the server would
+    # fail validation and be silently dropped.
     transport = entry.get("type") or entry.get("transport")
+    if transport == "streamable-http":
+        transport = "http"
     if transport and transport != "stdio":
         result["transport"] = transport
 
@@ -85,7 +96,9 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
+def discover_mcp_servers(
+    project_root: Path, *, include_user_scope: bool = False
+) -> DiscoveryResult:
     """Scan all tool config files for MCP server definitions.
 
     Scans:
@@ -93,7 +106,10 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
       add --scope project``; this is the canonical location for most real
       projects, checked into version control)
     - .claude/settings.json → mcpServers (legacy/manual location)
-    - ~/.claude.json → mcpServers (Claude's user-scope file)
+    - ~/.claude.json → mcpServers (Claude's user-scope file) — **only when
+      ``include_user_scope`` is set**; by default it's skipped so a bare
+      ``crossby sync`` never rakes personal servers into committed project
+      files. Servers from it are tagged ``scope="user"``.
     - .cursor/mcp.json → mcpServers
     - .vscode/mcp.json → servers (Copilot format)
     - .agents/mcp_config.json → mcpServers (Antigravity CLI)
@@ -109,16 +125,19 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
     """
     result = DiscoveryResult()
 
-    sources: list[tuple[str, Path, str]] = [
-        ("claude", project_root / ".mcp.json", "mcpServers"),
-        ("claude", project_root / ".claude" / "settings.json", "mcpServers"),
-        ("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers"),
-        ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers"),
-        ("copilot", project_root / ".vscode" / "mcp.json", "servers"),
-        ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers"),
+    sources: list[tuple[str, Path, str, Scope]] = [
+        ("claude", project_root / ".mcp.json", "mcpServers", "project"),
+        ("claude", project_root / ".claude" / "settings.json", "mcpServers", "project"),
+    ]
+    if include_user_scope:
+        sources.append(("claude", _GLOBAL_CLAUDE_JSON_PATH, "mcpServers", "user"))
+    sources += [
+        ("cursor", project_root / ".cursor" / "mcp.json", "mcpServers", "project"),
+        ("copilot", project_root / ".vscode" / "mcp.json", "servers", "project"),
+        ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers", "project"),
     ]
 
-    for tool, path, key in sources:
+    for tool, path, key, scope in sources:
         section = _read_json_section(path, key)
         if section is None:
             continue
@@ -137,7 +156,7 @@ def discover_mcp_servers(project_root: Path) -> DiscoveryResult:
                     result.conflicts.append((name, existing_tool, tool))
             else:
                 result.servers[name] = DiscoveredServer(
-                    name=name, source_tool=tool, data=normalized
+                    name=name, source_tool=tool, data=normalized, scope=scope
                 )
                 if isinstance(entry.get("oauth"), dict):
                     result.oauth_servers.append((name, tool))
@@ -174,7 +193,9 @@ def _read_codex_mcp(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def report_oauth_configs(project_root: Path) -> list[SyncResult]:
+def report_oauth_configs(
+    project_root: Path, *, include_user_scope: bool = False
+) -> list[SyncResult]:
     """Report MCP servers whose source entry has an ``oauth`` block.
 
     No writer in :mod:`crossby.sync.mcp` ports OAuth config (``callbackPort``,
@@ -188,8 +209,12 @@ def report_oauth_configs(project_root: Path) -> list[SyncResult]:
     row is about) — it's what makes :func:`crossby.sync.report.classify_status`
     read the row as ``Not Added`` and :func:`crossby.sync.plan.summarize_plan`
     count it toward the doctor readiness score.
+
+    When *include_user_scope* is set the scan covers ``~/.claude.json`` too, so
+    a user-scope server being ported doesn't get its ``oauth`` block dropped
+    without a trace — matching the scope the sync itself is running at.
     """
-    discovery = discover_mcp_servers(project_root)
+    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
     return [
         SyncResult(
             tool_id=None,
@@ -203,4 +228,32 @@ def report_oauth_configs(project_root: Path) -> list[SyncResult]:
             ),
         )
         for name, source_tool in discovery.oauth_servers
+    ]
+
+
+def report_duplicate_claude_servers(project_root: Path) -> list[SyncResult]:
+    """One informational row per server defined in *both* Claude MCP files.
+
+    crossby writes servers to ``.mcp.json`` and deliberately leaves any copy in
+    ``.claude/settings.json`` (where an older crossby or a manual edit may have
+    put it) untouched — it never silently edits a key it no longer owns. A name
+    living in both files is a stale duplicate the user should resolve, so this
+    surfaces it rather than resolving it silently the way discovery's
+    first-seen-wins merge does.
+    """
+    mcp_json = _read_json_section(project_root / ".mcp.json", "mcpServers") or {}
+    settings = _read_json_section(project_root / ".claude" / "settings.json", "mcpServers") or {}
+    return [
+        SyncResult(
+            tool_id=None,
+            concern=SyncConcern.MCP,
+            action="skipped",
+            file_path=None,
+            message=(
+                f"MCP server `{name}` is defined in both `.mcp.json` and "
+                "`.claude/settings.json`; crossby writes `.mcp.json` and leaves the "
+                "settings.json copy in place — remove one to clear the duplicate."
+            ),
+        )
+        for name in sorted(set(mcp_json) & set(settings))
     ]

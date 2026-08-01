@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import tomli_w
 
 from crossby.models.ai import AIToolID
@@ -186,6 +187,43 @@ class TestJsonConfigs:
         findings = validate_json_configs(tmp_path)
         assert any(f.level == "error" for f in findings)
 
+    def test_unreadable_file_becomes_a_finding_not_a_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An existing file that raises OSError on read (e.g. PermissionError)
+        # must surface as an error finding rather than crash --validate-target.
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"x": 1}), encoding="utf-8")
+
+        real_read_text = Path.read_text
+
+        def boom(self: Path, *args: object, **kwargs: object) -> str:
+            if self == path:
+                raise PermissionError("permission denied")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", boom)
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f for f in findings if f.level == "error" and str(f.path).endswith("settings.json")
+        ]
+        assert len(errors) == 1
+        assert "could not be read" in errors[0].detail
+
+    def test_non_utf8_file_becomes_a_finding_not_a_crash(self, tmp_path: Path) -> None:
+        # Invalid UTF-8 raises UnicodeDecodeError (a ValueError, not OSError)
+        # during read, before json.loads — it must be reported, not crash.
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'{"x": "\xff"}')
+        findings = validate_json_configs(tmp_path)
+        errors = [
+            f for f in findings if f.level == "error" and str(f.path).endswith("settings.json")
+        ]
+        assert len(errors) == 1
+        assert "could not be read" in errors[0].detail
+
     def test_invalid_cursor_hooks_json(self, tmp_path: Path) -> None:
         from crossby.sync.base import SyncConcern
 
@@ -208,22 +246,32 @@ class TestJsonConfigs:
         assert len(hook_errors) == 1
         assert "hooks.json" in str(hook_errors[0].path)
 
-    def test_invalid_root_claude_json_surfaces_error(self, tmp_path: Path) -> None:
-        """Regression: malformed `.claude.json` must produce a parse-error finding.
+    def test_invalid_home_claude_json_surfaces_error_under_user_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed user-scope ``~/.claude.json`` surfaces a parse error.
 
-        Previously the MCP PATH walker swallowed JSON errors and the JSON
-        validator didn't cover `.claude.json` / `.mcp.json`, so invalid JSON
-        in those files went entirely unreported.
+        crossby reads the home ``~/.claude.json``, not a project-local
+        ``.claude.json`` — but only under user scope, so it's validated the
+        same way: skipped by default, checked when ``include_user_scope`` is on.
         """
-        path = tmp_path / ".claude.json"
-        path.write_text("{ broken", encoding="utf-8")
-        findings = validate_json_configs(tmp_path)
+        from crossby.sync import mcp_discovery
+
+        home = tmp_path / "home" / ".claude.json"
+        home.parent.mkdir()
+        home.write_text("{ broken", encoding="utf-8")
+        monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", home)
+
+        # Off by default (project scope): the home file isn't touched.
+        assert validate_json_configs(tmp_path) == []
+
+        findings = validate_json_configs(tmp_path, include_user_scope=True)
         errors = [
             f
             for f in findings
             if f.level == "error" and f.tool_id == AIToolID.CLAUDE and "claude.json" in str(f.path)
         ]
-        assert errors, "malformed .claude.json must surface a JSON parse error"
+        assert errors, "malformed ~/.claude.json must surface a JSON parse error"
 
     def test_invalid_root_mcp_json_surfaces_error(self, tmp_path: Path) -> None:
         path = tmp_path / ".mcp.json"
@@ -332,12 +380,19 @@ class TestMCPCommandPaths:
         findings = validate_mcp_command_paths(tmp_path)
         assert any(f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings)
 
-    def test_dot_claude_json_warns_when_absent(self, tmp_path: Path) -> None:
-        _write_json(
-            tmp_path / ".claude.json",
-            {"mcpServers": {"fake": {"command": self._absent()}}},
-        )
-        findings = validate_mcp_command_paths(tmp_path)
+    def test_home_claude_json_checked_only_under_user_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.sync import mcp_discovery
+
+        home = tmp_path / "home" / ".claude.json"
+        _write_json(home, {"mcpServers": {"fake": {"command": self._absent()}}})
+        monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", home)
+
+        # Project scope by default: the user-scope file is left alone.
+        assert not validate_mcp_command_paths(tmp_path)
+
+        findings = validate_mcp_command_paths(tmp_path, include_user_scope=True)
         assert any(f.tool_id == AIToolID.CLAUDE and f.level == "warning" for f in findings)
 
     def test_cursor_mcp_json_warns_when_absent(self, tmp_path: Path) -> None:

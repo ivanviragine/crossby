@@ -106,6 +106,13 @@ class TestRewriteHeadersForCodex:
         result = rewrite_headers_for_codex({"X-Tenant": "${TENANT:-default}"})
         assert "X-Tenant" in result.dropped_default_fallbacks
 
+    def test_embedded_default_in_literal_is_not_a_drop(self) -> None:
+        # A ${VAR:-default} embedded in a larger literal is preserved verbatim
+        # (goes to http_headers), so nothing is dropped — no false-positive row.
+        result = rewrite_headers_for_codex({"X": "prefix ${VAR:-def} suffix"})
+        assert result.http_headers == {"X": "prefix ${VAR:-def} suffix"}
+        assert result.dropped_default_fallbacks == ()
+
     def test_authorization_static_falls_through(self) -> None:
         # An Authorization header that isn't Bearer-${VAR} stays as a static
         # header; Codex won't rewrite it.
@@ -147,3 +154,10 @@ class TestRewriteEnvForCodex:
         # Self-reference is still detected (default ignored) — env_vars wins.
         assert result.env_vars == ["TOKEN"]
         assert "TOKEN" in result.dropped_default_fallbacks
+
+    def test_non_self_reference_default_is_not_a_drop(self) -> None:
+        # ${OTHER:-def} under a differently-named key stays a literal env entry,
+        # so its default is preserved verbatim — nothing dropped.
+        result = rewrite_env_for_codex({"KEY": "${OTHER:-def}"})
+        assert result.env == {"KEY": "${OTHER:-def}"}
+        assert result.dropped_default_fallbacks == ()

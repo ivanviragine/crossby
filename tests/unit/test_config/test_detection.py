@@ -120,6 +120,21 @@ class TestDetectMcpServers:
         assert mcp[0].portable is True
         assert "2 MCP servers" in mcp[0].detail
 
+    def test_detects_claude_mcp_servers_in_mcp_json(self, tmp_path: Path) -> None:
+        # Claude reads project servers from .mcp.json — detection must see them
+        # there, and count a name shared with settings.json only once.
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"memory": {"command": "npx"}, "search": {"command": "npx"}}})
+        )
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text(
+            json.dumps({"mcpServers": {"memory": {"command": "npx"}}})  # dup of .mcp.json
+        )
+        items = detect_source_configs(AIToolID.CLAUDE, tmp_path)
+        mcp = [i for i in items if i.config_type == "mcp_servers"]
+        assert len(mcp) == 1
+        assert "2 MCP servers" in mcp[0].detail  # union: memory + search, not 3
+
     def test_detects_cursor_mcp_servers(self, tmp_path: Path) -> None:
         cursor_dir = tmp_path / ".cursor"
         cursor_dir.mkdir()
