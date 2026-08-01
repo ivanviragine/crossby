@@ -304,9 +304,15 @@ class TestSyncDefaultsBypassWizard:
 
         captured: dict[str, Any] = {}
 
-        def fake_build_sync_data(project_root: Path, from_tool: AIToolID | None = None) -> SyncData:
+        def fake_build_sync_data(
+            project_root: Path,
+            from_tool: AIToolID | None = None,
+            *,
+            include_user_scope: bool = False,
+        ) -> SyncData:
             captured["build_from"] = from_tool
             captured["build_root"] = project_root
+            captured["include_user_scope"] = include_user_scope
             return SyncData()
 
         def fake_run_sync(

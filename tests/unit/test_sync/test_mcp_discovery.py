@@ -61,9 +61,13 @@ class TestDiscoverMCPServers:
         )
         monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", fake_home_config)
 
-        result = discover_mcp_servers(tmp_path / "project")
+        # Off by default: a bare scan never rakes in personal user-scope servers.
+        assert "user-srv" not in discover_mcp_servers(tmp_path / "project").servers
+
+        result = discover_mcp_servers(tmp_path / "project", include_user_scope=True)
         assert "user-srv" in result.servers
         assert result.servers["user-srv"].source_tool == "claude"
+        assert result.servers["user-srv"].scope == "user"
 
     def test_project_mcp_json_wins_over_claude_settings(self, tmp_path: Path) -> None:
         """Same server name in both Claude scopes: .mcp.json (most specific) wins,
@@ -263,3 +267,26 @@ class TestReportOauthConfigs:
 
     def test_empty_when_no_oauth_servers(self, tmp_path: Path) -> None:
         assert report_oauth_configs(tmp_path) == []
+
+    def test_user_scope_oauth_reported_only_with_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A user-scope server's oauth block is silently dropped when ported,
+        # so it must be reported — but only when the sync opts into user scope.
+        from crossby.sync import mcp_discovery
+
+        home = tmp_path / "home.json"
+        home.write_text(
+            json.dumps(
+                {"mcpServers": {"user-oauth": {"url": "https://y", "oauth": {"clientId": 1}}}}
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mcp_discovery, "_GLOBAL_CLAUDE_JSON_PATH", home)
+        project = tmp_path / "project"
+        project.mkdir()
+
+        assert report_oauth_configs(project) == []  # project scope: nothing
+        rows = report_oauth_configs(project, include_user_scope=True)
+        assert len(rows) == 1
+        assert "user-oauth" in (rows[0].message or "")

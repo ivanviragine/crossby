@@ -44,7 +44,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `.mcp.json` (project scope), `.claude/settings.json`, `~/.claude.json` (user scope) `mcpServers` | `.cursor/mcp.json`, `.agents/mcp_config.json` (Antigravity CLI), `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. All three Claude sources are scanned most-specific-first (project `.mcp.json` wins on a name collision), so name collisions between them are resolved silently rather than reported as a conflict. |
+| `.mcp.json` (project scope), `.claude/settings.json`, and — only with `--include-user-scope` — `~/.claude.json` (user scope) `mcpServers` | `.mcp.json` (Claude, plus a narrow `enabledMcpjsonServers` approval in `.claude/settings.json`), `.cursor/mcp.json`, `.agents/mcp_config.json` (Antigravity CLI), `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. Claude reads project servers from `.mcp.json` (not `settings.json`), and remote entries are written with `type`, not `transport`. User scope is off by default so personal `~/.claude.json` servers don't leak into committed project files. A name defined in both `.mcp.json` and `.claude/settings.json` is reported as a duplicate to clean up. |
 | `headers: {Authorization: "Bearer ${TOKEN}"}` | Codex `bearer_token_env_var = "TOKEN"` | regex rewrite | Only the `Bearer ${VAR}` shape is rewritten; `${VAR:-default}` fallbacks are dropped and the key is reported. |
 | `headers: {X-Foo: "${VAR}"}` | Codex `env_http_headers = {X-Foo = "VAR"}` | regex rewrite | Static headers stay in `http_headers`. |
 | `env: {KEY: "${KEY}"}` (self-reference) | Codex `env_vars = ["KEY"]` | regex rewrite | Other `${VAR}` env values stay literal so source tools can interpolate them. |
@@ -112,7 +112,7 @@ track its own "already nudged" state rather than rely on the payload.
 | `.codex/config.toml` parses as TOML | error | Manual edits that broke the file. |
 | `.codex/agents/*.toml` carries `name` / `description` / `developer_instructions` | error | Translated agent files that lost a required field. |
 | `<tool>/skills/<name>/SKILL.md` carries `name` / `description` | error | Stripped or hand-edited skill frontmatter. |
-| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.claude.json`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json` | warning | Missing binary on the host; users see this before the first invocation fails. Env-var-templated commands like `${HOME}/bin/foo` are expanded via `os.path.expandvars` before the lookup. |
+| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json` (and `~/.claude.json` under `--include-user-scope`) | warning | Missing binary on the host; users see this before the first invocation fails. Env-var-templated commands like `${HOME}/bin/foo` are expanded via `os.path.expandvars` before the lookup. |
 | `AGENTS.md` / `CLAUDE.md` / `.cursorrules` / `.github/copilot-instructions.md` ≤ 32KB | warning | Instructions creeping past the size threshold beyond which review becomes painful. |
 | Tool-specific JSON files parse as JSON | error | `.claude/settings.json`, `.cursor/cli.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json`. |
 

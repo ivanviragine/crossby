@@ -84,20 +84,26 @@ def rewrite_headers_for_codex(headers: Mapping[str, object]) -> CodexHeaderRewri
     for raw_key, raw_value in headers.items():
         key = str(raw_key)
         value = str(raw_value)
-        if has_default_fallback(value):
-            dropped.append(key)
 
         if key.lower() == "authorization":
             captured = parse_bearer_env_var(value)
             if captured is not None:
                 bearer_env_var = captured
+                if has_default_fallback(value):
+                    dropped.append(key)
                 continue
 
         env_var = parse_env_var_ref(value)
         if env_var is not None:
             env[key] = env_var
+            if has_default_fallback(value):
+                dropped.append(key)
             continue
 
+        # A literal — even one embedding ``${VAR:-default}`` inside a larger
+        # string — is preserved verbatim, so no default is actually discarded
+        # here. Only the rewrite branches above strip a default down to a var
+        # name, so only they record a drop.
         static[key] = value
 
     return CodexHeaderRewrite(
@@ -134,12 +140,14 @@ def rewrite_env_for_codex(env: Mapping[str, object]) -> CodexEnvRewrite:
     for raw_key, raw_value in env.items():
         key = str(raw_key)
         value = str(raw_value)
-        if has_default_fallback(value):
-            dropped.append(key)
         captured = parse_env_var_ref(value)
         if captured is not None and captured == key:
             passthrough.append(key)
+            if has_default_fallback(value):
+                dropped.append(key)
             continue
+        # A literal or a non-self-reference ``${OTHER}`` stays verbatim so the
+        # source tool can still interpolate it — nothing is dropped.
         static[key] = value
 
     return CodexEnvRewrite(

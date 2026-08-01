@@ -18,7 +18,13 @@ from typing import Any
 from crossby.models.ai import AIToolID
 from crossby.models.config import MCPServerConfig
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
-from crossby.sync.json_utils import SyncAction, atomic_write_text, read_merge_write_json
+from crossby.sync.json_utils import (
+    SyncAction,
+    atomic_write_text,
+    read_json_file,
+    read_merge_write_json,
+    write_json_file,
+)
 from crossby.sync.toml_edit import remove_table, splice_or_none, upsert_table
 
 
@@ -42,8 +48,14 @@ def _to_stdio_entry(server: MCPServerConfig) -> dict[str, Any]:
 
 
 def _to_http_entry(server: MCPServerConfig) -> dict[str, Any]:
-    """Convert an http/sse server to the standard JSON entry."""
-    entry: dict[str, Any] = {"url": server.url, "transport": server.transport}
+    """Convert an http/sse server to the standard JSON entry.
+
+    The transport goes in ``type``, not ``transport``: Claude Code reads a
+    remote entry with a ``url`` but no ``type`` as a stdio server, fails to
+    launch it, and reports ``has a "url" but no "type"``. Cursor reads the same
+    key, so both tools share this shape.
+    """
+    entry: dict[str, Any] = {"url": server.url, "type": server.transport}
     if server.env:
         entry["env"] = server.env
     if server.headers:
@@ -175,18 +187,132 @@ class _JsonMCPWriter(AbstractSyncWriter):
         )
 
 
+def _approve_mcp_json_servers(
+    settings_path: Path,
+    approve: set[str],
+    revoke: set[str],
+    *,
+    dry_run: bool,
+) -> tuple[bool, int, int]:
+    """Record ``approve`` in (and drop ``revoke`` from) ``enabledMcpjsonServers``.
+
+    This is the one legitimate MCP use of ``.claude/settings.json``: a *narrow*
+    approval of exactly the servers crossby wrote to ``.mcp.json``, rather than
+    ``enableAllProjectMcpServers`` which would bless servers crossby never
+    touched. Returns ``(changed, added, removed)`` — whether the list changed at
+    all, and how many names were newly added / revoked, so the caller's message
+    reflects the real delta rather than the total enabled count.
+
+    A missing settings.json is created only when there's something to approve;
+    a malformed one is left byte-for-byte intact and the approval is skipped
+    with a warning (the servers are already safely in ``.mcp.json``).
+    """
+    if not approve and not revoke:
+        return False, 0, 0
+    data, error, was_new = read_json_file(settings_path)
+    if error is not None:
+        warnings.warn(
+            f"{settings_path} {error} — servers were written to .mcp.json but "
+            "could not be recorded in enabledMcpjsonServers. Fix the file manually.",
+            stacklevel=3,
+        )
+        return False, 0, 0
+    existing = data or {}
+    current = existing.get("enabledMcpjsonServers")
+    names = [n for n in current if isinstance(n, str)] if isinstance(current, list) else []
+    before = set(names)
+    result = list(names)
+    for name in sorted(approve):
+        if name not in result:
+            result.append(name)
+    result = [n for n in result if n not in revoke]
+    if result == names:
+        return False, 0, 0
+    if was_new and not result:
+        return False, 0, 0  # nothing to record — don't create an empty settings.json
+    added = sum(1 for n in result if n not in before)
+    removed = sum(1 for n in before if n in revoke)
+    if not dry_run:
+        existing["enabledMcpjsonServers"] = result
+        write_json_file(settings_path, existing)
+    return True, added, removed
+
+
 class ClaudeMCPWriter(_JsonMCPWriter):
-    """Merges MCP servers into .claude/settings.json → mcpServers."""
+    """Merges MCP servers into ``.mcp.json`` → ``mcpServers`` (what Claude reads).
+
+    Claude Code loads project MCP servers from ``.mcp.json``, *not* from
+    ``.claude/settings.json`` — that file holds only MCP *policy* keys. Older
+    crossby wrote servers into ``settings.json`` where Claude never read them,
+    so every such sync was inert. Servers now land in ``.mcp.json``; discovery
+    still reads ``.claude/settings.json`` too, so whatever a user or an older
+    crossby left there keeps working.
+
+    After the write, the names crossby wrote are approved narrowly via
+    ``enabledMcpjsonServers`` in ``.claude/settings.json``. Note: as of Claude
+    Code v2.1.196 these approval keys are ignored in an *untrusted* folder, so a
+    freshly cloned repo still shows the trust dialog on first open.
+    """
 
     tool_id = AIToolID.CLAUDE
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
-        return ".claude", "settings.json"
+        return "", ".mcp.json"
 
     @property
     def _mcp_key(self) -> str:
         return "mcpServers"
+
+    def sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        mcp_path = project_root / ".mcp.json"
+        settings_path = project_root / ".claude" / "settings.json"
+        enabled, disabled = _split_servers(data.mcp_servers)
+        updates = {name: self._to_entry(s) for name, s in enabled.items()}
+
+        action, message = read_merge_write_json(mcp_path, self._mcp_key, updates, disabled, dry_run)
+        if action == "error":
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action=action,
+                file_path=mcp_path,
+                message=message or None,
+            )
+
+        approval_changed, approved_n, revoked_n = _approve_mcp_json_servers(
+            settings_path, set(enabled), disabled, dry_run=dry_run
+        )
+        # When only the approval changed, settings.json is the file that was
+        # touched — report it as the artifact rather than the unchanged .mcp.json.
+        changed_file = mcp_path
+        if action == "skipped" and approval_changed:
+            action = "updated"
+            changed_file = settings_path
+
+        note: str | None = message or None
+        if approval_changed:
+            parts = []
+            if approved_n:
+                parts.append(f"approved {approved_n} server(s)")
+            if revoked_n:
+                parts.append(f"revoked {revoked_n} server(s)")
+            if parts:
+                note = f"{' and '.join(parts)} in {settings_path.name} (enabledMcpjsonServers)"
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action=action,
+            file_path=changed_file,
+            message=note,
+        )
 
 
 class CursorMCPWriter(_JsonMCPWriter):
@@ -364,3 +490,50 @@ class CodexMCPWriter(AbstractSyncWriter):
                 return None
             text = spliced
         return splice_or_none(text, expected)
+
+
+def report_dropped_default_fallbacks(
+    servers: dict[str, MCPServerConfig],
+) -> list[SyncResult]:
+    """Manual-fix rows for ``${VAR:-default}`` defaults Codex can't represent.
+
+    :mod:`crossby.sync.mcp_transports` rewrites ``${VAR}`` indirection into
+    Codex's env-var fields but drops any ``${VAR:-default}`` fallback — its
+    module contract says the literal is written and "a manual-fix note is
+    emitted by the caller". Nothing read those ``dropped_default_fallbacks``
+    fields until now; this is that caller. One row per (server, field) so the
+    default can be restored directly in ``.codex/config.toml``. Same detect-only
+    shape as :func:`crossby.sync.mcp_discovery.report_oauth_configs`.
+    """
+    from crossby.sync.mcp_transports import rewrite_env_for_codex, rewrite_headers_for_codex
+
+    rows: list[SyncResult] = []
+    for name, server in servers.items():
+        if not server.enabled:
+            continue
+        dropped: list[tuple[str, str]] = []
+        if server.headers:
+            dropped += [
+                ("header", h)
+                for h in rewrite_headers_for_codex(server.headers).dropped_default_fallbacks
+            ]
+        if server.env:
+            dropped += [
+                ("env var", e) for e in rewrite_env_for_codex(server.env).dropped_default_fallbacks
+            ]
+        for kind, field_name in dropped:
+            rows.append(
+                SyncResult(
+                    tool_id=None,
+                    concern=SyncConcern.MCP,
+                    action="skipped",
+                    file_path=None,
+                    message=(
+                        f"MCP server `{name}` {kind} `{field_name}` uses a "
+                        "`${VAR:-default}` default that Codex's config can't represent; "
+                        "the default was dropped. This is a manual-fix — set it "
+                        "directly in `.codex/config.toml`."
+                    ),
+                )
+            )
+    return rows

@@ -65,6 +65,14 @@ def sync(
         "--no-persist-report",
         help="Skip writing .crossby/sync-report.md after the run.",
     ),
+    include_user_scope: bool = typer.Option(
+        False,
+        "--include-user-scope",
+        help=(
+            "Also read user-scope MCP servers from ~/.claude.json. Off by "
+            "default so personal servers don't leak into committed project files."
+        ),
+    ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
     """Sync AI tool configs across tools — no config file needed.
@@ -137,7 +145,7 @@ def sync(
         from crossby.sync.validate import has_errors
         from crossby.sync.validate import validate_target as _do_validate
 
-        findings = _do_validate(project_root)
+        findings = _do_validate(project_root, include_user_scope=include_user_scope)
         _display_validation(findings)
         if has_errors(findings):
             raise typer.Exit(1)
@@ -152,6 +160,7 @@ def sync(
             concern=concern,
             mode="doctor" if doctor else "plan",
             strategy=strategy,
+            include_user_scope=include_user_scope,
         )
         return
 
@@ -221,7 +230,9 @@ def sync(
     # loop above. The "no source anywhere" case still falls through to the
     # interactive wizard so the existing zero-config UX is preserved.
     if source_tool is not None:
-        data = build_sync_data(project_root, from_tool=source_tool)
+        data = build_sync_data(
+            project_root, from_tool=source_tool, include_user_scope=include_user_scope
+        )
         _apply_strategy(data, strategy)
         target_tools = (
             [target_tool] if target_tool else [t for t in installed_tools if t != source_tool]
@@ -234,6 +245,7 @@ def sync(
             dry_run=dry_run,
             force=force,
             installed_tools=target_tools,
+            include_user_scope=include_user_scope,
         )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
@@ -243,7 +255,7 @@ def sync(
         return
 
     # Interactive wizard mode
-    scan = scan_project(project_root, installed_tools)
+    scan = scan_project(project_root, installed_tools, include_user_scope=include_user_scope)
 
     console.step(f"Detected tools: {', '.join(str(t) for t in installed_tools)}")
     console.empty()
@@ -355,9 +367,16 @@ def sync(
 
     # MCP
     if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
-        servers = discover_mcp(project_root)
+        from crossby.sync.mcp_discovery import discover_mcp_servers
+
+        scoped = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
+        servers = discover_mcp(project_root, include_user_scope=include_user_scope)
+        n_user = sum(
+            1 for name, ds in scoped.servers.items() if ds.scope == "user" and name in servers
+        )
+        scope_note = f" ({len(servers) - n_user} project, {n_user} user)" if n_user else ""
         if servers and prompts.confirm(
-            f"Port {len(servers)} MCP server(s) to all tools?", default=True
+            f"Port {len(servers)} MCP server(s){scope_note} to all tools?", default=True
         ):
             data.mcp_servers = servers
 
@@ -432,6 +451,7 @@ def sync(
             dry_run=dry_run,
             force=force,
             installed_tools=installed_tools,
+            include_user_scope=include_user_scope,
         )
     if data.allowed_commands and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
         results += run_sync(
@@ -688,6 +708,7 @@ def _run_inspection(
     concern: str | None,
     mode: Literal["plan", "doctor"],
     strategy: str | None = None,
+    include_user_scope: bool = False,
 ) -> None:
     """Run a dry-run sync and print a plan or doctor summary."""
     from crossby.ai_tools.base import AbstractAITool
@@ -733,7 +754,7 @@ def _run_inspection(
             f"No target tools detected besides the source ({source}). "
             "Install another AI tool or pass --to <tool> explicitly."
         )
-    data = build_sync_data(project_root, from_tool=source)
+    data = build_sync_data(project_root, from_tool=source, include_user_scope=include_user_scope)
     _apply_strategy(data, strategy)
     results = run_sync(
         data,
@@ -743,6 +764,7 @@ def _run_inspection(
         dry_run=True,
         force=False,
         installed_tools=target_tools,
+        include_user_scope=include_user_scope,
     )
 
     summary = summarize_plan(results)
@@ -750,7 +772,7 @@ def _run_inspection(
     console.out.print(plan_text)
 
     if mode == "doctor":
-        validation = _do_validate(project_root)
+        validation = _do_validate(project_root, include_user_scope=include_user_scope)
         report = build_doctor(summary, validation)
         console.empty()
         console.out.print(render_doctor(report))
