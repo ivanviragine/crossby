@@ -398,9 +398,7 @@ class TestCursorHooksWriter:
         path.parent.mkdir()
         existing = {
             "version": 1,
-            "hooks": {
-                "preToolUse": [{"type": "command", "command": "guard", "matcher": "Write"}]
-            },
+            "hooks": {"preToolUse": [{"type": "command", "command": "guard", "matcher": "Write"}]},
         }
         path.write_text(json.dumps(existing), encoding="utf-8")
 
@@ -437,9 +435,7 @@ class TestCursorHooksWriter:
         path.parent.mkdir()
         existing = {
             "version": 1,
-            "hooks": {
-                "preToolUse": [{"type": "command", "command": "python3 ./scripts/guard.py"}]
-            },
+            "hooks": {"preToolUse": [{"type": "command", "command": "python3 ./scripts/guard.py"}]},
         }
         path.write_text(json.dumps(existing), encoding="utf-8")
 
@@ -622,6 +618,34 @@ class TestCopilotHooksWriter:
         assert pre[0]["type"] == "command"
         assert pre[0]["bash"] == "python3 ./scripts/guard.py"
         assert pre[0]["comment"] == "Plan write guard"
+
+    def test_stop_maps_to_agent_stop(self, tmp_path: Path) -> None:
+        """Copilot names the turn-complete event `agentStop`, not `stop`."""
+        hook = HookEntry(event="stop", command="wade-hook stop", description="stop guard")
+        result = self.writer.sync(_cfg(hook), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".github" / "hooks" / "hooks.json")
+        assert data["hooks"]["agentStop"][0]["bash"] == "wade-hook stop"
+        assert "stop" not in data["hooks"]
+
+    def test_session_start_and_post_tool_use_supported(self, tmp_path: Path) -> None:
+        hooks = [
+            HookEntry(event="session_start", command="ctx"),
+            HookEntry(event="post_tool_use", command="audit"),
+        ]
+        result = self.writer.sync(_cfg(*hooks), tmp_path)
+        assert result.action == "created"
+        data = _read_json(tmp_path / ".github" / "hooks" / "hooks.json")
+        assert data["hooks"]["sessionStart"][0]["bash"] == "ctx"
+        assert data["hooks"]["postToolUse"][0]["bash"] == "audit"
+
+    def test_timeout_uses_timeout_sec_key(self, tmp_path: Path) -> None:
+        """Copilot spells it `timeoutSec`; every other tool uses `timeout`."""
+        hook = HookEntry(event="pre_tool_use", command="guard", timeout=45)
+        self.writer.sync(_cfg(hook), tmp_path)
+        entry = _read_json(tmp_path / ".github" / "hooks" / "hooks.json")["hooks"]["preToolUse"][0]
+        assert entry["timeoutSec"] == 45
+        assert "timeout" not in entry
 
     def test_tools_warning_in_message(self, tmp_path: Path) -> None:
         """CopilotHooksWriter warns when canonical hook specifies tools.
@@ -923,19 +947,52 @@ class TestCodexHooksWriter:
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         assert "matcher" not in data["hooks"]["Stop"][0]
 
-    def test_enables_codex_hooks_feature_flag(self, tmp_path: Path) -> None:
-        """A sync writes [features].codex_hooks = true so Codex loads the hooks."""
+    def test_enables_both_codex_hooks_feature_flags(self, tmp_path: Path) -> None:
+        """Writes the canonical `hooks` key AND the deprecated `codex_hooks` alias.
+
+        `hooks` is stable and on by default since Codex 0.146.0, so this is
+        defensive; the alias keeps a project pinned to an older Codex working.
+        Unknown feature keys are inert, so writing both is safe everywhere.
+        """
         import tomllib
 
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "created"
-        # Flag written automatically → no manual-fix note on the happy path.
-        assert result.message is None or "features.codex_hooks" not in result.message
+        # Flags written automatically → no manual-fix note on the happy path.
+        assert result.message is None or "features.hooks" not in result.message
 
         config = tmp_path / ".codex" / "config.toml"
         assert config.is_file()
         parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["features"]["hooks"] is True
         assert parsed["features"]["codex_hooks"] is True
+
+    def test_adds_missing_canonical_key_to_legacy_config(self, tmp_path: Path) -> None:
+        """A config written by an older crossby only has the alias — top it up.
+
+        The splicer must preserve surrounding comments and key order while
+        adding just the missing key.
+        """
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# my codex config\nmodel = 'gpt-5'\n\n"
+            "[features]\n# enable hooks\ncodex_hooks = true\n",
+            encoding="utf-8",
+        )
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is True
+        assert parsed["features"]["codex_hooks"] is True
+        assert parsed["model"] == "gpt-5"
+        # Comments survive the splice.
+        assert "# my codex config" in text
+        assert "# enable hooks" in text
 
     def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
         """Enabling the flag merges into an existing config, keeping other keys."""
