@@ -424,8 +424,13 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     return list(merged.values())
 
 
-# A bare alternation of literal tool names — the only matcher shape that is
-# also a tool list. Excludes the catch-all `.*` (and `*`) by construction.
+# A bare alternation of literal tool names — the only matcher shape that is also
+# a tool list. `[\w-]` admits the characters real tool names use (including MCP's
+# `mcp__server__tool` and hyphenated server names) and nothing else, so every
+# regex construct is excluded: the catch-all `.*` and `*`, quantifiers
+# (`Write.*`), groups (`(Write|Shell)`), anchors, character classes, and escapes.
+# Matched with `fullmatch`, so a partial hit like `Write.*` cannot sneak through
+# on its `Write` prefix.
 _PLAIN_ALTERNATION = re.compile(r"[\w-]+(?:\|[\w-]+)*")
 
 

@@ -203,7 +203,19 @@ class HookEvent(BaseModel):
 
 
 class HookDecision(BaseModel):
-    """A tool-neutral hook decision, serialized per dialect by ``emit_decision``."""
+    """A tool-neutral hook decision, serialized per dialect by ``emit_decision``.
+
+    Deliberately binary on the gate: there is no ``ask`` action. Copilot's
+    ``permissionDecision`` and agy's PreToolUse decision both accept an
+    ``ask``/``force_ask`` value that would hand the call back to the user, but a
+    crossby guard has no interactive channel — it runs headless, and in batch
+    runs a prompt nobody answers is a hang, not a safety net. Guards therefore
+    resolve to allow or deny themselves. Deny carries a ``reason``, which is what
+    the user sees; that reason is REQUIRED on Copilot deny.
+
+    ``context`` is not a gate decision at all — it injects text on the
+    non-blocking events (SessionStart / PostToolUse / prompt-submit).
+    """
 
     action: Literal["allow", "deny", "context"]
     reason: str = ""

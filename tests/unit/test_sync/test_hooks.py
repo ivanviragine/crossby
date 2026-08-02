@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -581,6 +582,27 @@ class TestCursorHooksWriter:
         assert "tools" not in migrated
         assert "event" not in migrated
         assert data["hooks"]["beforeSubmitPrompt"][0]["command"] == "ctx"
+
+    def test_migration_does_not_mutate_its_input(self) -> None:
+        """The migrator returns a new config instead of editing the caller's.
+
+        It used to `pop()` legacy keys off the dict it was handed, so an early
+        return would have left a half-migrated config behind.
+        """
+        from crossby.sync.hooks import _migrate_legacy_cursor_config
+
+        legacy: dict[str, object] = {
+            "preToolUse": [{"event": "preToolUse", "command": "old-guard", "tools": ["Write"]}],
+            "someOtherSetting": {"keep": True},
+        }
+        before = copy.deepcopy(legacy)
+
+        migrated, changed = _migrate_legacy_cursor_config(legacy)
+
+        assert changed is True
+        assert legacy == before, "input dict must be untouched"
+        assert "preToolUse" not in migrated
+        assert migrated["hooks"]["preToolUse"][0]["matcher"] == "Write"
 
     def test_preserves_other_keys(self, tmp_path: Path) -> None:
         path = tmp_path / ".cursor" / "hooks.json"

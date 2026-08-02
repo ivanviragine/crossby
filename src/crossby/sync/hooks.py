@@ -423,7 +423,9 @@ def _migrate_legacy_cursor_config(existing: dict[str, Any]) -> tuple[dict[str, A
     broken file behind, and convert each entry's ``tools`` list to the ``matcher``
     regex Cursor actually reads (there is no ``tools`` array in its schema).
 
-    Returns the (possibly rewritten) config and whether anything moved.
+    Returns the (possibly rewritten) config and whether anything moved. Does not
+    touch ``existing`` — the returned dict is the authoritative one, so callers
+    must use it rather than assume the argument was updated.
     """
     hooks_section = existing.get("hooks")
     legacy_keys = [
@@ -434,12 +436,16 @@ def _migrate_legacy_cursor_config(existing: dict[str, Any]) -> tuple[dict[str, A
     if not legacy_keys and isinstance(hooks_section, dict):
         return existing, False
 
+    # Rebuild rather than pop/append in place: `existing` is the caller's parsed
+    # file, and a half-migrated dict left behind on an early return would be a
+    # trap for the next reader.
     migrated: dict[str, Any] = dict(hooks_section) if isinstance(hooks_section, dict) else {}
+    out: dict[str, Any] = {k: v for k, v in existing.items() if k not in legacy_keys}
     for key in legacy_keys:
-        entries = existing.pop(key)
-        target: list[Any] = migrated.get(key, [])
-        if not isinstance(target, list):
-            target = []
+        entries = existing[key]
+        # `migrated` is a shallow copy, so this list is still the caller's.
+        existing_target = migrated.get(key)
+        target: list[Any] = list(existing_target) if isinstance(existing_target, list) else []
         for entry in entries:
             if not isinstance(entry, dict) or not entry.get("command"):
                 continue
@@ -461,8 +467,8 @@ def _migrate_legacy_cursor_config(existing: dict[str, Any]) -> tuple[dict[str, A
         if target:
             migrated[key] = target
 
-    existing["hooks"] = migrated
-    return existing, True
+    out["hooks"] = migrated
+    return out, True
 
 
 def _cursor_upsert(
