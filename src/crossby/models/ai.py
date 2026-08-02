@@ -180,11 +180,14 @@ class AIToolCapabilities(BaseModel, frozen=True):
     hard-blocks)."""
     hook_output_dialect: HookOutputDialect = HookOutputDialect.HOOK_SPECIFIC_OUTPUT
     """Which stdout shape this tool reads a *tool-call* hook decision from."""
-    hook_stop_dialect: HookStopDialect = HookStopDialect.BLOCK_DECISION
+    hook_stop_dialect: HookStopDialect = HookStopDialect.NONE
     """Which stdout shape this tool reads a *Stop* hook decision from. Declared
     separately from ``hook_output_dialect`` because the two channels are
-    independent per tool (see :class:`HookStopDialect`). Should be
-    ``HookStopDialect.NONE`` whenever ``supports_stop_hook`` is False."""
+    independent per tool (see :class:`HookStopDialect`).
+
+    Defaults to ``NONE`` to stay consistent with ``supports_stop_hook``, which
+    defaults to False: an adapter that never opts into a Stop hook should not
+    imply it speaks one. Every adapter crossby ships declares this explicitly."""
     hook_fail_open_default: bool = False
     """Tool treats a hook that errors/crashes as *allow* (fail-open) unless the
     hook config opts into fail-closed. True for Cursor — callers writing a

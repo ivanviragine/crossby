@@ -106,6 +106,23 @@ class TestTranslateTools:
         assert _translate_tools(["Edit", "Bash"], AIToolID.CLAUDE) == ["Edit", "Bash"]
 
 
+class TestHookEntryTimeout:
+    def test_rejects_non_positive_timeout(self) -> None:
+        """Cursor rejects a non-positive timeout and then loads NO hooks at all.
+
+        Catching it here beats writing a config that silently disables the guard.
+        """
+        import pytest
+        from pydantic import ValidationError
+
+        for bad in (0, -1):
+            with pytest.raises(ValidationError):
+                HookEntry(event="pre_tool_use", command="guard", timeout=bad)
+
+    def test_none_means_tool_default(self) -> None:
+        assert HookEntry(event="pre_tool_use", command="guard").timeout is None
+
+
 class TestToolsToMatcher:
     def test_two_tools(self) -> None:
         assert _tools_to_matcher(["Edit", "Write"]) == "Edit|Write"
