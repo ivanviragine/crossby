@@ -508,6 +508,41 @@ class TestCursorHooksWriter:
         # The scoped half wins — the unscoped shell twin must not erase it.
         assert entries[0].tools == ["Write", "Bash"]
 
+    def test_hand_authored_regex_matcher_is_not_read_as_tools(self, tmp_path: Path) -> None:
+        """A real regex matcher must not be split into bogus tool names.
+
+        ``matcher`` is a regex, so splitting on ``|`` unconditionally turns
+        ``(Write|Shell)`` into ``(Write`` / ``Shell)``. Those fragments would
+        become ``HookEntry.tools`` and get unioned back into the matcher on the
+        next write, corrupting the user's file a little more each sync.
+        """
+        from crossby.sync.readers import _read_cursor_hooks
+
+        path = tmp_path / ".cursor" / "hooks.json"
+        path.parent.mkdir()
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "preToolUse": [
+                            {"command": "wildcard", "matcher": "Write.*"},
+                            {"command": "grouped", "matcher": "(Write|Shell)"},
+                            {"command": "plain", "matcher": "Write|Shell"},
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert by_command["wildcard"] == []
+        assert by_command["grouped"] == []
+        # A bare alternation still round-trips: Cursor's `Shell` maps back to
+        # the canonical `Bash`.
+        assert by_command["plain"] == ["Write", "Bash"]
+
     def test_migrates_legacy_flat_shape(self, tmp_path: Path) -> None:
         """Pre-0.13 crossby wrote a shape Cursor rejects outright; repair it.
 

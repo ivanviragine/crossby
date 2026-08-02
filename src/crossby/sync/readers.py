@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -423,6 +424,11 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     return list(merged.values())
 
 
+# A bare alternation of literal tool names — the only matcher shape that is
+# also a tool list. Excludes the catch-all `.*` (and `*`) by construction.
+_PLAIN_ALTERNATION = re.compile(r"[\w-]+(?:\|[\w-]+)*")
+
+
 def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
     """Recover canonical tool names from a Cursor entry's scope.
 
@@ -430,9 +436,16 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
     names, e.g. ``Write|Shell``); falls back to the ``tools`` array that only
     ever existed in crossby's own pre-0.13 output. A catch-all matcher means
     "all tools", which is the same as no scope.
+
+    ``matcher`` is a regex, not a tool list, so only a plain ``|`` alternation
+    is split. A hand-authored matcher like ``Write.*`` or ``(Write|Shell)``
+    would otherwise yield fragments (``(Write``, ``Shell)``) that become
+    ``HookEntry.tools`` and get unioned straight back into the matcher on the
+    next write, corrupting ``.cursor/hooks.json``. Anything fancier is treated
+    as unscoped instead.
     """
     matcher = entry.get("matcher")
-    if isinstance(matcher, str) and matcher and matcher not in (".*", "*"):
+    if isinstance(matcher, str) and _PLAIN_ALTERNATION.fullmatch(matcher):
         return [_reverse_tool_name(t) for t in matcher.split("|") if t]
     tools_raw = entry.get("tools")
     if isinstance(tools_raw, list):
