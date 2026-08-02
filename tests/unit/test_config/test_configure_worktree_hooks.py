@@ -243,7 +243,7 @@ class TestCopilotConfigureWorktreeHooks:
         assert str(guard) in bashes
 
     def test_no_tool_filter_in_output(self, tmp_path: Path) -> None:
-        """Copilot has no per-tool filter — guard fires on all tool calls."""
+        """crossby writes Copilot hooks unscoped — guard fires on all tool calls."""
         guard = _guard(tmp_path)
         copilot_configure_worktree_hooks(tmp_path, guard)
 

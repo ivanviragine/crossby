@@ -765,8 +765,11 @@ class CopilotHooksWriter(AbstractSyncWriter):
                         ManualFixNote(
                             category="hooks.tools",
                             message=(
-                                "Copilot hooks have no per-tool filter; source `tools` "
-                                "scope was dropped and the hook applies to all tools."
+                                "crossby writes Copilot hooks unscoped; the source "
+                                "`tools` scope was dropped and the hook applies to all "
+                                "tools. Copilot itself does support a `matcher` regex "
+                                "on its tool events, so add one by hand if the hook "
+                                "must be scoped."
                             ),
                         )
                     )

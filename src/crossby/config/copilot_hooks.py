@@ -18,10 +18,11 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
     twice does not duplicate the entry. Preserves any existing hooks already
     in the file.
 
-    **Copilot limitation**: Copilot's hook format has no per-tool filter field.
-    The guard will fire on *all* tool calls, not just file-write tools (Edit,
-    Write). This is a known Copilot limitation and cannot be worked around
-    without Copilot adding tool-filter support.
+    **Unscoped**: the guard fires on *all* tool calls, not just file-write tools
+    (Edit, Write). Copilot does support a `matcher` regex on its tool events;
+    crossby simply doesn't wire it up yet (tracked in #88 §6), so this is a
+    crossby gap rather than a Copilot limitation. Firing too often is safe here —
+    the guard decides per call from its own payload.
 
     If ``.github/hooks/hooks.json`` contains invalid JSON, the underlying writer
     emits a ``warnings.warn()`` and returns without writing — no exception is raised.
@@ -30,7 +31,7 @@ def configure_plan_hooks(worktree_path: Path, guard_path: Path) -> None:
         worktree_path: Root of the worktree (directory that contains ``.github/``).
         guard_path: Path to the guard script to run before tool calls.
     """
-    # tools is intentionally left empty: Copilot has no per-tool filter.
+    # tools is intentionally left empty: crossby writes Copilot hooks unscoped.
     hook = HookEntry(event="pre_tool_use", tools=[], command=str(guard_path))
     CopilotHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
 
@@ -42,10 +43,11 @@ def configure_worktree_hooks(worktree_path: Path, guard_path: Path) -> None:
     twice does not duplicate the entry. Preserves any existing hooks already
     in the file.
 
-    **Copilot limitation**: Copilot's hook format has no per-tool filter field.
-    The guard will fire on *all* tool calls, not just file-write tools (Edit,
-    Write). This is a known Copilot limitation and cannot be worked around
-    without Copilot adding tool-filter support.
+    **Unscoped**: the guard fires on *all* tool calls, not just file-write tools
+    (Edit, Write). Copilot does support a `matcher` regex on its tool events;
+    crossby simply doesn't wire it up yet (tracked in #88 §6), so this is a
+    crossby gap rather than a Copilot limitation. Firing too often is safe here —
+    the guard decides per call from its own payload.
 
     If ``.github/hooks/hooks.json`` contains invalid JSON, the underlying writer
     emits a ``warnings.warn()`` and returns without writing — no exception is raised.
@@ -54,6 +56,6 @@ def configure_worktree_hooks(worktree_path: Path, guard_path: Path) -> None:
         worktree_path: Root of the worktree (directory that contains ``.github/``).
         guard_path: Path to the guard script to run before tool calls.
     """
-    # tools is intentionally left empty: Copilot has no per-tool filter.
+    # tools is intentionally left empty: crossby writes Copilot hooks unscoped.
     hook = HookEntry(event="pre_tool_use", tools=[], command=str(guard_path))
     CopilotHooksWriter().sync(SyncData(hooks=[hook]), worktree_path)
