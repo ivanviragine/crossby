@@ -84,15 +84,20 @@ print(c.get('pypi', 'password', fallback=''))
     if [[ -z "$PYPI_TOKEN" ]]; then
         echo "No token found in UV_PUBLISH_TOKEN or ~/.pypirc"
         printf "Enter PyPI token: "
-        read -r PYPI_TOKEN
+        # -s: a pasted token must not stay on screen (or in the scrollback of
+        # whatever terminal recording is running).
+        read -r -s PYPI_TOKEN
+        printf "\n"
         if [[ -z "$PYPI_TOKEN" ]]; then
             echo "Error: no token provided."
             exit 1
         fi
     fi
 
-    # Publish to PyPI
-    uv publish --token "$PYPI_TOKEN"
+    # Publish to PyPI. The token goes through the environment, not argv —
+    # command-line arguments are world-readable via `ps` for the life of the
+    # upload.
+    UV_PUBLISH_TOKEN="$PYPI_TOKEN" uv publish
     echo ""
 fi
 
