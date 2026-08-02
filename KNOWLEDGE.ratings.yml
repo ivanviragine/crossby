@@ -1,9 +1,17 @@
-0bb66acc:
+069302a6:
   down: 0
+  stale: 0
+  up: 1
+0bb66acc:
+  down: 1
   stale: 0
   superseded_by: 6ad64ecc
   up: 1
 0dfee0b6:
+  down: 0
+  stale: 0
+  up: 1
+14b6377d:
   down: 0
   stale: 0
   up: 1
@@ -16,6 +24,14 @@
   stale: 0
   up: 2
 3d8f2bc6:
+  down: 0
+  stale: 0
+  up: 1
+521e4f71:
+  down: 0
+  stale: 0
+  up: 1
+6ad64ecc:
   down: 0
   stale: 0
   up: 1
@@ -66,7 +82,7 @@ b71491ff:
   up: 1
 c39fe2c3:
   down: 0
-  stale: 0
+  stale: 1
   superseded_by: 521e4f71
   up: 2
 de22c329:
