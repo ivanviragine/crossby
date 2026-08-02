@@ -12,6 +12,7 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HookOutputDialect,
+    HookStopDialect,
     TokenUsage,
 )
 
@@ -57,6 +58,12 @@ class AntigravityCLIAdapter(AbstractAITool):
             # hook_fail_open_default stays False.
             supports_stop_hook=True,
             hook_output_dialect=HookOutputDialect.DECISION,
+            # Inverted polarity vs every other tool: agy blocks a Stop by
+            # telling the agent to *continue*. Its PreToolUse vocabulary is
+            # allow/deny/ask/force_ask — "continue" is a Stop-only word there,
+            # and "block" is not a word agy knows at all (it errors with
+            # `unknown pre-tool hook decision "block"`).
+            hook_stop_dialect=HookStopDialect.CONTINUE_DECISION,
             hook_fail_open_default=False,
             # sandboxes_writes stays False deliberately: agy's write sandbox is an
             # opt-in flag (``--sandbox``, passed only in yolo_args), not a verified

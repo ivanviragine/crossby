@@ -10,16 +10,27 @@ This centralizes the per-tool dialect knowledge that consumers (e.g. wade's
 deliberately import-light — only ``crossby.models.ai`` plus stdlib/pydantic — so
 a pre-tool-use hook that fires on every edit starts fast.
 
-Dialects (grouped by output *shape*, not tool — see :class:`HookOutputDialect`):
+Tool-call dialects (grouped by output *shape*, not tool — see
+:class:`HookOutputDialect`):
 
 - Claude / Codex → ``HOOK_SPECIFIC_OUTPUT``
 - Cursor → ``PERMISSION``
-- Copilot → ``EXIT_CODE``
+- Copilot → ``PERMISSION_DECISION``
 - Antigravity CLI (``agy``) → ``DECISION``
+
+Stop dialects are tracked separately (see :class:`HookStopDialect`), because a
+tool's Stop channel does not follow from its tool-call channel — Copilot reads
+the flat permission shape for PreToolUse but ``{"decision": "block"}`` for
+``agentStop``:
+
+- Claude / Codex / Copilot → ``BLOCK_DECISION``
+- Cursor → ``FOLLOWUP_MESSAGE``
+- Antigravity CLI (``agy``) → ``CONTINUE_DECISION``
 
 A deny always exits 2 regardless of dialect, so the block is honored even by a
 tool that ignores stdout (and a security guard stays fail-*closed*); the dialect
-only governs the stdout payload.
+only governs the stdout payload. A *Stop* decision never exits 2 — that channel
+stays fail-open so a guard cannot trap the agent mid-turn.
 """
 
 from __future__ import annotations
@@ -29,9 +40,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from crossby.models.ai import AIToolID, HookOutputDialect
+from crossby.models.ai import AIToolID, HookOutputDialect, HookStopDialect
 
 __all__ = [
+    "READ_TOOL_NAMES",
+    "SHELL_TOOL_NAMES",
     "HookDecision",
     "HookEmission",
     "HookEvent",
@@ -62,11 +75,92 @@ _CANONICAL_EVENT_NAMES: dict[str, str] = {
     "stop": "stop",
 }
 
-# Tool-call names that write to the filesystem (lowercased). Mirrors the set the
-# hook writers scope their matchers to; used to tell write intents from reads.
-WRITE_TOOL_NAMES: frozenset[str] = frozenset(
-    {"write", "edit", "multiedit", "create", "delete", "save", "append", "notebookedit"}
+# Tool-call names that only *read* (lowercased), grouped by the tool that emits
+# them so additions stay auditable. Anything not listed here — and not in
+# SHELL_TOOL_NAMES — is treated as a write, so a tool name crossby has never
+# seen fails *closed* rather than slipping past a guard.
+#
+# Verified against each tool's current docs / a live probe of the binary. When a
+# tool gains a read-only tool call, add it here or its reads start getting
+# routed through the write guard.
+READ_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        # Claude — `task` spawns a subagent whose own tool calls each fire their
+        # own PreToolUse hook, so guarding the spawn itself would double-guard.
+        # `todowrite` writes the internal todo list, not the filesystem.
+        "read",
+        "grep",
+        "glob",
+        "webfetch",
+        "websearch",
+        "todowrite",
+        "task",
+        # Cursor (adds `tabread`; shares read/grep with Claude).
+        "tabread",
+        # Codex — intentionally contributes nothing. Codex ships no read-only
+        # tool calls at all; its own instructions route every read through `rg`
+        # in the shell, which is why the SHELL_TOOL_NAMES carve-out below is
+        # what keeps a Codex session usable under a write guard.
+        # Copilot.
+        "view",
+        "rg",
+        "web_fetch",
+        "ask_user",
+        # Antigravity CLI (agy) — live-captured toolCall.name values.
+        "view_file",
+        "list_dir",
+        "grep_search",
+        "read_url_content",
+        "search_web",
+        "list_permissions",
+    }
 )
+
+# Shell/command-execution tool names (lowercased).
+#
+# These are deliberately NOT writes. `is_write` means specifically "a
+# path-addressed file write a containment guard can check against
+# ``file_path``" — a shell call has no such path, so classifying it as a write
+# would hand the guard an unverifiable write and get every shell command
+# denied. Shell calls are still guarded, just through the separate
+# :attr:`HookEvent.command` channel (command-content policies), not
+# ``file_path``.
+#
+# This is a carve-out, not a hole: leaving these out of the set below would
+# brick Codex outright (every Codex read is a shell call) and break any tool
+# whose guard is registered unscoped.
+SHELL_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "bash",  # Claude, Codex, Copilot
+        "shell",  # Cursor
+        "exec_command",  # Codex
+        "powershell",  # Copilot
+        "run_command",  # Antigravity CLI
+    }
+)
+
+# Canonical events on which Cursor actually reads a top-level
+# ``additional_context``. Its `beforeSubmitPrompt` output schema is `continue` +
+# `user_message` only, so context emitted there is silently dropped.
+_CURSOR_CONTEXT_EVENTS: frozenset[str] = frozenset({"session_start", "post_tool_use"})
+
+# Back-compat: map a legacy tool-call dialect to the stop dialect that tool
+# uses, so callers still passing a HookOutputDialect to emit_stop_decision keep
+# working unchanged (wade does this today at wade/hooks/cli.py:140,153).
+_LEGACY_STOP_DIALECTS: dict[HookOutputDialect, HookStopDialect] = {
+    HookOutputDialect.HOOK_SPECIFIC_OUTPUT: HookStopDialect.BLOCK_DECISION,
+    HookOutputDialect.PERMISSION: HookStopDialect.FOLLOWUP_MESSAGE,
+    HookOutputDialect.PERMISSION_DECISION: HookStopDialect.BLOCK_DECISION,
+    HookOutputDialect.DECISION: HookStopDialect.CONTINUE_DECISION,
+    HookOutputDialect.EXIT_CODE: HookStopDialect.NONE,
+}
+
+
+def _resolve_stop_dialect(dialect: HookStopDialect | HookOutputDialect) -> HookStopDialect:
+    """Map a legacy tool-call dialect to its stop dialect; pass stop dialects through."""
+    if isinstance(dialect, HookOutputDialect):
+        return _LEGACY_STOP_DIALECTS[dialect]
+    return dialect
 
 
 class HookEvent(BaseModel):
@@ -89,16 +183,39 @@ class HookEvent(BaseModel):
 
     @property
     def is_write(self) -> bool:
-        """True when this is a filesystem-write tool call (or intent unknown).
+        """True when this is a path-addressed filesystem write (or intent unknown).
 
-        Unknown tool name → treated as a possible write so guards still inspect
-        the path (matches the guard scripts' fail-safe behavior).
+        Fail-*closed* by construction: this is a denylist, not an allowlist. A
+        tool name crossby has never seen (a new tool call, a tool crossby does
+        not model, Codex's ``apply_patch``, agy's ``write_to_file``) is treated
+        as a write, so a guard inspects it rather than waving it through. Only
+        the names in :data:`READ_TOOL_NAMES` are known-safe reads.
+
+        Shell calls (:data:`SHELL_TOOL_NAMES`) are deliberately **not** writes —
+        see that constant for why. They are guarded through
+        :attr:`command` instead of :attr:`file_path`.
         """
-        return self.tool_name is None or self.tool_name in WRITE_TOOL_NAMES
+        if self.tool_name is None:
+            return True  # unknown intent → treat as a write
+        if self.tool_name in SHELL_TOOL_NAMES:
+            return False  # guarded via the `command` channel, not `file_path`
+        return self.tool_name not in READ_TOOL_NAMES
 
 
 class HookDecision(BaseModel):
-    """A tool-neutral hook decision, serialized per dialect by ``emit_decision``."""
+    """A tool-neutral hook decision, serialized per dialect by ``emit_decision``.
+
+    Deliberately binary on the gate: there is no ``ask`` action. Copilot's
+    ``permissionDecision`` and agy's PreToolUse decision both accept an
+    ``ask``/``force_ask`` value that would hand the call back to the user, but a
+    crossby guard has no interactive channel — it runs headless, and in batch
+    runs a prompt nobody answers is a hang, not a safety net. Guards therefore
+    resolve to allow or deny themselves. Deny carries a ``reason``, which is what
+    the user sees; that reason is REQUIRED on Copilot deny.
+
+    ``context`` is not a gate decision at all — it injects text on the
+    non-blocking events (SessionStart / PostToolUse / prompt-submit).
+    """
 
     action: Literal["allow", "deny", "context"]
     reason: str = ""
@@ -237,6 +354,17 @@ def _extract_tool_name(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _canonical_event(event: str | None) -> str | None:
+    """Normalize any casing/spelling of an event name to its canonical form.
+
+    Accepts canonical (``session_start``), tool-native (``sessionStart``,
+    ``SessionStart``) or unknown names; unknown names pass through unchanged.
+    """
+    if not event:
+        return None
+    return _CANONICAL_EVENT_NAMES.get(event.replace("_", "").lower(), event)
+
+
 def _extract_event(data: dict[str, Any], override: str | None) -> str | None:
     """Resolve the canonical event name from the payload or an override."""
     if override:
@@ -337,17 +465,25 @@ def emit_decision(
       "invalid hook output" rejection.
     - ``deny`` → exit 2 always (universal block), plus the dialect's stdout JSON
       and the reason on stderr (human-readable, honored by ``EXIT_CODE`` tools).
-    - ``context`` → exit 0; injects ``additionalContext`` for
-      ``HOOK_SPECIFIC_OUTPUT`` (Claude/Codex) and a top-level
-      ``additional_context`` for ``PERMISSION`` (Cursor, via its
-      ``beforeSubmitPrompt`` event); a no-op allow for ``EXIT_CODE`` and
-      ``DECISION`` (no verified context-injection channel — agy's
-      PreInvocation-based injection is out of scope, so it degrades to proceed).
+    - ``context`` → exit 0, with the injection key each tool actually reads:
+      ``hookSpecificOutput.additionalContext`` for ``HOOK_SPECIFIC_OUTPUT``
+      (Claude/Codex), a **flat** top-level ``additionalContext`` for
+      ``PERMISSION_DECISION`` (Copilot), and a top-level ``additional_context``
+      for ``PERMISSION`` (Cursor) — the last only on the events Cursor reads it
+      on. ``DECISION`` (agy) has no verified context-injection channel, so it
+      degrades to a no-op proceed.
+
+      The shapes are deliberately *not* interchangeable. Claude validates
+      PreToolUse output strictly and silently fails open on an unexpected
+      root-level key, so its context must be nested and nothing else added;
+      Copilot never nests (``hookSpecificOutput`` appears nowhere in GitHub's
+      hooks docs) and caps the joined value at 10 KB.
 
     Args:
         decision: The tool-neutral decision.
         dialect: The tool's output dialect (from ``AIToolCapabilities``).
-        event: Canonical event name, used for the ``hookEventName`` field.
+        event: Canonical event name, used for the ``hookEventName`` field and to
+            gate Cursor's context injection to the events that accept it.
     """
     if decision.action == "allow":
         if dialect is HookOutputDialect.DECISION:
@@ -363,7 +499,21 @@ def emit_decision(
                 }
             }
             return HookEmission(stdout=json.dumps(ctx_payload), exit_code=0)
-        if dialect is HookOutputDialect.PERMISSION and decision.additional_context:
+        if dialect is HookOutputDialect.PERMISSION_DECISION and decision.additional_context:
+            # Copilot reads a flat top-level key — never nested.
+            return HookEmission(
+                stdout=json.dumps({"additionalContext": decision.additional_context}),
+                exit_code=0,
+            )
+        if (
+            dialect is HookOutputDialect.PERMISSION
+            and decision.additional_context
+            and _canonical_event(event) in _CURSOR_CONTEXT_EVENTS
+        ):
+            # Cursor accepts `additional_context` on sessionStart/postToolUse
+            # only. Its beforeSubmitPrompt output schema is `continue` +
+            # `user_message`, so emitting the key there is silently ignored —
+            # gate it rather than pretend the injection landed.
             return HookEmission(
                 stdout=json.dumps({"additional_context": decision.additional_context}),
                 exit_code=0,
@@ -388,6 +538,18 @@ def emit_decision(
             }
         }
         return HookEmission(stdout=json.dumps(deny_payload), stderr=reason, exit_code=2)
+    if dialect is HookOutputDialect.PERMISSION_DECISION:
+        # Copilot: flat keys, reason REQUIRED on deny. Exactly one JSON object —
+        # Copilot strips {"type":"progress"} lines then runs a single
+        # JSON.parse, so a second object would concatenate into invalid JSON and
+        # be silently ignored. Exit 2 is an additional deny channel that
+        # overrides an "allow" in stdout, so it keeps the guard fail-closed even
+        # if stdout is dropped.
+        copilot_deny: dict[str, Any] = {
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+        return HookEmission(stdout=json.dumps(copilot_deny), stderr=reason, exit_code=2)
     if dialect is HookOutputDialect.PERMISSION:
         perm_payload: dict[str, Any] = {"permission": "deny", "agent_message": reason}
         return HookEmission(stdout=json.dumps(perm_payload), stderr=reason, exit_code=2)
@@ -398,45 +560,60 @@ def emit_decision(
 def emit_stop_decision(
     should_block: bool,
     reason: str,
-    dialect: HookOutputDialect,
+    dialect: HookStopDialect | HookOutputDialect,
 ) -> HookEmission:
     """Serialize a session-*Stop* decision into a tool's continue/block contract.
 
     Unlike PreToolUse (allow/deny a tool call), a Stop hook keeps the agent
     working by *blocking* completion and feeding a message back:
 
-    - ``HOOK_SPECIFIC_OUTPUT`` (Claude, Codex): ``{"decision": "block", "reason": …}``
-    - ``PERMISSION`` (Cursor): ``{"followup_message": …}`` (auto-submitted; the
-      tool bounds re-fires via its own ``loop_limit``).
-    - ``DECISION`` (agy): ``{"decision": "continue", "reason": …}`` — agy blocks a
-      Stop by telling the agent to *continue*, the inverse polarity of the
-      top-level ``continue`` boolean the other stdout dialects use for a no-op.
-    - ``EXIT_CODE`` (Copilot): no Stop-block channel — no-op allow. These
-      tools also report ``supports_stop_hook = False``, so a Stop hook should not
-      be installed for them in the first place.
+    - ``BLOCK_DECISION`` (Claude, Codex, Copilot):
+      ``{"decision": "block", "reason": …}``
+    - ``FOLLOWUP_MESSAGE`` (Cursor): ``{"followup_message": …}`` (auto-submitted;
+      the tool bounds re-fires via its own ``loop_limit``).
+    - ``CONTINUE_DECISION`` (agy): ``{"decision": "continue", "reason": …}`` — agy
+      blocks a Stop by telling the agent to *continue*, the inverse polarity of
+      the top-level ``continue`` boolean the other stdout dialects use for a
+      no-op.
+    - ``NONE``: no Stop-block channel — no-op allow. A tool mapped here should
+      also report ``supports_stop_hook = False``, so a Stop hook is not installed
+      for it in the first place.
 
     ``should_block=False`` → the turn ends normally, but a *no-op still emits
     JSON on the stdout-reading dialects*: Codex rejects an empty-stdout Stop hook
     with "invalid stop hook JSON output" (confirmed against a live Codex
     session), so a silent no-op would surface an error to the user on every clean
-    stop. ``{"continue": true}`` is the no-op for Claude/Codex/Cursor; agy uses a
-    bare ``{}`` instead, because to agy a top-level ``continue`` is not a
-    recognized key and ``{"decision": "continue"}`` would *block* the stop.
-    ``EXIT_CODE`` tools ignore stdout, so they stay truly silent.
+    stop. ``{"continue": true}`` is the no-op for Claude/Codex/Cursor/Copilot;
+    agy uses a bare ``{}`` instead, because to agy a top-level ``continue`` is not
+    a recognized key and ``{"decision": "continue"}`` would *block* the stop.
+    ``NONE`` tools ignore stdout, so they stay truly silent.
+
+    Never exits non-zero, on any dialect: the Stop channel is fail-*open* by
+    design, so a guard that misfires can annoy but cannot trap the agent in a
+    turn it is unable to end.
+
+    Args:
+        should_block: True to keep the agent working instead of ending the turn.
+        reason: Message fed back to the agent when blocking.
+        dialect: The tool's :class:`HookStopDialect`. A legacy
+            :class:`HookOutputDialect` is still accepted and mapped to its stop
+            equivalent, so callers written against the old signature keep their
+            existing behaviour.
     """
+    stop_dialect = _resolve_stop_dialect(dialect)
     if not should_block:
-        if dialect is HookOutputDialect.EXIT_CODE:
+        if stop_dialect is HookStopDialect.NONE:
             return HookEmission(exit_code=0)
-        if dialect is HookOutputDialect.DECISION:
+        if stop_dialect is HookStopDialect.CONTINUE_DECISION:
             return HookEmission(stdout=json.dumps({}), exit_code=0)
         return HookEmission(stdout=json.dumps({"continue": True}), exit_code=0)
-    if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
+    if stop_dialect is HookStopDialect.BLOCK_DECISION:
         stop_payload: dict[str, Any] = {"decision": "block", "reason": reason}
         return HookEmission(stdout=json.dumps(stop_payload), exit_code=0)
-    if dialect is HookOutputDialect.PERMISSION:
+    if stop_dialect is HookStopDialect.FOLLOWUP_MESSAGE:
         followup_payload: dict[str, Any] = {"followup_message": reason}
         return HookEmission(stdout=json.dumps(followup_payload), exit_code=0)
-    if dialect is HookOutputDialect.DECISION:
+    if stop_dialect is HookStopDialect.CONTINUE_DECISION:
         agy_continue: dict[str, Any] = {"decision": "continue", "reason": reason}
         return HookEmission(stdout=json.dumps(agy_continue), exit_code=0)
     return HookEmission(exit_code=0)

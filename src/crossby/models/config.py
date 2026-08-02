@@ -147,6 +147,22 @@ class HookEntry(BaseModel):
     per-hook fail-closed switch — today just Cursor (``failClosed: true``), which
     otherwise defaults to fail-open. Set this on security guards; other writers
     ignore it (their hooks already fail closed, or offer no such switch)."""
+    timeout: int | None = Field(default=None, gt=0)
+    """Seconds before the tool gives up on the hook process, or ``None`` for the
+    tool's own default. Every tool measures this in seconds but spells the key
+    differently — Copilot uses ``timeoutSec`` (default 30), the rest use
+    ``timeout`` (Cursor default 60, Codex 600, agy 30) — so each writer emits it
+    under its own native name.
+
+    Must be positive: Cursor rejects a non-positive timeout outright ("Hook
+    script timeout must be a positive number"), and a config it rejects loads no
+    hooks at all — so catch it here rather than write a file that silently
+    disables the guard.
+
+    Worth setting on a guard that runs on every write: the default is generous
+    enough that a hung hook stalls the agent for a noticeable time, and on
+    Cursor a timeout is only *blocked* rather than allowed when
+    ``fail_closed`` is also set."""
 
 
 class ProfileConfig(BaseModel):

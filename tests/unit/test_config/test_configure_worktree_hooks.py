@@ -99,7 +99,7 @@ class TestClaudeConfigureWorktreeHooks:
 
 
 class TestCursorConfigureWorktreeHooks:
-    """configure_worktree_hooks writes to .cursor/hooks.json → preToolUse[]."""
+    """configure_worktree_hooks writes to .cursor/hooks.json → hooks.preToolUse[]."""
 
     def test_fresh_install(self, tmp_path: Path) -> None:
         guard = _guard(tmp_path)
@@ -108,17 +108,20 @@ class TestCursorConfigureWorktreeHooks:
         hooks_file = tmp_path / ".cursor" / "hooks.json"
         assert hooks_file.is_file()
         data = json.loads(hooks_file.read_text(encoding="utf-8"))
-        pre_tool = data["preToolUse"]
+        # The {version, hooks} wrapper is mandatory — Cursor rejects a config
+        # without a top-level `hooks` object and loads nothing at all.
+        assert data["version"] == 1
+        pre_tool = data["hooks"]["preToolUse"]
         assert isinstance(pre_tool, list)
         assert len(pre_tool) == 1
         entry = pre_tool[0]
         assert entry["command"] == str(guard)
-        assert entry["event"] == "preToolUse"
-        # Tools cover Edit, Write, and Delete — worktree isolation must
-        # also block deletions via Cursor's Delete tool.
-        assert "Edit" in entry["tools"]
-        assert "Write" in entry["tools"]
-        assert "Delete" in entry["tools"]
+        assert entry["type"] == "command"
+        # Scope is a single `matcher` regex; Cursor's schema has no `tools`.
+        assert "tools" not in entry
+        # Cursor has no Edit tool — Edit collapses into Write. Delete stays, so
+        # worktree isolation still blocks deletions.
+        assert entry["matcher"] == "Write|Delete"
 
     def test_idempotent(self, tmp_path: Path) -> None:
         guard = _guard(tmp_path)
@@ -126,16 +129,19 @@ class TestCursorConfigureWorktreeHooks:
         cursor_configure_worktree_hooks(tmp_path, guard)
 
         data = json.loads((tmp_path / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
-        commands = [e["command"] for e in data["preToolUse"] if isinstance(e, dict)]
+        commands = [e["command"] for e in data["hooks"]["preToolUse"] if isinstance(e, dict)]
         assert commands.count(str(guard)) == 1
 
     def test_coexists_with_existing_hooks(self, tmp_path: Path) -> None:
         hooks_path = tmp_path / ".cursor" / "hooks.json"
         hooks_path.parent.mkdir(parents=True)
         existing = {
-            "preToolUse": [
-                {"event": "preToolUse", "command": "/usr/local/bin/existing", "tools": ["Bash"]},
-            ]
+            "version": 1,
+            "hooks": {
+                "preToolUse": [
+                    {"type": "command", "command": "/usr/local/bin/existing", "matcher": "Shell"},
+                ]
+            },
         }
         hooks_path.write_text(json.dumps(existing), encoding="utf-8")
 
@@ -143,9 +149,42 @@ class TestCursorConfigureWorktreeHooks:
         cursor_configure_worktree_hooks(tmp_path, guard)
 
         data = json.loads(hooks_path.read_text(encoding="utf-8"))
-        commands = [e["command"] for e in data["preToolUse"] if isinstance(e, dict)]
+        commands = [e["command"] for e in data["hooks"]["preToolUse"] if isinstance(e, dict)]
         assert "/usr/local/bin/existing" in commands
         assert str(guard) in commands
+
+    def test_migrates_legacy_flat_config(self, tmp_path: Path) -> None:
+        """A pre-0.13 flat file is lifted into the wrapper instead of left broken.
+
+        crossby <=0.12 wrote event arrays at the top level, which Cursor rejects
+        outright — so every hook it wrote was inert. Re-syncing must repair the
+        file, not append a second copy alongside the dead one.
+        """
+        hooks_path = tmp_path / ".cursor" / "hooks.json"
+        hooks_path.parent.mkdir(parents=True)
+        guard = _guard(tmp_path)
+        legacy = {
+            "preToolUse": [
+                {
+                    "event": "preToolUse",
+                    "command": str(guard),
+                    "tools": ["Edit", "Write", "Delete"],
+                }
+            ]
+        }
+        hooks_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        cursor_configure_worktree_hooks(tmp_path, guard)
+
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+        assert data["version"] == 1
+        assert "preToolUse" not in data, "legacy top-level key must be lifted, not left behind"
+        entries = data["hooks"]["preToolUse"]
+        assert len(entries) == 1, "migration must not duplicate the guard"
+        assert entries[0]["command"] == str(guard)
+        assert entries[0]["matcher"] == "Write|Delete"
+        assert "tools" not in entries[0]
+        assert "event" not in entries[0]
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +243,7 @@ class TestCopilotConfigureWorktreeHooks:
         assert str(guard) in bashes
 
     def test_no_tool_filter_in_output(self, tmp_path: Path) -> None:
-        """Copilot has no per-tool filter — guard fires on all tool calls."""
+        """crossby writes Copilot hooks unscoped — guard fires on all tool calls."""
         guard = _guard(tmp_path)
         copilot_configure_worktree_hooks(tmp_path, guard)
 

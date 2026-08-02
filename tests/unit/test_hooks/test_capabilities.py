@@ -18,8 +18,11 @@ class TestHookOutputDialect:
     def test_cursor_uses_permission(self) -> None:
         assert _caps(AIToolID.CURSOR).hook_output_dialect is HookOutputDialect.PERMISSION
 
-    def test_copilot_uses_exit_code(self) -> None:
-        assert _caps(AIToolID.COPILOT).hook_output_dialect is HookOutputDialect.EXIT_CODE
+    def test_copilot_uses_permission_decision(self) -> None:
+        # Copilot's preToolUse has a documented structured stdout schema, FLAT at
+        # the top level. Modelling it as EXIT_CODE (crossby <=0.12) threw away
+        # both the deny reason and the `ask` decision.
+        assert _caps(AIToolID.COPILOT).hook_output_dialect is HookOutputDialect.PERMISSION_DECISION
 
     def test_antigravity_cli_uses_decision(self) -> None:
         # agy reads a hook decision as a top-level {"decision": …} object.
@@ -32,8 +35,10 @@ class TestStopHookSupport:
         for tool in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.CURSOR):
             assert _caps(tool).supports_stop_hook is True
 
-    def test_unsupported(self) -> None:
-        assert _caps(AIToolID.COPILOT).supports_stop_hook is False
+    def test_copilot_supports_stop(self) -> None:
+        # Copilot fires `agentStop`, and emit_stop_decision produces a real
+        # blocking payload for it rather than the old EXIT_CODE no-op.
+        assert _caps(AIToolID.COPILOT).supports_stop_hook is True
 
     def test_antigravity_cli_supports_stop_but_not_session_start(self) -> None:
         # agy fires a Stop hook (the reliable enforcement surface) but has no
