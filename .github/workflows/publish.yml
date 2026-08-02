@@ -21,7 +21,8 @@ permissions:
 
 concurrency:
   # Never let a tag push and a manual publish of the same tag race into two
-  # uploads — PyPI rejects the second, failing the run for a benign reason.
+  # concurrent uploads. Both events carry the same tag ref, so this serialises
+  # them; it does not deduplicate them — see `skip-existing` below.
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
@@ -42,3 +43,10 @@ jobs:
         run: uv build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Both triggers above fire for the same tag, so whichever runs second
+          # would hit an already-uploaded version and fail a release that in
+          # fact succeeded. Skipping the duplicate keeps the escape hatch
+          # usable; the version itself is pinned by the tag, so a re-upload can
+          # only ever be the same artifact.
+          skip-existing: true
