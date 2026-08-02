@@ -56,8 +56,19 @@ class HookOutputDialect(StrEnum):
       Codex).
     - ``PERMISSION`` — a ``{"permission": "allow"|"deny", ...}`` object on
       stdout (Cursor).
+    - ``PERMISSION_DECISION`` — a **flat, top-level**
+      ``{"permissionDecision": "allow"|"deny"|"ask", "permissionDecisionReason":
+      …}`` object on stdout (Copilot). Same field *names* as the payload nested
+      inside ``HOOK_SPECIFIC_OUTPUT``, but never nested:
+      ``hookSpecificOutput`` appears nowhere in GitHub's hooks docs — it is a
+      Claude/VS Code construct. ``permissionDecisionReason`` is required on a
+      deny. Copilot strips ``{"type":"progress"}`` lines and then runs a single
+      ``JSON.parse``, so a hook must emit exactly *one* JSON object.
     - ``EXIT_CODE`` — no structured stdout contract; the exit code is the only
-      block signal, with a human message on stderr (Copilot).
+      block signal, with a human message on stderr. No tool crossby models uses
+      this today (Copilot moved to ``PERMISSION_DECISION`` once its documented
+      stdout schema was confirmed); kept for tools that genuinely have no stdout
+      channel.
     - ``DECISION`` — a ``{"decision": "deny"|"allow"|"ask", "reason": …}`` object
       on stdout, with a Stop hook blocking via ``{"decision": "continue"}``
       (Antigravity CLI / ``agy``). Field names are top-level and camelCase; an
@@ -66,12 +77,48 @@ class HookOutputDialect(StrEnum):
     A deny always also exits non-zero (2) so the block is honored even by tools
     that ignore stdout, and so a security guard stays fail-*closed* — the dialect
     only governs the stdout payload shape.
+
+    This covers the *tool-call* channel only. A tool's Stop channel is
+    independent and is declared separately as :class:`HookStopDialect` — Copilot
+    is the proof that one enum cannot serve both, since its PreToolUse is the
+    flat permission shape while its stop is ``{"decision": "block", …}``.
     """
 
     HOOK_SPECIFIC_OUTPUT = "hook_specific_output"
     PERMISSION = "permission"
+    PERMISSION_DECISION = "permission_decision"
     EXIT_CODE = "exit_code"
     DECISION = "decision"
+
+
+class HookStopDialect(StrEnum):
+    """How a tool expects a hook to block (or allow) the *end of a turn*.
+
+    Deliberately separate from :class:`HookOutputDialect`: a tool's Stop channel
+    does not follow from its tool-call channel. Copilot reads a flat
+    ``permissionDecision`` for PreToolUse but a ``{"decision": "block"}`` for
+    ``agentStop``, so threading one enum through both would have to special-case
+    the tool anyway.
+
+    - ``BLOCK_DECISION`` — ``{"decision": "block", "reason": …}`` (Claude, Codex,
+      Copilot).
+    - ``FOLLOWUP_MESSAGE`` — ``{"followup_message": …}``, auto-submitted back to
+      the agent (Cursor). Re-fires are bounded by the tool's own ``loop_limit``.
+    - ``CONTINUE_DECISION`` — ``{"decision": "continue", "reason": …}`` (agy).
+      Note the inverted polarity: agy blocks a stop by telling the agent to
+      *continue*, where the other dialects use a top-level ``continue`` boolean
+      as the no-op.
+    - ``NONE`` — the tool has no Stop-block channel; a Stop hook cannot block it.
+
+    Unlike a PreToolUse deny, a Stop decision never exits 2 — the Stop channel
+    stays fail-*open* on purpose, so a broken guard can never trap the agent in
+    a turn it cannot end.
+    """
+
+    BLOCK_DECISION = "block_decision"
+    FOLLOWUP_MESSAGE = "followup_message"
+    CONTINUE_DECISION = "continue_decision"
+    NONE = "none"
 
 
 class AIModel(BaseModel, frozen=True):
@@ -132,7 +179,12 @@ class AIToolCapabilities(BaseModel, frozen=True):
     accepts a trusted-dir flag; Claude adds dirs but still prompts rather than
     hard-blocks)."""
     hook_output_dialect: HookOutputDialect = HookOutputDialect.HOOK_SPECIFIC_OUTPUT
-    """Which stdout shape this tool reads a hook decision from."""
+    """Which stdout shape this tool reads a *tool-call* hook decision from."""
+    hook_stop_dialect: HookStopDialect = HookStopDialect.BLOCK_DECISION
+    """Which stdout shape this tool reads a *Stop* hook decision from. Declared
+    separately from ``hook_output_dialect`` because the two channels are
+    independent per tool (see :class:`HookStopDialect`). Should be
+    ``HookStopDialect.NONE`` whenever ``supports_stop_hook`` is False."""
     hook_fail_open_default: bool = False
     """Tool treats a hook that errors/crashes as *allow* (fail-open) unless the
     hook config opts into fail-closed. True for Cursor — callers writing a

@@ -291,9 +291,14 @@ _REVERSE_EVENTS: dict[str, str] = {
     # stop
     "Stop": "stop",
     "stop": "stop",
+    "agentStop": "stop",  # Copilot names its turn-complete event agentStop
     # notification
     "Notification": "notification",
     "notification": "notification",
+    # Cursor's dedicated shell event. CursorHooksWriter fans a shell-scoped
+    # pre_tool_use hook out to it, so it must fold back into pre_tool_use or a
+    # read → write cycle grows a spurious extra hook every time.
+    "beforeShellExecution": "pre_tool_use",
 }
 
 # Reverse tool name maps (tool-specific → canonical)
@@ -307,6 +312,13 @@ _REVERSE_TOOLS: dict[str, str] = {
     "glob": "Glob",
     "web_search": "WebSearch",
     "web_fetch": "WebFetch",
+    # Antigravity CLI natives (see _TOOL_NAME_MAP[ANTIGRAVITY_CLI]).
+    "write_to_file": "Write",
+    "replace_file_content": "Edit",
+    "multi_replace_file_content": "MultiEdit",
+    "run_command": "Bash",
+    "view_file": "Read",
+    "grep_search": "Grep",
 }
 
 
@@ -362,30 +374,70 @@ def _read_claude_hooks(project_root: Path) -> list[HookEntry]:
 
 
 def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
-    """Read hooks from .cursor/hooks.json."""
+    """Read hooks from .cursor/hooks.json.
+
+    Reads the real Cursor shape — ``{"version": 1, "hooks": {"<event>": [...]}}``
+    with a ``matcher`` regex — and still accepts the flat top-level layout
+    crossby wrote before 0.13 so an un-migrated file round-trips.
+
+    ``beforeShellExecution`` maps back to ``pre_tool_use``, because that is what
+    ``CursorHooksWriter`` fans a shell-scoped pre-tool hook out to. Entries are
+    deduped by ``(event, command)`` so the fanned-out pair collapses back into
+    the single :class:`HookEntry` it came from instead of reappearing as a
+    spurious second hook on every read → write cycle.
+
+    Note that ``fail_closed`` and ``timeout`` are deliberately not read back
+    here; the readers drop both for every tool today (see ``_read_copilot_hooks``
+    too). That is a known round-trip gap tracked in #88 §5, not an oversight of
+    this function — the writers are upgrade-safe and never downgrade an existing
+    ``failClosed``, which bounds the impact.
+    """
     data = _read_json(project_root / ".cursor" / "hooks.json")
     if not data:
         return []
-    result: list[HookEntry] = []
-    for event_name, entries in data.items():
+    hooks_section = data.get("hooks")
+    # Pre-0.13 crossby wrote event arrays at the top level with no wrapper.
+    source = hooks_section if isinstance(hooks_section, dict) else data
+
+    merged: dict[tuple[str, str], HookEntry] = {}
+    for event_name, entries in source.items():
         if not isinstance(entries, list):
             continue
         canonical_event = _reverse_event_name(event_name)
         for entry in entries:
             if not isinstance(entry, dict) or "command" not in entry:
                 continue
-            tools_raw = entry.get("tools", [])
-            tools = (
-                [_reverse_tool_name(t) for t in tools_raw] if isinstance(tools_raw, list) else []
-            )
-            result.append(
-                HookEntry(
-                    event=canonical_event,
-                    command=entry["command"],
-                    tools=tools,
-                )
-            )
-    return result
+            command = entry["command"]
+            key = (canonical_event, command)
+            tools = _cursor_entry_tools(entry)
+            previous = merged.get(key)
+            if previous is None:
+                merged[key] = HookEntry(event=canonical_event, command=command, tools=tools)
+                continue
+            # The fan-out pair collapses here. The `beforeShellExecution` half is
+            # written unscoped, so whichever half is read second must not erase
+            # the other's tool scope — keep the scoped one regardless of the key
+            # order the JSON happened to be in.
+            if tools and not previous.tools:
+                merged[key] = HookEntry(event=canonical_event, command=command, tools=tools)
+    return list(merged.values())
+
+
+def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
+    """Recover canonical tool names from a Cursor entry's scope.
+
+    Prefers the ``matcher`` regex Cursor actually uses (alternation of tool
+    names, e.g. ``Write|Shell``); falls back to the ``tools`` array that only
+    ever existed in crossby's own pre-0.13 output. A catch-all matcher means
+    "all tools", which is the same as no scope.
+    """
+    matcher = entry.get("matcher")
+    if isinstance(matcher, str) and matcher and matcher not in (".*", "*"):
+        return [_reverse_tool_name(t) for t in matcher.split("|") if t]
+    tools_raw = entry.get("tools")
+    if isinstance(tools_raw, list):
+        return [_reverse_tool_name(t) for t in tools_raw]
+    return []
 
 
 def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:

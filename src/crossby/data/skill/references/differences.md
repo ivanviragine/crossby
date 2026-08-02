@@ -65,9 +65,10 @@ tool's docs and confirm the schemas before trusting these rows.
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
 | Canonical events `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop`, `notification` | per-tool event names (PascalCase `PreToolUse` / camelCase `preToolUse` / etc.) | event-name translation | Each writer also drops events its tool can't represent and records a `manual_fix` note in the report row. |
-| Source hook with `tools` filter | `.cursor/hooks.json` only honours `tools` on its tool-execution events; Cursor `stop`, Codex `Stop` / `UserPromptSubmit` ignore matcher | partial mapping | The `tools` / `matcher` field is stripped on write and the dropped scope shows up as a `hooks.<event>.matcher` manual-fix note. |
-| Source hook of unsupported event for the target (e.g. Claude `Notification` → Codex, anything but `pre_tool_use` → Copilot) | dropped from the target | manual-fix | Each unique unsupported event produces one `hooks.<event>` manual-fix note so the user knows what didn't make it across. |
-| Any hook written to `.codex/hooks.json` | inert until `[features].codex_hooks = true` is set in `.codex/config.toml` | always-on manual-fix | Codex won't load the file otherwise. `CodexHooksWriter` always emits the `features.codex_hooks` reminder, even when every event mapped cleanly. |
+| Source hook with `tools` filter | Cursor honours a scope only on `preToolUse`/`postToolUse`, and as a single `matcher` **regex string** (its schema has no `tools` array); Cursor `stop`, Codex `Stop` / `UserPromptSubmit` ignore matcher | partial mapping | The scope is stripped on write where unsupported and the dropped scope shows up as a `hooks.<event>.matcher` manual-fix note. |
+| Source hook of unsupported event for the target (e.g. Claude `Notification` → Codex) | dropped from the target | manual-fix | Each unique unsupported event produces one `hooks.<event>` manual-fix note so the user knows what didn't make it across. |
+| Any hook written to `.codex/hooks.json` | `[features].hooks = true` plus the deprecated `codex_hooks` alias written to `.codex/config.toml` | automatic, defensive | The hooks feature is stable and **on by default** since Codex 0.146.0, so the flag is no longer required; `CodexHooksWriter` still writes both keys so a project pinned to an older Codex isn't left with inert hooks. A manual-fix note appears only if that file can't be written. |
+| `pre_tool_use` hook scoped to a shell tool → Cursor | a `preToolUse` entry *and* an unscoped `beforeShellExecution` entry | fan-out | Cursor is the only tool with a dedicated shell event. Registering both means callers register once and get shell coverage everywhere; both fire for one shell call, which is safe because a guard decision is idempotent. `beforeShellExecution` matches the command string, not a tool name, so it is written without a matcher. |
 | Any hook written to `.agents/hooks.json` (Antigravity CLI) | container-wrapped `{name: {Event: [...]}}`; `Stop` handlers sit directly under the event key, `PreToolUse`/`PostToolUse` wrap them in `{matcher, hooks}` | shape split | agy nests every hook under an arbitrary container name and drops the matcher on `Stop`; the runtime emits agy's `{"decision": …}` dialect (a `Stop` blocks via `{"decision": "continue"}`, the inverse of the other tools' `continue` boolean). |
 | Multiple sources defining the same `(event, command)` | matcher widened (union of tools) | merge | Re-running with a broader matcher upgrades coverage instead of duplicating entries. |
 
@@ -77,8 +78,8 @@ Per-tool supported events:
 | --- | --- | --- |
 | Claude | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop`, `notification` | every event |
 | Codex | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop` | `pre_tool_use`, `post_tool_use`, `session_start` only |
-| Cursor | `pre_tool_use`, `user_prompt_submit`, `stop` | `pre_tool_use` only |
-| Copilot | `pre_tool_use` | none — Copilot hooks apply to every tool |
+| Cursor | `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `stop` | `pre_tool_use`, `post_tool_use` only (as a `matcher` regex) |
+| Copilot | `pre_tool_use`, `post_tool_use`, `session_start`, `stop` | none — crossby writes Copilot hooks unscoped (Copilot does support a `matcher` regex; wiring it up is tracked separately) |
 | Antigravity CLI | `pre_tool_use`, `post_tool_use`, `stop` | `pre_tool_use`, `post_tool_use` only |
 
 Antigravity CLI (`agy`) has no `session_start` / `user_prompt_submit` equivalent

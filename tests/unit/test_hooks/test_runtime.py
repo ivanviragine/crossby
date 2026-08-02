@@ -252,12 +252,35 @@ class TestEmitDecisionContext:
         assert em.exit_code == 0
         assert json.loads(em.stdout) == {}
 
-    def test_context_injected_for_permission_dialect(self) -> None:
-        # Cursor injects context via a top-level `additional_context` field on
-        # its beforeSubmitPrompt event, not hookSpecificOutput.
-        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION)
+    def test_context_injected_for_permission_dialect_on_session_start(self) -> None:
+        # Cursor injects context via a top-level `additional_context` field, not
+        # hookSpecificOutput — and only on the events whose output schema
+        # actually reads it.
+        em = emit_decision(
+            HookDecision.context("hello"), HookOutputDialect.PERMISSION, event="session_start"
+        )
         assert em.exit_code == 0
         assert json.loads(em.stdout) == {"additional_context": "hello"}
+
+    def test_context_gated_off_for_cursor_prompt_submit(self) -> None:
+        """Cursor's beforeSubmitPrompt ignores `additional_context`.
+
+        Its documented output is `continue` + `user_message` only, so emitting
+        the key there injects nothing — don't pretend it landed.
+        """
+        em = emit_decision(
+            HookDecision.context("hello"),
+            HookOutputDialect.PERMISSION,
+            event="user_prompt_submit",
+        )
+        assert em.exit_code == 0
+        assert em.stdout == ""
+
+    def test_context_flat_for_copilot(self) -> None:
+        """Copilot reads a flat top-level additionalContext, never nested."""
+        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION_DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"additionalContext": "hello"}
 
 
 class TestEmitStopDecision:

@@ -14,6 +14,8 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HookOutputDialect,
+    HookStopDialect,
 )
 
 # Codex uses "xhigh" for both our XHIGH and MAX levels
@@ -48,6 +50,10 @@ class CodexAdapter(AbstractAITool):
             supports_stop_hook=True,
             supports_session_start_hook=True,
             supports_user_prompt_submit_hook=True,
+            # Both dialects stated explicitly rather than left to the model
+            # default, so the capability matrix reads the same in every adapter.
+            hook_output_dialect=HookOutputDialect.HOOK_SPECIFIC_OUTPUT,
+            hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
             sandboxes_writes=True,
             supports_usage_reporting=True,
         )

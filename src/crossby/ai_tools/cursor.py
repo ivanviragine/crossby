@@ -18,6 +18,7 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HookOutputDialect,
+    HookStopDialect,
 )
 
 logger = structlog.get_logger()
@@ -61,7 +62,28 @@ class CursorAdapter(AbstractAITool):
             supports_accept_edits=True,
             supports_stop_hook=True,
             supports_user_prompt_submit_hook=True,
+            # Cursor does fire `sessionStart`, and its `additional_context` does
+            # reach the model — both verified against cursor-agent
+            # 2026.04.17. Caveats worth knowing before relying on it:
+            #   * it is fire-and-forget — the agent loop does not wait for or
+            #     enforce a blocking response, so it can inject but not gate;
+            #   * it is not supported in cloud agents;
+            #   * which events `cursor-agent` fires has varied across versions,
+            #     so treat CLI coverage as version-dependent rather than
+            #     guaranteed by the docs.
+            supports_session_start_hook=True,
             hook_output_dialect=HookOutputDialect.PERMISSION,
+            hook_stop_dialect=HookStopDialect.FOLLOWUP_MESSAGE,
+            # Cursor is the one tool that defaults hooks to fail-*open*, so a
+            # security guard must set HookEntry.fail_closed to be worth
+            # anything. `failClosed` is a generic per-script option: Cursor's
+            # published docs name it only for beforeShellExecution /
+            # beforeMCPExecution / beforeReadFile, but the shipped
+            # implementation also honours it on preToolUse — verified by
+            # reading cursor-agent's bundled hook runtime, where preToolUse is
+            # in the fail-closed event set and a failed hook there is converted
+            # into {"permission": "deny"}. Documented as under-documented
+            # rather than unsupported.
             hook_fail_open_default=True,
         )
 
