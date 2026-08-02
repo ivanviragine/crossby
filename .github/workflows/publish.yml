@@ -1,11 +1,29 @@
 name: Publish to PyPI
 
+# Tag push is the primary trigger, and it deliberately does NOT depend on
+# release.yml creating a GitHub Release first: GitHub does not trigger
+# workflows from events raised with secrets.GITHUB_TOKEN, so a release created
+# by Actions cannot start this workflow. Keying off the tag directly keeps the
+# two workflows independent — release.yml writes the notes, this one ships the
+# artifact.
+#
+# `release: [published]` is kept as a manual escape hatch so publishing an
+# existing release from the UI (or `gh release edit --draft=false`) still ships
+# that tag.
 on:
+  push:
+    tags: ["v*"]
   release:
     types: [published]
 
 permissions:
   contents: read
+
+concurrency:
+  # Never let a tag push and a manual publish of the same tag race into two
+  # uploads — PyPI rejects the second, failing the run for a benign reason.
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:

@@ -84,9 +84,20 @@ fi
 uv publish --token "$PYPI_TOKEN"
 echo ""
 
-# Create GitHub Release
+# Create GitHub Release.
+#
+# `gh release view` matches DRAFT releases too, so a bare existence check used
+# to short-circuit here and leave the draft unpublished forever — that is how
+# v0.12.1-v0.12.3 ended up tagged and drafted but never released. Check the
+# draft flag explicitly and promote it.
 if gh release view "$TAG" &>/dev/null; then
-    echo "GitHub Release ${TAG} already exists — skipping."
+    IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo "")
+    if [[ "$IS_DRAFT" == "true" ]]; then
+        gh release edit "$TAG" --draft=false
+        echo "GitHub Release ${TAG} was a draft — published."
+    else
+        echo "GitHub Release ${TAG} already published — skipping."
+    fi
 else
     gh release create "$TAG" --title "$TAG" --generate-notes
     echo "GitHub Release ${TAG} created."
