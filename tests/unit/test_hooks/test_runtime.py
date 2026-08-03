@@ -7,6 +7,8 @@ import json
 import pytest
 
 from crossby.hooks.runtime import (
+    READ_TOOL_NAMES,
+    SHELL_TOOL_NAMES,
     HookDecision,
     HookEvent,
     detect_tool_id,
@@ -14,7 +16,7 @@ from crossby.hooks.runtime import (
     emit_stop_decision,
     parse_event,
 )
-from crossby.models.ai import AIToolID, HookOutputDialect
+from crossby.models.ai import AIToolID, HookOutputDialect, HookStopDialect
 
 
 class TestParseEventDialects:
@@ -153,18 +155,108 @@ class TestParseEventMalformed:
 
 
 class TestIsWrite:
-    """HookEvent.is_write distinguishes write intents (unknown → treated as write)."""
+    """HookEvent.is_write is a fail-CLOSED denylist, not an allowlist.
 
-    @pytest.mark.parametrize("name", ["write", "edit", "multiedit", "notebookedit", "delete"])
+    The old allowlist returned False for anything it didn't recognise, so a
+    guard waved through Codex's ``apply_patch`` and every agy write tool.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "write",
+            "edit",
+            "multiedit",
+            "notebookedit",
+            "delete",
+            "create",
+            # The real fall-throughs the allowlist missed.
+            "apply_patch",  # Codex
+            "write_stdin",  # Codex
+            "str_replace_editor",  # Copilot
+            "write_to_file",  # agy
+            "replace_file_content",  # agy
+            "multi_replace_file_content",  # agy
+        ],
+    )
     def test_write_tools(self, name: str) -> None:
         assert HookEvent(tool_name=name).is_write is True
 
-    @pytest.mark.parametrize("name", ["read", "view", "grep", "bash"])
-    def test_non_write_tools(self, name: str) -> None:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "some_brand_new_tool",
+            "edit_notebook_v2",
+            "",
+        ],
+    )
+    def test_unknown_tool_name_fails_closed(self, name: str) -> None:
+        """A name crossby has never seen must be treated as a write."""
+        assert HookEvent(tool_name=name).is_write is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Claude
+            "read",
+            "grep",
+            "glob",
+            "webfetch",
+            "websearch",
+            "todowrite",
+            "task",
+            # Cursor
+            "tabread",
+            # Copilot
+            "view",
+            "rg",
+            "web_fetch",
+            "ask_user",
+            # agy
+            "view_file",
+            "list_dir",
+            "grep_search",
+            "read_url_content",
+            "search_web",
+            "list_permissions",
+        ],
+    )
+    def test_documented_read_tools(self, name: str) -> None:
         assert HookEvent(tool_name=name).is_write is False
+
+    @pytest.mark.parametrize(
+        "name",
+        ["bash", "shell", "run_command", "powershell", "exec_command"],
+    )
+    def test_shell_is_carved_out(self, name: str) -> None:
+        """Shell calls are NOT path-addressed writes — deliberate carve-out.
+
+        wade's worktree_containment denies a write whose file_path is absent, so
+        marking a shell call as a write would deny every shell command. Codex is
+        the extreme case: it has no read-only tools at all and routes every read
+        through `rg` in the shell, so a session would be blocked outright.
+        Shell is guarded through HookEvent.command instead.
+        """
+        event = HookEvent(tool_name=name, command="rm -rf /")
+        assert event.is_write is False
+        # The command channel is still populated, so a policy can inspect it.
+        assert event.command == "rm -rf /"
 
     def test_unknown_tool_name_treated_as_write(self) -> None:
         assert HookEvent(tool_name=None).is_write is True
+
+    def test_read_and_shell_sets_are_disjoint(self) -> None:
+        assert not (READ_TOOL_NAMES & SHELL_TOOL_NAMES)
+
+    def test_name_sets_are_lowercase(self) -> None:
+        """_extract_tool_name lowercases, so the sets must be lowercase to match."""
+        for name in READ_TOOL_NAMES | SHELL_TOOL_NAMES:
+            assert name == name.lower()
+
+    def test_matching_is_case_insensitive_via_parse(self) -> None:
+        assert parse_event(json.dumps({"tool_name": "Bash"})).is_write is False
+        assert parse_event(json.dumps({"tool_name": "Read"})).is_write is False
+        assert parse_event(json.dumps({"tool_name": "Write"})).is_write is True
 
 
 class TestEmitDecisionAllow:
@@ -252,12 +344,35 @@ class TestEmitDecisionContext:
         assert em.exit_code == 0
         assert json.loads(em.stdout) == {}
 
-    def test_context_injected_for_permission_dialect(self) -> None:
-        # Cursor injects context via a top-level `additional_context` field on
-        # its beforeSubmitPrompt event, not hookSpecificOutput.
-        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION)
+    def test_context_injected_for_permission_dialect_on_session_start(self) -> None:
+        # Cursor injects context via a top-level `additional_context` field, not
+        # hookSpecificOutput — and only on the events whose output schema
+        # actually reads it.
+        em = emit_decision(
+            HookDecision.context("hello"), HookOutputDialect.PERMISSION, event="session_start"
+        )
         assert em.exit_code == 0
         assert json.loads(em.stdout) == {"additional_context": "hello"}
+
+    def test_context_gated_off_for_cursor_prompt_submit(self) -> None:
+        """Cursor's beforeSubmitPrompt ignores `additional_context`.
+
+        Its documented output is `continue` + `user_message` only, so emitting
+        the key there injects nothing — don't pretend it landed.
+        """
+        em = emit_decision(
+            HookDecision.context("hello"),
+            HookOutputDialect.PERMISSION,
+            event="user_prompt_submit",
+        )
+        assert em.exit_code == 0
+        assert em.stdout == ""
+
+    def test_context_flat_for_copilot(self) -> None:
+        """Copilot reads a flat top-level additionalContext, never nested."""
+        em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION_DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"additionalContext": "hello"}
 
 
 class TestEmitStopDecision:
@@ -306,6 +421,107 @@ class TestEmitStopDecision:
         em = emit_stop_decision(True, "finish first", HookOutputDialect.EXIT_CODE)
         assert em.exit_code == 0
         assert em.stdout == ""
+
+
+class TestEmitStopDecisionStopDialects:
+    """The Stop channel is declared independently of the tool-call channel."""
+
+    def test_block_decision(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookStopDialect.BLOCK_DECISION)
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {"decision": "block", "reason": "finish first"}
+
+    def test_followup_message(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookStopDialect.FOLLOWUP_MESSAGE)
+        assert json.loads(em.stdout) == {"followup_message": "finish first"}
+
+    def test_continue_decision(self) -> None:
+        # agy blocks a stop by telling the agent to *continue* — inverted
+        # polarity vs the `continue` boolean every other dialect uses as a no-op.
+        em = emit_stop_decision(True, "finish first", HookStopDialect.CONTINUE_DECISION)
+        assert json.loads(em.stdout) == {"decision": "continue", "reason": "finish first"}
+
+    def test_none_dialect_is_noop(self) -> None:
+        em = emit_stop_decision(True, "finish first", HookStopDialect.NONE)
+        assert em.exit_code == 0
+        assert em.stdout == ""
+
+    @pytest.mark.parametrize("dialect", list(HookStopDialect))
+    def test_stop_never_exits_nonzero(self, dialect: HookStopDialect) -> None:
+        """The Stop channel is fail-OPEN — a guard must never trap the agent."""
+        assert emit_stop_decision(True, "r", dialect).exit_code == 0
+        assert emit_stop_decision(False, "", dialect).exit_code == 0
+
+    def test_copilot_stop_now_blocks_instead_of_no_op(self) -> None:
+        """Regression: Copilot's stop was a silent no-op under EXIT_CODE.
+
+        A Copilot Stop hook would install and then never block anything.
+        """
+        from crossby.ai_tools.copilot import CopilotAdapter
+
+        caps = CopilotAdapter().capabilities()
+        assert caps.supports_stop_hook is True
+        em = emit_stop_decision(True, "keep going", caps.hook_stop_dialect)
+        assert json.loads(em.stdout) == {"decision": "block", "reason": "keep going"}
+
+    @pytest.mark.parametrize(
+        ("legacy", "expected_stop"),
+        [
+            (HookOutputDialect.HOOK_SPECIFIC_OUTPUT, HookStopDialect.BLOCK_DECISION),
+            (HookOutputDialect.PERMISSION, HookStopDialect.FOLLOWUP_MESSAGE),
+            (HookOutputDialect.PERMISSION_DECISION, HookStopDialect.BLOCK_DECISION),
+            (HookOutputDialect.DECISION, HookStopDialect.CONTINUE_DECISION),
+            (HookOutputDialect.EXIT_CODE, HookStopDialect.NONE),
+        ],
+    )
+    def test_legacy_output_dialect_maps_to_stop_dialect(
+        self, legacy: HookOutputDialect, expected_stop: HookStopDialect
+    ) -> None:
+        """wade still passes a HookOutputDialect positionally; keep it working.
+
+        Behaviour must be byte-identical to the new enum's, so a wade pin bump
+        is a no-op rather than a silent change of stop semantics.
+        """
+        for should_block in (True, False):
+            assert emit_stop_decision(should_block, "r", legacy) == emit_stop_decision(
+                should_block, "r", expected_stop
+            )
+
+
+class TestEmitDecisionCopilot:
+    """Copilot's preToolUse reads a flat permission-decision object."""
+
+    def test_deny_is_flat_with_required_reason(self) -> None:
+        em = emit_decision(
+            HookDecision.deny("outside worktree"), HookOutputDialect.PERMISSION_DECISION
+        )
+        payload = json.loads(em.stdout)
+        assert payload == {
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "outside worktree",
+        }
+        # Never nested — hookSpecificOutput appears nowhere in GitHub's docs.
+        assert "hookSpecificOutput" not in payload
+        # Exit 2 is an additional deny channel that overrides an allow in stdout,
+        # so the guard stays fail-closed even if stdout is dropped.
+        assert em.exit_code == 2
+        assert em.stderr == "outside worktree"
+
+    def test_deny_emits_exactly_one_json_object(self) -> None:
+        """Copilot does a single JSON.parse — two objects would be invalid JSON.
+
+        Concatenated objects parse as garbage and are silently ignored, which
+        would turn a deny into an allow.
+        """
+        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.PERMISSION_DECISION)
+        assert json.loads(em.stdout)  # parses as a single value
+        assert em.stdout.count("{") == 1
+
+    def test_claude_deny_stays_nested_only(self) -> None:
+        """Claude validates strictly and fails open on unexpected root keys."""
+        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.HOOK_SPECIFIC_OUTPUT)
+        payload = json.loads(em.stdout)
+        assert set(payload) == {"hookSpecificOutput"}
 
 
 class TestDetectToolId:

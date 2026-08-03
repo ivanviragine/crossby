@@ -1,11 +1,11 @@
-name: Create Draft Release
+name: Create Release
 
 on:
   push:
     tags: ["v*"]
 
 jobs:
-  draft-release:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -14,11 +14,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Create draft release
+      # Published (not draft) on purpose. A draft release never fires the
+      # `release: [published]` event, which is what stranded v0.12.1-v0.12.3 as
+      # drafts while PyPI stayed on 0.12.0.
+      #
+      # publish.yml does NOT rely on this release firing an event: GitHub
+      # deliberately does not trigger workflows from events raised with
+      # secrets.GITHUB_TOKEN, so a release created here can never start another
+      # workflow run. publish.yml keys off the same tag push instead.
+      - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            --draft \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

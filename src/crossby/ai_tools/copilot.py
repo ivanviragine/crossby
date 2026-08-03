@@ -13,6 +13,7 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     HookOutputDialect,
+    HookStopDialect,
     TokenUsage,
 )
 
@@ -36,7 +37,23 @@ class CopilotAdapter(AbstractAITool):
             supports_trusted_dirs=True,
             supports_plan_mode=True,
             supports_accept_edits=True,
-            hook_output_dialect=HookOutputDialect.EXIT_CODE,
+            supports_session_start_hook=True,
+            supports_stop_hook=True,
+            # Copilot's preToolUse has a documented structured stdout schema —
+            # flat and top-level, never nested under `hookSpecificOutput` (which
+            # appears nowhere in GitHub's hooks docs; it is a Claude/VS Code
+            # construct). Modelling this as EXIT_CODE, as crossby did through
+            # 0.12.x, threw away the reason string and the `ask` decision.
+            hook_output_dialect=HookOutputDialect.PERMISSION_DECISION,
+            # ...but its stop channel is a different vocabulary again
+            # (`agentStop` reads {"decision": "block", "reason": …}), which is
+            # exactly why the two dialects are declared independently.
+            hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
+            # Non-zero exits other than 2 are fail-closed on preToolUse, but a
+            # hook *timeout* is fail-open on every Copilot event, so there is no
+            # per-hook fail-closed switch to opt into. Default timeout is 30s
+            # (`timeoutSec`).
+            hook_fail_open_default=False,
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:

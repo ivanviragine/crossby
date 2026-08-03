@@ -1,15 +1,24 @@
+069302a6:
+  down: 0
+  stale: 0
+  up: 3
 0bb66acc:
+  down: 1
+  stale: 0
+  superseded_by: 6ad64ecc
+  up: 1
+0dfee0b6:
   down: 0
   stale: 0
   up: 1
-0dfee0b6:
+14b6377d:
   down: 0
   stale: 0
   up: 1
 196d703f:
   down: 0
   stale: 0
-  up: 4
+  up: 5
 2a38e22d:
   down: 0
   stale: 0
@@ -18,11 +27,27 @@
   down: 0
   stale: 0
   up: 1
-74bba59d:
+521e4f71:
   down: 0
   stale: 0
   up: 1
+6ad64ecc:
+  down: 0
+  stale: 0
+  up: 3
+70d13817:
+  down: 0
+  stale: 0
+  up: 1
+74bba59d:
+  down: 0
+  stale: 0
+  up: 2
 801860a4:
+  down: 0
+  stale: 0
+  up: 1
+892b7ed4:
   down: 0
   stale: 0
   up: 1
@@ -39,6 +64,10 @@
   down: 0
   stale: 1
   up: 0
+9bd292cc:
+  down: 0
+  stale: 0
+  up: 1
 abee48e8:
   down: 0
   stale: 0
@@ -47,7 +76,20 @@ b7079af0:
   down: 0
   stale: 0
   up: 1
+b71491ff:
+  down: 0
+  stale: 0
+  up: 1
 c39fe2c3:
+  down: 0
+  stale: 1
+  superseded_by: 521e4f71
+  up: 2
+db00f668:
+  down: 0
+  stale: 0
+  up: 1
+de22c329:
   down: 0
   stale: 0
   up: 1
@@ -59,8 +101,20 @@ eb391f2d:
   down: 0
   stale: 0
   up: 4
+f0ef034d:
+  down: 0
+  stale: 0
+  up: 1
+f57216d4:
+  down: 0
+  stale: 0
+  up: 1
 f7a8c38e:
   down: 0
-  stale: 1
+  stale: 2
   superseded_by: c39fe2c3
   up: 0
+f8017d9c:
+  down: 0
+  stale: 0
+  up: 1

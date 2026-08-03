@@ -36,15 +36,25 @@ if ! git tag -l "$TAG" | grep -q "$TAG"; then
     exit 1
 fi
 
-# Check not already published on PyPI
-if pip index versions crossby 2>/dev/null | grep -q "$VERSION"; then
-    echo "Error: crossby ${VERSION} is already on PyPI."
-    exit 1
+# Check not already published on PyPI.
+#
+# An existing version skips the UPLOAD ONLY — it must not abort the script, or
+# the GitHub Release block below never runs and a leftover draft can never be
+# promoted. That combination (on PyPI + still a draft) is exactly the state this
+# script has to be able to recover from.
+ALREADY_ON_PYPI=false
+if pip index versions crossby 2>/dev/null | grep -qE "(^|[^0-9.])${VERSION//./\\.}([^0-9.]|$)"; then
+    ALREADY_ON_PYPI=true
 fi
 
 echo "Version:  ${VERSION}"
 echo "Tag:      ${TAG}"
 echo "Package:  crossby"
+if $ALREADY_ON_PYPI; then
+    echo "PyPI:     already published — skipping upload"
+else
+    echo "PyPI:     not published yet"
+fi
 echo ""
 
 if $DRY_RUN; then
@@ -52,41 +62,59 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# Build
-rm -rf dist
-uv build
-echo ""
+if ! $ALREADY_ON_PYPI; then
+    # Build
+    rm -rf dist
+    uv build
+    echo ""
 
-# Resolve PyPI token
-PYPI_TOKEN="${UV_PUBLISH_TOKEN:-}"
+    # Resolve PyPI token
+    PYPI_TOKEN="${UV_PUBLISH_TOKEN:-}"
 
-if [[ -z "$PYPI_TOKEN" && -f "$HOME/.pypirc" ]]; then
-    PYPI_TOKEN=$(python3 -c "
+    if [[ -z "$PYPI_TOKEN" && -f "$HOME/.pypirc" ]]; then
+        PYPI_TOKEN=$(python3 -c "
 import configparser, pathlib
 c = configparser.ConfigParser()
 c.read(pathlib.Path.home() / '.pypirc')
 print(c.get('pypi', 'password', fallback=''))
 " 2>/dev/null || true)
-    [[ -n "$PYPI_TOKEN" ]] && echo "Using token from ~/.pypirc"
-fi
-
-if [[ -z "$PYPI_TOKEN" ]]; then
-    echo "No token found in UV_PUBLISH_TOKEN or ~/.pypirc"
-    printf "Enter PyPI token: "
-    read -r PYPI_TOKEN
-    if [[ -z "$PYPI_TOKEN" ]]; then
-        echo "Error: no token provided."
-        exit 1
+        [[ -n "$PYPI_TOKEN" ]] && echo "Using token from ~/.pypirc"
     fi
+
+    if [[ -z "$PYPI_TOKEN" ]]; then
+        echo "No token found in UV_PUBLISH_TOKEN or ~/.pypirc"
+        printf "Enter PyPI token: "
+        # -s: a pasted token must not stay on screen (or in the scrollback of
+        # whatever terminal recording is running).
+        read -r -s PYPI_TOKEN
+        printf "\n"
+        if [[ -z "$PYPI_TOKEN" ]]; then
+            echo "Error: no token provided."
+            exit 1
+        fi
+    fi
+
+    # Publish to PyPI. The token goes through the environment, not argv —
+    # command-line arguments are world-readable via `ps` for the life of the
+    # upload.
+    UV_PUBLISH_TOKEN="$PYPI_TOKEN" uv publish
+    echo ""
 fi
 
-# Publish to PyPI
-uv publish --token "$PYPI_TOKEN"
-echo ""
-
-# Create GitHub Release
+# Create GitHub Release.
+#
+# `gh release view` matches DRAFT releases too, so a bare existence check used
+# to short-circuit here and leave the draft unpublished forever — that is how
+# v0.12.1-v0.12.3 ended up tagged and drafted but never released. Check the
+# draft flag explicitly and promote it.
 if gh release view "$TAG" &>/dev/null; then
-    echo "GitHub Release ${TAG} already exists — skipping."
+    IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo "")
+    if [[ "$IS_DRAFT" == "true" ]]; then
+        gh release edit "$TAG" --draft=false
+        echo "GitHub Release ${TAG} was a draft — published."
+    else
+        echo "GitHub Release ${TAG} already published — skipping."
+    fi
 else
     gh release create "$TAG" --title "$TAG" --generate-notes
     echo "GitHub Release ${TAG} created."

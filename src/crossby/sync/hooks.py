@@ -41,11 +41,20 @@ _EVENT_NAMES: dict[AIToolID, dict[str, str]] = {
     },
     AIToolID.CURSOR: {
         "pre_tool_use": "preToolUse",
+        "post_tool_use": "postToolUse",
+        "session_start": "sessionStart",
         "user_prompt_submit": "beforeSubmitPrompt",
         "stop": "stop",
     },
     AIToolID.COPILOT: {
         "pre_tool_use": "preToolUse",
+        "post_tool_use": "postToolUse",
+        "session_start": "sessionStart",
+        # Copilot names the turn-complete event `agentStop`, not `stop`. (Its
+        # prompt event is likewise `userPromptSubmitted`, not `userPromptSubmit`
+        # — not mapped here because crossby does not yet register prompt hooks
+        # for Copilot.)
+        "stop": "agentStop",
     },
     AIToolID.CODEX: {
         "pre_tool_use": "PreToolUse",
@@ -72,15 +81,52 @@ def _translate_event(event: str, tool_id: AIToolID) -> str:
 # ---------------------------------------------------------------------------
 
 _TOOL_NAME_MAP: dict[AIToolID, dict[str, str]] = {
-    AIToolID.CURSOR: {"Bash": "Shell"},
+    # Cursor has no `Edit` tool — editing collapses into `Write` (this mirrors
+    # cursor-agent's own Claude-config importer, which maps Edit → Write).
+    AIToolID.CURSOR: {"Bash": "Shell", "Edit": "Write", "MultiEdit": "Write"},
     AIToolID.COPILOT: {"Edit": "edit", "Write": "write", "Bash": "shell"},
+    # agy's native tool-call names, live-captured from `toolCall.name` on a
+    # running agy v1.1.9. Without this map a canonical guard registered against
+    # `Write|Edit` compiles to a matcher that matches none of agy's real tool
+    # names, so the guard installs and then never fires.
+    AIToolID.ANTIGRAVITY_CLI: {
+        "Write": "write_to_file",
+        "Edit": "replace_file_content",
+        "MultiEdit": "multi_replace_file_content",
+        "Bash": "run_command",
+        "Read": "view_file",
+        "Grep": "grep_search",
+    },
 }
 
 
 def _translate_tools(tools: list[str], tool_id: AIToolID) -> list[str]:
-    """Translate canonical tool names to tool-specific names."""
+    """Translate canonical tool names to tool-specific names, preserving order.
+
+    Deduplicates: several canonical names can collapse onto one native name
+    (Cursor maps both ``Edit`` and ``MultiEdit`` to ``Write``), and a matcher
+    listing the same alternative twice is noise.
+    """
     mapping = _TOOL_NAME_MAP.get(tool_id, {})
-    return [mapping.get(t, t) for t in tools]
+    seen: list[str] = []
+    for tool in tools:
+        native = mapping.get(tool, tool)
+        if native not in seen:
+            seen.append(native)
+    return seen
+
+
+def _command_handler(hook: HookEntry) -> dict[str, Any]:
+    """Build the ``{"type": "command", ...}`` handler Claude/Codex/agy all use.
+
+    These three share the Claude-shaped nested handler and all spell the hook
+    timeout ``timeout`` in seconds (Copilot is the odd one out with
+    ``timeoutSec``, so its writer builds its own entry).
+    """
+    handler: dict[str, Any] = {"type": "command", "command": hook.command}
+    if hook.timeout is not None:
+        handler["timeout"] = hook.timeout
+    return handler
 
 
 def _tools_to_matcher(tools: list[str]) -> str:
@@ -286,7 +332,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             if not already_exists:
                 new_entry: dict[str, Any] = {
                     "matcher": _tools_to_matcher(desired_tools),
-                    "hooks": [{"type": "command", "command": command}],
+                    "hooks": [_command_handler(hook)],
                 }
                 event_list.append(new_entry)
                 hooks_section[event_name] = event_list
@@ -320,28 +366,217 @@ class ClaudeHooksWriter(AbstractSyncWriter):
 # ---------------------------------------------------------------------------
 
 
-_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "user_prompt_submit", "stop"})
-# Cursor honours per-tool scoping only on its tool-execution events.
-_CURSOR_TOOL_SCOPE_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
+_CURSOR_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "post_tool_use", "session_start", "user_prompt_submit", "stop"}
+)
+# Cursor honours per-tool scoping only on its tool-execution events, where the
+# matcher is tested against `tool_name`. On every other event the matcher is
+# tested against something else entirely (a literal like "Stop", or the command
+# string), so a tool scope there would silently match nothing.
+_CURSOR_TOOL_SCOPE_EVENTS: frozenset[str] = frozenset({"pre_tool_use", "post_tool_use"})
+
+# Cursor's dedicated shell event. Not a canonical crossby event: a `pre_tool_use`
+# hook scoped to a shell tool fans out to this as a second entry (see
+# CursorHooksWriter), so callers register once and get shell coverage on all
+# five tools.
+_CURSOR_SHELL_EVENT = "beforeShellExecution"
+# Native (post-translation) Cursor tool names that mean "run a shell command".
+_CURSOR_SHELL_TOOLS: frozenset[str] = frozenset({"Shell"})
+
+# Every event name Cursor's config validator accepts. Anything else in the
+# `hooks` object makes Cursor reject the WHOLE file with "Unknown hook type",
+# so the legacy-shape migration below must not promote stray keys into it.
+_CURSOR_KNOWN_EVENTS: frozenset[str] = frozenset(
+    {
+        "beforeShellExecution",
+        "beforeMCPExecution",
+        "afterShellExecution",
+        "afterMCPExecution",
+        "beforeReadFile",
+        "afterFileEdit",
+        "beforeTabFileRead",
+        "afterTabFileEdit",
+        "stop",
+        "beforeSubmitPrompt",
+        "afterAgentResponse",
+        "afterAgentThought",
+        "sessionStart",
+        "sessionEnd",
+        "preCompact",
+        "subagentStart",
+        "subagentStop",
+        "preToolUse",
+        "postToolUse",
+        "postToolUseFailure",
+    }
+)
+
+
+def _migrate_legacy_cursor_config(existing: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Lift a pre-0.13 flat Cursor hooks file into the ``{version, hooks}`` shape.
+
+    crossby <=0.12 wrote event arrays at the *top level* with no wrapper, e.g.
+    ``{"preToolUse": [{"event": …, "command": …, "tools": [...]}]}``. Cursor
+    rejects that outright — its loader requires a top-level ``hooks`` object and
+    reports "missing 'hooks' property", so every hook crossby ever wrote for
+    Cursor was silently inert. Migrate those keys in place rather than leaving a
+    broken file behind, and convert each entry's ``tools`` list to the ``matcher``
+    regex Cursor actually reads (there is no ``tools`` array in its schema).
+
+    Returns the (possibly rewritten) config and whether anything moved. Does not
+    touch ``existing`` — the returned dict is the authoritative one, so callers
+    must use it rather than assume the argument was updated.
+    """
+    hooks_section = existing.get("hooks")
+    legacy_keys = [
+        key
+        for key, value in existing.items()
+        if key in _CURSOR_KNOWN_EVENTS and isinstance(value, list)
+    ]
+    if not legacy_keys and isinstance(hooks_section, dict):
+        return existing, False
+
+    # Rebuild rather than pop/append in place: `existing` is the caller's parsed
+    # file, and a half-migrated dict left behind on an early return would be a
+    # trap for the next reader.
+    migrated: dict[str, Any] = dict(hooks_section) if isinstance(hooks_section, dict) else {}
+    out: dict[str, Any] = {k: v for k, v in existing.items() if k not in legacy_keys}
+    for key in legacy_keys:
+        entries = existing[key]
+        # `migrated` is a shallow copy, so this list is still the caller's.
+        existing_target = migrated.get(key)
+        target: list[Any] = list(existing_target) if isinstance(existing_target, list) else []
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("command"):
+                continue
+            converted = {k: v for k, v in entry.items() if k not in ("event", "tools")}
+            converted.setdefault("type", "command")
+            tools = entry.get("tools")
+            if isinstance(tools, list) and tools and key in ("preToolUse", "postToolUse"):
+                # Re-translate through the current map on the way in. Legacy
+                # files were written when the map only renamed Bash→Shell, so
+                # they can carry names Cursor has no tool for (`Edit`); left
+                # alone those become matcher alternatives that can never match.
+                converted["matcher"] = _tools_to_matcher(
+                    _translate_tools([str(t) for t in tools], AIToolID.CURSOR)
+                )
+            if not any(
+                isinstance(e, dict) and e.get("command") == converted["command"] for e in target
+            ):
+                target.append(converted)
+        if target:
+            migrated[key] = target
+
+    out["hooks"] = migrated
+    return out, True
+
+
+def _cursor_upsert(
+    hooks_section: dict[str, Any],
+    event_name: str,
+    hook: HookEntry,
+    desired_tools: list[str],
+    *,
+    scoped: bool,
+) -> bool:
+    """Merge one hook into ``hooks_section[event_name]``; return True if changed.
+
+    Dedup key is the command. An existing entry is only ever *widened* — its
+    matcher grows to cover new tools, ``failClosed`` is added if missing, and a
+    ``timeout`` is filled in only when absent so a hand-tuned value survives.
+    """
+    event_list: list[Any] = hooks_section.get(event_name, [])
+    if not isinstance(event_list, list):
+        event_list = []
+
+    desired_matcher = _tools_to_matcher(desired_tools) if scoped else None
+    if desired_matcher == ".*":
+        # Cursor treats a missing matcher as "all tools"; don't write a
+        # redundant catch-all regex.
+        desired_matcher = None
+
+    for entry in event_list:
+        if not isinstance(entry, dict) or entry.get("command") != hook.command:
+            continue
+        changed = False
+        if hook.fail_closed and entry.get("failClosed") is not True:
+            entry["failClosed"] = True
+            changed = True
+        if hook.timeout is not None and "timeout" not in entry:
+            entry["timeout"] = hook.timeout
+            changed = True
+        if not scoped:
+            if "matcher" in entry:
+                del entry["matcher"]
+                changed = True
+            return changed
+        existing_matcher = entry.get("matcher")
+        # A missing matcher already means "all tools" — never narrow it.
+        if existing_matcher is None:
+            return changed
+        widened = _widen_matcher(
+            existing_matcher if isinstance(existing_matcher, str) else None,
+            desired_tools,
+        )
+        if widened != existing_matcher:
+            entry["matcher"] = widened
+            changed = True
+        return changed
+
+    new_entry: dict[str, Any] = {"type": "command", "command": hook.command}
+    if desired_matcher is not None:
+        new_entry["matcher"] = desired_matcher
+    if hook.fail_closed:
+        # Cursor defaults hooks to fail-open; a security guard must block the
+        # action when the hook itself crashes or times out.
+        new_entry["failClosed"] = True
+    if hook.timeout is not None:
+        new_entry["timeout"] = hook.timeout
+    event_list.append(new_entry)
+    hooks_section[event_name] = event_list
+    return True
 
 
 class CursorHooksWriter(AbstractSyncWriter):
-    """Merges hooks into .cursor/hooks.json → <eventName>[].
+    """Merges hooks into .cursor/hooks.json → ``hooks.<eventName>[]``.
 
     Format::
 
         {
-          "preToolUse": [
-            {"event": "preToolUse", "command": "...", "tools": ["Edit", "Shell"],
-             "failClosed": true}
-          ]
+          "version": 1,
+          "hooks": {
+            "preToolUse": [
+              {"type": "command", "command": "...", "matcher": "Write|Shell",
+               "failClosed": true, "timeout": 30}
+            ],
+            "beforeShellExecution": [
+              {"type": "command", "command": "...", "failClosed": true}
+            ]
+          }
         }
 
-    Merge key: ``entry.command`` within the event's array.
-    When the command matches, the ``tools`` list is widened if the desired
-    coverage has grown (upgrade-safe). ``failClosed: true`` is emitted for hooks
-    marked :attr:`HookEntry.fail_closed` — Cursor otherwise treats a hook that
+    The ``{"version", "hooks"}`` wrapper is mandatory — Cursor's loader rejects a
+    config without a top-level ``hooks`` object and drops the file entirely.
+    crossby <=0.12 wrote the event arrays at the top level, so every Cursor hook
+    it ever wrote was inert; :func:`_migrate_legacy_cursor_config` repairs such a
+    file in place. Per-tool scope is a single ``matcher`` **regex string**;
+    Cursor's schema has no ``tools`` array.
+
+    Merge key: ``entry.command`` within the event's array. When the command
+    matches, the ``matcher`` is widened if the desired coverage has grown
+    (upgrade-safe). ``failClosed: true`` is emitted for hooks marked
+    :attr:`HookEntry.fail_closed` — Cursor otherwise treats a hook that
     crashes/times out as *allow*, silently defeating a security guard.
+
+    **Shell fan-out.** A ``pre_tool_use`` hook scoped to a shell tool also gets a
+    second entry under ``beforeShellExecution``, written *unscoped* because that
+    event matches against the command string rather than a tool name. Both
+    events fire for a single shell call, so the hook command runs twice — which
+    is deliberate and safe, because a guard is a pure allow/deny decision and
+    therefore idempotent. `preToolUse` alone does already cover shell on current
+    cursor-agent builds (verified); the extra registration is there because which
+    events cursor-agent fires has varied by version, and a security guard that
+    silently stops covering shell is the failure this issue exists to prevent.
     """
 
     tool_id = AIToolID.CURSOR
@@ -378,65 +613,34 @@ class CursorHooksWriter(AbstractSyncWriter):
 
         kept, notes = _filter_supported_hooks(data.hooks, _CURSOR_SUPPORTED_EVENTS)
         existing = file_data or {}
-        changed = False
+        existing, changed = _migrate_legacy_cursor_config(existing)
+        hooks_section: dict[str, Any] = existing.get("hooks", {})
+        if not isinstance(hooks_section, dict):
+            hooks_section = {}
         dropped_tool_scope_events: set[str] = set()
 
         for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
-            event_list: list[Any] = existing.get(event_name, [])
-            if not isinstance(event_list, list):
-                event_list = []
-
-            # Dedup by command; widen tools list if coverage has grown.
-            # An existing entry whose ``tools`` key is missing or set to ``[]``
-            # is treated as "all tools" — that's how Cursor reads it — so we
-            # leave it alone instead of narrowing to the desired subset.
-            command = hook.command
             allow_tool_scope = hook.event in _CURSOR_TOOL_SCOPE_EVENTS
             raw_desired = hook.tools or []
             desired_tools = _translate_tools(raw_desired, self.tool_id) if allow_tool_scope else []
             if not allow_tool_scope and raw_desired:
                 dropped_tool_scope_events.add(hook.event)
-            already_exists = False
-            for entry in event_list:
-                if not isinstance(entry, dict) or entry.get("command") != command:
-                    continue
-                already_exists = True
-                # Upgrade-safe: add failClosed to a pre-existing entry that lacks
-                # it (e.g. written by an older crossby) so security guards harden
-                # on re-sync. Never silently downgrade an entry to fail-open.
-                if hook.fail_closed and entry.get("failClosed") is not True:
-                    entry["failClosed"] = True
-                    changed = True
-                if not allow_tool_scope:
-                    if "tools" in entry:
-                        del entry["tools"]
-                        changed = True
-                    break
-                raw_tools = entry.get("tools")
-                # Missing key or empty list ⇒ "all tools"; don't narrow it.
-                if raw_tools is None or (isinstance(raw_tools, list) and not raw_tools):
-                    break
-                existing_tools: list[str] = list(raw_tools) if isinstance(raw_tools, list) else []
-                missing = [t for t in desired_tools if t not in existing_tools]
-                if missing:
-                    entry["tools"] = existing_tools + missing
-                    changed = True
-                break
 
-            if not already_exists:
-                new_entry: dict[str, Any] = {
-                    "event": event_name,
-                    "command": command,
-                }
-                if allow_tool_scope:
-                    new_entry["tools"] = desired_tools
-                if hook.fail_closed:
-                    # Cursor defaults hooks to fail-open; a security guard must
-                    # block the action when the hook itself crashes/times out.
-                    new_entry["failClosed"] = True
-                event_list.append(new_entry)
-                existing[event_name] = event_list
+            if _cursor_upsert(
+                hooks_section, event_name, hook, desired_tools, scoped=allow_tool_scope
+            ):
+                changed = True
+
+            # Shell fan-out: mirror a shell-scoped pre-tool hook onto Cursor's
+            # dedicated shell event, unscoped (it matches the command string,
+            # not a tool name). See the class docstring for why this is a
+            # deliberate double-registration.
+            if (
+                hook.event == "pre_tool_use"
+                and any(tool in _CURSOR_SHELL_TOOLS for tool in desired_tools)
+                and _cursor_upsert(hooks_section, _CURSOR_SHELL_EVENT, hook, [], scoped=False)
+            ):
                 changed = True
 
         for event in sorted(dropped_tool_scope_events):
@@ -450,7 +654,9 @@ class CursorHooksWriter(AbstractSyncWriter):
                 )
             )
 
-        if not changed:
+        version_correct = existing.get("version") == 1
+
+        if not changed and version_correct:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -461,6 +667,10 @@ class CursorHooksWriter(AbstractSyncWriter):
 
         action: _HookAction = "created" if was_new else "updated"
         if not dry_run:
+            # `version` and `hooks` are both mandatory — Cursor's validator
+            # rejects the file without them and loads no hooks at all.
+            existing["version"] = 1
+            existing["hooks"] = hooks_section
             write_json_file(path, existing)
 
         return SyncResult(
@@ -477,7 +687,9 @@ class CursorHooksWriter(AbstractSyncWriter):
 # ---------------------------------------------------------------------------
 
 
-_COPILOT_SUPPORTED_EVENTS: frozenset[str] = frozenset({"pre_tool_use"})
+_COPILOT_SUPPORTED_EVENTS: frozenset[str] = frozenset(
+    {"pre_tool_use", "post_tool_use", "session_start", "stop"}
+)
 
 
 class CopilotHooksWriter(AbstractSyncWriter):
@@ -559,8 +771,11 @@ class CopilotHooksWriter(AbstractSyncWriter):
                         ManualFixNote(
                             category="hooks.tools",
                             message=(
-                                "Copilot hooks have no per-tool filter; source `tools` "
-                                "scope was dropped and the hook applies to all tools."
+                                "crossby writes Copilot hooks unscoped; the source "
+                                "`tools` scope was dropped and the hook applies to all "
+                                "tools. Copilot itself does support a `matcher` regex "
+                                "on its tool events, so add one by hand if the hook "
+                                "must be scoped."
                             ),
                         )
                     )
@@ -569,6 +784,11 @@ class CopilotHooksWriter(AbstractSyncWriter):
                     "bash": command,
                     "comment": hook.description or "",
                 }
+                if hook.timeout is not None:
+                    # Copilot spells it `timeoutSec` (seconds, default 30).
+                    # `timeout` is an accepted alias but `timeoutSec` wins, so
+                    # emit the canonical name.
+                    new_entry["timeoutSec"] = hook.timeout
                 event_list.append(new_entry)
                 hooks_section[event_name] = event_list
                 changed = True
@@ -749,7 +969,11 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             agy_event = _translate_event(hook.event, self.tool_id)
             command = hook.command
             allow_matcher = hook.event in _ANTIGRAVITY_CLI_MATCHER_EVENTS
-            desired_tools = hook.tools or []
+            # Translate to agy's native tool-call names first — its matcher is a
+            # regex over the live `toolCall.name`, so a matcher built from
+            # crossby's canonical names (Write|Edit|Bash) matches nothing agy
+            # ever emits and the guard silently never fires.
+            desired_tools = _translate_tools(hook.tools or [], self.tool_id)
             if not allow_matcher and desired_tools:
                 dropped_matcher_events.add(hook.event)
 
@@ -779,7 +1003,7 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             if not isinstance(event_list, list):
                 event_list = []
 
-            handler: dict[str, Any] = {"type": "command", "command": command}
+            handler: dict[str, Any] = _command_handler(hook)
             if allow_matcher:
                 event_list.append({"matcher": _tools_to_matcher(desired_tools), "hooks": [handler]})
             else:
@@ -841,22 +1065,35 @@ _CODEX_MATCHER_EVENTS: frozenset[str] = frozenset(
 # (e.g. a pre-existing `.codex/config.toml` is malformed). On the happy path the
 # writer sets the flag itself, so no manual step is reported.
 _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
-    category="features.codex_hooks",
+    category="features.hooks",
     message=(
         "Could not update `.codex/config.toml` automatically — set "
-        "`[features].codex_hooks = true` there manually so Codex loads these hooks."
+        "`[features].hooks = true` (and `codex_hooks = true` for older Codex "
+        "builds) there manually so Codex loads these hooks."
     ),
 )
 
+# Canonical key first, deprecated alias second. `hooks` is the current name and
+# has been stable and ON by default since Codex 0.146.0 (`codex features list`
+# reports `hooks stable true`); `codex_hooks` resolves to it as a deprecated
+# alias. Unknown feature keys are inert, so writing both is safe on every build
+# and is purely defensive for older ones.
+_CODEX_FEATURE_KEYS: tuple[str, ...] = ("hooks", "codex_hooks")
+
 
 def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> ManualFixNote | None:
-    """Enable ``[features].codex_hooks`` in ``.codex/config.toml`` (idempotent).
+    """Enable the Codex hooks feature flags in ``.codex/config.toml`` (idempotent).
 
-    Codex ignores ``.codex/hooks.json`` unless this feature flag is set, so the
-    hooks we write are inert without it. Merges the flag into any existing config
-    (preserving other keys/tables) and writes it back.
+    Writes both ``[features].hooks`` (canonical) and ``[features].codex_hooks``
+    (deprecated alias) so the config works on current and older Codex alike.
+    Merges into any existing config, preserving other keys/tables.
 
-    Returns ``None`` on success (or when the flag is already set / ``dry_run``);
+    On current Codex this is belt-and-braces — the feature is stable and enabled
+    by default, so hooks load whether or not the flag is present. It still gets
+    written so a project pinned to an older Codex is not silently left with
+    inert hooks.
+
+    Returns ``None`` on success (or when both flags are already set / ``dry_run``);
     returns :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is malformed
     TOML and can't be updated automatically, so the caller can surface a
     manual-fix note instead of silently leaving the hooks inert.
@@ -878,19 +1115,27 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
     features = existing.get("features")
     if not isinstance(features, dict):
         features = {}
-    if features.get("codex_hooks") is True:
+    missing = [key for key in _CODEX_FEATURE_KEYS if features.get(key) is not True]
+    if not missing:
         return None  # already enabled — nothing to do
 
     if dry_run:
         return None
 
-    features["codex_hooks"] = True
+    for key in missing:
+        features[key] = True
     existing["features"] = features
 
-    # Splice the one key in textually so the user's comments and key ordering
+    # Splice each key in textually so the user's comments and key ordering
     # survive; fall back to the (lossy) full dump only if that can't be done.
     # Reuses the text read above — a second read could see a different file.
-    new_text = splice_or_none(set_scalar(original, ("features",), "codex_hooks", "true"), existing)
+    spliced: str | None = original
+    for key in missing:
+        if spliced is None:
+            break
+        spliced = set_scalar(spliced, ("features",), key, "true")
+
+    new_text = splice_or_none(spliced, existing)
     if new_text is None:
         new_text = tomli_w.dumps(existing)
 
@@ -908,10 +1153,13 @@ class CodexHooksWriter(AbstractSyncWriter):
     PostToolUse, SessionStart, UserPromptSubmit, Stop) and only honours
     ``matcher`` on the first three. Unsupported events and dropped matchers
     are reported as manual-fix notes in the ``SyncResult.message`` so the
-    sync report classifies the row as ``Check before using``. Because Codex
-    ignores ``hooks.json`` unless ``[features].codex_hooks = true`` is set, the
-    writer also enables that flag in ``.codex/config.toml`` automatically (a
-    manual-fix note is surfaced only if that file can't be written).
+    sync report classifies the row as ``Check before using``.
+
+    The writer also sets ``[features].hooks = true`` and its deprecated alias
+    ``codex_hooks`` in ``.codex/config.toml`` (a manual-fix note is surfaced only
+    if that file can't be written). On current Codex this is defensive only —
+    the hooks feature is stable and enabled by default since 0.146.0 — but it
+    keeps a project pinned to an older Codex from ending up with inert hooks.
     """
 
     tool_id = AIToolID.CODEX
@@ -998,7 +1246,7 @@ class CodexHooksWriter(AbstractSyncWriter):
 
             if not already_exists:
                 new_entry: dict[str, Any] = {
-                    "hooks": [{"type": "command", "command": command}],
+                    "hooks": [_command_handler(hook)],
                 }
                 if allow_matcher:
                     new_entry["matcher"] = _tools_to_matcher(desired_tools)
