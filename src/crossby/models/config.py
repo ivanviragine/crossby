@@ -272,9 +272,7 @@ def _merge_scene(parent: SceneConfig, child: SceneConfig) -> SceneConfig:
     """
     declared = child.model_fields_set
     updates = {
-        field: getattr(child, field)
-        for field in _SCENE_INHERITABLE_FIELDS
-        if field in declared
+        field: getattr(child, field) for field in _SCENE_INHERITABLE_FIELDS if field in declared
     }
     return parent.model_copy(update=updates)
 
@@ -454,9 +452,7 @@ class CrossbyConfig(BaseModel):
         if scene.extends is None:
             return scene
         if scene.extends not in self.scenes:
-            raise ConfigError(
-                f"scene {name!r} extends undefined scene {scene.extends!r}"
-            )
+            raise ConfigError(f"scene {name!r} extends undefined scene {scene.extends!r}")
         parent = self._flatten_scene(scene.extends, [*chain, name])
         return _merge_scene(parent, scene)
 

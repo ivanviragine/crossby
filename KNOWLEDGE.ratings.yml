@@ -31,6 +31,10 @@
   down: 0
   stale: 0
   up: 1
+5fd44490:
+  down: 0
+  stale: 0
+  up: 1
 6ad64ecc:
   down: 0
   stale: 0
@@ -108,7 +112,7 @@ f0ef034d:
 f57216d4:
   down: 0
   stale: 0
-  up: 1
+  up: 2
 f7a8c38e:
   down: 0
   stale: 2

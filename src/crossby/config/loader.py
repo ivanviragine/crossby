@@ -204,9 +204,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     )
 
 
-def _parse_scenes(
-    raw: Any, profiles: dict[str, ProfileConfig]
-) -> dict[str, SceneConfig]:
+def _parse_scenes(raw: Any, profiles: dict[str, ProfileConfig]) -> dict[str, SceneConfig]:
     """Parse the ``scenes:`` section, mirroring the ``profiles:`` block.
 
     Uses the same separate ``is None`` / ``isinstance`` checks so a falsy scalar
