@@ -46,21 +46,11 @@ def detect_skills_source(root: Path) -> Path | None:
     return None
 
 
-def count_skills(directory: Path) -> int:
-    """Count skill subdirectories (each containing a SKILL.md file) in directory."""
-    count = 0
-    with contextlib.suppress(OSError):
-        resolved = directory.resolve() if directory.is_symlink() else directory
-        count = sum(1 for d in resolved.iterdir() if d.is_dir() and (d / "SKILL.md").is_file())
-    return count
-
-
 def list_skills(directory: Path) -> list[str]:
     """Return the names of skill subdirectories (each containing a SKILL.md).
 
-    The name-returning companion to :func:`count_skills`: applies the same
-    "subdirectory bearing a ``SKILL.md``" rule and the same symlinked-directory
-    handling, and returns the directory names sorted. A missing or unreadable
+    A "skill" is a subdirectory bearing a ``SKILL.md`` file; a symlinked
+    *directory* is followed. Names are returned sorted; a missing or unreadable
     directory yields an empty list.
     """
     names: list[str] = []
@@ -68,6 +58,11 @@ def list_skills(directory: Path) -> list[str]:
         resolved = directory.resolve() if directory.is_symlink() else directory
         names = [d.name for d in resolved.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()]
     return sorted(names)
+
+
+def count_skills(directory: Path) -> int:
+    """Count skill subdirectories (each containing a SKILL.md file) in directory."""
+    return len(list_skills(directory))
 
 
 def get_skills_target(tool_id: AIToolID, root: Path) -> Path | None:

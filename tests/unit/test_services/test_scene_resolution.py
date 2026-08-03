@@ -192,6 +192,14 @@ class TestGlobalConcerns:
         # 'gh pr *' matches the allowlist text 'gh pr create'; 'npm test' stays out.
         assert set(resolved.names("permissions")) == {"git diff:*", "gh pr create"}
 
+    def test_global_group_names_are_sorted(self, tmp_path: Path) -> None:
+        """Every concern's group.names is sorted — permissions included."""
+        _populate(tmp_path)
+        scene = SceneConfig(permissions=SceneSelector(include=["*"]))
+        resolved = resolve_scene(scene, _scan(tmp_path), tmp_path)
+        group_names = resolved.groups_for("permissions")[0].names
+        assert list(group_names) == sorted(group_names)
+
 
 class TestAgents:
     def test_agent_names_enumerated_by_stem(self, tmp_path: Path) -> None:

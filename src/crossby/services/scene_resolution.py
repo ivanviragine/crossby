@@ -208,7 +208,9 @@ def _collect_groups(concern: str, scan: ProjectScan, project_root: Path) -> list
     if concern == "mcp":
         return _global_group(sorted(discover_mcp(project_root)), scan)
     if concern == "permissions":
-        return _global_group(discover_permissions(project_root), scan)
+        # sorted() like mcp/hooks: discover_permissions preserves reader order,
+        # so sort here to keep every concern's group.names deterministic.
+        return _global_group(sorted(discover_permissions(project_root)), scan)
     if concern == "hooks":
         names = [f"{hook.event}:{hook.command}" for hook in discover_hooks(project_root)]
         return _global_group(sorted(names), scan)
@@ -251,9 +253,9 @@ def _dir_groups(
 def _global_group(names: list[str], scan: ProjectScan) -> list[_RawGroup]:
     """Build the single path-less group for a project-wide concern.
 
-    Names are already deduplicated and sorted by the discoverer. Attribution is
-    tool-agnostic: these items apply across every installed tool, so the group
-    carries ``target_path=None`` and all installed tools.
+    *names* is expected already deduplicated and sorted by the caller.
+    Attribution is tool-agnostic: these items apply across every installed tool,
+    so the group carries ``target_path=None`` and all installed tools.
     """
     if not names:
         return []
