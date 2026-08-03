@@ -119,6 +119,43 @@ class TestInitExistingFileGuard:
         parsed = parse_config_file(target)
         assert parsed.ai.default_tool == "claude"
 
+    def test_force_preserves_hand_authored_scenes_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``scenes:`` is not a rendered section, so --force must carry it over."""
+        target = tmp_path / ".crossby.yml"
+        existing = (
+            "version: 1\n"
+            "profiles:\n"
+            "  ccyolo:\n"
+            "    tool: claude\n"
+            "scenes:\n"
+            "  pr-review:\n"
+            "    description: Review a pull request\n"
+            "    profile: ccyolo\n"
+            "    skills:\n"
+            "      include: [review-*]\n"
+        )
+        target.write_text(existing, encoding="utf-8")
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(tmp_path), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 0, result.output
+        parsed = parse_config_file(target)
+        scene = parsed.get_scene("pr-review")
+        assert scene is not None
+        assert scene.description == "Review a pull request"
+        assert scene.profile == "ccyolo"
+        assert scene.skills is not None
+        assert scene.skills.include == ["review-*"]
+
 
 class TestRenderInitYaml:
     def test_empty_answers_round_trip(self, tmp_path: Path) -> None:
