@@ -28,6 +28,24 @@ Matches the .crossby.yml format:
         tool: cursor
         model: haiku
         effort: low
+    scenes:
+      base:
+        skills:
+          exclude: ["deploy-*"]
+      pr-review:
+        description: Review a pull request
+        extends: base                 # optional single-parent composition
+        profile: ccyolo               # optional default launch profile
+        skills:
+          include: ["review-*", "knowledge"]
+        agents:
+          include: ["code-reviewer"]
+        mcp:
+          include: ["github"]
+        hooks:
+          include: ["pre_tool_use:*"]
+        permissions:
+          include: ["git diff:*", "gh pr *"]
     sync_defaults:
       from: claude
       to: null
@@ -176,6 +194,91 @@ class ProfileConfig(BaseModel):
     auto: bool | None = None
 
 
+class SceneSelector(BaseModel):
+    """Include/exclude globs for one concern inside a :class:`SceneConfig`.
+
+    Selection has three states, distinguished by whether ``include`` is set:
+
+    - ``include`` **absent** (``None``) → start from *everything* detected for
+      the concern, then drop anything ``exclude`` matches.
+    - ``include: []`` → start from *nothing*.
+    - ``include: [globs]`` → start from the union of items each glob matches.
+
+    ``exclude`` is applied last and always wins over ``include``. Patterns are
+    ``fnmatch`` globs over each item's canonical name; ``extra="forbid"`` turns
+    a typo'd key (``includ:``) into an error instead of a silent no-op.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    include: list[str] | None = None
+    exclude: list[str] = Field(default_factory=list)
+
+
+class SceneConfig(BaseModel):
+    """A named, task-shaped bundle of capabilities (stored under ``scenes``).
+
+    Where a :class:`ProfileConfig` answers *how do I launch* (tool/model/effort),
+    a scene answers *what is in the room* — which skills, agents, MCP servers,
+    hooks and permissions the session should carry. ``rules`` and ``plugins`` are
+    deliberately not selectable concerns.
+
+    ``extends`` names a single parent scene to compose from; flattening (with
+    per-concern *replace* semantics, cycle detection and undefined-parent
+    errors) happens in :meth:`CrossbyConfig.get_scene`, not on this model.
+    ``profile`` names a default launch profile and is validated against the
+    ``profiles:`` section by the loader. ``extra="forbid"`` rejects a typo'd
+    concern key (``skils:``) rather than dropping it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str | None = None
+    extends: str | None = None
+    profile: str | None = None
+
+    skills: SceneSelector | None = None
+    agents: SceneSelector | None = None
+    mcp: SceneSelector | None = None
+    hooks: SceneSelector | None = None
+    permissions: SceneSelector | None = None
+
+
+# Fields inherited across an ``extends`` edge. ``extends`` itself is resolved
+# away during flattening, so it is not carried onto the merged scene.
+_SCENE_INHERITABLE_FIELDS: tuple[str, ...] = (
+    "description",
+    "profile",
+    "skills",
+    "agents",
+    "mcp",
+    "hooks",
+    "permissions",
+)
+
+# The subset of the above that are per-concern selectors — used by the resolver.
+SCENE_CONCERNS: tuple[str, ...] = ("skills", "agents", "mcp", "hooks", "permissions")
+
+
+def _merge_scene(parent: SceneConfig, child: SceneConfig) -> SceneConfig:
+    """Merge *child* onto *parent* with per-concern **replace** semantics.
+
+    A field the child declares (present in ``model_fields_set``) fully replaces
+    the parent's value; a field the child omits is inherited verbatim. This
+    holds for the concern selectors and for ``description``/``profile`` alike,
+    so e.g. a child that declares its own ``skills:`` does **not** inherit the
+    parent's ``skills.exclude``. The result is a flat scene: ``extends`` is not
+    an inheritable field, so the merged scene keeps the parent's (``None``).
+    """
+    declared = child.model_fields_set
+    updates = {
+        field: getattr(child, field)
+        for field in _SCENE_INHERITABLE_FIELDS
+        if field in declared
+    }
+    return parent.model_copy(update=updates)
+
+
 class SyncDefaults(BaseModel):
     """Defaults for ``crossby sync`` — all fields optional.
 
@@ -224,6 +327,7 @@ class CrossbyConfig(BaseModel):
     ai: AIConfig = AIConfig()
     models: dict[str, ComplexityModelMapping] = {}
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
+    scenes: dict[str, SceneConfig] = Field(default_factory=dict)
     sync_defaults: SyncDefaults = Field(default_factory=SyncDefaults)
     handoff_defaults: HandoffDefaults = Field(default_factory=HandoffDefaults)
 
@@ -314,6 +418,47 @@ class CrossbyConfig(BaseModel):
     def get_profile(self, name: str) -> ProfileConfig | None:
         """Get a named launch profile."""
         return self.profiles.get(name)
+
+    def get_scene(self, name: str) -> SceneConfig | None:
+        """Return the named scene with its ``extends`` chain flattened.
+
+        The returned :class:`SceneConfig` is *flat*: every parent selector has
+        already been folded in with per-concern replace semantics (see
+        :func:`_merge_scene`), so the resolver never needs sibling scenes.
+        Returns ``None`` for an unknown scene — mirroring :meth:`get_profile`.
+
+        Raises:
+            ConfigError: if any ``extends`` in the chain names an undefined
+                scene, or if the chain forms a cycle (the message names the
+                full chain).
+        """
+        if name not in self.scenes:
+            return None
+        return self._flatten_scene(name, [])
+
+    def _flatten_scene(self, name: str, chain: list[str]) -> SceneConfig:
+        """Recursively fold *name*'s ``extends`` parents into a flat scene.
+
+        *chain* is the list of scenes visited on the way down (most-derived
+        first); it drives both cycle detection and the error message.
+        """
+        # ConfigError lives in the loader, which imports this module — a
+        # function-local import keeps that dependency one-directional.
+        from crossby.config.loader import ConfigError
+
+        if name in chain:
+            cycle = " -> ".join([*chain, name])
+            raise ConfigError(f"scene 'extends' cycle detected: {cycle}")
+
+        scene = self.scenes[name]  # callers only recurse into known scenes
+        if scene.extends is None:
+            return scene
+        if scene.extends not in self.scenes:
+            raise ConfigError(
+                f"scene {name!r} extends undefined scene {scene.extends!r}"
+            )
+        parent = self._flatten_scene(scene.extends, [*chain, name])
+        return _merge_scene(parent, scene)
 
     def get_sync_from(self) -> AIToolID | None:
         """Get the default source tool for ``crossby sync``."""

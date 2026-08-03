@@ -214,6 +214,25 @@ profiles:
     model: haiku
     effort: low
 
+scenes:                           # task-shaped bundles of capabilities
+  base:
+    skills:
+      exclude: [deploy-*]
+  pr-review:
+    description: Review a pull request
+    extends: base                 # single-parent composition
+    profile: ccyolo               # default launch profile for this scene
+    skills:
+      include: [review-*, knowledge]
+    agents:
+      include: [code-reviewer]
+    mcp:
+      include: [github]
+    hooks:
+      include: ["pre_tool_use:*"]
+    permissions:
+      include: ["git diff:*", "gh pr *"]
+
 sync_defaults:                    # fed into `crossby sync`
   from: claude
   to: cursor

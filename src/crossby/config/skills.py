@@ -55,6 +55,21 @@ def count_skills(directory: Path) -> int:
     return count
 
 
+def list_skills(directory: Path) -> list[str]:
+    """Return the names of skill subdirectories (each containing a SKILL.md).
+
+    The name-returning companion to :func:`count_skills`: applies the same
+    "subdirectory bearing a ``SKILL.md``" rule and the same symlinked-directory
+    handling, and returns the directory names sorted. A missing or unreadable
+    directory yields an empty list.
+    """
+    names: list[str] = []
+    with contextlib.suppress(OSError):
+        resolved = directory.resolve() if directory.is_symlink() else directory
+        names = [d.name for d in resolved.iterdir() if d.is_dir() and (d / "SKILL.md").is_file()]
+    return sorted(names)
+
+
 def get_skills_target(tool_id: AIToolID, root: Path) -> Path | None:
     """Return the skills directory path for *tool_id*."""
     rel = SKILLS_DIR.get(tool_id)
