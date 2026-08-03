@@ -23,6 +23,29 @@ def _iter_tier_defaults() -> list[tuple[str, str, str]]:
 
 _ALL_DEFAULT_MODEL_IDS = sorted({model_id for _, _, model_id in _iter_tier_defaults()})
 
+# Expected tier for every distinct TOOL_DEFAULTS model ID, hand-derived from
+# classify_tier_universal's documented keyword rules (haiku/flash/mini -> FAST;
+# opus/pro/max -> POWERFUL; sonnet or no keyword -> BALANCED). Pins how the novel
+# effort-encoded IDs (composer-2.5-fast, claude-opus-5-high, gemini-3.6-flash-*)
+# parse, so a regex/keyword regression fails the test instead of slipping through.
+_EXPECTED_TIERS: dict[str, ModelTier] = {
+    "anthropic/claude-haiku-4.5": ModelTier.FAST,
+    "anthropic/claude-opus-4.7": ModelTier.POWERFUL,
+    "anthropic/claude-sonnet-4.6": ModelTier.BALANCED,
+    "claude-haiku-4.5": ModelTier.FAST,
+    "claude-opus-5": ModelTier.POWERFUL,
+    "claude-opus-5-high": ModelTier.POWERFUL,
+    "claude-sonnet-5": ModelTier.BALANCED,
+    "composer-2.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
+    "composer-2.5-fast": ModelTier.BALANCED,  # "fast" is not a classifier keyword
+    "gemini-3.6-flash-high": ModelTier.FAST,
+    "gemini-3.6-flash-low": ModelTier.FAST,
+    "gemini-3.6-flash-medium": ModelTier.FAST,
+    "gpt-5.4": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
+    "gpt-5.4-mini": ModelTier.FAST,
+    "gpt-5.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
+}
+
 
 class TestMediumTierDefaults:
     """Medium tier must map to balanced-tier (not fast-tier) for all tools."""
@@ -64,11 +87,17 @@ class TestDefaultsRegistryGuard:
             f"{tool_id}.{tier} default '{model_id}' is not in get_models_for_tool('{tool_id}')"
         )
 
+    def test_expected_tiers_cover_all_defaults(self) -> None:
+        # Guards the map below against drift: adding a new default model ID
+        # without an expected tier fails here instead of silently skipping it.
+        assert set(_EXPECTED_TIERS) == set(_ALL_DEFAULT_MODEL_IDS)
+
     @pytest.mark.parametrize("model_id", _ALL_DEFAULT_MODEL_IDS)
-    def test_default_resolves_through_classifier(self, model_id: str) -> None:
-        # Cheap insurance: novel effort-encoded IDs (composer-2.5-fast,
-        # claude-opus-5-high, gemini-3.6-flash-*) must parse without raising.
-        assert isinstance(classify_tier_universal(model_id), ModelTier)
+    def test_default_classifies_to_expected_tier(self, model_id: str) -> None:
+        # Genuine regression guard: the novel effort-encoded IDs
+        # (composer-2.5-fast, claude-opus-5-high, gemini-3.6-flash-*) must keep
+        # classifying by their family keyword rather than shifting tier.
+        assert classify_tier_universal(model_id) == _EXPECTED_TIERS[model_id]
 
 
 class TestClaudeTierDefaults:
