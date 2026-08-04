@@ -264,9 +264,10 @@ class TestRunSyncLedgerGating:
 
         monkeypatch.setattr("crossby.sync.ownership.save_ledger", _boom)
         results = run_sync(
-            SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=_registry(
-                ClaudeHooksWriter()
-            )
+            SyncData(hooks=[_HOOK]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(ClaudeHooksWriter()),
         )
         # The write result survives the failed ledger save …
         assert any(r.concern == SyncConcern.HOOKS and r.action != "error" for r in results)

@@ -290,9 +290,7 @@ def run_sync(
                     [LEDGER_PATH.as_posix()],
                 )
         except OSError as exc:
-            logger.warning(
-                "ownership.persist_failed", path=str(project_root), error=str(exc)
-            )
+            logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or
     # when the user explicitly asked for the plugins concern. We don't run
