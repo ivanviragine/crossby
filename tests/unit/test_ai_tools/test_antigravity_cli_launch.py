@@ -81,6 +81,20 @@ class TestAntigravityCLIEffort:
             resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.1-pro-medium", None)
         assert resolved == "gemini-3.1-pro-high"
 
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gemini-3.6-flash-xhigh", "gemini-3.6-flash-high"),
+            ("gemini-3.1-pro-max", "gemini-3.1-pro-high"),
+        ],
+    )
+    def test_stored_xhigh_max_suffix_normalizes_to_high(self, model: str, expected: str) -> None:
+        # agy never emits a -xhigh/-max ID; a hand-written one must normalize
+        # down rather than pass through as an invalid command.
+        with pytest.warns(UserWarning, match="only low/medium/high"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model(model, None)
+        assert resolved == expected
+
     def test_no_effort_defaults_to_medium_when_supported(self) -> None:
         cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.6-flash", effort=None)
         assert _model_of(cmd) == "gemini-3.6-flash-medium"

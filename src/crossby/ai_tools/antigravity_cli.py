@@ -28,16 +28,22 @@ _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
     "gemini-3.1-pro": (EffortLevel.LOW, EffortLevel.HIGH),
 }
 
-# Effort suffixes agy uses on Gemini model IDs (xhigh/max are never valid there).
+# Effort suffixes that may appear on a stored model ID. agy only *emits* the
+# low/medium/high tiers, but a hand-written config could carry an ``-xhigh``/
+# ``-max`` suffix agy rejects; recognizing them lets resolve_effort_model
+# normalize such an ID down to a valid tier instead of passing it through.
 _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
     "-low": EffortLevel.LOW,
     "-medium": EffortLevel.MEDIUM,
     "-high": EffortLevel.HIGH,
+    "-xhigh": EffortLevel.XHIGH,
+    "-max": EffortLevel.MAX,
 }
 
 
 def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
-    """Split a trailing ``-low``/``-medium``/``-high`` effort suffix off a model ID.
+    """Split a trailing effort suffix (``-low``/``-medium``/``-high``/``-xhigh``/
+    ``-max``) off a model ID.
 
     Returns ``(base, effort)`` when the ID ends in a known effort suffix, else
     ``(model, None)``.
