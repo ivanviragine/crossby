@@ -59,6 +59,27 @@ class SyncData:
     # Hooks concern
     hooks: list[HookEntry] = field(default_factory=list)
 
+    # --- Revocation channels ------------------------------------------------
+    # Computed *exclusively* by ``run_sync()`` from the ownership ledger
+    # (``sync/ownership.py``) and handed to writers explicitly. These are the
+    # ONLY inputs a writer may act on to remove an item — a writer must never
+    # infer "absent from the additive fields above ⇒ remove", or the direct
+    # single-hook callers (``config/claude_allowlist.configure_plan_hooks`` and
+    # friends) would wipe every other entry in the target file on every session
+    # setup. All default to empty, so those direct callers revoke nothing.
+
+    # Canonical ``(event, command)`` pairs to remove from each hooks target.
+    hooks_remove: list[tuple[str, str]] = field(default_factory=list)
+    # Canonical ``(event, command)`` pairs crossby already owns for the target
+    # tool. Consulted only to decide whether a matcher may *narrow* (crossby's
+    # own over-broad matcher) versus must *widen* (protect a human's broader
+    # scope) — never used to remove anything.
+    hooks_owned: frozenset[tuple[str, str]] = field(default_factory=frozenset)
+    # Canonical permission patterns to remove from each permissions target.
+    permissions_remove: list[str] = field(default_factory=list)
+    # MCP server names crossby may delete (ledger-bounded disabled set).
+    mcp_remove: frozenset[str] = field(default_factory=frozenset)
+
 
 @dataclass
 class SyncResult:
@@ -69,6 +90,12 @@ class SyncResult:
     action: Literal["created", "updated", "skipped", "error"]
     file_path: Path | None = None
     message: str | None = None
+    # Counts used by the report/plan to distinguish a revocation-only row from
+    # an additive one. ``added`` counts entries written/widened this run;
+    # ``revoked`` counts entries removed. A row with ``revoked > 0`` and
+    # ``added == 0`` classifies as ``Removed`` rather than ``Added``.
+    added: int = 0
+    revoked: int = 0
 
 
 class AbstractSyncWriter(ABC):

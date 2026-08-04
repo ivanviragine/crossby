@@ -101,7 +101,9 @@ class TestCorruptedJsonRecovery:
         config = tmp_path / "settings.json"
         original = "{not valid json!!"
         config.write_text(original, encoding="utf-8")
-        action, error = configure_json_allowlist(config, ["myapp:*"], pattern_converter=_bash)
+        action, error, _added, _revoked = configure_json_allowlist(
+            config, ["myapp:*"], pattern_converter=_bash
+        )
         assert action == "error"
         assert error is not None and "invalid JSON" in error
         # File is untouched
@@ -111,7 +113,9 @@ class TestCorruptedJsonRecovery:
         config = tmp_path / "settings.json"
         original = "[1, 2, 3]\n"
         config.write_text(original, encoding="utf-8")
-        action, error = configure_json_allowlist(config, ["myapp:*"], pattern_converter=_bash)
+        action, error, _added, _revoked = configure_json_allowlist(
+            config, ["myapp:*"], pattern_converter=_bash
+        )
         assert action == "error"
         assert error is not None and "not a JSON object" in error
         assert config.read_text(encoding="utf-8") == original

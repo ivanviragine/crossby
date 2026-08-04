@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
 import structlog
 
-from crossby.config.allowlist_util import configure_json_allowlist
+from crossby.config.allowlist_util import AllowlistAction, configure_json_allowlist
 from crossby.models.ai import AIToolID
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 
@@ -22,6 +23,50 @@ logger = structlog.get_logger()
 
 # Module-level global Cursor config path — monkeypatchable in tests.
 _GLOBAL_CURSOR_CONFIG_PATH = Path.home() / ".cursor" / "cli-config.json"
+
+
+def _permission_result(
+    writer: AbstractSyncWriter,
+    config_path: Path,
+    action: AllowlistAction,
+    error: str | None,
+    added: int,
+    revoked: int,
+) -> SyncResult:
+    """Turn a :func:`configure_json_allowlist` outcome into a :class:`SyncResult`.
+
+    Shared by the Claude and Cursor writers so both surface a parse error, an
+    idempotent skip, and a revocation-only row identically.
+    """
+    if error is not None:
+        return SyncResult(
+            tool_id=writer.tool_id,
+            concern=writer.concern,
+            action="error",
+            file_path=config_path,
+            message=error,
+        )
+    if action == "skipped":
+        return SyncResult(
+            tool_id=writer.tool_id,
+            concern=writer.concern,
+            action="skipped",
+            file_path=config_path,
+            message="already configured",
+        )
+    message: str | None = None
+    if revoked:
+        plural = "s" if revoked != 1 else ""
+        message = f"removed {revoked} crossby-owned permission{plural} no longer in source"
+    return SyncResult(
+        tool_id=writer.tool_id,
+        concern=writer.concern,
+        action=action,
+        file_path=config_path,
+        message=message,
+        added=added,
+        revoked=revoked,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -97,18 +142,27 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         return False
 
     @staticmethod
-    def write(project_root: Path, patterns: list[str]) -> tuple[str, str | None]:
-        """Add patterns to .claude/settings.json. Idempotent, non-destructive.
+    def write(
+        project_root: Path,
+        patterns: list[str],
+        revoke: Iterable[str] = (),
+        *,
+        dry_run: bool = False,
+    ) -> tuple[AllowlistAction, str | None, int, int]:
+        """Add patterns to (and revoke owned ones from) .claude/settings.json.
 
-        Returns ``(action, error_message)`` so callers can surface parse
-        failures without overwriting a malformed file.
+        Idempotent and non-destructive to hand-authored entries. Returns
+        ``(action, error_message, added, revoked)`` so callers can surface parse
+        failures without overwriting a malformed file, and report the delta.
         """
         settings_path = project_root / ".claude" / "settings.json"
         return configure_json_allowlist(
             settings_path,
             patterns,
             pattern_converter=canonical_to_claude,
+            revoke=revoke,
             log_event="claude_allowlist.configured",
+            dry_run=dry_run,
         )
 
     def sync(
@@ -120,7 +174,8 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         force: bool = False,
     ) -> SyncResult:
         patterns = data.allowed_commands
-        if not patterns:
+        revoke = data.permissions_remove
+        if not patterns and not revoke:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -129,41 +184,10 @@ class ClaudePermissionWriter(AbstractSyncWriter):
             )
 
         settings_path = project_root / ".claude" / "settings.json"
-
-        if self.check(project_root, patterns):
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                file_path=settings_path,
-                message="already configured",
-            )
-
-        action: Literal["created", "updated"] = (
-            "created" if not settings_path.is_file() else "updated"
+        written_action, error, added, revoked = self.write(
+            project_root, patterns, revoke, dry_run=dry_run
         )
-
-        if not dry_run:
-            written_action, error = self.write(project_root, patterns)
-            if error is not None:
-                return SyncResult(
-                    tool_id=self.tool_id,
-                    concern=self.concern,
-                    action="error",
-                    file_path=settings_path,
-                    message=error,
-                )
-            if written_action == "created":
-                action = "created"
-            elif written_action == "updated":
-                action = "updated"
-
-        return SyncResult(
-            tool_id=self.tool_id,
-            concern=self.concern,
-            action=action,
-            file_path=settings_path,
-        )
+        return _permission_result(self, settings_path, written_action, error, added, revoked)
 
 
 # ---------------------------------------------------------------------------
@@ -220,17 +244,23 @@ class CursorPermissionWriter(AbstractSyncWriter):
     def write(
         project_root: Path | None = None,
         patterns: list[str] | None = None,
-    ) -> tuple[str, str | None]:
-        """Add patterns to the Cursor CLI allowlist. Idempotent.
+        revoke: Iterable[str] = (),
+        *,
+        dry_run: bool = False,
+    ) -> tuple[AllowlistAction, str | None, int, int]:
+        """Add patterns to (and revoke owned ones from) the Cursor CLI allowlist.
 
-        Returns ``(action, error_message)``; ``error_message`` is set when
-        the existing file is malformed (in which case nothing is written).
+        Idempotent. Returns ``(action, error_message, added, revoked)``;
+        ``error_message`` is set when the existing file is malformed (in which
+        case nothing is written).
         """
         return configure_json_allowlist(
             _cursor_config_path(project_root),
             patterns or [],
             pattern_converter=canonical_to_cursor,
+            revoke=revoke,
             log_event="cursor_allowlist.configured",
+            dry_run=dry_run,
         )
 
     def sync(
@@ -242,7 +272,8 @@ class CursorPermissionWriter(AbstractSyncWriter):
         force: bool = False,
     ) -> SyncResult:
         patterns = data.allowed_commands
-        if not patterns:
+        revoke = data.permissions_remove
+        if not patterns and not revoke:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -252,38 +283,7 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
         scope_root = project_root if self.scope == "project" else None
         config_path = _cursor_config_path(scope_root)
-
-        if self.check(scope_root, patterns):
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                file_path=config_path,
-                message="already configured",
-            )
-
-        action: Literal["created", "updated"] = (
-            "created" if not config_path.is_file() else "updated"
+        written_action, error, added, revoked = self.write(
+            scope_root, patterns, revoke, dry_run=dry_run
         )
-
-        if not dry_run:
-            written_action, error = self.write(scope_root, patterns)
-            if error is not None:
-                return SyncResult(
-                    tool_id=self.tool_id,
-                    concern=self.concern,
-                    action="error",
-                    file_path=config_path,
-                    message=error,
-                )
-            if written_action == "created":
-                action = "created"
-            elif written_action == "updated":
-                action = "updated"
-
-        return SyncResult(
-            tool_id=self.tool_id,
-            concern=self.concern,
-            action=action,
-            file_path=config_path,
-        )
+        return _permission_result(self, config_path, written_action, error, added, revoked)

@@ -43,6 +43,7 @@ class PlanSummary:
     by_concern: dict[SyncConcern, int]
     by_action: dict[str, int]
     manual_fix_results: list[SyncResult] = field(default_factory=list)
+    revoked_results: list[SyncResult] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -55,6 +56,11 @@ class PlanSummary:
     @property
     def manual_fix_count(self) -> int:
         return len(self.manual_fix_results)
+
+    @property
+    def revoked_count(self) -> int:
+        """Number of rows that removed at least one crossby-owned entry."""
+        return len(self.revoked_results)
 
 
 def summarize_plan(results: Sequence[SyncResult]) -> PlanSummary:
@@ -81,6 +87,7 @@ def summarize_plan(results: Sequence[SyncResult]) -> PlanSummary:
     by_concern: dict[SyncConcern, int] = {}
     by_action: dict[str, int] = {}
     manual_fix: list[SyncResult] = []
+    revoked: list[SyncResult] = []
 
     for result in results:
         by_concern[result.concern] = by_concern.get(result.concern, 0) + 1
@@ -98,11 +105,17 @@ def summarize_plan(results: Sequence[SyncResult]) -> PlanSummary:
             or (result.action in _WRITING_ACTIONS and has_manual_fix_hint)
         ):
             manual_fix.append(result)
+        # Revocations are real writes, not problems — surfaced separately so a
+        # removal-only row is counted rather than folded invisibly into
+        # ``updated``.
+        if result.revoked > 0:
+            revoked.append(result)
 
     return PlanSummary(
         by_concern=by_concern,
         by_action=by_action,
         manual_fix_results=manual_fix,
+        revoked_results=revoked,
     )
 
 
@@ -134,6 +147,12 @@ def render_plan(summary: PlanSummary) -> str:
             lines.append(f"    - [{tool}] {result.concern.value} {path}: {detail}")
     else:
         lines.append("  manual review: none")
+    if summary.revoked_results:
+        total_revoked = sum(r.revoked for r in summary.revoked_results)
+        lines.append(
+            f"  revocations: {summary.revoked_count} row(s), {total_revoked} entr"
+            f"{'y' if total_revoked == 1 else 'ies'} removed"
+        )
     return "\n".join(lines)
 
 
@@ -192,6 +211,7 @@ def build_doctor(plan: PlanSummary, validation: Sequence[ValidationFinding]) -> 
 def render_doctor(report: DoctorReport) -> str:
     lines: list[str] = ["Crossby doctor:", f"  readiness: {report.readiness}"]
     lines.append(f"  manual-review items: {report.plan.manual_fix_count}")
+    lines.append(f"  revocations: {report.plan.revoked_count}")
     lines.append(f"  sync errors: {report.plan.error_count}")
     lines.append(f"  validation errors: {report.validation_errors}")
     lines.append(f"  validation warnings: {report.validation_warnings}")

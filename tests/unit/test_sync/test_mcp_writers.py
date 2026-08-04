@@ -94,9 +94,15 @@ class TestClaudeMCPWriter:
     def test_revoke_only_note_reports_a_revocation(self, tmp_path: Path) -> None:
         # Disabling one of two approved servers is a revocation, not an approval —
         # the note must say so rather than reporting a bogus approval count.
+        # ``b`` is only removable because it is in ``mcp_remove`` (the
+        # ledger-bounded set run_sync computes for a crossby-owned server).
         self.writer.sync(_cfg({"a": STDIO_SERVER, "b": STDIO_WITH_ENV}), tmp_path)
         result = self.writer.sync(
-            _cfg({"a": STDIO_SERVER, "b": MCPServerConfig(command="npx", enabled=False)}), tmp_path
+            SyncData(
+                mcp_servers={"a": STDIO_SERVER, "b": MCPServerConfig(command="npx", enabled=False)},
+                mcp_remove=frozenset({"b"}),
+            ),
+            tmp_path,
         )
         assert result.message is not None
         assert "revoked 1 server(s)" in result.message
@@ -120,7 +126,14 @@ class TestClaudeMCPWriter:
     def test_disabling_revokes_the_approval(self, tmp_path: Path) -> None:
         self.writer.sync(_cfg({"old": STDIO_SERVER}), tmp_path)
         assert "old" in _read_json(self._settings(tmp_path))["enabledMcpjsonServers"]
-        self.writer.sync(_cfg({"old": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
+        # crossby owns "old", so run_sync would pass it in mcp_remove.
+        self.writer.sync(
+            SyncData(
+                mcp_servers={"old": MCPServerConfig(command="npx", enabled=False)},
+                mcp_remove=frozenset({"old"}),
+            ),
+            tmp_path,
+        )
         assert "old" not in _read_json(self._settings(tmp_path))["enabledMcpjsonServers"]
         assert "old" not in _read_json(self._mcp(tmp_path)).get("mcpServers", {})
 
@@ -162,9 +175,23 @@ class TestClaudeMCPWriter:
     def test_removes_disabled_server(self, tmp_path: Path) -> None:
         mcp = self._mcp(tmp_path)
         mcp.write_text(json.dumps({"mcpServers": {"old": {"command": "npx"}}}), encoding="utf-8")
-        servers = {"old": MCPServerConfig(command="npx", enabled=False)}
-        self.writer.sync(_cfg(servers), tmp_path)
+        # Only removed because crossby owns "old" (mcp_remove is ledger-bounded).
+        data = SyncData(
+            mcp_servers={"old": MCPServerConfig(command="npx", enabled=False)},
+            mcp_remove=frozenset({"old"}),
+        )
+        self.writer.sync(data, tmp_path)
         assert "old" not in _read_json(mcp)["mcpServers"]
+
+    def test_disabled_unowned_server_survives(self, tmp_path: Path) -> None:
+        # A disabled source server whose name crossby never wrote (absent from
+        # mcp_remove) must not delete a same-named hand-authored target entry.
+        mcp = self._mcp(tmp_path)
+        mcp.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "hand-written"}}}), encoding="utf-8"
+        )
+        self.writer.sync(_cfg({"shared": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
+        assert _read_json(mcp)["mcpServers"]["shared"]["command"] == "hand-written"
 
     def test_disabled_server_not_added(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
@@ -268,9 +295,24 @@ class TestCursorMCPWriter:
         path.parent.mkdir()
         path.write_text(json.dumps({"mcpServers": {"gone": {"command": "node"}}}), encoding="utf-8")
 
-        self.writer.sync(_cfg({"gone": MCPServerConfig(command="node", enabled=False)}), tmp_path)
+        self.writer.sync(
+            SyncData(
+                mcp_servers={"gone": MCPServerConfig(command="node", enabled=False)},
+                mcp_remove=frozenset({"gone"}),
+            ),
+            tmp_path,
+        )
         data = _read_json(path)
         assert "gone" not in data["mcpServers"]
+
+    def test_disabled_unowned_server_survives(self, tmp_path: Path) -> None:
+        path = tmp_path / ".cursor" / "mcp.json"
+        path.parent.mkdir()
+        path.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "hand-written"}}}), encoding="utf-8"
+        )
+        self.writer.sync(_cfg({"shared": MCPServerConfig(command="node", enabled=False)}), tmp_path)
+        assert _read_json(path)["mcpServers"]["shared"]["command"] == "hand-written"
 
     def test_dry_run(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
@@ -509,11 +551,35 @@ class TestCodexMCPWriter:
             tomli_w.dumps({"mcp_servers": {"old": {"command": "npx"}}}),
             encoding="utf-8",
         )
-        self.writer.sync(_cfg({"old": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
+        # Only removed because crossby owns "old" (mcp_remove is ledger-bounded).
+        self.writer.sync(
+            SyncData(
+                mcp_servers={"old": MCPServerConfig(command="npx", enabled=False)},
+                mcp_remove=frozenset({"old"}),
+            ),
+            tmp_path,
+        )
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         # Removing the last server drops the table entirely rather than leaving
         # an empty `[mcp_servers]` behind.
         assert "old" not in data.get("mcp_servers", {})
+
+    def test_disabled_unowned_server_survives(self, tmp_path: Path) -> None:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        import tomli_w
+
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text(
+            tomli_w.dumps({"mcp_servers": {"shared": {"command": "hand-written"}}}),
+            encoding="utf-8",
+        )
+        self.writer.sync(_cfg({"shared": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert data["mcp_servers"]["shared"]["command"] == "hand-written"
 
     def test_dry_run(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path, dry_run=True)
