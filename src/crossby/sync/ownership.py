@@ -28,6 +28,7 @@ from typing import Any
 
 import structlog
 
+from crossby.config.json_utils import atomic_write_text
 from crossby.models.ai import AIToolID
 from crossby.sync.base import SyncConcern
 
@@ -177,8 +178,9 @@ def save_ledger(project_root: Path, ledger: OwnershipLedger) -> bool:
                 return False
         except OSError:
             pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    # Atomic tmp+rename — a crash mid-write must not corrupt the ledger (which
+    # would silently wipe all accumulated provenance), matching the other writers.
+    atomic_write_text(path, body)
     return True
 
 

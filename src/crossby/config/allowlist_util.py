@@ -29,15 +29,17 @@ def configure_json_allowlist(
     revoke: Iterable[str] = (),
     log_event: str = "allowlist.configured",
     dry_run: bool = False,
-) -> tuple[AllowlistAction, str | None, int, int]:
+) -> tuple[AllowlistAction, str | None, list[str], int]:
     """Read JSON, add required patterns, remove revoked ones, write back.
 
-    Returns ``(action, error_message, added, revoked)`` where ``action`` is one
-    of ``"created"``, ``"updated"``, ``"skipped"``, or ``"error"`` and the two
-    integers count patterns added and removed this call.
+    Returns ``(action, error_message, created, revoked)`` where ``action`` is one
+    of ``"created"``, ``"updated"``, ``"skipped"``, or ``"error"``, ``created``
+    is the list of **canonical** patterns written *fresh* this call (those not
+    already present — never a pattern that was there by hand), and ``revoked`` is
+    the count removed.
 
     No-op if both *patterns* and *revoke* are empty (returns
-    ``("skipped", None, 0, 0)``). Idempotent — patterns already present are not
+    ``("skipped", None, [], 0)``). Idempotent — patterns already present are not
     duplicated, and revoking a pattern that is absent removes nothing. Repairs a
     missing or malformed ``permissions`` dict or ``allow`` list rather than
     failing.
@@ -49,13 +51,13 @@ def configure_json_allowlist(
     one is never touched.
 
     Refuses to overwrite a malformed JSON file: parse failure returns
-    ``("error", msg, 0, 0)`` with no write, matching the safer policy used by
+    ``("error", msg, [], 0)`` with no write, matching the safer policy used by
     hooks/MCP writers (instead of silently replacing the user's file with
     a fresh ``{}``-derived document).
     """
     revoke_patterns = {pattern_converter(p) for p in revoke}
     if not patterns and not revoke_patterns:
-        return "skipped", None, 0, 0
+        return "skipped", None, [], 0
 
     data, error, was_new = read_json_file(config_path)
     if error is not None:
@@ -65,7 +67,7 @@ def configure_json_allowlist(
         )
         warnings.warn(msg, stacklevel=2)
         logger.warning("allowlist_util.read_error", path=str(config_path), error=error)
-        return "error", msg, 0, 0
+        return "error", msg, [], 0
     existing: dict[str, object] = data if data is not None else {}
 
     permissions = existing.setdefault("permissions", {})
@@ -78,11 +80,15 @@ def configure_json_allowlist(
         allow_list = []
         permissions["allow"] = allow_list
 
-    added = 0
-    for pat in (pattern_converter(p) for p in patterns):
+    # Track the *canonical* patterns written fresh, so run_sync records ownership
+    # only of what crossby actually added — never a hand-authored pattern that
+    # coincidentally matches the source.
+    created: list[str] = []
+    for canonical in patterns:
+        pat = pattern_converter(canonical)
         if pat not in allow_list:
             allow_list.append(pat)
-            added += 1
+            created.append(canonical)
 
     revoked = 0
     if revoke_patterns:
@@ -93,10 +99,10 @@ def configure_json_allowlist(
             # same list object we validated/repaired above.
             allow_list[:] = kept
 
-    if not added and not revoked:
-        return "skipped", None, 0, 0
+    if not created and not revoked:
+        return "skipped", None, [], 0
 
     if not dry_run:
         write_json_file(config_path, existing)
         logger.info(log_event, path=str(config_path))
-    return ("created" if was_new else "updated"), None, added, revoked
+    return ("created" if was_new else "updated"), None, created, revoked

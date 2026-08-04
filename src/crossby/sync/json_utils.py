@@ -35,7 +35,7 @@ def read_merge_write_json(
     updates: dict[str, Any],
     removals: set[str],
     dry_run: bool = False,
-) -> tuple[SyncAction, str, int, int]:
+) -> tuple[SyncAction, str, list[str], int]:
     """Atomic read-modify-write for a JSON config file.
 
     Merges ``updates`` into ``file[key]`` and removes ``removals`` from it.
@@ -52,14 +52,16 @@ def read_merge_write_json(
         dry_run: If True, compute action but do not write.
 
     Returns:
-        Tuple of (action, message, added_count, removed_count) where action is
-        one of ``"created"``, ``"updated"``, ``"skipped"``, ``"error"``.
+        Tuple of (action, message, written_names, removed_count) where
+        ``written_names`` are the names crossby wrote or overwrote this call
+        (used to record ownership) and action is one of ``"created"``,
+        ``"updated"``, ``"skipped"``, ``"error"``.
     """
     data, error, was_new = read_json_file(path)
     if error is not None:
         msg = f"{path} {error} — skipping sync. Fix the file manually or delete it."
         warnings.warn(msg, stacklevel=2)
-        return "error", msg, 0, 0
+        return "error", msg, [], 0
 
     existing = data or {}
 
@@ -67,26 +69,26 @@ def read_merge_write_json(
     if not isinstance(section, dict):
         section = {}
 
-    added = 0
+    written: list[str] = []
     removed = 0
 
     for name, entry in updates.items():
         if section.get(name) != entry:
             section[name] = entry
-            added += 1
+            written.append(name)
 
     for name in removals:
         if name in section:
             del section[name]
             removed += 1
 
-    if not added and not removed:
-        return "skipped", "", 0, 0
+    if not written and not removed:
+        return "skipped", "", [], 0
 
     if dry_run:
         action: SyncAction = "created" if was_new else "updated"
-        return action, "", added, removed
+        return action, "", written, removed
 
     existing[key] = section
     write_json_file(path, existing)
-    return ("created" if was_new else "updated"), "", added, removed
+    return ("created" if was_new else "updated"), "", written, removed

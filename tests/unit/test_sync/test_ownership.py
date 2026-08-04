@@ -31,6 +31,7 @@ from crossby.sync.ownership import (
     load_ledger,
     save_ledger,
 )
+from crossby.sync.permissions import ClaudePermissionWriter
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,7 +60,19 @@ def _make_writer(
             dry_run: bool = False,
             force: bool = False,
         ) -> SyncResult:
-            return SyncResult(tool_id=self.tool_id, concern=the_concern, action=the_action)
+            # Simulate a real writer: report the identities it "wrote fresh" so
+            # run_sync records ownership from them. A skip/error creates nothing.
+            created: tuple[object, ...] = ()
+            if the_action in {"created", "updated"}:
+                if the_concern == SyncConcern.HOOKS:
+                    created = tuple((h.event, h.command) for h in data.hooks)
+                elif the_concern == SyncConcern.PERMISSIONS:
+                    created = tuple(data.allowed_commands)
+                elif the_concern == SyncConcern.MCP:
+                    created = tuple(n for n, s in data.mcp_servers.items() if s.enabled)
+            return SyncResult(
+                tool_id=self.tool_id, concern=the_concern, action=the_action, created=created
+            )
 
     _W.concern = the_concern
     return _W()
@@ -178,9 +191,24 @@ class TestRunSyncLedgerGating:
         ledger = load_ledger(tmp_path)
         assert ledger.hooks(AIToolID.CLAUDE) == frozenset({("pre_tool_use", "guard")})
 
-    def test_skipped_also_records_ownership(self, tmp_path: Path) -> None:
+    def test_only_writer_created_ids_are_recorded(self, tmp_path: Path) -> None:
+        # A writer that reports no `created` (e.g. the hook was already present,
+        # authored by hand) must NOT have that identity recorded as owned — this
+        # is what keeps crossby from later revoking a human entry.
         reg = _registry(_make_writer(SyncConcern.HOOKS, "skipped"))
         run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset()
+
+    def test_skip_after_create_preserves_ownership(self, tmp_path: Path) -> None:
+        # A real writer: first sync creates+owns the hook; an identical second
+        # sync skips (created nothing) but ownership must persist.
+        reg = _registry(ClaudeHooksWriter())
+        run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset(
+            {("pre_tool_use", "guard")}
+        )
+        results = run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert all(r.action == "skipped" for r in results)
         assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset(
             {("pre_tool_use", "guard")}
         )
@@ -258,3 +286,95 @@ class TestRunSyncNeverDeletesUnowned:
         # The human hook is untouched; crossby's is added alongside it.
         assert "human" in commands
         assert "crossby" in commands
+
+
+class TestProvenanceNotIdentityCoincidence:
+    """Ownership follows what crossby WROTE, not what merely matches the source.
+
+    The subtle regression these guard against: recording the whole source set as
+    owned would let crossby claim (and then narrow/revoke) a human entry that
+    happens to share a ``(event, command)`` / pattern with the source.
+    """
+
+    def _settings(self, root: Path) -> Path:
+        return root / ".claude" / "settings.json"
+
+    def _pre_tool_entry(self, root: Path) -> dict:
+        return json.loads(self._settings(root).read_text())["hooks"]["PreToolUse"][0]
+
+    def test_human_hook_sharing_source_identity_is_never_narrowed_or_revoked(
+        self, tmp_path: Path
+    ) -> None:
+        settings = self._settings(tmp_path)
+        settings.parent.mkdir(parents=True)
+        # Human wrote (pre_tool_use, guard) with a deliberately broad matcher.
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": ".*", "hooks": [{"type": "command", "command": "guard"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        reg = _registry(ClaudeHooksWriter())
+        source = SyncData(hooks=[HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])])
+
+        # Sync 1: the command already exists and crossby did not create it — the
+        # broad matcher is preserved (widen-only) and crossby claims nothing.
+        run_sync(source, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert self._pre_tool_entry(tmp_path)["matcher"] == ".*"
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset()
+
+        # Sync 2: STILL not owned, so the matcher is never narrowed to "Edit".
+        run_sync(source, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert self._pre_tool_entry(tmp_path)["matcher"] == ".*"
+
+        # Sync 3: source drops the hook — the human's entry must NOT be revoked.
+        run_sync(SyncData(hooks=[]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        commands = {
+            inner["command"]
+            for entry in json.loads(settings.read_text())["hooks"].get("PreToolUse", [])
+            for inner in entry["hooks"]
+        }
+        assert "guard" in commands
+
+    def test_crossby_written_hook_is_revoked_when_source_empties(self, tmp_path: Path) -> None:
+        reg = _registry(ClaudeHooksWriter())
+        run_sync(
+            SyncData(hooks=[HookEntry(event="pre_tool_use", command="owned", tools=["Edit"])]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=reg,
+        )
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset(
+            {("pre_tool_use", "owned")}
+        )
+        # Source now has no hooks at all — crossby's own entry is revoked.
+        run_sync(SyncData(hooks=[]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert "PreToolUse" not in json.loads(self._settings(tmp_path).read_text()).get("hooks", {})
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset()
+
+    def test_human_permission_sharing_source_identity_survives(self, tmp_path: Path) -> None:
+        settings = self._settings(tmp_path)
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git diff:*)"]}}))
+        reg = _registry(ClaudePermissionWriter())
+
+        # Source has git diff:* but it is already present → crossby creates
+        # nothing and claims nothing.
+        run_sync(
+            SyncData(allowed_commands=["git diff:*"]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=reg,
+        )
+        assert load_ledger(tmp_path).permissions(AIToolID.CLAUDE) == frozenset()
+
+        # Source drops it → the human's pattern is not revoked.
+        run_sync(SyncData(allowed_commands=[]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        assert "Bash(git diff:*)" in allow

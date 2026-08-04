@@ -96,6 +96,13 @@ class SyncResult:
     # ``added == 0`` classifies as ``Removed`` rather than ``Added``.
     added: int = 0
     revoked: int = 0
+    # Identities the writer wrote **fresh** this run (a new hook entry, a newly
+    # added permission pattern, a newly written MCP server) — NOT ones that were
+    # already present. ``run_sync`` records ownership from this, never from the
+    # whole source set, so crossby never claims (and later narrows/revokes) a
+    # human entry that merely shares an identity with a source entry. Hooks use
+    # ``(event, command)`` tuples; permissions/MCP use strings.
+    created: tuple[object, ...] = ()
 
 
 class AbstractSyncWriter(ABC):

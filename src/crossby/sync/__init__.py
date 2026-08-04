@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from crossby.models.ai import AIToolID
 from crossby.sync.agents import (
@@ -146,7 +147,6 @@ def run_sync(
     ledger = load_ledger(project_root)
     current_hooks = {(h.event, h.command) for h in data.hooks}
     current_perms = set(data.allowed_commands)
-    enabled_mcp = {name for name, s in data.mcp_servers.items() if s.enabled}
     disabled_mcp = {name for name, s in data.mcp_servers.items() if not s.enabled}
     # tool → the identity set crossby should own after a successful write.
     # Applied to the ledger only for writers that did not error.
@@ -160,6 +160,8 @@ def run_sync(
     skills_writers_ran = False
     for writer in writers:
         writer_data = data
+        hooks_owned: frozenset[tuple[str, str]] = frozenset()
+        perms_owned: frozenset[str] = frozenset()
         mcp_owned: frozenset[str] = frozenset()
         if writer.concern == SyncConcern.HOOKS:
             hooks_owned = ledger.hooks(writer.tool_id)
@@ -188,17 +190,26 @@ def run_sync(
             )
         results.append(result)
 
-        # Record intended new ownership, gated on writer success. An ``error``
-        # row leaves the ledger untouched so the next run retries cleanly.
+        # Record intended new ownership, gated on writer success. New ownership =
+        # what crossby still owns that is still in the source (previously-owned ∩
+        # current, i.e. previously-owned minus what was revoked) PLUS what the
+        # writer wrote **fresh** this run (``result.created``). Crucially this is
+        # NOT the whole source set: a human entry that merely shares an identity
+        # with a source entry is never in ``created`` (the writer found it already
+        # present), so crossby never claims — and thus never narrows or revokes —
+        # it. An ``error`` row leaves the ledger untouched entirely.
         if result.action != "error":
             if writer.concern == SyncConcern.HOOKS:
-                pending_hooks[writer.tool_id] = set(current_hooks)
+                created_hooks = cast(
+                    "set[tuple[str, str]]", {c for c in result.created if isinstance(c, tuple)}
+                )
+                pending_hooks[writer.tool_id] = set(hooks_owned & current_hooks) | created_hooks
             elif writer.concern == SyncConcern.PERMISSIONS:
-                pending_perms[writer.tool_id] = set(current_perms)
+                created_perms = {c for c in result.created if isinstance(c, str)}
+                pending_perms[writer.tool_id] = set(perms_owned & current_perms) | created_perms
             elif writer.concern == SyncConcern.MCP:
-                # New ownership = still-present owned servers (minus removed
-                # disabled ones) plus everything just written.
-                pending_mcp[writer.tool_id] = set(mcp_owned - disabled_mcp) | enabled_mcp
+                created_mcp = {c for c in result.created if isinstance(c, str)}
+                pending_mcp[writer.tool_id] = set(mcp_owned - disabled_mcp) | created_mcp
 
         if writer.concern == SyncConcern.AGENTS:
             agents_writers_ran = True
@@ -252,8 +263,9 @@ def run_sync(
             ledger.record_permissions(perm_tool, perm_pats)
         for mcp_tool, mcp_names in pending_mcp.items():
             ledger.record_mcp(mcp_tool, mcp_names)
-        save_ledger(project_root, ledger)
-        if (project_root / LEDGER_PATH).is_file():
+        # Only touch .gitignore when the ledger file was actually created or
+        # changed — save_ledger returns False on an idempotent no-op.
+        if save_ledger(project_root, ledger):
             from crossby.sync.gitignore_utils import update_managed_block
 
             update_managed_block(

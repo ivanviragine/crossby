@@ -30,13 +30,14 @@ def _permission_result(
     config_path: Path,
     action: AllowlistAction,
     error: str | None,
-    added: int,
+    created: list[str],
     revoked: int,
 ) -> SyncResult:
     """Turn a :func:`configure_json_allowlist` outcome into a :class:`SyncResult`.
 
     Shared by the Claude and Cursor writers so both surface a parse error, an
-    idempotent skip, and a revocation-only row identically.
+    idempotent skip, and a revocation-only row identically. ``created`` is the
+    set of canonical patterns written fresh — recorded as owned by ``run_sync``.
     """
     if error is not None:
         return SyncResult(
@@ -64,8 +65,9 @@ def _permission_result(
         action=action,
         file_path=config_path,
         message=message,
-        added=added,
+        added=len(created),
         revoked=revoked,
+        created=tuple(created),
     )
 
 
@@ -148,12 +150,13 @@ class ClaudePermissionWriter(AbstractSyncWriter):
         revoke: Iterable[str] = (),
         *,
         dry_run: bool = False,
-    ) -> tuple[AllowlistAction, str | None, int, int]:
+    ) -> tuple[AllowlistAction, str | None, list[str], int]:
         """Add patterns to (and revoke owned ones from) .claude/settings.json.
 
         Idempotent and non-destructive to hand-authored entries. Returns
-        ``(action, error_message, added, revoked)`` so callers can surface parse
-        failures without overwriting a malformed file, and report the delta.
+        ``(action, error_message, created, revoked)`` — ``created`` is the list
+        of canonical patterns written fresh this call — so callers can surface
+        parse failures without overwriting a malformed file, and report the delta.
         """
         settings_path = project_root / ".claude" / "settings.json"
         return configure_json_allowlist(
@@ -184,10 +187,10 @@ class ClaudePermissionWriter(AbstractSyncWriter):
             )
 
         settings_path = project_root / ".claude" / "settings.json"
-        written_action, error, added, revoked = self.write(
+        written_action, error, created, revoked = self.write(
             project_root, patterns, revoke, dry_run=dry_run
         )
-        return _permission_result(self, settings_path, written_action, error, added, revoked)
+        return _permission_result(self, settings_path, written_action, error, created, revoked)
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +250,10 @@ class CursorPermissionWriter(AbstractSyncWriter):
         revoke: Iterable[str] = (),
         *,
         dry_run: bool = False,
-    ) -> tuple[AllowlistAction, str | None, int, int]:
+    ) -> tuple[AllowlistAction, str | None, list[str], int]:
         """Add patterns to (and revoke owned ones from) the Cursor CLI allowlist.
 
-        Idempotent. Returns ``(action, error_message, added, revoked)``;
+        Idempotent. Returns ``(action, error_message, created, revoked)``;
         ``error_message`` is set when the existing file is malformed (in which
         case nothing is written).
         """
@@ -283,7 +286,7 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
         scope_root = project_root if self.scope == "project" else None
         config_path = _cursor_config_path(scope_root)
-        written_action, error, added, revoked = self.write(
+        written_action, error, created, revoked = self.write(
             scope_root, patterns, revoke, dry_run=dry_run
         )
-        return _permission_result(self, config_path, written_action, error, added, revoked)
+        return _permission_result(self, config_path, written_action, error, created, revoked)
