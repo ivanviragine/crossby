@@ -62,11 +62,15 @@
 801860a4:
   down: 0
   stale: 0
-  up: 3
+  up: 4
 892b7ed4:
   down: 0
   stale: 0
   up: 2
+9098e61a:
+  down: 0
+  stale: 0
+  up: 1
 91c88418:
   down: 0
   stale: 0
@@ -95,7 +99,7 @@ b7079af0:
 b71491ff:
   down: 0
   stale: 0
-  up: 5
+  up: 6
 b7a90461:
   down: 0
   stale: 1

@@ -162,7 +162,10 @@ class AntigravityCLIAdapter(AbstractAITool):
         Covers, in one pass:
 
         - **Bare models** (``claude-*``, ``gpt-oss-120b``): returned unchanged —
-          effort does not apply and agy launches them bare.
+          effort does not apply and agy launches them bare. A stored effort
+          suffix on such a base (the retired ``gpt-oss-120b-medium`` catalog ID)
+          is spurious and dropped, with a warning, so agy is never handed a
+          suffixed ID it rejects.
         - **Precedence**: an effort already baked into the ID wins over a
           separately supplied ``effort`` (agy would reject the two together).
         - **No effort anywhere**: a deterministic default is baked in so the
@@ -179,6 +182,19 @@ class AntigravityCLIAdapter(AbstractAITool):
         base, suffix_effort = _split_effort_suffix(model)
         tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
         if tiers is None:
+            # Non-Gemini base: agy launches it bare and rejects a baked effort. A
+            # stored effort suffix on such a base (e.g. the retired
+            # ``gpt-oss-120b-medium`` catalog ID) is spurious — drop it so the
+            # command stays valid instead of passing an ID agy would reject.
+            if suffix_effort is not None:
+                dropped = f"-{suffix_effort.value}"
+                warnings.warn(
+                    f"Antigravity CLI model {base!r} does not accept a reasoning "
+                    f"effort; dropping the {dropped!r} suffix and launching bare.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return base
             # Bare model (claude-*, gpt-oss-120b): agy launches it with no effort.
             return model
 
