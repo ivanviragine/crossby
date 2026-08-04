@@ -412,6 +412,14 @@ def sync(
     # Execute per-concern to avoid writing back to the source tool.
     # Rules and agents have an explicit source; exclude it from their targets.
     # MCP, permissions, and hooks are merged from all tools — write to all.
+    #
+    # Known limitation: each concern below runs only when the *new* source data
+    # for it is non-empty. So in this interactive wizard, a concern that has
+    # emptied (source A had hooks, source B has none) is not revoked here — the
+    # ledger-diff never runs for it. The non-interactive path (`--from`) and
+    # `--plan`/`--doctor` call run_sync unconditionally and DO revoke; the wizard
+    # falls back to additive-only, which is safe (no data loss), just not fully
+    # revocable. Tracked as follow-up.
     results = []
     if data.rules_source and (sync_concern is None or sync_concern == SyncConcern.RULES):
         rules_targets = [t for t in installed_tools if t != rules_src_tool]

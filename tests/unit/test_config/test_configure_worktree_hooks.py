@@ -286,3 +286,57 @@ class TestMalformedJsonWarns:
             warnings.simplefilter("always")
             copilot_configure_worktree_hooks(tmp_path, _guard(tmp_path))
         assert any("invalid JSON" in str(warning.message) for warning in w)
+
+
+class TestWorktreeGuardRevokesNothing:
+    """The single-hook guard install must never remove another hook in the file."""
+
+    def test_claude_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        claude_configure_worktree_hooks(tmp_path, _guard(tmp_path))
+        commands = {
+            inner["command"]
+            for entry in json.loads(settings.read_text())["hooks"]["PreToolUse"]
+            for inner in entry["hooks"]
+        }
+        assert "other" in commands
+        assert str(_guard(tmp_path)) in commands
+
+    def test_cursor_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        hooks = tmp_path / ".cursor" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text(
+            json.dumps({"version": 1, "hooks": {"stop": [{"type": "command", "command": "keep"}]}}),
+            encoding="utf-8",
+        )
+        cursor_configure_worktree_hooks(tmp_path, _guard(tmp_path))
+        data = json.loads(hooks.read_text())
+        assert data["hooks"]["stop"][0]["command"] == "keep"
+        assert data["hooks"]["preToolUse"]
+
+    def test_copilot_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        hooks = tmp_path / ".github" / "hooks" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text(
+            json.dumps(
+                {"version": 1, "hooks": {"agentStop": [{"type": "command", "bash": "keep"}]}}
+            ),
+            encoding="utf-8",
+        )
+        copilot_configure_worktree_hooks(tmp_path, _guard(tmp_path))
+        data = json.loads(hooks.read_text())
+        assert data["hooks"]["agentStop"][0]["bash"] == "keep"
+        assert data["hooks"]["preToolUse"]

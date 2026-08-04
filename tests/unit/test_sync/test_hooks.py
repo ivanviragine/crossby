@@ -1339,3 +1339,162 @@ class TestAntigravityCLIHooksWriter:
         assert result.action == "skipped"
         data = _read_json(path)
         assert "plan-write-guard" not in data
+
+
+# ---------------------------------------------------------------------------
+# Revocation — driven ONLY by SyncData.hooks_remove (never inferred)
+# ---------------------------------------------------------------------------
+
+
+def _remove(*pairs: tuple[str, str]) -> SyncData:
+    return SyncData(hooks=[], hooks_remove=list(pairs))
+
+
+class TestClaudeHooksRemoval:
+    def _path(self, root: Path) -> Path:
+        return root / ".claude" / "settings.json"
+
+    def test_removes_named_hook_and_drops_empty_event(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.action == "updated"
+        assert result.revoked == 1
+        assert result.added == 0
+        # Removing the last hook for the event drops the event key, leaving a
+        # valid (parseable, empty) structure — not malformed scaffolding.
+        assert "PreToolUse" not in _read_json(self._path(tmp_path)).get("hooks", {})
+
+    def test_removal_leaves_sibling_hooks(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK, BARE_HOOK), tmp_path)
+        writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        commands = {
+            inner["command"]
+            for entry in _read_json(self._path(tmp_path))["hooks"]["PreToolUse"]
+            for inner in entry["hooks"]
+        }
+        assert GUARD_HOOK.command not in commands
+        assert BARE_HOOK.command in commands
+
+    def test_removing_an_absent_hook_is_skipped(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", "never-written")), tmp_path)
+        assert result.action == "skipped"
+        assert result.revoked == 0
+
+    def test_empty_data_and_empty_removal_is_skipped(self, tmp_path: Path) -> None:
+        result = ClaudeHooksWriter().sync(SyncData(), tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "no hooks config"
+
+    def test_add_and_remove_in_one_run(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(
+            SyncData(hooks=[BARE_HOOK], hooks_remove=[("pre_tool_use", GUARD_HOOK.command)]),
+            tmp_path,
+        )
+        assert result.added == 1
+        assert result.revoked == 1
+
+    def test_dry_run_reports_revocation_but_writes_nothing(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        before = self._path(tmp_path).read_text(encoding="utf-8")
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path, dry_run=True)
+        # The intended revocation is reported...
+        assert result.revoked == 1
+        # ...but the file on disk is untouched.
+        assert self._path(tmp_path).read_text(encoding="utf-8") == before
+
+
+class TestClaudeMatcherNarrowing:
+    """A crossby-owned matcher narrows on scope shrink; a human's never does."""
+
+    def _entry(self, root: Path) -> dict:
+        data = _read_json(root / ".claude" / "settings.json")
+        return data["hooks"]["PreToolUse"][0]
+
+    def test_owned_matcher_narrows(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        wide = HookEntry(event="pre_tool_use", command="guard", tools=["Edit", "Write"])
+        writer.sync(_cfg(wide), tmp_path)
+        assert set(self._entry(tmp_path)["matcher"].split("|")) == {"Edit", "Write"}
+
+        narrow = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
+        result = writer.sync(
+            SyncData(hooks=[narrow], hooks_owned=frozenset({("pre_tool_use", "guard")})),
+            tmp_path,
+        )
+        assert result.action == "updated"
+        assert self._entry(tmp_path)["matcher"] == "Edit"
+
+    def test_unowned_matcher_is_never_narrowed(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        wide = HookEntry(event="pre_tool_use", command="guard", tools=["Edit", "Write"])
+        writer.sync(_cfg(wide), tmp_path)
+        narrow = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
+        # hooks_owned empty → crossby doesn't own it → widen-only (no change).
+        result = writer.sync(SyncData(hooks=[narrow]), tmp_path)
+        assert result.action == "skipped"
+        assert set(self._entry(tmp_path)["matcher"].split("|")) == {"Edit", "Write"}
+
+
+class TestOtherWritersRemoval:
+    """Each native hooks writer removes the named (event, command) entry."""
+
+    def test_cursor_removes_and_drops_shell_fanout(self, tmp_path: Path) -> None:
+        writer = CursorHooksWriter()
+        shell_hook = HookEntry(event="pre_tool_use", command="guard", tools=["Bash"])
+        writer.sync(_cfg(shell_hook), tmp_path)
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert data["hooks"]["preToolUse"]
+        assert data["hooks"]["beforeShellExecution"]  # fanned out
+
+        result = writer.sync(_remove(("pre_tool_use", "guard")), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        # Both the primary entry and its shell mirror are gone.
+        assert "preToolUse" not in data["hooks"]
+        assert "beforeShellExecution" not in data["hooks"]
+
+    def test_copilot_removes_named_hook(self, tmp_path: Path) -> None:
+        writer = CopilotHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".github" / "hooks" / "hooks.json")
+        assert "preToolUse" not in data["hooks"]
+
+    def test_codex_removes_named_hook(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".codex" / "hooks.json")
+        assert "PreToolUse" not in data.get("hooks", {})
+
+    def test_antigravity_removes_named_hook(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        writer = AntigravityCLIHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".agents" / "hooks.json")
+        # The container's command is gone; an emptied container is pruned.
+        commands = [
+            handler.get("command")
+            for container in data.values()
+            if isinstance(container, dict)
+            for entries in container.values()
+            if isinstance(entries, list)
+            for entry in entries
+            for handler in [entry, *entry.get("hooks", [])]
+            if isinstance(handler, dict)
+        ]
+        assert GUARD_HOOK.command not in commands
