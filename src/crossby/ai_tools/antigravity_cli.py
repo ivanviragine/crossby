@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import ClassVar
 
@@ -16,14 +17,53 @@ from crossby.models.ai import (
     TokenUsage,
 )
 
-# agy only exposes three effort tiers; xhigh/max both collapse to high.
-_ANTIGRAVITY_CLI_EFFORT_MAP: dict[EffortLevel, str] = {
-    EffortLevel.LOW: "low",
-    EffortLevel.MEDIUM: "medium",
-    EffortLevel.HIGH: "high",
-    EffortLevel.XHIGH: "high",
-    EffortLevel.MAX: "high",
+# agy bakes reasoning effort into the model ID and rejects a separate --effort on
+# an already-suffixed model, while a bare Gemini base model *requires* an effort.
+# Only these base families require/encode effort (verified via `agy models` + live
+# probing); every other catalog model launches bare and ignores effort. Per-model
+# tiers differ: the flash families accept low/medium/high, gemini-3.1-pro only low/high.
+_ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
+    "gemini-3.6-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
+    "gemini-3.5-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
+    "gemini-3.1-pro": (EffortLevel.LOW, EffortLevel.HIGH),
 }
+
+# Effort suffixes agy uses on Gemini model IDs (xhigh/max are never valid there).
+_EFFORT_SUFFIXES: dict[str, EffortLevel] = {
+    "-low": EffortLevel.LOW,
+    "-medium": EffortLevel.MEDIUM,
+    "-high": EffortLevel.HIGH,
+}
+
+
+def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
+    """Split a trailing ``-low``/``-medium``/``-high`` effort suffix off a model ID.
+
+    Returns ``(base, effort)`` when the ID ends in a known effort suffix, else
+    ``(model, None)``.
+    """
+    for suffix, level in _EFFORT_SUFFIXES.items():
+        if model.endswith(suffix):
+            return model[: -len(suffix)], level
+    return model, None
+
+
+def _nearest_tier(effort: EffortLevel, tiers: tuple[EffortLevel, ...]) -> EffortLevel:
+    """Closest supported tier to ``effort`` by ``EffortLevel`` ordinal distance.
+
+    Ties resolve toward the *higher* tier.
+    """
+    order = list(EffortLevel)
+    target = order.index(effort)
+    return min(tiers, key=lambda t: (abs(order.index(t) - target), -order.index(t)))
+
+
+def _default_effort(tiers: tuple[EffortLevel, ...]) -> EffortLevel:
+    """Deterministic effort when none is supplied: ``medium`` when the model
+    supports it, otherwise the tier nearest to medium (so gemini-3.1-pro → high)."""
+    if EffortLevel.MEDIUM in tiers:
+        return EffortLevel.MEDIUM
+    return _nearest_tier(EffortLevel.MEDIUM, tiers)
 
 
 class AntigravityCLIAdapter(AbstractAITool):
@@ -44,6 +84,8 @@ class AntigravityCLIAdapter(AbstractAITool):
             headless_flag="--print",
             supports_headless=True,
             supports_effort=True,
+            # agy --effort accepts only low|medium|high; xhigh/max are rejected.
+            supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
@@ -104,10 +146,62 @@ class AntigravityCLIAdapter(AbstractAITool):
         """Resume a specific Antigravity CLI conversation by ID."""
         return ["agy", "--conversation", session_id]
 
-    def effort_args(self, effort: EffortLevel) -> list[str]:
-        """agy's ``--effort`` only accepts low|medium|high."""
-        mapped = _ANTIGRAVITY_CLI_EFFORT_MAP.get(effort, effort.value)
-        return ["--effort", mapped]
+    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
+        """Bake reasoning effort into the model ID — the single form ``agy`` accepts.
+
+        ``agy`` rejects a separate ``--effort`` on a suffixed model and *requires*
+        an effort on a bare Gemini model, so effort is encoded in the ID (the
+        Cursor ``-thinking`` pattern) and no ``--effort`` flag is ever emitted.
+
+        Covers, in one pass:
+
+        - **Bare models** (``claude-*``, ``gpt-oss-120b``): returned unchanged —
+          effort does not apply and agy launches them bare.
+        - **Precedence**: an effort already baked into the ID wins over a
+          separately supplied ``effort`` (agy would reject the two together).
+        - **No effort anywhere**: a deterministic default is baked in so the
+          command is valid (``gemini-3.6-flash`` → ``…-medium``, ``gemini-3.1-pro``
+          → ``…-high``) rather than the rejected bare base model.
+        - **xhigh/max**: normalized to ``high`` (agy rejects them), with a warning.
+        - **Per-model gap / invalid stored suffix** (``gemini-3.1-pro-medium``):
+          snapped to the nearest valid tier (ties → higher), with a warning.
+        """
+        if not model:
+            # No --model to bake effort into (e.g. effort supplied with no model).
+            return model
+
+        base, suffix_effort = _split_effort_suffix(model)
+        tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
+        if tiers is None:
+            # Bare model (claude-*, gpt-oss-120b): agy launches it with no effort.
+            return model
+
+        # A suffix on the model ID wins over a separately supplied effort.
+        eff = suffix_effort if suffix_effort is not None else effort
+        if eff is None:
+            eff = _default_effort(tiers)
+
+        if eff in (EffortLevel.XHIGH, EffortLevel.MAX):
+            warnings.warn(
+                f"Antigravity CLI accepts only low/medium/high effort; "
+                f"normalizing {eff.value!r} to 'high'.",
+                UserWarning,
+                stacklevel=2,
+            )
+            eff = EffortLevel.HIGH
+
+        if eff not in tiers:
+            snapped = _nearest_tier(eff, tiers)
+            available = ", ".join(t.value for t in tiers)
+            warnings.warn(
+                f"Antigravity CLI model {base!r} has no {eff.value!r} effort tier "
+                f"(available: {available}); snapping to {snapped.value!r}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            eff = snapped
+
+        return f"{base}-{eff.value}"
 
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         """Antigravity CLI persists conversations as opaque per-conversation

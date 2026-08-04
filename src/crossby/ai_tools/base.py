@@ -338,11 +338,12 @@ class AbstractAITool(ABC):
         """
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
+    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
         """Resolve model variant based on effort level.
 
         Some tools use different model IDs for higher effort (e.g., thinking
-        model variants). Default: return model unchanged. Override per tool.
+        model variants). Called for every model at launch (``effort`` may be
+        ``None``). Default: return model unchanged. Override per tool.
         """
         return model
 
@@ -474,12 +475,13 @@ class AbstractAITool(ABC):
         if initial_message:
             cmd.extend(self.initial_message_args(initial_message))
 
-        # Resolve effort-based model variant before applying model flag
+        # Resolve effort-based model variant before applying model flag. Called
+        # for every model (effort may be None): tools that bake effort into the
+        # ID (Cursor, antigravity-cli) need to translate even when no separate
+        # effort is passed — e.g. a bare agy Gemini model requires a baked effort.
         effective_model = model
-        if effort and effective_model:
+        if effective_model:
             effective_model = self.resolve_effort_model(effective_model, effort)
-        elif effort and not effective_model:
-            effective_model = self.resolve_effort_model(None, effort)
 
         # Cross-provider translation: if the user passed a model id that
         # belongs to another provider's family (Claude → Codex or Codex →
