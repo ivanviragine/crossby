@@ -140,3 +140,39 @@ class TestRepairBehavior:
         data = json.loads(config.read_text(encoding="utf-8"))
         assert isinstance(data["permissions"]["allow"], list)
         assert "Bash(myapp:*)" in data["permissions"]["allow"]
+
+
+class TestPatternInBothAddAndRevoke:
+    """A pattern requested for both ``patterns`` and ``revoke`` is never claimed.
+
+    ``run_sync`` computes ``revoke`` as ``owned - current`` so the two sets never
+    overlap today, but the helper is used by several writers — enforcing the
+    invariant here keeps ``created`` from ever reporting a pattern absent from the
+    file, which would make ``run_sync`` record ownership of something it did not
+    leave on disk.
+    """
+
+    def test_add_and_revoke_of_absent_pattern_is_a_noop(self, tmp_path: Path) -> None:
+        config = tmp_path / "settings.json"
+        action, error, created, _revoked = configure_json_allowlist(
+            config, ["myapp:*"], pattern_converter=_bash, revoke=["myapp:*"]
+        )
+        assert error is None
+        # Never appended and never claimed — the revoke wins.
+        assert created == []
+        assert action == "skipped"
+        assert not config.exists()
+
+    def test_revoke_wins_over_add_for_existing_pattern(self, tmp_path: Path) -> None:
+        config = tmp_path / "settings.json"
+        config.write_text(
+            json.dumps({"permissions": {"allow": ["Bash(myapp:*)"]}}) + "\n", encoding="utf-8"
+        )
+        _action, error, created, revoked = configure_json_allowlist(
+            config, ["myapp:*"], pattern_converter=_bash, revoke=["myapp:*"]
+        )
+        assert error is None
+        assert created == []
+        assert revoked == 1
+        data = json.loads(config.read_text(encoding="utf-8"))
+        assert "Bash(myapp:*)" not in data["permissions"]["allow"]

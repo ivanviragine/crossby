@@ -86,6 +86,11 @@ def configure_json_allowlist(
     created: list[str] = []
     for canonical in patterns:
         pat = pattern_converter(canonical)
+        if pat in revoke_patterns:
+            # A pattern requested for both add and revoke is dropped by the loop
+            # below — never append it or claim it in ``created``, or run_sync
+            # would record ownership of a pattern absent from the file on disk.
+            continue
         if pat not in allow_list:
             allow_list.append(pat)
             created.append(canonical)
