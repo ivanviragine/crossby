@@ -125,6 +125,19 @@ Sync writers live in `src/crossby/sync/<concern>.py` and subclass `AbstractSyncW
 
 Register the instance in `src/crossby/sync/__init__.py` alongside the other writers. `SyncRegistry` enforces uniqueness by `(tool_id, concern)`.
 
+### Revocation and the ownership ledger
+
+crossby's sync is **additive by default but revocable**: it can take back an entry it wrote earlier (e.g. after `sync --from A` then `sync --from B`, a target reflects B's hooks/permissions, not the union of both). The mechanism is a provenance ledger (`sync/ownership.py` → `.crossby/owned.json`) that records what crossby wrote per `(tool_id, concern)` — hook `(event, command)` pairs, canonical permission patterns, and MCP server names.
+
+The load-bearing rule when adding removal to a writer:
+
+- **Writers must never infer "absent from `data` ⇒ remove".** Revocation is computed **only** in `run_sync()` as `ledger_owned − current_set` and handed to the writer through an explicit, default-empty field on `SyncData` (`hooks_remove`, `permissions_remove`, `mcp_remove`). A writer that inferred removal from its own `data` would be catastrophic: `config/claude_allowlist.configure_plan_hooks` and the Cursor/Copilot equivalents call writers directly with a single-hook `SyncData` on every plan-mode/worktree session setup, and would wipe every other hook in the file.
+- **Ownership is what crossby *wrote*, not what matched the source.** Each writer reports the identities it created **fresh** this run via `SyncResult.created` (an entry it appended, a permission/server it added — never one already present). `run_sync()` records `new_owned = (ledger_owned ∩ current) ∪ created`. This is what keeps a hand-authored entry that merely shares a `(event, command)` / pattern / server-name with the source from being claimed — and thereby later narrowed or revoked — by crossby.
+- `run_sync()` records new ownership **only** for writers that did not return `error` — an error leaves the ledger untouched so the next run retries cleanly.
+- The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A missing or malformed `owned.json` degrades to "own nothing", never a crash. Persistence is best-effort too: an `OSError` while saving `owned.json` or updating `.gitignore` is logged and swallowed, so a read-only dir or full disk never discards the `SyncResult`s whose writes already succeeded (the ledger simply retries next run).
+- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. `mcp_remove` bounds the existing `enabled=False` deletion so crossby can never delete a same-named server a human wrote. Hooks and permissions do revoke-on-absence.
+- A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
+
 ### Symlink, copy, or translate
 
 Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:

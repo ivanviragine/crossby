@@ -10,10 +10,10 @@ complementary outputs that survive past the run:
   can render in place of the Rich table when the user passes
   ``--report-format markdown-table``.
 
-The ``Status`` column uses three controlled values: ``Added``,
+The ``Status`` column uses four controlled values: ``Added``, ``Removed``,
 ``Check before using``, ``Not Added``. ``classify_status`` maps each
-:class:`SyncResult` into that vocabulary by inspecting action +
-message.
+:class:`SyncResult` into that vocabulary by inspecting action + message +
+the added/revoked counts.
 """
 
 from __future__ import annotations
@@ -51,7 +51,12 @@ _CHECK_HINTS = (
 
 
 def classify_status(result: SyncResult) -> str:
-    """Map a :class:`SyncResult` to one of the three controlled statuses.
+    """Map a :class:`SyncResult` to one of the four controlled statuses.
+
+    A ``created``/``updated`` row that *only* removed entries (``revoked > 0``
+    and ``added == 0``) is a revocation — classified ``Removed`` so it reads
+    distinctly from an additive ``Added``. A lossy-translation hint still wins
+    (``Check before using``), and a mixed add+remove row counts as ``Added``.
 
     The classification rule for ``skipped`` rows uses ``file_path``: when a
     writer skipped *and* never identified a target artifact (``file_path is
@@ -71,6 +76,8 @@ def classify_status(result: SyncResult) -> str:
     if result.action in {"created", "updated"}:
         if any(hint in message for hint in _CHECK_HINTS):
             return "Check before using"
+        if result.revoked > 0 and result.added == 0:
+            return "Removed"
         return "Added"
     if result.action == "skipped":
         if result.concern == SyncConcern.PLUGINS or result.file_path is None:
