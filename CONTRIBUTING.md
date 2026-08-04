@@ -170,7 +170,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
 | `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
-| `--effort`    | `--effort <level>`                 | —                 | `--effort <level>`                | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
+| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
@@ -178,12 +178,22 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI  |
 | ------------- | -------- | ------- | -------- | ------------------- | ---------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `low`            |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `medium`         |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `high`           |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `high`           |
+| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`    |
+| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium` |
+| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`   |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+
+Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
+emitting a separate `--effort` flag (which it rejects alongside a suffixed
+model). Only the Gemini families encode effort — `gemini-3.6-flash` and
+`gemini-3.5-flash` accept `low`/`medium`/`high`, `gemini-3.1-pro` accepts only
+`low`/`high` (a requested `medium` snaps to the nearest valid tier). `xhigh`/
+`max` normalize to `high`, and a Gemini model launched with no effort gets a
+deterministic default (`medium`, or the nearest tier). Non-Gemini models
+(`claude-*`, `gpt-oss-120b`) launch bare and ignore effort.
 
 ### Permission & Allowlist Configuration
 
