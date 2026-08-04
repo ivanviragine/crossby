@@ -271,11 +271,17 @@ def run_sync(
         # permission, full disk) must not discard the SyncResults for writes
         # that already succeeded, so mirror run_sync's per-writer isolation
         # here. load_ledger already degrades to "own nothing" on a missing or
-        # malformed file, so a dropped save simply retries next run. Only touch
-        # .gitignore when the ledger file was actually created or changed —
-        # save_ledger returns False on an idempotent no-op.
+        # malformed file, so a dropped save simply retries next run.
         try:
-            if save_ledger(project_root, ledger):
+            save_ledger(project_root, ledger)
+            # Ensure the ledger is gitignored whenever the file exists on disk —
+            # decoupled from save_ledger's change detection so a prior transient
+            # .gitignore failure self-heals on the next sync (rather than being
+            # skipped forever because the unchanged ledger makes save_ledger
+            # return False). update_managed_block is itself a no-op when the
+            # block is already present, so this is cheap on the common path; an
+            # empty ledger is never materialised, so there's nothing to ignore.
+            if (project_root / LEDGER_PATH).is_file():
                 from crossby.sync.gitignore_utils import update_managed_block
 
                 update_managed_block(

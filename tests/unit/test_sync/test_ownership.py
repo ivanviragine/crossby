@@ -274,6 +274,38 @@ class TestRunSyncLedgerGating:
         settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         assert "PreToolUse" in settings["hooks"]
 
+    def test_gitignore_update_self_heals_after_transient_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A transient OSError updating .gitignore must not leave owned.json
+        # unignored forever: because an identical re-sync makes save_ledger
+        # return False, the retry is decoupled to run whenever the ledger file
+        # exists. Fail the first .gitignore update, then let the second heal it.
+        import crossby.sync.gitignore_utils as gi
+
+        real = gi.update_managed_block
+        calls = {"n": 0}
+
+        def _flaky(*args: object, **kwargs: object) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient .gitignore failure")
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("crossby.sync.gitignore_utils.update_managed_block", _flaky)
+        reg = _registry(ClaudeHooksWriter())
+        gitignore = tmp_path / ".gitignore"
+
+        # Sync 1: ledger is written, but the .gitignore update fails transiently.
+        run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert (tmp_path / LEDGER_PATH).is_file()
+        assert not gitignore.is_file() or LEDGER_PATH.as_posix() not in gitignore.read_text()
+
+        # Sync 2: identical, so save_ledger no-ops — but the retry still runs
+        # because the ledger file exists, and the block is now written.
+        run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert LEDGER_PATH.as_posix() in gitignore.read_text()
+
 
 class TestRunSyncNeverDeletesUnowned:
     def _settings(self, root: Path) -> Path:
