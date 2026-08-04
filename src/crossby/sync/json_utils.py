@@ -35,7 +35,7 @@ def read_merge_write_json(
     updates: dict[str, Any],
     removals: set[str],
     dry_run: bool = False,
-) -> tuple[SyncAction, str, list[str], int]:
+) -> tuple[SyncAction, str, list[str], list[str], int]:
     """Atomic read-modify-write for a JSON config file.
 
     Merges ``updates`` into ``file[key]`` and removes ``removals`` from it.
@@ -52,16 +52,20 @@ def read_merge_write_json(
         dry_run: If True, compute action but do not write.
 
     Returns:
-        Tuple of (action, message, written_names, removed_count) where
-        ``written_names`` are the names crossby wrote or overwrote this call
-        (used to record ownership) and action is one of ``"created"``,
+        Tuple of (action, message, written_names, created_names, removed_count).
+        ``written_names`` are all names crossby wrote or overwrote this call (the
+        ``added`` count). ``created_names`` are only the names that were *absent*
+        before this run — the ownership set. An existing server whose stored
+        value merely differs is overwritten but never claimed, matching the
+        permission/allowlist writers so a hand-authored server crossby happened
+        to overwrite is never later revoked. ``action`` is one of ``"created"``,
         ``"updated"``, ``"skipped"``, ``"error"``.
     """
     data, error, was_new = read_json_file(path)
     if error is not None:
         msg = f"{path} {error} — skipping sync. Fix the file manually or delete it."
         warnings.warn(msg, stacklevel=2)
-        return "error", msg, [], 0
+        return "error", msg, [], [], 0
 
     existing = data or {}
 
@@ -70,10 +74,16 @@ def read_merge_write_json(
         section = {}
 
     written: list[str] = []
+    created: list[str] = []
     removed = 0
 
     for name, entry in updates.items():
         if section.get(name) != entry:
+            # Claim ownership only for names absent before this run — overwriting
+            # a same-named entry (hand-authored or otherwise) applies the change
+            # but never marks it crossby-owned, so it is never later revoked.
+            if name not in section:
+                created.append(name)
             section[name] = entry
             written.append(name)
 
@@ -83,12 +93,12 @@ def read_merge_write_json(
             removed += 1
 
     if not written and not removed:
-        return "skipped", "", [], 0
+        return "skipped", "", [], [], 0
 
     if dry_run:
         action: SyncAction = "created" if was_new else "updated"
-        return action, "", written, removed
+        return action, "", written, created, removed
 
     existing[key] = section
     write_json_file(path, existing)
-    return ("created" if was_new else "updated"), "", written, removed
+    return ("created" if was_new else "updated"), "", written, created, removed

@@ -180,7 +180,7 @@ class _JsonMCPWriter(AbstractSyncWriter):
         # Only ledger-owned names may be removed (``data.mcp_remove``), so a
         # same-named server crossby never wrote survives even when a source
         # server of that name is disabled.
-        action, message, written, removed = read_merge_write_json(
+        action, message, written, created, removed = read_merge_write_json(
             path, self._mcp_key, updates, set(data.mcp_remove), dry_run
         )
         return SyncResult(
@@ -191,7 +191,8 @@ class _JsonMCPWriter(AbstractSyncWriter):
             message=message or None,
             added=len(written),
             revoked=removed,
-            created=tuple(written),
+            # Ownership = only freshly-added servers, never overwritten ones.
+            created=tuple(created),
         )
 
 
@@ -287,7 +288,7 @@ class ClaudeMCPWriter(_JsonMCPWriter):
         # Only ledger-owned names may be removed / de-approved.
         revoke = set(data.mcp_remove)
 
-        action, message, written, removed = read_merge_write_json(
+        action, message, written, created, removed = read_merge_write_json(
             mcp_path, self._mcp_key, updates, revoke, dry_run
         )
         if action == "error":
@@ -326,8 +327,9 @@ class ClaudeMCPWriter(_JsonMCPWriter):
             message=note,
             added=len(written) + approved_n,
             revoked=removed + revoked_n,
-            # Ownership = the server names crossby actually wrote to .mcp.json.
-            created=tuple(written),
+            # Ownership = only server names crossby freshly added to .mcp.json —
+            # never one it overwrote, so a hand-authored server is never claimed.
+            created=tuple(created),
         )
 
 
@@ -400,7 +402,7 @@ class CodexMCPWriter(AbstractSyncWriter):
         path = project_root / ".codex" / "config.toml"
         enabled, _disabled = _split_servers(data.mcp_servers)
         # Only ledger-owned names may be removed (``data.mcp_remove``).
-        action, message, written, removed = self._write_toml(
+        action, message, written, created, removed = self._write_toml(
             path, enabled, set(data.mcp_remove), dry_run
         )
         return SyncResult(
@@ -411,7 +413,8 @@ class CodexMCPWriter(AbstractSyncWriter):
             message=message or None,
             added=len(written),
             revoked=removed,
-            created=tuple(written),
+            # Ownership = only freshly-added tables, never overwritten ones.
+            created=tuple(created),
         )
 
     def _write_toml(
@@ -420,7 +423,7 @@ class CodexMCPWriter(AbstractSyncWriter):
         enabled: dict[str, MCPServerConfig],
         revoke: set[str],
         dry_run: bool,
-    ) -> tuple[SyncAction, str, list[str], int]:
+    ) -> tuple[SyncAction, str, list[str], list[str], int]:
         import tomllib
 
         import tomli_w
@@ -438,17 +441,22 @@ class CodexMCPWriter(AbstractSyncWriter):
                     f"Fix the file manually or delete it. ({e})"
                 )
                 warnings.warn(msg, stacklevel=3)
-                return "error", msg, [], 0
+                return "error", msg, [], [], 0
 
         mcp_section: dict[str, Any] = existing.get("mcp_servers", {})
         if not isinstance(mcp_section, dict):
             mcp_section = {}
 
         written: list[str] = []
+        created: list[str] = []
         removed: list[str] = []
         for name, server in enabled.items():
             entry = _to_toml_entry(server)
             if mcp_section.get(name) != entry:
+                # Overwriting a same-named table applies the change but is never
+                # claimed as owned — only genuinely new tables enter ``created``.
+                if name not in mcp_section:
+                    created.append(name)
                 mcp_section[name] = entry
                 written.append(name)
 
@@ -458,10 +466,10 @@ class CodexMCPWriter(AbstractSyncWriter):
                 removed.append(name)
 
         if not written and not removed:
-            return "skipped", "", [], 0
+            return "skipped", "", [], [], 0
 
         if dry_run:
-            return ("created" if was_new else "updated"), "", written, len(removed)
+            return ("created" if was_new else "updated"), "", written, created, len(removed)
 
         if mcp_section:
             existing["mcp_servers"] = mcp_section
@@ -477,7 +485,7 @@ class CodexMCPWriter(AbstractSyncWriter):
             # correct but drops the user's comments and key ordering.
             new_text = tomli_w.dumps(existing)
         atomic_write_text(path, new_text)
-        return ("created" if was_new else "updated"), "", written, len(removed)
+        return ("created" if was_new else "updated"), "", written, created, len(removed)
 
     @staticmethod
     def _splice(

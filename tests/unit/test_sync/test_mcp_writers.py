@@ -193,6 +193,21 @@ class TestClaudeMCPWriter:
         self.writer.sync(_cfg({"shared": MCPServerConfig(command="npx", enabled=False)}), tmp_path)
         assert _read_json(mcp)["mcpServers"]["shared"]["command"] == "hand-written"
 
+    def test_overwriting_existing_server_is_not_claimed_as_owned(self, tmp_path: Path) -> None:
+        # Ownership (``created``) is creation-only: overwriting a same-named
+        # server applies the change but never claims it, so a hand-authored
+        # server crossby merely overwrote is never later revoked. Only a
+        # genuinely new server enters ``created``.
+        mcp = self._mcp(tmp_path)
+        mcp.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "hand-written"}}}), encoding="utf-8"
+        )
+        result = self.writer.sync(_cfg({"shared": STDIO_SERVER, "fresh": HTTP_SERVER}), tmp_path)
+        assert set(result.created) == {"fresh"}
+        # The overwrite still applied on disk — creation-only ownership does not
+        # suppress the merge itself.
+        assert _read_json(mcp)["mcpServers"]["shared"]["command"] == "npx"
+
     def test_disabled_server_not_added(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"never": DISABLED_SERVER}), tmp_path)
         # No enabled servers, nothing to write — and no empty settings.json created.

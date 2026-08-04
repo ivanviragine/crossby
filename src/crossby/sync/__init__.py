@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+import structlog
+
 from crossby.models.ai import AIToolID
 from crossby.sync.agents import (
     AntigravityCLIAgentsWriter,
@@ -57,6 +59,8 @@ from crossby.sync.skills import (
 # --dangerously-skip-permissions launch flags, no per-project policy file)
 # and it has no hook system at all — same absence pattern as Codex having
 # no permission writer (sandbox mode is inherent, not a file to write).
+logger = structlog.get_logger()
+
 # .gitignore managed-block id for the per-machine ownership ledger.
 _LEDGER_GITIGNORE_BLOCK_ID = "sync ownership"
 
@@ -263,15 +267,25 @@ def run_sync(
             ledger.record_permissions(perm_tool, perm_pats)
         for mcp_tool, mcp_names in pending_mcp.items():
             ledger.record_mcp(mcp_tool, mcp_names)
-        # Only touch .gitignore when the ledger file was actually created or
-        # changed — save_ledger returns False on an idempotent no-op.
-        if save_ledger(project_root, ledger):
-            from crossby.sync.gitignore_utils import update_managed_block
+        # The ledger is advisory: a persistence failure (read-only dir, no
+        # permission, full disk) must not discard the SyncResults for writes
+        # that already succeeded, so mirror run_sync's per-writer isolation
+        # here. load_ledger already degrades to "own nothing" on a missing or
+        # malformed file, so a dropped save simply retries next run. Only touch
+        # .gitignore when the ledger file was actually created or changed —
+        # save_ledger returns False on an idempotent no-op.
+        try:
+            if save_ledger(project_root, ledger):
+                from crossby.sync.gitignore_utils import update_managed_block
 
-            update_managed_block(
-                project_root,
-                _LEDGER_GITIGNORE_BLOCK_ID,
-                [LEDGER_PATH.as_posix()],
+                update_managed_block(
+                    project_root,
+                    _LEDGER_GITIGNORE_BLOCK_ID,
+                    [LEDGER_PATH.as_posix()],
+                )
+        except OSError as exc:
+            logger.warning(
+                "ownership.persist_failed", path=str(project_root), error=str(exc)
             )
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or

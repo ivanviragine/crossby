@@ -13,8 +13,10 @@ import json
 from pathlib import Path
 from typing import Literal
 
+import pytest
+
 from crossby.models.ai import AIToolID
-from crossby.models.config import HookEntry
+from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync import run_sync
 from crossby.sync.base import (
     AbstractSyncWriter,
@@ -24,6 +26,7 @@ from crossby.sync.base import (
     SyncResult,
 )
 from crossby.sync.hooks import ClaudeHooksWriter
+from crossby.sync.mcp import ClaudeMCPWriter
 from crossby.sync.ownership import (
     LEDGER_PATH,
     LEDGER_VERSION,
@@ -249,6 +252,28 @@ class TestRunSyncLedgerGating:
         gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
         assert LEDGER_PATH.as_posix() in gitignore
 
+    def test_ledger_save_oserror_does_not_discard_results(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ledger is advisory: an OSError persisting it (read-only dir, full
+        # disk) must not propagate out of run_sync and discard the SyncResults
+        # for writes that already succeeded — matching run_sync's per-writer
+        # isolation. save_ledger is imported inside run_sync, so patch the source.
+        def _boom(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("crossby.sync.ownership.save_ledger", _boom)
+        results = run_sync(
+            SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=_registry(
+                ClaudeHooksWriter()
+            )
+        )
+        # The write result survives the failed ledger save …
+        assert any(r.concern == SyncConcern.HOOKS and r.action != "error" for r in results)
+        # … and the hook actually landed on disk.
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert "PreToolUse" in settings["hooks"]
+
 
 class TestRunSyncNeverDeletesUnowned:
     def _settings(self, root: Path) -> Path:
@@ -378,3 +403,35 @@ class TestProvenanceNotIdentityCoincidence:
         run_sync(SyncData(allowed_commands=[]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
         allow = json.loads(settings.read_text())["permissions"]["allow"]
         assert "Bash(git diff:*)" in allow
+
+    def test_human_mcp_server_sharing_source_name_is_never_claimed_or_revoked(
+        self, tmp_path: Path
+    ) -> None:
+        # MCP ownership is creation-only: overwriting a same-named hand-authored
+        # server applies the merge but claims nothing, so the later disable path
+        # (bounded by ``disabled ∩ owned``) can never delete it.
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "hand-written"}}}), encoding="utf-8"
+        )
+        reg = _registry(ClaudeMCPWriter())
+
+        # Sync 1: source has `shared` enabled with a different config → crossby
+        # overwrites the entry but, because it already existed, claims nothing.
+        run_sync(
+            SyncData(mcp_servers={"shared": MCPServerConfig(command="npx")}),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=reg,
+        )
+        assert load_ledger(tmp_path).mcp(AIToolID.CLAUDE) == frozenset()
+
+        # Sync 2: source disables `shared`. Deletion is bounded by ownership and
+        # crossby owns nothing, so the server survives.
+        run_sync(
+            SyncData(mcp_servers={"shared": MCPServerConfig(command="npx", enabled=False)}),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=reg,
+        )
+        assert "shared" in json.loads(mcp.read_text())["mcpServers"]
