@@ -131,6 +131,12 @@ class TestModelCompatibility:
         assert adapter.is_model_compatible("o3") is True
         assert adapter.is_model_compatible("claude-opus") is False
 
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_accepts_gpt_5_6(self, model: str) -> None:
+        """The gpt-5.6 family (luna/sol/terra) is codex-native — Issue #112."""
+        adapter = AbstractAITool.get("codex")
+        assert adapter.is_model_compatible(model) is True
+
     def test_opencode_accepts_all(self) -> None:
         adapter = AbstractAITool.get("opencode")
         # opencode supports 75+ providers — accepts any model ID
@@ -289,6 +295,13 @@ class TestClassifyTierUniversal:
     def test_unrecognized_defaults_to_balanced(self) -> None:
         assert classify_tier_universal("gpt-4o") == ModelTier.BALANCED
         assert classify_tier_universal("some-unknown-model") == ModelTier.BALANCED
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_gpt_5_6_classifies_balanced(self, model: str) -> None:
+        """luna/sol/terra carry no tier keyword, so they classify to BALANCED
+        like the existing gpt-5.4/gpt-5.5 entries — Issue #112. Guards against a
+        keyword-regex regression."""
+        assert classify_tier_universal(model) == ModelTier.BALANCED
 
 
 class TestTrustedDirsArgs:
@@ -470,6 +483,22 @@ class TestCrossProviderModelTranslation:
             cmd = adapter.build_launch_command(model="claude-haiku-4.5")
         assert "--model" in cmd
         assert "claude-haiku-4-5" in cmd
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_gpt_5_6_launches_unchanged_with_effort(self, model: str) -> None:
+        """A codex-native gpt-5.6 model launches through CodexAdapter with the
+        bare id preserved and effort applied via ``-c model_reasoning_effort``,
+        with no cross-provider translation warning — Issue #112."""
+        from crossby.models.ai import EffortLevel
+
+        adapter = AbstractAITool.get("codex")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning (incl. translation) becomes an error
+            cmd = adapter.build_launch_command(model=model, effort=EffortLevel.HIGH)
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == model  # bare id, no effort suffix, not translated
+        assert "-c" in cmd
+        assert 'model_reasoning_effort="high"' in cmd
 
     def test_passthrough_for_arbitrary_accepting_tool(self) -> None:
         # Cursor / Copilot / OpenCode accept arbitrary model ids — no
