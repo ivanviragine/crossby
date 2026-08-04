@@ -11,6 +11,18 @@ from crossby.models.ai import AIToolID, ModelTier
 
 _TIERS = ("easy", "medium", "complex", "very_complex")
 
+# Effort suffixes a default model ID may encode (antigravity-cli bakes effort
+# into the model ID, so a suffixed default is launchable when its base is a
+# registry member).
+_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-xhigh", "-max")
+
+
+def _strip_effort_suffix(model_id: str) -> str:
+    for suffix in _EFFORT_SUFFIXES:
+        if model_id.endswith(suffix):
+            return model_id[: -len(suffix)]
+    return model_id
+
 
 def _iter_tier_defaults() -> list[tuple[str, str, str]]:
     """Flatten TOOL_DEFAULTS into (tool_id, tier, model_id) tuples."""
@@ -83,8 +95,15 @@ class TestDefaultsRegistryGuard:
     @pytest.mark.parametrize(("tool_id", "tier", "model_id"), _iter_tier_defaults())
     def test_default_is_registry_member(self, tool_id: str, tier: str, model_id: str) -> None:
         registry = get_models_for_tool(tool_id)
-        assert model_id in registry, (
-            f"{tool_id}.{tier} default '{model_id}' is not in get_models_for_tool('{tool_id}')"
+        if model_id in registry:
+            return
+        # A default may encode an effort suffix that the catalog stores only in
+        # its base form (antigravity-cli). It's launchable when the base resolves
+        # to a registry member — the adapter bakes the effort back in at launch.
+        base = _strip_effort_suffix(model_id)
+        assert base in registry, (
+            f"{tool_id}.{tier} default '{model_id}' (base '{base}') is not in "
+            f"get_models_for_tool('{tool_id}')"
         )
 
     def test_expected_tiers_cover_all_defaults(self) -> None:

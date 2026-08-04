@@ -13,7 +13,7 @@ from crossby.ai_tools.model_utils import (
     classify_tier_universal,
     has_date_suffix,
 )
-from crossby.models.ai import AIModel, AIToolID, AIToolType, ModelTier
+from crossby.models.ai import AIModel, AIToolID, AIToolType, EffortLevel, ModelTier
 
 
 class TestSelfRegistration:
@@ -102,6 +102,19 @@ class TestCapabilities:
         assert caps.supports_headless is True
         assert caps.supports_initial_message is True
         assert caps.blocks_until_exit is True
+
+    def test_supported_efforts_defaults_to_all_levels(self) -> None:
+        # A tool that doesn't narrow effort offers every EffortLevel.
+        caps = AbstractAITool.get("claude").capabilities()
+        assert caps.supported_efforts == tuple(EffortLevel)
+
+    def test_antigravity_cli_narrows_supported_efforts(self) -> None:
+        caps = AbstractAITool.get("antigravity-cli").capabilities()
+        assert caps.supported_efforts == (
+            EffortLevel.LOW,
+            EffortLevel.MEDIUM,
+            EffortLevel.HIGH,
+        )
 
 
 class TestModelCompatibility:
@@ -241,6 +254,26 @@ class TestBuildLaunchCommand:
         adapter = AbstractAITool.get("cursor")
         cmd = adapter.build_launch_command(model="gpt-5.3-codex")
         assert cmd == ["agent", "--model", "gpt-5.3-codex"]
+
+    @pytest.mark.parametrize(
+        ("tool_id", "model"),
+        [
+            ("claude", "claude-opus-4-6"),
+            ("copilot", "gpt-5.1"),
+            ("codex", "gpt-5.1"),
+            ("opencode", "anthropic/claude-sonnet-4"),
+            ("cursor", "opus-4.6"),
+            # A bare model for antigravity-cli: a Gemini base would legitimately
+            # bake a default effort; a non-Gemini model must stay untouched.
+            ("antigravity-cli", "gpt-oss-120b"),
+        ],
+    )
+    def test_effort_none_leaves_model_unchanged(self, tool_id: str, model: str) -> None:
+        # build_launch_command now resolves effort for every model; effort=None
+        # must be a no-op (no -thinking / -effort suffix added) for every adapter.
+        adapter = AbstractAITool.get(tool_id)
+        cmd = adapter.build_launch_command(model=model, effort=None)
+        assert cmd[cmd.index("--model") + 1] == model
 
 
 class TestDateSuffix:

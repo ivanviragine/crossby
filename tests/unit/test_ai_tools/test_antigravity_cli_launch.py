@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter
 from crossby.models.ai import EffortLevel, TokenUsage
+
+
+def _model_of(cmd: list[str]) -> str | None:
+    """Return the value passed to --model, or None if the flag is absent."""
+    return cmd[cmd.index("--model") + 1] if "--model" in cmd else None
 
 
 class TestAntigravityCLIYolo:
@@ -18,19 +25,110 @@ class TestAntigravityCLIYolo:
 
 
 class TestAntigravityCLIEffort:
-    def test_low_medium_high_map_1to1(self) -> None:
-        adapter = AntigravityCLIAdapter()
-        assert adapter.effort_args(EffortLevel.LOW) == ["--effort", "low"]
-        assert adapter.effort_args(EffortLevel.MEDIUM) == ["--effort", "medium"]
-        assert adapter.effort_args(EffortLevel.HIGH) == ["--effort", "high"]
-
-    def test_xhigh_and_max_collapse_to_high(self) -> None:
-        adapter = AntigravityCLIAdapter()
-        assert adapter.effort_args(EffortLevel.XHIGH) == ["--effort", "high"]
-        assert adapter.effort_args(EffortLevel.MAX) == ["--effort", "high"]
+    """agy bakes effort into the model ID and never emits a separate --effort."""
 
     def test_supports_effort_capability(self) -> None:
         assert AntigravityCLIAdapter().capabilities().supports_effort is True
+
+    def test_supported_efforts_is_low_medium_high(self) -> None:
+        caps = AntigravityCLIAdapter().capabilities()
+        assert caps.supported_efforts == (
+            EffortLevel.LOW,
+            EffortLevel.MEDIUM,
+            EffortLevel.HIGH,
+        )
+
+    def test_base_plus_effort_bakes_suffix_and_omits_effort_flag(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(
+            model="gemini-3.6-flash", effort=EffortLevel.HIGH
+        )
+        assert _model_of(cmd) == "gemini-3.6-flash-high"
+        assert "--effort" not in cmd
+
+    def test_idempotent_suffixed_model_plus_matching_effort(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(
+            model="gemini-3.6-flash-high", effort=EffortLevel.HIGH
+        )
+        assert _model_of(cmd) == "gemini-3.6-flash-high"
+        assert "--effort" not in cmd
+
+    def test_suffix_wins_over_conflicting_effort(self) -> None:
+        # Precedence: an effort baked into the ID beats a separately supplied one,
+        # and no --effort is emitted — so a stored suffixed model stays valid.
+        cmd = AntigravityCLIAdapter().build_launch_command(
+            model="gemini-3.6-flash-high", effort=EffortLevel.LOW
+        )
+        assert _model_of(cmd) == "gemini-3.6-flash-high"
+        assert "--effort" not in cmd
+
+    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
+    def test_xhigh_and_max_normalize_to_high_with_warning(self, effort: EffortLevel) -> None:
+        with pytest.warns(UserWarning, match="only low/medium/high"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.6-flash", effort)
+        assert resolved == "gemini-3.6-flash-high"
+
+    def test_per_model_gap_snaps_to_nearest_tier_with_warning(self) -> None:
+        # gemini-3.1-pro supports only low/high; medium snaps up (ties → higher).
+        with pytest.warns(UserWarning, match="no 'medium' effort tier"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model(
+                "gemini-3.1-pro", EffortLevel.MEDIUM
+            )
+        assert resolved == "gemini-3.1-pro-high"
+
+    def test_invalid_stored_suffix_is_repaired(self) -> None:
+        # gemini-3.1-pro-medium is a tier agy rejects — snap to a valid one.
+        with pytest.warns(UserWarning, match="no 'medium' effort tier"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.1-pro-medium", None)
+        assert resolved == "gemini-3.1-pro-high"
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gemini-3.6-flash-xhigh", "gemini-3.6-flash-high"),
+            ("gemini-3.1-pro-max", "gemini-3.1-pro-high"),
+        ],
+    )
+    def test_stored_xhigh_max_suffix_normalizes_to_high(self, model: str, expected: str) -> None:
+        # agy never emits a -xhigh/-max ID; a hand-written one must normalize
+        # down rather than pass through as an invalid command.
+        with pytest.warns(UserWarning, match="only low/medium/high"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model(model, None)
+        assert resolved == expected
+
+    def test_no_effort_defaults_to_medium_when_supported(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.6-flash", effort=None)
+        assert _model_of(cmd) == "gemini-3.6-flash-medium"
+        assert "--effort" not in cmd
+
+    def test_no_effort_defaults_to_nearest_when_medium_unsupported(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.1-pro", effort=None)
+        assert _model_of(cmd) == "gemini-3.1-pro-high"
+        assert "--effort" not in cmd
+
+    def test_effort_without_model_emits_no_model_flag(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model=None, effort=EffortLevel.HIGH)
+        assert "--model" not in cmd
+
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-oss-120b", "claude-sonnet-4-6", "claude-opus-4-6-thinking"],
+    )
+    def test_bare_models_ignore_effort_and_pass_through(self, model: str) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model=model, effort=EffortLevel.HIGH)
+        assert _model_of(cmd) == model
+        assert "--effort" not in cmd
+
+    def test_retired_gpt_oss_suffix_drops_to_bare_base(self) -> None:
+        # gpt-oss-120b takes no effort; the retired 'gpt-oss-120b-medium' catalog
+        # ID (renamed to bare 'gpt-oss-120b' in this PR) may linger in a stored
+        # config. It must resolve to bare 'gpt-oss-120b' — agy rejects the
+        # suffixed form — with a warning and no --effort flag.
+        with pytest.warns(UserWarning, match="does not accept a reasoning effort"):
+            cmd = AntigravityCLIAdapter().build_launch_command(
+                model="gpt-oss-120b-medium", effort=None
+            )
+        assert _model_of(cmd) == "gpt-oss-120b"
+        assert "--effort" not in cmd
 
 
 class TestAntigravityCLIInitialMessage:
@@ -58,16 +156,16 @@ class TestAntigravityCLIParseTranscript:
 
 class TestAntigravityCLIBuildLaunchCommand:
     def test_combines_model_effort_and_yolo(self) -> None:
+        # A base model + effort bakes into one suffixed --model with NO --effort
+        # flag (agy rejects the two together), alongside the yolo flags.
         cmd = AntigravityCLIAdapter().build_launch_command(
-            model="gemini-3.6-flash-high",
+            model="gemini-3.6-flash",
             effort=EffortLevel.HIGH,
             yolo=True,
         )
         assert cmd[0] == "agy"
-        assert "--model" in cmd
-        assert cmd[cmd.index("--model") + 1] == "gemini-3.6-flash-high"
-        assert "--effort" in cmd
-        assert cmd[cmd.index("--effort") + 1] == "high"
+        assert _model_of(cmd) == "gemini-3.6-flash-high"
+        assert "--effort" not in cmd
         assert "--dangerously-skip-permissions" in cmd
         assert "--sandbox" in cmd
 

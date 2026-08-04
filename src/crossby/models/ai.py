@@ -151,6 +151,12 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_initial_message: bool = True
     blocks_until_exit: bool = True
     supports_effort: bool = False
+    supported_efforts: tuple[EffortLevel, ...] = tuple(EffortLevel)
+    """Effort levels this tool can actually honor — the set a picker should offer.
+    Defaults to every EffortLevel; tools whose CLI accepts a subset narrow it
+    (antigravity-cli → low/medium/high). Independent of supports_effort, which
+    only says the tool has an effort concept crossby drives (Cursor/antigravity-cli
+    bake effort into the model ID rather than emitting a flag)."""
     supports_yolo: bool = False
     supports_resume: bool = False
     supports_trusted_dirs: bool = False

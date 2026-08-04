@@ -60,8 +60,12 @@ class TestRegistryGetModels:
     def test_antigravity_cli_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
         models = adapter.get_models()
+        model_ids = [m.id for m in models]
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
-        assert "gemini-3.6-flash-high" in [m.id for m in models]
+        # Catalog lists base IDs only — effort is baked in at launch, not stored.
+        assert "gemini-3.6-flash" in model_ids
+        assert "gemini-3.6-flash-high" not in model_ids
+        assert "gpt-oss-120b-medium" not in model_ids
 
     def test_codex_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
