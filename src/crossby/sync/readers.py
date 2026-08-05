@@ -349,10 +349,14 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     [{"type", "command"}]}]}}``, so both readers share this body rather than
     diverging by copy-paste.
 
-    ``matcher`` becomes ``tools`` via ``.split("|")`` (``.*``/empty → unscoped);
-    Claude and Codex both spell tool names canonically, so no reverse mapping is
-    applied. A handler whose ``command`` is missing or not a non-empty ``str`` is
-    skipped rather than handed to Pydantic (data-type hardening).
+    ``matcher`` becomes ``tools`` via :func:`_matcher_tools`, so only a plain
+    ``|`` alternation of tool names is recovered. A catch-all ``.*`` or exotic
+    regex (``Write.*``) yields unscoped ``[]`` rather than a bogus token like
+    ``Write.*``: carried into a cross-tool sync that token translates to nothing
+    the target tool ever emits, silently rendering the guard inert (whereas an
+    unscoped hook re-scopes to ``.*`` and still fires). A handler whose
+    ``command`` is missing or not a non-empty ``str`` is skipped rather than
+    handed to Pydantic (data-type hardening).
     """
     data = _read_json(path)
     if not data:
@@ -368,12 +372,7 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            matcher = entry.get("matcher", "")
-            tools = (
-                matcher.split("|")
-                if isinstance(matcher, str) and matcher and matcher != ".*"
-                else []
-            )
+            tools = _matcher_tools(entry.get("matcher"))
             inner_hooks = entry.get("hooks", [])
             if not isinstance(inner_hooks, list):
                 continue

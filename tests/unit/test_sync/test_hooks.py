@@ -1617,6 +1617,32 @@ class TestCodexHooksReader:
         assert after == before
         assert after["hooks"]["PreToolUse"][0]["matcher"] == "Write.*"
 
+    def test_exotic_matcher_syncs_cross_tool_as_catchall_not_inert(self, tmp_path: Path) -> None:
+        """An exotic matcher reaches another tool as `.*` (fires), not a dead token.
+
+        `.split("|")` would read `Write.*` as `tools=["Write.*"]`; synced on to
+        Antigravity that token translates to nothing agy ever emits, so the guard
+        installs but never fires. Reading it as unscoped re-scopes to `.*`, which
+        still fires (fail-safe) — the point of the security guard.
+        """
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": "Write.*", "hooks": [{"type": "command", "command": "guard"}]}
+                ]
+            },
+        )
+        read_back = _read_codex_hooks(tmp_path)
+        assert read_back[0].tools == []  # unrepresentable regex → unscoped, not ["Write.*"]
+
+        AntigravityCLIHooksWriter().sync(SyncData(hooks=read_back), tmp_path)
+        agy = _read_json(tmp_path / ".agents" / "hooks.json")
+        matchers = [e["matcher"] for c in agy.values() for e in c.get("PreToolUse", [])]
+        assert matchers == [".*"]
+
 
 # ---------------------------------------------------------------------------
 # Antigravity CLI hooks reader — .agents/hooks.json is a container map
