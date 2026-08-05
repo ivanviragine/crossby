@@ -11,6 +11,7 @@ non-destructive merge strategy (dedup by (event, command)):
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -136,6 +137,18 @@ def _tools_to_matcher(tools: list[str]) -> str:
     return "|".join(tools)
 
 
+# A bare alternation of literal tool names — the only matcher shape that is also
+# a tool list. `[\w-]` admits the characters real tool names use (including MCP's
+# `mcp__server__tool` and hyphenated server names) and nothing else, so every
+# regex construct is excluded: the catch-all `.*` and `*`, quantifiers
+# (`Write.*`), groups (`(Write|Shell)`), anchors, character classes, and escapes.
+# Matched with `fullmatch`, so a partial hit like `Write.*` cannot sneak through
+# on its `Write` prefix. Shared with the hooks readers (``sync/readers.py``): the
+# reader treats only this shape as recoverable tool scope, so the writer's widen
+# guard below must classify matchers the same way or a read → write cycle diverges.
+_PLAIN_ALTERNATION = re.compile(r"[\w-]+(?:\|[\w-]+)*")
+
+
 def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
     """Return a regex matcher that covers both existing and desired tool sets.
 
@@ -144,14 +157,29 @@ def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
     ``Edit|Write``) with a narrower desired one (``Edit``) would silently
     drop coverage.
 
-    Catch-all (``.*``) wins on either side. Otherwise the union of pipe-
-    separated tokens is returned, preserving the order of existing tokens
-    and appending any new desired ones.
+    Catch-all (``.*``) wins on either side, **except** when broadening would
+    trample a concrete matcher crossby never wrote: an empty desired tool set
+    expands to ``.*``, but a reader also returns ``tools=[]`` for a hand-authored
+    matcher it can't represent (e.g. ``Write.*``). Broadening that to ``.*`` would
+    silently widen a deliberately-narrow guard on every re-sync. So when the
+    desired matcher is ``.*`` and the existing one is a concrete regex that is
+    neither ``.*`` nor a plain alternation, the existing matcher is returned
+    unchanged. This only ever declines to *widen*; it never narrows coverage.
+
+    Otherwise the union of pipe-separated tokens is returned, preserving the
+    order of existing tokens and appending any new desired ones.
     """
     desired_matcher = _tools_to_matcher(desired_tools)
     if not existing or not isinstance(existing, str) or existing.strip() == "":
         return desired_matcher
-    if existing == ".*" or desired_matcher == ".*":
+    if desired_matcher == ".*":
+        # Empty/all-tools desired. Broaden to ``.*`` only when the existing
+        # matcher is itself ``.*`` or a plain alternation crossby understands as a
+        # tool list; keep any other concrete regex (a human's ``Write.*``) as-is.
+        if existing == ".*" or _PLAIN_ALTERNATION.fullmatch(existing):
+            return ".*"
+        return existing
+    if existing == ".*":
         return ".*"
     existing_tokens = [t for t in existing.split("|") if t]
     new_tokens = list(existing_tokens)

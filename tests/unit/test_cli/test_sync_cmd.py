@@ -1020,3 +1020,93 @@ class TestWizardRevocation:
         assert "No tool configs found to sync." in result.output
         assert not (tmp_path / LEDGER_PATH).exists()
         assert not (tmp_path / REPORT_PATH).exists()
+
+
+class TestSyncCommandHooks:
+    """`crossby sync hooks --from codex|antigravity-cli` is no longer read-blind."""
+
+    def _claude_hook_commands(self, project: Path) -> list[str]:
+        data = json.loads((project / ".claude" / "settings.json").read_text())
+        return [
+            handler["command"]
+            for entries in data.get("hooks", {}).values()
+            for entry in entries
+            for handler in entry.get("hooks", [])
+        ]
+
+    def test_sync_hooks_from_codex_reaches_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real .codex/hooks.json is read and written to the target tool."""
+        codex = tmp_path / ".codex" / "hooks.json"
+        codex.parent.mkdir()
+        codex.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Edit", "hooks": [{"type": "command", "command": "guard"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["codex", "claude"],
+            )
+            result = runner.invoke(
+                app,
+                ["sync", "hooks", "--from", "codex", "--to", "claude", "--path", str(tmp_path)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no hooks config" not in result.output
+        assert "guard" in self._claude_hook_commands(tmp_path)
+
+    def test_sync_hooks_from_antigravity_cli_reaches_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real .agents/hooks.json is read and written to the target tool."""
+        agy = tmp_path / ".agents" / "hooks.json"
+        agy.parent.mkdir()
+        agy.write_text(
+            json.dumps(
+                {
+                    "guard": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "write_to_file",
+                                "hooks": [{"type": "command", "command": "guard"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["antigravity-cli", "claude"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "hooks",
+                    "--from",
+                    "antigravity-cli",
+                    "--to",
+                    "claude",
+                    "--path",
+                    str(tmp_path),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no hooks config" not in result.output
+        # agy's native tool name reverse-maps to the canonical `Write` on write.
+        assert "guard" in self._claude_hook_commands(tmp_path)
