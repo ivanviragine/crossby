@@ -11,7 +11,7 @@ $ crossby sync --from codex
 ✓  agents        .agents/          →  .claude/agents/, .cursor/agents/, +2 more
 ✓  skills        .agents/skills/   →  .claude/skills/, .cursor/skills/, +1 more
 ✓  permissions                     →  translated for Claude, Cursor
-✓  hooks                           →  written for Claude, Cursor, Copilot
+✓  hooks                           →  written for Claude, Cursor, Codex, Copilot, Antigravity CLI
 ✓  mcp servers                     →  merged into Claude, Cursor, Codex, Copilot, Antigravity CLI
 ```
 
