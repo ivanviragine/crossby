@@ -125,6 +125,20 @@ Sync writers live in `src/crossby/sync/<concern>.py` and subclass `AbstractSyncW
 
 Register the instance in `src/crossby/sync/__init__.py` alongside the other writers. `SyncRegistry` enforces uniqueness by `(tool_id, concern)`.
 
+### Revocation and the ownership ledger
+
+crossby's sync is **additive by default but revocable**: it can take back an entry it wrote earlier (e.g. after `sync --from A` then `sync --from B`, a target reflects B's hooks/permissions, not the union of both). The mechanism is a provenance ledger (`sync/ownership.py` → `.crossby/owned.json`) that records what crossby wrote per `(tool_id, concern)` — hook `(event, command)` pairs, canonical permission patterns, and MCP server names.
+
+The load-bearing rule when adding removal to a writer:
+
+- **Writers must never infer "absent from `data` ⇒ remove".** Revocation is computed **only** in `run_sync()` as `ledger_owned − current_set` and handed to the writer through an explicit, default-empty field on `SyncData` (`hooks_remove`, `permissions_remove`, `mcp_remove`). A writer that inferred removal from its own `data` would be catastrophic: `config/claude_allowlist.configure_plan_hooks` and the Cursor/Copilot equivalents call writers directly with a single-hook `SyncData` on every plan-mode/worktree session setup, and would wipe every other hook in the file.
+- **Ownership is what crossby *wrote*, not what matched the source.** Each writer reports the identities it created **fresh** this run via `SyncResult.created` (an entry it appended, a permission/server it added — never one already present). `run_sync()` records `new_owned = (ledger_owned ∩ current) ∪ created`. This is what keeps a hand-authored entry that merely shares a `(event, command)` / pattern / server-name with the source from being claimed — and thereby later narrowed or revoked — by crossby.
+- `run_sync()` records new ownership **only** for writers that did not return `error` — an error leaves the ledger untouched so the next run retries cleanly.
+- The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A missing or malformed `owned.json` degrades to "own nothing", never a crash. Persistence is best-effort too: an `OSError` while saving `owned.json` or updating `.gitignore` is logged and swallowed, so a read-only dir or full disk never discards the `SyncResult`s whose writes already succeeded (the ledger simply retries next run).
+- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. `mcp_remove` bounds the existing `enabled=False` deletion so crossby can never delete a same-named server a human wrote. Hooks and permissions do revoke-on-absence.
+- A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
+- **The interactive wizard revokes on *environment-wide absence*.** Each revocable concern (hooks, permissions, MCP) dispatches on *data OR ownership*: the wizard loads the ledger once and runs `run_sync()` for a concern when the merged source data is non-empty **or** any installed target still owns entries for it. Because the wizard merges discovery across *all* installed tools (no `--from` scope), "revoke" here means the concern has emptied across the **whole environment** — an entry still present on any installed tool is rediscovered as current and is **not** stripped. This is *not* entry-for-entry `--from` parity (where an entry present only on other tools would be revoked). Two consequences to know: MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP dispatch removes nothing and just emits `skipped`/discovery rows; and declining a still-present port while the ledger owns entries leaves `data` empty for that concern, so the ownership arm fires and revokes the owned copies (a later confirm re-adds them). Hardening "decline ≠ revoke" (e.g. also requiring `not scan.<concern>.found`) is a possible follow-up, not current behavior.
+
 ### Symlink, copy, or translate
 
 Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:
@@ -157,7 +171,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
 | `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
-| `--effort`    | `--effort <level>`                 | —                 | `--effort <level>`                | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
+| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
@@ -165,12 +179,24 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI  |
 | ------------- | -------- | ------- | -------- | ------------------- | ---------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `low`            |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `medium`         |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `high`           |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `high`           |
+| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`    |
+| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium` |
+| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`   |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+
+Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
+emitting a separate `--effort` flag (which it rejects alongside a suffixed
+model). Only the Gemini families encode effort — `gemini-3.6-flash` and
+`gemini-3.5-flash` accept `low`/`medium`/`high`, `gemini-3.1-pro` accepts only
+`low`/`high` (a requested `medium` snaps to the nearest valid tier). `xhigh`/
+`max` normalize to `high`, and a Gemini model launched with no effort gets a
+deterministic default (`medium`, or the nearest tier). Non-Gemini models
+(`claude-*`, `gpt-oss-120b`) launch bare and ignore effort — a spurious effort
+suffix on one (e.g. the retired `gpt-oss-120b-medium` catalog ID) is dropped
+with a warning so `agy` is never handed a suffixed ID it rejects.
 
 ### Permission & Allowlist Configuration
 

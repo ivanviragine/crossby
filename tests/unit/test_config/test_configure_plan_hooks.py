@@ -297,3 +297,78 @@ class TestMalformedJsonWarns:
             warnings.simplefilter("always")
             copilot_configure_plan_hooks(tmp_path, _guard(tmp_path))
         assert any("invalid JSON" in str(warning.message) for warning in w)
+
+
+# ---------------------------------------------------------------------------
+# Revocation safety — these direct, single-hook callers must never remove
+# any other hook already in the file, even one crossby "owns" elsewhere.
+# They build SyncData(hooks=[one]) with an empty removal channel, so removal
+# is impossible by construction; this locks that in.
+# ---------------------------------------------------------------------------
+
+
+class TestDirectCallersRevokeNothing:
+    def test_claude_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}
+                        ],
+                        "Stop": [{"hooks": [{"type": "command", "command": "on-stop"}]}],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        claude_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        commands = {
+            inner["command"]
+            for entries in data["hooks"].values()
+            for entry in entries
+            for inner in entry["hooks"]
+        }
+        # The guard is added; both pre-existing hooks survive untouched.
+        assert "other" in commands
+        assert "on-stop" in commands
+        assert str(_guard(tmp_path)) in commands
+
+    def test_cursor_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        hooks = tmp_path / ".cursor" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "stop": [{"type": "command", "command": "on-stop"}],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        cursor_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        data = json.loads(hooks.read_text(encoding="utf-8"))
+        assert data["hooks"]["stop"][0]["command"] == "on-stop"
+        assert data["hooks"]["preToolUse"]
+
+    def test_copilot_preserves_existing_hooks(self, tmp_path: Path) -> None:
+        hooks = tmp_path / ".github" / "hooks" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        hooks.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {"agentStop": [{"type": "command", "bash": "on-stop"}]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        copilot_configure_plan_hooks(tmp_path, _guard(tmp_path))
+        data = json.loads(hooks.read_text(encoding="utf-8"))
+        assert data["hooks"]["agentStop"][0]["bash"] == "on-stop"
+        assert data["hooks"]["preToolUse"]

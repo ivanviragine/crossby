@@ -118,7 +118,7 @@ class CursorAdapter(AbstractAITool):
         CLI and IDE differ.)"""
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
+    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
         """For high/xhigh/max effort, append ``-thinking`` to the model ID.
 
         Models that already encode effort (e.g. ``-high``, ``-xhigh``) or

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,7 @@ from crossby.config.skills import SKILLS_DIR, count_skills
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync.base import SyncData
+from crossby.sync.hooks import _ANTIGRAVITY_CLI_SUPPORTED_EVENTS, _PLAIN_ALTERNATION
 
 logger = structlog.get_logger()
 
@@ -341,9 +341,24 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def _read_claude_hooks(project_root: Path) -> list[HookEntry]:
-    """Read hooks from .claude/settings.json."""
-    data = _read_json(project_root / ".claude" / "settings.json")
+def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
+    """Parse the Claude-shaped hooks layout at *path* into canonical entries.
+
+    Both Claude (``.claude/settings.json``) and Codex (``.codex/hooks.json``)
+    store hooks as ``{"hooks": {"<EventName>": [{"matcher", "hooks":
+    [{"type", "command"}]}]}}``, so both readers share this body rather than
+    diverging by copy-paste.
+
+    ``matcher`` becomes ``tools`` via :func:`_matcher_tools`, so only a plain
+    ``|`` alternation of tool names is recovered. A catch-all ``.*`` or exotic
+    regex (``Write.*``) yields unscoped ``[]`` rather than a bogus token like
+    ``Write.*``: carried into a cross-tool sync that token translates to nothing
+    the target tool ever emits, silently rendering the guard inert (whereas an
+    unscoped hook re-scopes to ``.*`` and still fires). A handler whose
+    ``command`` is missing or not a non-empty ``str`` is skipped rather than
+    handed to Pydantic (data-type hardening).
+    """
+    data = _read_json(path)
     if not data:
         return []
     hooks_section = data.get("hooks")
@@ -357,21 +372,41 @@ def _read_claude_hooks(project_root: Path) -> list[HookEntry]:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            matcher = entry.get("matcher", "")
-            tools = matcher.split("|") if matcher and matcher != ".*" else []
+            tools = _matcher_tools(entry.get("matcher"))
             inner_hooks = entry.get("hooks", [])
             if not isinstance(inner_hooks, list):
                 continue
             for inner in inner_hooks:
-                if isinstance(inner, dict) and "command" in inner:
-                    result.append(
-                        HookEntry(
-                            event=canonical_event,
-                            command=inner["command"],
-                            tools=tools,
-                        )
+                if not isinstance(inner, dict):
+                    continue
+                command = inner.get("command")
+                if not isinstance(command, str) or not command:
+                    continue
+                result.append(
+                    HookEntry(
+                        event=canonical_event,
+                        command=command,
+                        tools=tools,
                     )
+                )
     return result
+
+
+def _read_claude_hooks(project_root: Path) -> list[HookEntry]:
+    """Read hooks from .claude/settings.json (Claude-shaped)."""
+    return _read_claude_shape_hooks(project_root / ".claude" / "settings.json")
+
+
+def _read_codex_hooks(project_root: Path) -> list[HookEntry]:
+    """Read hooks from .codex/hooks.json.
+
+    Codex writes the Claude-shaped nested-handler JSON (the same structure
+    ``CodexHooksWriter`` emits and ``_read_claude_hooks`` parses), so this is a
+    thin wrapper over :func:`_read_claude_shape_hooks`. Codex's event names
+    (``SessionStart``/``UserPromptSubmit``/``Stop``/``PreToolUse``/``PostToolUse``)
+    all reverse-map via ``_REVERSE_EVENTS``, so no map changes are needed.
+    """
+    return _read_claude_shape_hooks(project_root / ".codex" / "hooks.json")
 
 
 def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
@@ -424,14 +459,24 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     return list(merged.values())
 
 
-# A bare alternation of literal tool names — the only matcher shape that is also
-# a tool list. `[\w-]` admits the characters real tool names use (including MCP's
-# `mcp__server__tool` and hyphenated server names) and nothing else, so every
-# regex construct is excluded: the catch-all `.*` and `*`, quantifiers
-# (`Write.*`), groups (`(Write|Shell)`), anchors, character classes, and escapes.
-# Matched with `fullmatch`, so a partial hit like `Write.*` cannot sneak through
-# on its `Write` prefix.
-_PLAIN_ALTERNATION = re.compile(r"[\w-]+(?:\|[\w-]+)*")
+def _matcher_tools(matcher: Any) -> list[str]:
+    """Recover canonical tool names from a hook ``matcher`` regex.
+
+    ``matcher`` is a regex, not a tool list, so only a plain ``|`` alternation of
+    literal tool names (``Write|Shell``) is recoverable — the sole matcher shape
+    that is also a tool list (see ``_PLAIN_ALTERNATION`` in ``sync/hooks.py``).
+    Each token is reverse-mapped to its canonical crossby name; a native name
+    crossby does not recognize passes through unchanged.
+
+    A catch-all ``.*`` or any fancier regex (``Write.*``, ``(Write|Shell)``)
+    means "all tools" / is unrepresentable, so it yields ``[]`` (unscoped) rather
+    than fragmenting into bogus tool tokens that would be unioned straight back
+    into the matcher on the next write. The paired ``_widen_matcher`` guard then
+    keeps such a hand-authored matcher from being broadened to ``.*`` on re-sync.
+    """
+    if isinstance(matcher, str) and _PLAIN_ALTERNATION.fullmatch(matcher):
+        return [_reverse_tool_name(t) for t in matcher.split("|") if t]
+    return []
 
 
 def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
@@ -443,15 +488,15 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
     "all tools", which is the same as no scope.
 
     ``matcher`` is a regex, not a tool list, so only a plain ``|`` alternation
-    is split. A hand-authored matcher like ``Write.*`` or ``(Write|Shell)``
-    would otherwise yield fragments (``(Write``, ``Shell)``) that become
-    ``HookEntry.tools`` and get unioned straight back into the matcher on the
-    next write, corrupting ``.cursor/hooks.json``. Anything fancier is treated
-    as unscoped instead.
+    is split (via :func:`_matcher_tools`). A hand-authored matcher like
+    ``Write.*`` or ``(Write|Shell)`` would otherwise yield fragments (``(Write``,
+    ``Shell)``) that become ``HookEntry.tools`` and get unioned straight back
+    into the matcher on the next write, corrupting ``.cursor/hooks.json``.
+    Anything fancier is treated as unscoped instead.
     """
-    matcher = entry.get("matcher")
-    if isinstance(matcher, str) and _PLAIN_ALTERNATION.fullmatch(matcher):
-        return [_reverse_tool_name(t) for t in matcher.split("|") if t]
+    from_matcher = _matcher_tools(entry.get("matcher"))
+    if from_matcher:
+        return from_matcher
     tools_raw = entry.get("tools")
     if isinstance(tools_raw, list):
         return [_reverse_tool_name(t) for t in tools_raw]
@@ -488,10 +533,73 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
     return result
 
 
+def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
+    """Read hooks from .agents/hooks.json (Antigravity CLI's container map).
+
+    agy's file maps arbitrary *container* names to ``{agy_event: [entries]}``.
+    Tool-execution events (PreToolUse/PostToolUse) wrap handlers in a
+    ``{"matcher", "hooks": [...]}`` object; ``Stop`` lists handlers
+    (``{"type", "command"}``) directly with no matcher. Both shapes are handled
+    here, mirroring the traversal in ``sync/hooks.py``'s ``_agy_command_present``.
+
+    Only events that reverse-map to an agy-writer-supported canonical event
+    (``pre_tool_use``, ``post_tool_use``, ``stop`` — see
+    ``_ANTIGRAVITY_CLI_SUPPORTED_EVENTS``) are emitted. agy also exposes
+    ``PreInvocation``/``PostInvocation``, which have no canonical crossby event;
+    those keys are skipped rather than emitted with a passthrough event string
+    the writer would then drop on the next sync.
+
+    Tool scope is recovered from the ``matcher`` via :func:`_matcher_tools`, so
+    agy's native names (``write_to_file``/``run_command``/…) reverse cleanly to
+    canonical tools while a catch-all or exotic regex yields unscoped ``[]``.
+
+    Round-trip gaps (deliberate): the per-hook ``description`` is left empty
+    because agy encodes no per-hook comment — only the lossy container *name*
+    slug — and ``fail_closed``/``timeout`` are dropped for every tool today
+    (#88 §5).
+    """
+    data = _read_json(project_root / ".agents" / "hooks.json")
+    if not data:
+        return []
+    result: list[HookEntry] = []
+    for container in data.values():
+        if not isinstance(container, dict):
+            continue
+        for event_name, entries in container.items():
+            canonical_event = _reverse_event_name(event_name)
+            if canonical_event not in _ANTIGRAVITY_CLI_SUPPORTED_EVENTS:
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                # Bare Stop handler: {"type", "command"} directly in the list.
+                bare_command = entry.get("command")
+                if isinstance(bare_command, str) and bare_command:
+                    result.append(HookEntry(event=canonical_event, command=bare_command, tools=[]))
+                    continue
+                # Matcher-wrapped entry: {"matcher", "hooks": [{"type","command"}]}.
+                inner_hooks = entry.get("hooks")
+                if not isinstance(inner_hooks, list):
+                    continue
+                tools = _matcher_tools(entry.get("matcher"))
+                for inner in inner_hooks:
+                    if not isinstance(inner, dict):
+                        continue
+                    command = inner.get("command")
+                    if not isinstance(command, str) or not command:
+                        continue
+                    result.append(HookEntry(event=canonical_event, command=command, tools=tools))
+    return result
+
+
 _HOOK_READERS: dict[AIToolID, Any] = {
     AIToolID.CLAUDE: _read_claude_hooks,
     AIToolID.CURSOR: _read_cursor_hooks,
     AIToolID.COPILOT: _read_copilot_hooks,
+    AIToolID.CODEX: _read_codex_hooks,
+    AIToolID.ANTIGRAVITY_CLI: _read_agy_hooks,
 }
 
 

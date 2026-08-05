@@ -11,6 +11,7 @@ non-destructive merge strategy (dedup by (event, command)):
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -136,6 +137,18 @@ def _tools_to_matcher(tools: list[str]) -> str:
     return "|".join(tools)
 
 
+# A bare alternation of literal tool names — the only matcher shape that is also
+# a tool list. `[\w-]` admits the characters real tool names use (including MCP's
+# `mcp__server__tool` and hyphenated server names) and nothing else, so every
+# regex construct is excluded: the catch-all `.*` and `*`, quantifiers
+# (`Write.*`), groups (`(Write|Shell)`), anchors, character classes, and escapes.
+# Matched with `fullmatch`, so a partial hit like `Write.*` cannot sneak through
+# on its `Write` prefix. Shared with the hooks readers (``sync/readers.py``): the
+# reader treats only this shape as recoverable tool scope, so the writer's widen
+# guard below must classify matchers the same way or a read → write cycle diverges.
+_PLAIN_ALTERNATION = re.compile(r"[\w-]+(?:\|[\w-]+)*")
+
+
 def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
     """Return a regex matcher that covers both existing and desired tool sets.
 
@@ -144,14 +157,29 @@ def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
     ``Edit|Write``) with a narrower desired one (``Edit``) would silently
     drop coverage.
 
-    Catch-all (``.*``) wins on either side. Otherwise the union of pipe-
-    separated tokens is returned, preserving the order of existing tokens
-    and appending any new desired ones.
+    Catch-all (``.*``) wins on either side, **except** when broadening would
+    trample a concrete matcher crossby never wrote: an empty desired tool set
+    expands to ``.*``, but a reader also returns ``tools=[]`` for a hand-authored
+    matcher it can't represent (e.g. ``Write.*``). Broadening that to ``.*`` would
+    silently widen a deliberately-narrow guard on every re-sync. So when the
+    desired matcher is ``.*`` and the existing one is a concrete regex that is
+    neither ``.*`` nor a plain alternation, the existing matcher is returned
+    unchanged. This only ever declines to *widen*; it never narrows coverage.
+
+    Otherwise the union of pipe-separated tokens is returned, preserving the
+    order of existing tokens and appending any new desired ones.
     """
     desired_matcher = _tools_to_matcher(desired_tools)
     if not existing or not isinstance(existing, str) or existing.strip() == "":
         return desired_matcher
-    if existing == ".*" or desired_matcher == ".*":
+    if desired_matcher == ".*":
+        # Empty/all-tools desired. Broaden to ``.*`` only when the existing
+        # matcher is itself ``.*`` or a plain alternation crossby understands as a
+        # tool list; keep any other concrete regex (a human's ``Write.*``) as-is.
+        if existing == ".*" or _PLAIN_ALTERNATION.fullmatch(existing):
+            return ".*"
+        return existing
+    if existing == ".*":
         return ".*"
     existing_tokens = [t for t in existing.split("|") if t]
     new_tokens = list(existing_tokens)
@@ -159,6 +187,135 @@ def _widen_matcher(existing: str | None, desired_tools: list[str]) -> str:
         if token and token not in new_tokens:
             new_tokens.append(token)
     return "|".join(new_tokens)
+
+
+def _merge_matcher(existing: str | None, desired_tools: list[str], *, owned: bool) -> str:
+    """Choose the matcher for a hook whose command already exists in the target.
+
+    When crossby *owns* the ``(event, command)`` entry (it is recorded in the
+    ownership ledger) it sets the matcher to exactly the desired scope — this is
+    how an over-broad matcher crossby itself wrote on an earlier, wider sync gets
+    **narrowed** when the source tool scope later shrinks. When crossby does not
+    own the entry (a human wrote the same command by hand) it only ever *widens*,
+    never dropping coverage the human added.
+    """
+    if owned:
+        return _tools_to_matcher(desired_tools)
+    return _widen_matcher(existing, desired_tools)
+
+
+# ---------------------------------------------------------------------------
+# Shared removal helpers (consume SyncData.hooks_remove only)
+# ---------------------------------------------------------------------------
+
+
+def _remove_claude_shape(hooks_section: dict[str, Any], event_name: str, command: str) -> int:
+    """Remove ``command`` from a Claude/Codex-shaped ``hooks_section[event_name]``.
+
+    Drops an entry whose inner ``hooks`` becomes empty, and the event key itself
+    once its list is empty, so a fully-revoked file stays valid rather than
+    accumulating empty scaffolding. Returns 1 if the command was found (and
+    removed) under this event, else 0.
+    """
+    event_list = hooks_section.get(event_name)
+    if not isinstance(event_list, list):
+        return 0
+    removed = False
+    new_list: list[Any] = []
+    for entry in event_list:
+        if not isinstance(entry, dict):
+            new_list.append(entry)
+            continue
+        inner = entry.get("hooks")
+        if not isinstance(inner, list):
+            new_list.append(entry)
+            continue
+        kept_inner = [
+            h
+            for h in inner
+            if not (
+                (isinstance(h, dict) and h.get("command") == command)
+                or (isinstance(h, str) and h == command)
+            )
+        ]
+        if len(kept_inner) != len(inner):
+            removed = True
+            if not kept_inner:
+                continue  # drop the now-empty matcher entry
+            entry["hooks"] = kept_inner
+        new_list.append(entry)
+    if not removed:
+        return 0
+    if new_list:
+        hooks_section[event_name] = new_list
+    else:
+        hooks_section.pop(event_name, None)
+    return 1
+
+
+def _remove_flat_shape(
+    hooks_section: dict[str, Any], event_name: str, command: str, command_key: str
+) -> int:
+    """Remove entries whose ``command_key`` equals ``command`` (Cursor/Copilot shape).
+
+    ``command_key`` is ``"command"`` for Cursor, ``"bash"`` for Copilot. Drops
+    the event key when its list empties. Returns 1 if anything was removed.
+    """
+    event_list = hooks_section.get(event_name)
+    if not isinstance(event_list, list):
+        return 0
+    kept = [e for e in event_list if not (isinstance(e, dict) and e.get(command_key) == command)]
+    if len(kept) == len(event_list):
+        return 0
+    if kept:
+        hooks_section[event_name] = kept
+    else:
+        hooks_section.pop(event_name, None)
+    return 1
+
+
+def _remove_agy_command(container_map: dict[str, Any], agy_event: str, command: str) -> int:
+    """Remove ``command`` under ``agy_event`` across every container.
+
+    Handles both the matcher-wrapped tool-event shape (``{"matcher", "hooks":
+    [...]}``) and the bare Stop handler shape (``{"type", "command"}``). Empties
+    are pruned: an emptied event list drops its key, an emptied container drops
+    from the map. Returns 1 if the command was found in any container.
+    """
+    removed = False
+    for container_name in list(container_map.keys()):
+        container = container_map.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        event_list = container.get(agy_event)
+        if not isinstance(event_list, list):
+            continue
+        new_list: list[Any] = []
+        for entry in event_list:
+            if isinstance(entry, dict) and entry.get("command") == command:
+                removed = True
+                continue  # Stop-shape handler
+            if isinstance(entry, dict):
+                inner = entry.get("hooks")
+                if isinstance(inner, list):
+                    kept_inner = [
+                        h
+                        for h in inner
+                        if not (isinstance(h, dict) and h.get("command") == command)
+                    ]
+                    if len(kept_inner) != len(inner):
+                        removed = True
+                        if not kept_inner:
+                            continue  # drop emptied matcher entry
+                        entry["hooks"] = kept_inner
+            new_list.append(entry)
+        if new_list:
+            container[agy_event] = new_list
+        else:
+            container.pop(agy_event, None)
+        if not container:
+            container_map.pop(container_name, None)
+    return 1 if removed else 0
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +373,14 @@ def _message_with_notes(
     return f"{base}; {suffix}"
 
 
+def _revoked_clause(count: int) -> str | None:
+    """Human-readable summary for revoked hooks, or ``None`` when nothing was."""
+    if count <= 0:
+        return None
+    plural = "s" if count != 1 else ""
+    return f"removed {count} crossby-owned hook{plural} no longer in source"
+
+
 # ---------------------------------------------------------------------------
 # ClaudeHooksWriter
 # ---------------------------------------------------------------------------
@@ -265,7 +430,7 @@ class ClaudeHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks:
+        if not data.hooks and not data.hooks_remove:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -292,19 +457,21 @@ class ClaudeHooksWriter(AbstractSyncWriter):
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
-        changed = False
+        added = 0
+        created: list[tuple[str, str]] = []
         for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             event_list: list[Any] = hooks_section.get(event_name, [])
             if not isinstance(event_list, list):
                 event_list = []
 
-            # Dedup by command; widen matcher if tool coverage has grown.
-            # The widen — not replace — semantic protects existing broader
-            # coverage (e.g. ``.*`` or ``Edit|Write|Bash``) from being
-            # silently narrowed when the desired hook only names a subset.
+            # Dedup by command. When crossby owns the (event, command) entry the
+            # matcher is set to exactly the desired scope (narrow-or-widen);
+            # otherwise it is only widened, protecting a human's broader coverage
+            # (e.g. ``.*`` or ``Edit|Write|Bash``) from being silently narrowed.
             command = hook.command
             desired_tools = hook.tools or []
+            owned = (hook.event, command) in data.hooks_owned
             already_exists = False
             for entry in event_list:
                 if not isinstance(entry, dict):
@@ -320,13 +487,14 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 if found_in_entry:
                     already_exists = True
                     existing_matcher = entry.get("matcher")
-                    widened = _widen_matcher(
+                    merged = _merge_matcher(
                         existing_matcher if isinstance(existing_matcher, str) else None,
                         desired_tools,
+                        owned=owned,
                     )
-                    if widened != existing_matcher:
-                        entry["matcher"] = widened
-                        changed = True
+                    if merged != existing_matcher:
+                        entry["matcher"] = merged
+                        added += 1
                     break
 
             if not already_exists:
@@ -336,9 +504,16 @@ class ClaudeHooksWriter(AbstractSyncWriter):
                 }
                 event_list.append(new_entry)
                 hooks_section[event_name] = event_list
-                changed = True
+                added += 1
+                created.append((hook.event, command))
 
-        if not changed:
+        revoked = 0
+        for event, command in data.hooks_remove:
+            revoked += _remove_claude_shape(
+                hooks_section, _translate_event(event, self.tool_id), command
+            )
+
+        if not added and not revoked:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -357,7 +532,10 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message=_message_with_notes(None, notes),
+            message=_message_with_notes(_revoked_clause(revoked), notes),
+            added=added,
+            revoked=revoked,
+            created=tuple(created),
         )
 
 
@@ -478,12 +656,20 @@ def _cursor_upsert(
     desired_tools: list[str],
     *,
     scoped: bool,
-) -> bool:
-    """Merge one hook into ``hooks_section[event_name]``; return True if changed.
+    owned: bool = False,
+) -> tuple[bool, bool]:
+    """Merge one hook into ``hooks_section[event_name]``.
 
-    Dedup key is the command. An existing entry is only ever *widened* — its
-    matcher grows to cover new tools, ``failClosed`` is added if missing, and a
-    ``timeout`` is filled in only when absent so a hand-tuned value survives.
+    Returns ``(changed, created)`` — whether the file changed at all, and whether
+    a **new** entry was appended (as opposed to an existing one being modified).
+    ``created`` drives ownership recording: crossby only ever claims entries it
+    wrote fresh, never one it merely widened.
+
+    Dedup key is the command. ``failClosed`` is added if missing and a
+    ``timeout`` is filled in only when absent, so a hand-tuned value survives.
+    When crossby ``owned`` the entry the matcher is set to exactly the desired
+    scope (narrow-or-widen); otherwise it is only ever *widened*, so a human's
+    broader coverage is never silently dropped.
     """
     event_list: list[Any] = hooks_section.get(event_name, [])
     if not isinstance(event_list, list):
@@ -509,11 +695,22 @@ def _cursor_upsert(
             if "matcher" in entry:
                 del entry["matcher"]
                 changed = True
-            return changed
+            return changed, False
         existing_matcher = entry.get("matcher")
-        # A missing matcher already means "all tools" — never narrow it.
+        if owned:
+            # crossby owns this entry — set the matcher to exactly the desired
+            # scope, narrowing an over-broad matcher it wrote on an earlier sync.
+            if desired_matcher is None:
+                if "matcher" in entry:
+                    del entry["matcher"]
+                    changed = True
+            elif existing_matcher != desired_matcher:
+                entry["matcher"] = desired_matcher
+                changed = True
+            return changed, False
+        # Not owned: a missing matcher already means "all tools" — never narrow it.
         if existing_matcher is None:
-            return changed
+            return changed, False
         widened = _widen_matcher(
             existing_matcher if isinstance(existing_matcher, str) else None,
             desired_tools,
@@ -521,7 +718,7 @@ def _cursor_upsert(
         if widened != existing_matcher:
             entry["matcher"] = widened
             changed = True
-        return changed
+        return changed, False
 
     new_entry: dict[str, Any] = {"type": "command", "command": hook.command}
     if desired_matcher is not None:
@@ -534,7 +731,7 @@ def _cursor_upsert(
         new_entry["timeout"] = hook.timeout
     event_list.append(new_entry)
     hooks_section[event_name] = event_list
-    return True
+    return True, True
 
 
 class CursorHooksWriter(AbstractSyncWriter):
@@ -590,7 +787,7 @@ class CursorHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks:
+        if not data.hooks and not data.hooks_remove:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -613,12 +810,14 @@ class CursorHooksWriter(AbstractSyncWriter):
 
         kept, notes = _filter_supported_hooks(data.hooks, _CURSOR_SUPPORTED_EVENTS)
         existing = file_data or {}
-        existing, changed = _migrate_legacy_cursor_config(existing)
+        existing, migrated = _migrate_legacy_cursor_config(existing)
         hooks_section: dict[str, Any] = existing.get("hooks", {})
         if not isinstance(hooks_section, dict):
             hooks_section = {}
         dropped_tool_scope_events: set[str] = set()
 
+        added = 0
+        created: list[tuple[str, str]] = []
         for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
             allow_tool_scope = hook.event in _CURSOR_TOOL_SCOPE_EVENTS
@@ -626,22 +825,42 @@ class CursorHooksWriter(AbstractSyncWriter):
             desired_tools = _translate_tools(raw_desired, self.tool_id) if allow_tool_scope else []
             if not allow_tool_scope and raw_desired:
                 dropped_tool_scope_events.add(hook.event)
+            owned = (hook.event, hook.command) in data.hooks_owned
 
-            if _cursor_upsert(
-                hooks_section, event_name, hook, desired_tools, scoped=allow_tool_scope
-            ):
-                changed = True
+            changed, did_create = _cursor_upsert(
+                hooks_section, event_name, hook, desired_tools, scoped=allow_tool_scope, owned=owned
+            )
+            if changed:
+                added += 1
+            if did_create:
+                created.append((hook.event, hook.command))
 
             # Shell fan-out: mirror a shell-scoped pre-tool hook onto Cursor's
             # dedicated shell event, unscoped (it matches the command string,
             # not a tool name). See the class docstring for why this is a
-            # deliberate double-registration.
-            if (
-                hook.event == "pre_tool_use"
-                and any(tool in _CURSOR_SHELL_TOOLS for tool in desired_tools)
-                and _cursor_upsert(hooks_section, _CURSOR_SHELL_EVENT, hook, [], scoped=False)
+            # deliberate double-registration. The mirror is the same canonical
+            # identity, so it does not add a second `created` entry.
+            if hook.event == "pre_tool_use" and any(
+                tool in _CURSOR_SHELL_TOOLS for tool in desired_tools
             ):
-                changed = True
+                shell_changed, _ = _cursor_upsert(
+                    hooks_section, _CURSOR_SHELL_EVENT, hook, [], scoped=False
+                )
+                if shell_changed:
+                    added += 1
+
+        revoked = 0
+        for event, command in data.hooks_remove:
+            event_name = _translate_event(event, self.tool_id)
+            removed = _remove_flat_shape(hooks_section, event_name, command, "command")
+            # A shell-scoped pre-tool hook was fanned out to beforeShellExecution;
+            # revoke that mirror entry too so the guard is fully retracted.
+            if event == "pre_tool_use":
+                removed += _remove_flat_shape(
+                    hooks_section, _CURSOR_SHELL_EVENT, command, "command"
+                )
+            if removed:
+                revoked += 1
 
         for event in sorted(dropped_tool_scope_events):
             notes.append(
@@ -655,6 +874,7 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
         version_correct = existing.get("version") == 1
+        changed = bool(migrated or added or revoked)
 
         if not changed and version_correct:
             return SyncResult(
@@ -678,7 +898,10 @@ class CursorHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message=_message_with_notes(None, notes),
+            message=_message_with_notes(_revoked_clause(revoked), notes),
+            added=added,
+            revoked=revoked,
+            created=tuple(created),
         )
 
 
@@ -722,7 +945,7 @@ class CopilotHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks:
+        if not data.hooks and not data.hooks_remove:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -749,7 +972,8 @@ class CopilotHooksWriter(AbstractSyncWriter):
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
-        changed = False
+        added = 0
+        created: list[tuple[str, str]] = []
         seen_tool_filter_drop = False
 
         for hook in kept:
@@ -791,9 +1015,17 @@ class CopilotHooksWriter(AbstractSyncWriter):
                     new_entry["timeoutSec"] = hook.timeout
                 event_list.append(new_entry)
                 hooks_section[event_name] = event_list
-                changed = True
+                added += 1
+                created.append((hook.event, command))
+
+        revoked = 0
+        for event, command in data.hooks_remove:
+            revoked += _remove_flat_shape(
+                hooks_section, _translate_event(event, self.tool_id), command, "bash"
+            )
 
         version_correct = existing.get("version") == 1
+        changed = bool(added or revoked)
 
         if not changed and version_correct:
             return SyncResult(
@@ -815,7 +1047,10 @@ class CopilotHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message=_message_with_notes(None, notes),
+            message=_message_with_notes(_revoked_clause(revoked), notes),
+            added=added,
+            revoked=revoked,
+            created=tuple(created),
         )
 
 
@@ -939,7 +1174,7 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks:
+        if not data.hooks and not data.hooks_remove:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -962,13 +1197,15 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
 
         kept, notes = _filter_supported_hooks(data.hooks, _ANTIGRAVITY_CLI_SUPPORTED_EVENTS)
         existing = file_data if isinstance(file_data, dict) else {}
-        changed = False
+        added = 0
+        created: list[tuple[str, str]] = []
         dropped_matcher_events: set[str] = set()
 
         for hook in kept:
             agy_event = _translate_event(hook.event, self.tool_id)
             command = hook.command
             allow_matcher = hook.event in _ANTIGRAVITY_CLI_MATCHER_EVENTS
+            owned = (hook.event, command) in data.hooks_owned
             # Translate to agy's native tool-call names first — its matcher is a
             # regex over the live `toolCall.name`, so a matcher built from
             # crossby's canonical names (Write|Edit|Bash) matches nothing agy
@@ -978,18 +1215,19 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
                 dropped_matcher_events.add(hook.event)
 
             if allow_matcher:
-                # Upgrade-safe: if this command is already registered, widen its
-                # matcher when the desired tool coverage has grown (never narrow),
-                # mirroring the Claude/Codex writers. Prevents a re-sync from
-                # silently dropping newly-covered tools from a guard.
+                # If this command is already registered, set its matcher to
+                # exactly the desired scope when crossby owns the entry
+                # (narrow-or-widen) or widen only otherwise — mirroring the
+                # Claude/Codex writers, so a re-sync neither silently drops
+                # newly-covered tools nor keeps a stale over-broad union.
                 existing_entry = _agy_find_matcher_entry(existing, agy_event, command)
                 if existing_entry is not None:
                     existing_matcher = existing_entry.get("matcher")
                     base = existing_matcher if isinstance(existing_matcher, str) else None
-                    widened = _widen_matcher(base, desired_tools)
-                    if widened != existing_matcher:
-                        existing_entry["matcher"] = widened
-                        changed = True
+                    merged = _merge_matcher(base, desired_tools, owned=owned)
+                    if merged != existing_matcher:
+                        existing_entry["matcher"] = merged
+                        added += 1
                     continue
             elif _agy_command_present(existing, agy_event, command):
                 # Stop: no matcher to widen — a present command is a no-op.
@@ -1012,7 +1250,12 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
 
             container[agy_event] = event_list
             existing[container_name] = container
-            changed = True
+            added += 1
+            created.append((hook.event, command))
+
+        revoked = 0
+        for event, command in data.hooks_remove:
+            revoked += _remove_agy_command(existing, _translate_event(event, self.tool_id), command)
 
         for event in sorted(dropped_matcher_events):
             notes.append(
@@ -1026,7 +1269,7 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
                 )
             )
 
-        if not changed:
+        if not added and not revoked:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1044,7 +1287,10 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message=_message_with_notes(None, notes),
+            message=_message_with_notes(_revoked_clause(revoked), notes),
+            added=added,
+            revoked=revoked,
+            created=tuple(created),
         )
 
 
@@ -1173,7 +1419,7 @@ class CodexHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks:
+        if not data.hooks and not data.hooks_remove:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1201,7 +1447,8 @@ class CodexHooksWriter(AbstractSyncWriter):
         if not isinstance(hooks_section, dict):
             hooks_section = {}
 
-        changed = False
+        added = 0
+        created: list[tuple[str, str]] = []
         dropped_matcher_events: set[str] = set()
         for hook in kept:
             event_name = _translate_event(hook.event, self.tool_id)
@@ -1212,6 +1459,7 @@ class CodexHooksWriter(AbstractSyncWriter):
             command = hook.command
             desired_tools = hook.tools or []
             allow_matcher = hook.event in _CODEX_MATCHER_EVENTS
+            owned = (hook.event, command) in data.hooks_owned
             if not allow_matcher and desired_tools:
                 dropped_matcher_events.add(hook.event)
 
@@ -1231,17 +1479,18 @@ class CodexHooksWriter(AbstractSyncWriter):
                     already_exists = True
                     if allow_matcher:
                         existing_matcher = entry.get("matcher")
-                        widened = _widen_matcher(
+                        merged = _merge_matcher(
                             existing_matcher if isinstance(existing_matcher, str) else None,
                             desired_tools,
+                            owned=owned,
                         )
-                        if widened != existing_matcher:
-                            entry["matcher"] = widened
-                            changed = True
+                        if merged != existing_matcher:
+                            entry["matcher"] = merged
+                            added += 1
                     elif "matcher" in entry:
                         # Strip a matcher Codex ignores so the file stays clean.
                         del entry["matcher"]
-                        changed = True
+                        added += 1
                     break
 
             if not already_exists:
@@ -1252,7 +1501,14 @@ class CodexHooksWriter(AbstractSyncWriter):
                     new_entry["matcher"] = _tools_to_matcher(desired_tools)
                 event_list.append(new_entry)
                 hooks_section[event_name] = event_list
-                changed = True
+                added += 1
+                created.append((hook.event, command))
+
+        revoked = 0
+        for event, command in data.hooks_remove:
+            revoked += _remove_claude_shape(
+                hooks_section, _translate_event(event, self.tool_id), command
+            )
 
         for event in sorted(dropped_matcher_events):
             notes.append(
@@ -1265,7 +1521,7 @@ class CodexHooksWriter(AbstractSyncWriter):
                 )
             )
 
-        if not changed and not kept:
+        if not added and not revoked and not kept:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1291,5 +1547,8 @@ class CodexHooksWriter(AbstractSyncWriter):
             concern=self.concern,
             action=action,
             file_path=path,
-            message=_message_with_notes(None, notes),
+            message=_message_with_notes(_revoked_clause(revoked), notes),
+            added=added,
+            revoked=revoked,
+            created=tuple(created),
         )

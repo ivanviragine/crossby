@@ -35,7 +35,7 @@ def read_merge_write_json(
     updates: dict[str, Any],
     removals: set[str],
     dry_run: bool = False,
-) -> tuple[SyncAction, str]:
+) -> tuple[SyncAction, str, list[str], list[str], int]:
     """Atomic read-modify-write for a JSON config file.
 
     Merges ``updates`` into ``file[key]`` and removes ``removals`` from it.
@@ -46,18 +46,26 @@ def read_merge_write_json(
         path: Path to the JSON file.
         key: The top-level key to update (e.g. ``"mcpServers"``).
         updates: Mapping of server_name → server_dict to add/update.
-        removals: Set of server names to remove from ``file[key]``.
+        removals: Set of server names to remove from ``file[key]``. Callers pass
+            only names crossby is permitted to delete (ledger-bounded), so a
+            same-named hand-authored server is never dropped.
         dry_run: If True, compute action but do not write.
 
     Returns:
-        Tuple of (action, message) where action is one of:
-        ``"created"``, ``"updated"``, ``"skipped"``, ``"error"``.
+        Tuple of (action, message, written_names, created_names, removed_count).
+        ``written_names`` are all names crossby wrote or overwrote this call (the
+        ``added`` count). ``created_names`` are only the names that were *absent*
+        before this run — the ownership set. An existing server whose stored
+        value merely differs is overwritten but never claimed, matching the
+        permission/allowlist writers so a hand-authored server crossby happened
+        to overwrite is never later revoked. ``action`` is one of ``"created"``,
+        ``"updated"``, ``"skipped"``, ``"error"``.
     """
     data, error, was_new = read_json_file(path)
     if error is not None:
         msg = f"{path} {error} — skipping sync. Fix the file manually or delete it."
         warnings.warn(msg, stacklevel=2)
-        return "error", msg
+        return "error", msg, [], [], 0
 
     existing = data or {}
 
@@ -65,25 +73,32 @@ def read_merge_write_json(
     if not isinstance(section, dict):
         section = {}
 
-    changed = False
+    written: list[str] = []
+    created: list[str] = []
+    removed = 0
 
     for name, entry in updates.items():
         if section.get(name) != entry:
+            # Claim ownership only for names absent before this run — overwriting
+            # a same-named entry (hand-authored or otherwise) applies the change
+            # but never marks it crossby-owned, so it is never later revoked.
+            if name not in section:
+                created.append(name)
             section[name] = entry
-            changed = True
+            written.append(name)
 
     for name in removals:
         if name in section:
             del section[name]
-            changed = True
+            removed += 1
 
-    if not changed:
-        return "skipped", ""
+    if not written and not removed:
+        return "skipped", "", [], [], 0
 
     if dry_run:
         action: SyncAction = "created" if was_new else "updated"
-        return action, ""
+        return action, "", written, created, removed
 
     existing[key] = section
     write_json_file(path, existing)
-    return ("created" if was_new else "updated"), ""
+    return ("created" if was_new else "updated"), "", written, created, removed
