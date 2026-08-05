@@ -269,17 +269,44 @@ def sync(
     console.detail(f"  Plugins:     {scan.plugins.summary}")
     console.empty()
 
-    # Check if anything was found
-    has_data = any(
-        [
-            scan.rules.found,
-            scan.agents.found,
-            scan.skills.found,
-            scan.mcp.found,
-            scan.hooks.found,
-            scan.permissions.found,
-            scan.plugins.found,
-        ]
+    # Ownership ledger — a revocable concern (hooks, permissions, MCP) that has
+    # emptied *across the whole environment* (nothing discovered on any installed
+    # tool) still needs its ledger diff to run so crossby can revoke what it wrote
+    # earlier. Load the ledger once and compute, per concern, whether any installed
+    # target still owns entries. This is environment-wide absence, not entry-for-
+    # entry ``--from`` parity: an entry still present on any installed tool is
+    # rediscovered as current below and therefore never revoked.
+    from crossby.sync.ownership import load_ledger
+
+    ledger = load_ledger(project_root)
+
+    def _concern_active(c: SyncConcern) -> bool:
+        return sync_concern is None or sync_concern == c
+
+    owns_hooks = _concern_active(SyncConcern.HOOKS) and any(
+        ledger.hooks(t) for t in installed_tools
+    )
+    owns_perms = _concern_active(SyncConcern.PERMISSIONS) and any(
+        ledger.permissions(t) for t in installed_tools
+    )
+    owns_mcp = _concern_active(SyncConcern.MCP) and any(ledger.mcp(t) for t in installed_tools)
+    owns_any = owns_hooks or owns_perms or owns_mcp
+
+    # Check if anything was found (or the ledger still owns a now-emptied concern,
+    # which needs a revocation pass even with nothing discovered).
+    has_data = (
+        any(
+            [
+                scan.rules.found,
+                scan.agents.found,
+                scan.skills.found,
+                scan.mcp.found,
+                scan.hooks.found,
+                scan.permissions.found,
+                scan.plugins.found,
+            ]
+        )
+        or owns_any
     )
     if not has_data:
         console.info("No tool configs found to sync.")
@@ -394,16 +421,20 @@ def sync(
         if hooks and prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
             data.hooks = hooks
 
-    # Check if user confirmed anything
-    has_sync = any(
-        [
-            data.rules_source,
-            data.agents_source,
-            data.skills_source,
-            data.mcp_servers,
-            data.allowed_commands,
-            data.hooks,
-        ]
+    # Check if user confirmed anything (or the ledger still owns a now-emptied
+    # concern, which needs a revocation pass even with no new source data).
+    has_sync = (
+        any(
+            [
+                data.rules_source,
+                data.agents_source,
+                data.skills_source,
+                data.mcp_servers,
+                data.allowed_commands,
+                data.hooks,
+            ]
+        )
+        or owns_any
     )
     if not has_sync:
         console.info("Nothing to sync.")
@@ -413,13 +444,15 @@ def sync(
     # Rules and agents have an explicit source; exclude it from their targets.
     # MCP, permissions, and hooks are merged from all tools — write to all.
     #
-    # Known limitation: each concern below runs only when the *new* source data
-    # for it is non-empty. So in this interactive wizard, a concern that has
-    # emptied (source A had hooks, source B has none) is not revoked here — the
-    # ledger-diff never runs for it. The non-interactive path (`--from`) and
-    # `--plan`/`--doctor` call run_sync unconditionally and DO revoke; the wizard
-    # falls back to additive-only, which is safe (no data loss), just not fully
-    # revocable. Tracked as follow-up.
+    # The three revocable concerns dispatch on *data OR ownership*: run_sync
+    # fires when there's new source data for the concern OR the ledger still owns
+    # entries for it. The ownership arm reaches the ledger diff when the concern
+    # has emptied across the whole environment, so run_sync computes
+    # ``hooks_remove = owned - {}`` (owned minus the empty source) and revokes
+    # (permissions likewise). MCP is disable-based (``mcp_remove = disabled &
+    # owned``), so an owned-but-emptied MCP dispatch removes nothing and only
+    # emits skipped/discovery rows; it is gated uniformly so all three share one
+    # dispatch shape.
     results = []
     if data.rules_source and (sync_concern is None or sync_concern == SyncConcern.RULES):
         rules_targets = [t for t in installed_tools if t != rules_src_tool]
@@ -451,7 +484,7 @@ def sync(
             force=force,
             installed_tools=skills_targets,
         )
-    if data.mcp_servers and (sync_concern is None or sync_concern == SyncConcern.MCP):
+    if (data.mcp_servers or owns_mcp) and (sync_concern is None or sync_concern == SyncConcern.MCP):
         results += run_sync(
             data,
             project_root,
@@ -461,7 +494,9 @@ def sync(
             installed_tools=installed_tools,
             include_user_scope=include_user_scope,
         )
-    if data.allowed_commands and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
+    if (data.allowed_commands or owns_perms) and (
+        sync_concern is None or sync_concern == SyncConcern.PERMISSIONS
+    ):
         results += run_sync(
             data,
             project_root,
@@ -470,7 +505,7 @@ def sync(
             force=force,
             installed_tools=installed_tools,
         )
-    if data.hooks and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
+    if (data.hooks or owns_hooks) and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
         results += run_sync(
             data,
             project_root,
