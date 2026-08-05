@@ -54,11 +54,12 @@ from crossby.sync.skills import (
 )
 
 # Global default registry — one writer per (tool, concern) pair.
-# Antigravity CLI has no (ANTIGRAVITY_CLI, PERMISSIONS) or (ANTIGRAVITY_CLI,
-# HOOKS) writer: its permission model is mode-based (--mode/--sandbox/
-# --dangerously-skip-permissions launch flags, no per-project policy file)
-# and it has no hook system at all — same absence pattern as Codex having
-# no permission writer (sandbox mode is inherent, not a file to write).
+# Neither Codex nor Antigravity CLI has a PERMISSIONS writer: their autonomy is
+# mode-based launch flags (Codex sandbox mode; agy --mode/--sandbox/
+# --dangerously-skip-permissions), not a per-project policy file to sync. Both
+# DO have a HOOKS writer — CodexHooksWriter (.codex/hooks.json) and
+# AntigravityCLIHooksWriter (.agents/hooks.json), registered below — each with a
+# matching reader in sync/readers.py, so every hooks writer round-trips.
 logger = structlog.get_logger()
 
 # .gitignore managed-block id for the per-machine ownership ledger.
