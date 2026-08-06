@@ -303,7 +303,7 @@ crossby launch --scene pr-review
 crossby launch --scene pr-review --tool codex --model gpt-5.2
 ```
 
-`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out across tools — that is what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written temp-file-then-atomic-rename and kept out of git via `.git/info/exclude` (a session-scoped launch never edits the tracked `.gitignore`). If a tool has a session lever but not for a concern the scene narrows (e.g. Cursor scopes MCP but not agents), crossby warns and applies what it can.
+`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out across tools — that is what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written temp-file-then-atomic-rename and kept out of git via `.git/info/exclude` (a session-scoped launch never edits the tracked `.gitignore`). If a tool has a session lever but not for a concern the scene narrows (e.g. Codex scopes MCP but not agents), crossby warns and applies what it can.
 
 Per-tool levers:
 
@@ -312,7 +312,7 @@ Per-tool levers:
 | Claude | `--mcp-config <file> --strict-mcp-config`, a `--settings` file of `skillOverrides` (needs `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
 | Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
-| Cursor | `CURSOR_CONFIG_DIR` pointed at a scene-materialised config dir |
+| Cursor | none — falls back to persistent activation (its only knob, `CURSOR_CONFIG_DIR`, relocates the whole config base including auth, not just MCP) |
 | OpenCode | `OPENCODE_CONFIG` pointed at a scene-rendered config file |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
 | VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |

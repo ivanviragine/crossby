@@ -286,6 +286,10 @@ class ClaudeAdapter(AbstractAITool):
                 args.append(caps.scene_mcp_strict_flag)
 
         # skills — skillOverrides off for each deselected skill (version-gated).
+        # When the scene omits ``skills``, ``resolve_scene`` selects the whole
+        # universe (an absent selector filters nothing), so ``selected("skills")``
+        # is a superset of the on-disk skills and the disable set is empty — the
+        # ``if skills_disable`` guard is the concern-narrowing gate, mirroring MCP.
         skills_dir = scene.project_root / SKILLS_DIR[AIToolID.CLAUDE]
         skills_disable = set(list_skills(skills_dir)) - scene.selected("skills")
         if skills_disable:

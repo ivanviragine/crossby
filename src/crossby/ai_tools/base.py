@@ -411,8 +411,9 @@ class AbstractAITool(ABC):
         take a scene on the command line (Claude, Codex, Copilot, Cursor,
         OpenCode) override this to materialise the scene's artefacts under
         ``scene.launch_dir`` and point their CLI at them. An override must render
-        idempotently: :meth:`launch` calls it once, but a library consumer may
-        call it again via :meth:`build_launch_environment`.
+        idempotently: :meth:`launch` calls it once per launch, but a library
+        consumer may call it directly, and repeated calls must produce the same
+        artefacts and the same argv/env.
         """
         from crossby.scenes.launch import SceneLaunchArgs
 

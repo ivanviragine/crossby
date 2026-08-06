@@ -150,6 +150,38 @@ class TestClaudeSceneLaunch:
         assert "Agent(deployer)" in result.args
         assert "Agent(reviewer)" not in result.args
 
+    def test_omitted_skills_agents_leave_args_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A scene that omits skills/agents disables neither.
+
+        ``resolve_scene`` selects the whole universe for an omitted selector, so
+        the adapter's disable set is empty and no ``--settings`` /
+        ``--disallowedTools`` are emitted — the guard is the narrowing gate. Uses
+        the real resolver (not a hand-built ResolvedScene) to exercise the path.
+        """
+        from crossby.models.config import SceneConfig
+        from crossby.services.scene_resolution import resolve_scene
+        from crossby.sync.readers import build_sync_data, scan_project
+
+        _make_skills(tmp_path, ("review", "deploy"))
+        _make_agents(tmp_path, ("reviewer", "deployer"))
+        monkeypatch.setattr(
+            "crossby.scenes.versioning.detect_tool_version", lambda _tool: (9, 9, 9)
+        )
+        scene = SceneConfig()  # every concern omitted
+        scan = scan_project(tmp_path, [AIToolID.CLAUDE])
+        resolved = resolve_scene(scene, scan, tmp_path, tool_id=None)
+        ctx = SceneLaunchContext(
+            name="pr-review",
+            resolved=resolved,
+            project_root=tmp_path,
+            sync_data=build_sync_data(tmp_path),
+        )
+        result = ClaudeAdapter().scene_launch_args(ctx)
+        assert "--settings" not in result.args
+        assert "--disallowedTools" not in result.args
+
 
 # ---------------------------------------------------------------------------
 # Codex
@@ -225,6 +257,36 @@ class TestCodexSceneLaunch:
         with pytest.raises(FileExistsError):
             scene_launch.write_codex_profile(tmp_path, "pr-review", {"linear"})
 
+    def test_profile_collision_falls_back_to_persistent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A namespaced-profile collision degrades to persistent activation.
+
+        Rather than let ``FileExistsError`` abort ``crossby launch --scene``, the
+        adapter warns, applies the scene persistently for Codex, and emits no
+        ``--profile`` — leaving the hand-written profile untouched.
+        """
+        import crossby.scenes.engine as engine
+
+        home = tmp_path / "codex_home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        path = scene_launch.codex_profile_path(tmp_path, "pr-review")
+        path.write_text("model = 'gpt-5'\n")  # hand-written, no crossby header
+
+        calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            engine, "apply_scene", lambda _resolved, _root, **kw: calls.append(kw) or []
+        )
+
+        ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
+        with pytest.warns(UserWarning, match="Falling back to persistent"):
+            result = CodexAdapter().scene_launch_args(ctx)
+
+        assert result.args == ()  # no --profile emitted
+        assert path.read_text() == "model = 'gpt-5'\n"  # collision left intact
+        assert calls and calls[0]["tools"] == (AIToolID.CODEX,)
+
 
 # ---------------------------------------------------------------------------
 # Copilot
@@ -273,20 +335,28 @@ class TestCopilotSceneLaunch:
 
 
 class TestCursorSceneLaunch:
-    def test_cursor_config_dir_env(self, tmp_path: Path) -> None:
+    """Cursor has no session-scoped lever.
+
+    ``CURSOR_CONFIG_DIR`` relocates Cursor's whole config base (auth +
+    cli-config.json, not just mcp.json), so scoping MCP through it would launch
+    Cursor unauthenticated. crossby therefore leaves Cursor to the persistent
+    ``scene use`` fallback instead of emitting a launch-time lever.
+    """
+
+    def test_no_session_lever(self) -> None:
+        adapter = CursorAdapter()
+        assert adapter.capabilities().supports_scene_launch is False
+        assert adapter.capabilities().scene_config_dir_env is None
+        assert adapter.scene_launch_ready() is False
+        assert adapter.scene_launch_concerns() == set()
+
+    def test_scene_launch_args_is_noop(self, tmp_path: Path) -> None:
+        # Even called directly, Cursor renders nothing and sets no env var.
         ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
         result = CursorAdapter().scene_launch_args(ctx)
-        env = dict(result.env)
-        assert "CURSOR_CONFIG_DIR" in env
-        config_dir = Path(env["CURSOR_CONFIG_DIR"])
-        assert config_dir == tmp_path / ".crossby" / "scene" / "pr-review" / "launch" / "cursor"
-        body = json.loads((config_dir / "mcp.json").read_text())
-        assert set(body["mcpServers"]) == {"github"}
-
-    def test_no_narrowing_no_env(self, tmp_path: Path) -> None:
-        ctx = _context(tmp_path, all_mcp=("github",), selected_mcp=("github",))
-        result = CursorAdapter().scene_launch_args(ctx)
+        assert result.args == ()
         assert dict(result.env) == {}
+        assert not (tmp_path / ".crossby").exists()
 
 
 class TestOpenCodeSceneLaunch:
