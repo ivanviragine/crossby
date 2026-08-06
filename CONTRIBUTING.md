@@ -139,6 +139,64 @@ The load-bearing rule when adding removal to a writer:
 - A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
 - **The interactive wizard revokes on *environment-wide absence*.** Each revocable concern (hooks, permissions, MCP) dispatches on *data OR ownership*: the wizard loads the ledger once and runs `run_sync()` for a concern when the merged source data is non-empty **or** any installed target still owns entries for it. Because the wizard merges discovery across *all* installed tools (no `--from` scope), "revoke" here means the concern has emptied across the **whole environment** — an entry still present on any installed tool is rediscovered as current and is **not** stripped. This is *not* entry-for-entry `--from` parity (where an entry present only on other tools would be revoked). Two consequences to know: MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP dispatch removes nothing and just emits `skipped`/discovery rows; and declining a still-present port while the ledger owns entries leaves `data` empty for that concern, so the ownership arm fires and revokes the owned copies (a later confirm re-adds them). Hardening "decline ≠ revoke" (e.g. also requiring `not scan.<concern>.found`) is a possible follow-up, not current behavior.
 
+### Scene activation mechanisms
+
+A **scene** narrows what each installed tool sees for one or more concerns
+(skills, agents, MCP, hooks, permissions). The resolver
+(`services/scene_resolution.py`) decides *what* is selected; the activation
+engine (`scenes/`) decides *how* to make each tool honour that selection,
+choosing the least-invasive mechanism available per `(tool, concern)` cell. The
+matrix lives in `scenes/mechanism.py`:
+
+- **DECLARE** — write the tool's own disable key. Non-destructive and instantly
+  reversible; the user's real skill/server/agent files are left untouched.
+  Claude `skillOverrides` (skills, gated on `claude >= 2.1.129`),
+  `permissions.deny: ["Agent(<name>)"]` (agents), and `disabledMcpjsonServers`
+  (MCP); Codex `mcp_servers.<id>.enabled = false`; Antigravity CLI
+  `mcpServers.<name>.disabled = true`.
+- **PROJECT** — materialise a scene-filtered source tree of relative symlinks
+  under `.crossby/scene/active/{skills,agents}` (carrying the `.crossby-managed`
+  marker) and re-point the existing sync writers at it, or, for hooks and
+  permissions, filter the concern's list and drive `run_sync`'s revocable
+  removal channel. No new per-tool path knowledge is added — the engine composes
+  the registered writers.
+- **UNSUPPORTED** — the tool has no per-item lever (Cursor / Copilot MCP); the
+  cell is reported, never silently faked.
+
+| Concern | Claude | Codex | Antigravity CLI | Cursor | Copilot |
+|---|---|---|---|---|---|
+| skills | DECLARE (`skillOverrides`) | PROJECT | PROJECT | PROJECT | PROJECT |
+| agents | DECLARE (`permissions.deny`) | PROJECT | PROJECT | PROJECT | PROJECT |
+| mcp | DECLARE (`disabledMcpjsonServers`) | DECLARE (`enabled=false`) | DECLARE (`disabled=true`) | UNSUPPORTED | UNSUPPORTED |
+| hooks | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) |
+| permissions | PROJECT (removal) | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+
+Rules that keep the matrix honest:
+
+- **Shared paths make PROJECT authoritative.** Codex and Antigravity CLI share
+  the literal directory `.agents/skills`. Antigravity has no skills DECLARE
+  lever, so PROJECT re-points that physical directory for both — a best-effort
+  Codex `[[skills.config]]` toggle could only contradict it, so the cell is
+  PROJECT. The rule is general: when tools share a resolved target path and any
+  lacks a DECLARE lever, PROJECT wins for the whole group (resolved *after*
+  grouping by path, not per-tool in isolation).
+- **The canonical source is never re-pointed onto a tree that links into it.**
+  The real skills/agents source (e.g. `.claude/skills`) stays real and filters
+  itself via DECLARE; only the *other* tools' directories re-point at the scene
+  tree. Re-pointing crossby's own symlink always forces (a scene switch must
+  replace the prior link); a real, non-crossby directory still honours `--force`
+  (refused otherwise, backed up with it).
+- **DECLARE provenance is ledgered.** Every DECLARE surface here is new and not
+  covered by the revocable-sync ledger's additive concerns, so the five key
+  types get their own `scene` section in `.crossby/owned.json` (`SceneDeclareKey`
+  in `sync/ownership.py`). `clear_scene` reverts only entries crossby recorded —
+  a user's own `skillOverrides`/`deny`/`disabled` value survives untouched.
+- **Report honestly.** Plugin-provided skills (reachable by neither mechanism),
+  Codex toggles on an untrusted project (silently ignored until trusted), and a
+  Claude build below `2.1.129` are each surfaced as report rows rather than a
+  quiet no-op. `dry_run` computes the full result set and never touches disk;
+  `apply_scene` is idempotent and safe to re-run from a half-applied state.
+
 ### Symlink, copy, or translate
 
 Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:
