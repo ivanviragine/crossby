@@ -233,6 +233,16 @@ def is_source_dir(project_root: Path, target_rel: str, source_rel: str) -> bool:
     return is_same_path(project_root / source_rel, project_root / target_rel)
 
 
+def tool_points_at_projection(project_root: Path, target_rel: str, kind: str) -> bool:
+    """True when *target_rel* resolves into the scene projection tree for *kind*.
+
+    A scoped clear uses this to decide whether the shared ``.crossby/scene/`` tree
+    is still referenced by a tool it is *not* reverting — if so, the tree must
+    survive so that tool keeps resolving.
+    """
+    return is_same_path(project_root / target_rel, project_root / _kind_dir(kind))
+
+
 def clear_projection(project_root: Path, *, dry_run: bool = False) -> SyncResult | None:
     """Remove ``.crossby/scene/`` entirely. Returns a row only if it existed."""
     root = project_root / SCENE_PROJECTION_ROOT

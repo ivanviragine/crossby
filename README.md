@@ -250,6 +250,41 @@ Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--accept
 
 `sync_defaults` and `handoff_defaults` feed the interactive prompts for those commands — CLI flags still win, and you always get the "Proceed / Change X" review before anything runs. `crossby sync` does **not** require this file — it reads directly from each tool's standard paths.
 
+## Scenes
+
+A **scene** (defined under `scenes:` above) is a task-shaped slice of the project's skills, agents, MCP servers, hooks and permissions. Activating one filters each installed tool down to just the selected capabilities, using the least-invasive mechanism per tool — a native disable key where one exists (Claude `skillOverrides`, MCP toggles), otherwise a re-pointed, filtered projection of the source directory.
+
+```bash
+# List the scenes defined in .crossby.yml, with per-concern counts
+crossby scene list
+
+# Show what a scene resolves to per tool, the mechanism each would use,
+# and any selectors that matched nothing
+crossby scene show pr-review
+
+# Apply a scene to every installed tool
+crossby scene use pr-review
+
+# Preview without writing, or scope to one tool
+crossby scene use pr-review --plan
+crossby scene use pr-review --tool cursor
+
+# Revert to the pre-scene baseline
+crossby scene clear
+
+# What's active, per-tool mechanism, and whether any managed file drifted
+crossby scene status
+```
+
+Key behaviours:
+
+- **Switching restores the true baseline.** `use B` while `A` is active reverts `A` first, then applies `B` from the original pre-`A` state — so a later `clear` restores your settings, not `A`'s (or `B`'s) output.
+- **Reverting is ledger-driven.** `clear` only undoes what crossby wrote (tracked in `.crossby/owned.json`); a `skillOverrides`, `deny`, or MCP-`disabled` entry you authored by hand is left untouched. `clear` works even after the active scene is renamed or deleted from `.crossby.yml`. One exception: a scene that *narrows* hooks or permissions removes those crossby-synced entries through the revocable-sync channel, and `clear` does **not** put them back — `use` warns when this happens; re-run `crossby sync` to restore them.
+- **Drift is detected, not clobbered.** `status` compares a per-tool content hash captured at apply time against the current file (normalised, so a semantically-neutral reformat is not flagged; drift is tracked at file granularity, so an unrelated edit to a shared config file such as `.claude/settings.json` can register too). `use` and `clear` refuse to revert a scene whose managed files have drifted — pass `--force` to proceed anyway. `--force` **bypasses the refusal**; because reversion is ledger-driven, re-applying then replaces crossby's own entries, but a value you changed by hand to a non-crossby value is left as you set it.
+- **`--tool`** scopes every subcommand (output for `list`/`show`/`status`, effect for `use`/`clear`). `--plan` previews without writing; `--force` proceeds despite drift.
+
+Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.
+
 ## Supported tools
 
 | Tool           | Sync | Launch | Handoff (source) | Handoff (target) |

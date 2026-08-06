@@ -1110,9 +1110,6 @@ class TestSyncCommandHooks:
         assert "no hooks config" not in result.output
         # agy's native tool name reverse-maps to the canonical `Write` on write.
         assert "guard" in self._claude_hook_commands(tmp_path)
-        settings = json.loads(
-            (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
-        )
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
         matchers = [e["matcher"] for e in settings["hooks"]["PreToolUse"]]
         assert matchers == ["Write"]
-

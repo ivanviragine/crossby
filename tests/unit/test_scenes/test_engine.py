@@ -300,3 +300,137 @@ class TestHooksPermissionsFilter:
         results = apply_scene(resolve(tmp_path, SCENE), tmp_path)
         perm_rows = [r for r in results if r.concern.value == "permissions"]
         assert perm_rows == []
+
+
+class TestToolScope:
+    """The ``tools=`` argument that scopes apply / clear to a subset of tools."""
+
+    def _install_four(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(
+                lambda _cls: [
+                    AIToolID.CLAUDE,
+                    AIToolID.CODEX,
+                    AIToolID.ANTIGRAVITY_CLI,
+                    AIToolID.CURSOR,
+                ]
+            ),
+        )
+
+    def test_apply_scoped_touches_only_the_named_tool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path, tools=[AIToolID.CURSOR])
+
+        # Cursor got a filtered skills projection; Claude was never DECLARE-filtered.
+        assert (tmp_path / ".cursor" / "skills").is_symlink()
+        assert not (tmp_path / ".claude" / "settings.json").exists()
+
+    def test_scoped_clear_keeps_shared_projection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        # Apply to every tool: codex + antigravity share the .agents/skills tree.
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        assert (tmp_path / ".crossby" / "scene").exists()
+
+        # Clearing only cursor must not yank the projection from the sharers.
+        clear_scene(tmp_path, tools=[AIToolID.CURSOR])
+        assert (tmp_path / ".crossby" / "scene").exists()
+        # The other tools still resolve through the shared projection tree.
+        assert (tmp_path / ".agents" / "skills").is_symlink()
+
+    def test_unscoped_clear_removes_projection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        clear_scene(tmp_path)
+        assert not (tmp_path / ".crossby" / "scene").exists()
+
+    def test_empty_scope_clear_reverts_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # tools=[] must mean "revert nothing" — it must NOT collapse to "all".
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        clear_scene(tmp_path, tools=[])
+        assert _settings(tmp_path)["skillOverrides"] == {"deploy-prod": "off"}
+        assert (tmp_path / ".crossby" / "scene").exists()
+
+    def test_clear_restores_uninstalled_recorded_tool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        assert (tmp_path / ".cursor" / "skills").is_symlink()
+
+        # Cursor is uninstalled, but a clear of the recorded scope must still
+        # re-point its on-disk symlink before deleting the projection.
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI]),
+        )
+        clear_scene(
+            tmp_path,
+            tools=[AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI, AIToolID.CURSOR],
+        )
+        assert not (tmp_path / ".crossby" / "scene").exists()
+        # Cursor's dir resolves to the real source, not a dangling deleted path.
+        resolved = {p.name for p in (tmp_path / ".cursor" / "skills").iterdir()}
+        assert {"review-skill", "knowledge", "deploy-prod"} <= resolved
+
+    def test_clear_keeps_projection_when_restore_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        assert (tmp_path / ".crossby" / "scene").exists()
+
+        def _err(*_a: object, **_kw: object) -> SyncResult:
+            return SyncResult(
+                tool_id=AIToolID.CURSOR, concern=SyncConcern.SKILLS, action="error", message="boom"
+            )
+
+        monkeypatch.setattr("crossby.scenes.projection.restore_source", _err)
+        clear_scene(tmp_path)
+        # A failed re-point must not leave a tool dangling — keep the projection.
+        assert (tmp_path / ".crossby" / "scene").exists()
+
+    def test_scoped_clear_keeps_projection_for_uninstalled_sharer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+
+        # Codex/Antigravity (sharing .agents/skills → the projection) are
+        # uninstalled; a scoped clear of Cursor must still keep the projection
+        # because their on-disk symlinks still resolve into it.
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
+        )
+        clear_scene(tmp_path, tools=[AIToolID.CURSOR])
+        assert (tmp_path / ".crossby" / "scene").exists()
