@@ -415,3 +415,22 @@ class TestToolScope:
         clear_scene(tmp_path)
         # A failed re-point must not leave a tool dangling — keep the projection.
         assert (tmp_path / ".crossby" / "scene").exists()
+
+    def test_scoped_clear_keeps_projection_for_uninstalled_sharer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+
+        # Codex/Antigravity (sharing .agents/skills → the projection) are
+        # uninstalled; a scoped clear of Cursor must still keep the projection
+        # because their on-disk symlinks still resolve into it.
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
+        )
+        clear_scene(tmp_path, tools=[AIToolID.CURSOR])
+        assert (tmp_path / ".crossby" / "scene").exists()

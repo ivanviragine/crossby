@@ -171,17 +171,18 @@ def _should_clear_projection(project_root: Path, scope: set[AIToolID] | None) ->
     """True when removing ``.crossby/scene/`` is safe for the current clear scope.
 
     An unscoped clear always removes it. A scoped clear removes it only when no
-    installed tool *outside* the scope still points its skills/agents directory
-    at the projection tree — otherwise that tool would be left dangling at a
-    deleted path.
+    tool *outside* the scope still points its skills/agents directory at the
+    projection tree — otherwise that tool would be left dangling at a deleted
+    path. Every scene-participating tool's directory is checked on disk (not just
+    the currently-installed ones), so a recorded-but-uninstalled tool whose
+    symlink still resolves into the projection also protects it.
     """
     if scope is None:
         return True
     if not (project_root / projection.SCENE_PROJECTION_ROOT).exists():
         return False
-    from crossby.ai_tools.base import AbstractAITool
 
-    for tool in AbstractAITool.detect_installed():
+    for tool in _scene_tools():
         if tool in scope:
             continue
         for kind, concern in (("skills", SyncConcern.SKILLS), ("agents", SyncConcern.AGENTS)):
@@ -191,6 +192,13 @@ def _should_clear_projection(project_root: Path, scope: set[AIToolID] | None) ->
             ):
                 return False
     return True
+
+
+def _scene_tools() -> set[AIToolID]:
+    """Every tool that has a skills or agents directory a scene could re-point."""
+    tools = set(SKILLS_DIR)
+    tools.update(tool for tool in AIToolID if str(tool) in _AGENT_TARGET_PATHS)
+    return tools
 
 
 # ---------------------------------------------------------------------------

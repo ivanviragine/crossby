@@ -375,7 +375,7 @@ def use_scene(
     tool: str | None = _TOOL_OPTION,
     plan: bool = typer.Option(False, "--plan", help="Preview the apply; write nothing."),
     force: bool = typer.Option(
-        False, "--force", help="Proceed despite drift in the outgoing scene, overwriting it."
+        False, "--force", help="Proceed despite drift in the outgoing scene (bypass the refusal)."
     ),
     path: Path = _PATH_OPTION,
 ) -> None:
@@ -475,7 +475,15 @@ def use_scene(
         merged = dict(active.tools)
         merged.update(state.tools)
         state.tools = merged
-    save_scene_state(project_root, state)
+    try:
+        save_scene_state(project_root, state)
+    except OSError as exc:
+        # The scene is applied (the ledger has provenance) but its state could
+        # not be recorded — surface it cleanly so the user can re-run rather than
+        # being left with an active-but-untracked scene.
+        console.error(f"Scene applied but its state could not be recorded: {exc}")
+        console.hint(f"Re-run 'crossby scene use {name}' once the path is writable.")
+        raise typer.Exit(1) from exc
 
     if _has_error(results):
         console.error("Scene applied partially — some tools failed (see rows above).")
@@ -626,7 +634,7 @@ def clear_active(
     tool: str | None = _TOOL_OPTION,
     plan: bool = typer.Option(False, "--plan", help="Preview the revert; write nothing."),
     force: bool = typer.Option(
-        False, "--force", help="Proceed despite drift in the active scene, overwriting it."
+        False, "--force", help="Proceed despite drift in the active scene (bypass the refusal)."
     ),
     path: Path = _PATH_OPTION,
 ) -> None:
