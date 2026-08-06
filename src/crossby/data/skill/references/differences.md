@@ -139,6 +139,39 @@ the concerns below) aren't wired yet.
 | Any tool with Claude-only markers in its instructions file → any non-Claude target | rules | symlink downgraded to copy with a `crossby:manual-fix` block; per-tool marker list lives in `instruction_markers.py` |
 | Any source → any target | plugins | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; migrate by hand |
 
+## Scene activation mechanisms
+
+A scene narrows what each tool sees per concern. Because the levers are uneven
+across tools, crossby picks the least-invasive mechanism per `(tool, concern)`
+cell (`scenes/mechanism.py`):
+
+- **DECLARE** — write the tool's own disable key, leaving the user's real files
+  intact. Only these surfaces exist today:
+
+  | Concern | Tool | Key written |
+  | --- | --- | --- |
+  | skills | Claude | `skillOverrides: {"<name>": "off"}` (needs `claude >= 2.1.129`; never affects plugin skills) |
+  | agents | Claude | `permissions.deny: ["Agent(<name>)"]` |
+  | mcp | Claude | `disabledMcpjsonServers: ["<name>"]` |
+  | mcp | Codex | `mcp_servers.<id>.enabled = false` (silently ignored on an untrusted project) |
+  | mcp | Antigravity CLI | `mcpServers.<name>.disabled = true` |
+
+- **PROJECT** — for skills/agents, re-point the tool's directory at a filtered
+  symlink tree under `.crossby/scene/active/`; for hooks/permissions, filter the
+  list and revoke the deselected remainder through the ownership ledger. Used
+  wherever no DECLARE key exists, and made **authoritative** whenever tools share
+  a resolved path and any of them lacks a lever (Codex + Antigravity CLI both use
+  `.agents/skills`, so PROJECT wins there).
+
+- **UNSUPPORTED** — no per-item lever at all: Cursor and Copilot MCP (deleting a
+  server would be destructive), and permissions on Codex / Copilot / Antigravity
+  CLI (their autonomy is a launch flag, not a per-project policy file). Reported,
+  never faked.
+
+Hooks have **no** per-item disable lever on any tool crossby supports (Claude and
+Copilot are all-or-nothing via `disableAllHooks`; Cursor and Antigravity have no
+toggle), so a scene can only narrow hooks by removing crossby-owned entries.
+
 ## Sources
 
 - https://code.claude.com/docs/en/skills

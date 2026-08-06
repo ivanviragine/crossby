@@ -13,22 +13,28 @@ Each test here corresponds to a verified data-loss path:
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from crossby.models.ai import AIToolID
-from crossby.models.config import MCPServerConfig
+from crossby.models.config import HookEntry, MCPServerConfig
+from crossby.sync import run_sync
 from crossby.sync.agents import (
     ClaudeAgentsWriter,
     CodexAgentsWriter,
     CopilotAgentsWriter,
 )
-from crossby.sync.base import SyncData
+from crossby.sync.base import SyncData, SyncRegistry
 from crossby.sync.file_utils import is_same_path
-from crossby.sync.hooks import _ensure_codex_hooks_feature_flag
-from crossby.sync.mcp import CodexMCPWriter
+from crossby.sync.hooks import (
+    ClaudeHooksWriter,
+    _ensure_codex_hooks_feature_flag,
+)
+from crossby.sync.mcp import ClaudeMCPWriter, CodexMCPWriter
+from crossby.sync.permissions import ClaudePermissionWriter
 from crossby.sync.skills import ClaudeSkillsWriter
 
 # ---------------------------------------------------------------------------
@@ -465,3 +471,81 @@ class TestInitForcePreservesConfig:
         assert (tmp_path / ".crossby.yml.bak").read_text(
             encoding="utf-8"
         ) == "{{ not: valid: yaml\n"
+
+
+# ---------------------------------------------------------------------------
+# 5. Revocable sync never deletes an entry crossby didn't write
+# ---------------------------------------------------------------------------
+
+
+def _registry(*writers: object) -> SyncRegistry:
+    reg = SyncRegistry()
+    for w in writers:
+        reg.register(w)  # type: ignore[arg-type]
+    return reg
+
+
+class TestNeverDeletesUnowned:
+    """An entry absent from ``.crossby/owned.json`` survives a sync unconditionally.
+
+    The ledger starts empty (nothing owned), so a first sync may only *add* — it
+    can never revoke a hand-authored hook, permission, or MCP server, even one
+    absent from the current ``SyncData``.
+    """
+
+    def test_hand_written_hook_survives(self, tmp_path: Path) -> None:
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Edit", "hooks": [{"type": "command", "command": "human"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        run_sync(
+            SyncData(hooks=[HookEntry(event="pre_tool_use", command="crossby", tools=["Write"])]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(ClaudeHooksWriter()),
+        )
+        commands = {
+            inner["command"]
+            for entry in json.loads(settings.read_text())["hooks"]["PreToolUse"]
+            for inner in entry["hooks"]
+        }
+        assert "human" in commands
+
+    def test_hand_written_permission_survives(self, tmp_path: Path) -> None:
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(human:*)"]}}))
+        run_sync(
+            SyncData(allowed_commands=["crossby:*"]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(ClaudePermissionWriter()),
+        )
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        assert "Bash(human:*)" in allow
+
+    def test_hand_written_mcp_server_survives_a_same_named_disable(self, tmp_path: Path) -> None:
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "hand-written"}}}), encoding="utf-8"
+        )
+        # Source disables a same-named server; crossby never wrote "shared", so
+        # the ledger doesn't own it → it must survive.
+        run_sync(
+            SyncData(mcp_servers={"shared": MCPServerConfig(command="npx", enabled=False)}),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(ClaudeMCPWriter()),
+        )
+        data = json.loads(mcp.read_text())
+        assert data["mcpServers"]["shared"]["command"] == "hand-written"

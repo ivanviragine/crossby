@@ -12,6 +12,9 @@ from typer.testing import CliRunner
 from crossby.cli.main import app
 from crossby.models.ai import AIToolID
 from crossby.sync.base import SyncConcern, SyncData
+from crossby.sync.ownership import LEDGER_PATH, OwnershipLedger, load_ledger, save_ledger
+from crossby.sync.readers import ProjectScan
+from crossby.sync.report import REPORT_PATH
 
 runner = CliRunner()
 
@@ -687,3 +690,429 @@ class TestSyncMalformedConfig:
         assert "ConfigError" not in result.output
         # The error message itself does land.
         assert "ai" in result.output and "mapping" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Interactive-wizard revocation (Issue #111, follow-up to #100)
+# ---------------------------------------------------------------------------
+
+
+_GUARD_HOOK = ("pre_tool_use", "guard")
+_OWNED_HOOK = ("pre_tool_use", "owned")
+
+
+def _seed_hook_ledger(project_root: Path, tool: AIToolID, pairs: set[tuple[str, str]]) -> None:
+    """Seed ``.crossby/owned.json`` so crossby owns *pairs* of hooks for *tool*."""
+    ledger = OwnershipLedger()
+    ledger.record_hooks(tool, pairs)
+    save_ledger(project_root, ledger)
+
+
+def _write_claude_settings(project_root: Path, settings: dict[str, Any]) -> Path:
+    path = project_root / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    return path
+
+
+def _claude_hook_commands(project_root: Path) -> set[str]:
+    settings = json.loads((project_root / ".claude" / "settings.json").read_text())
+    return {
+        inner["command"]
+        for entry in settings.get("hooks", {}).get("PreToolUse", [])
+        for inner in entry["hooks"]
+    }
+
+
+def _empty_project_scan(*_args: Any, **_kwargs: Any) -> ProjectScan:
+    """A scan that discovers nothing — simulates a concern that has emptied
+    across the *whole environment* while the ledger + a target file still carry
+    crossby's entry."""
+    return ProjectScan(installed_tools=[])
+
+
+class TestWizardRevocation:
+    """The wizard dispatches revocable concerns on *data OR ownership*.
+
+    When a concern has emptied across the environment (nothing discovered) but
+    the ledger still owns entries, the wizard runs ``run_sync`` so crossby can
+    revoke what it wrote earlier — the follow-up behaviour from Issue #111.
+    """
+
+    def test_wizard_revokes_environment_wide_emptied_hook(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Target file physically holds a crossby-owned hook; the ledger owns it.
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "owned"}]}
+                    ]
+                }
+            },
+        )
+        _seed_hook_ledger(tmp_path, AIToolID.CLAUDE, {("pre_tool_use", "owned")})
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        # Discovery finds nothing across every tool → environment-wide absence.
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        # The crossby-owned hook is gone from the target …
+        assert "PreToolUse" not in json.loads(
+            (tmp_path / ".claude" / "settings.json").read_text()
+        ).get("hooks", {})
+        # … and the ledger no longer lists it.
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset()
+
+    def test_wizard_revokes_environment_wide_emptied_permission(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_claude_settings(tmp_path, {"permissions": {"allow": ["Bash(myapp:*)"]}})
+        ledger = OwnershipLedger()
+        ledger.record_permissions(AIToolID.CLAUDE, {"myapp:*"})
+        save_ledger(tmp_path, ledger)
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        allow = json.loads((tmp_path / ".claude" / "settings.json").read_text())["permissions"][
+            "allow"
+        ]
+        assert "Bash(myapp:*)" not in allow
+        assert load_ledger(tmp_path).permissions(AIToolID.CLAUDE) == frozenset()
+
+    def test_declining_a_still_present_port_revokes_owned_copies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Discovery IS non-empty (the hook is still present), but the user answers
+        # "no" to the port prompt while the ledger owns the entry. With the literal
+        # `data OR ownership` gate, data.hooks is empty so the ownership arm fires
+        # and revokes crossby's owned copy. Pins this as a conscious, stable choice.
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "guard"}]}
+                    ]
+                }
+            },
+        )
+        _seed_hook_ledger(tmp_path, AIToolID.CLAUDE, {("pre_tool_use", "guard")})
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        # Real scan discovers the hook, so the port prompt is reached — then declined.
+        monkeypatch.setattr("crossby.ui.prompts.confirm", lambda *a, **k: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "guard" not in _claude_hook_commands(tmp_path)
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset()
+
+    def test_hook_still_present_on_another_tool_is_not_revoked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Merged discovery: an owned entry still present on *any* installed tool is
+        # rediscovered as current and therefore NOT revoked (environment-wide
+        # absence, not entry-for-entry --from parity).
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "guard"}]}
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+
+        # Establish: a real wizard run ports Claude's hook to Cursor and records
+        # crossby ownership of it for Cursor.
+        first = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+        assert first.exit_code == 0, first.output
+        assert load_ledger(tmp_path).hooks(AIToolID.CURSOR) == frozenset({_GUARD_HOOK})
+
+        # Re-run: the hook is still present on Claude, so it is rediscovered as
+        # current and Cursor's owned copy is preserved, not revoked.
+        from crossby.sync.readers import discover_hooks
+
+        second = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+        assert second.exit_code == 0, second.output
+        cursor_hooks = {
+            (h.event, h.command) for h in discover_hooks(tmp_path, from_tool=AIToolID.CURSOR)
+        }
+        assert ("pre_tool_use", "guard") in cursor_hooks
+        assert load_ledger(tmp_path).hooks(AIToolID.CURSOR) == frozenset({_GUARD_HOOK})
+
+    def test_explicit_concern_does_not_trigger_other_owned_concerns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `crossby sync permissions` must not fire the hooks dispatch even though
+        # the ledger owns hooks — the concern filter gates the ownership arm too.
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "guard"}]}
+                    ]
+                }
+            },
+        )
+        _seed_hook_ledger(tmp_path, AIToolID.CLAUDE, {("pre_tool_use", "guard")})
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+
+        result = runner.invoke(app, ["sync", "permissions", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "Nothing to sync." in result.output
+        # The owned hook is untouched on disk and in the ledger.
+        assert "guard" in _claude_hook_commands(tmp_path)
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset({_GUARD_HOOK})
+
+    def test_dry_run_ownership_revocation_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "owned"}]}
+                    ]
+                }
+            },
+        )
+        _seed_hook_ledger(tmp_path, AIToolID.CLAUDE, {("pre_tool_use", "owned")})
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--dry-run", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        # No target change …
+        assert "owned" in _claude_hook_commands(tmp_path)
+        # … no ledger change …
+        assert load_ledger(tmp_path).hooks(AIToolID.CLAUDE) == frozenset({_OWNED_HOOK})
+        # … and no report persisted.
+        assert not (tmp_path / REPORT_PATH).exists()
+
+    def test_hand_authored_entry_survives_alongside_revoked_owned_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A target file holding both a crossby-owned entry and a hand-authored one
+        # keeps the hand-authored entry after a wizard revocation run.
+        _write_claude_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Edit", "hooks": [{"type": "command", "command": "owned"}]},
+                        {"matcher": "Write", "hooks": [{"type": "command", "command": "human"}]},
+                    ]
+                }
+            },
+        )
+        # The ledger owns ONLY crossby's entry, never the human one.
+        _seed_hook_ledger(tmp_path, AIToolID.CLAUDE, {("pre_tool_use", "owned")})
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        commands = _claude_hook_commands(tmp_path)
+        assert "human" in commands
+        assert "owned" not in commands
+
+    def test_owned_but_emptied_mcp_is_a_no_op_that_reports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP
+        # dispatch removes nothing, leaves the ledger unchanged, and only emits
+        # skipped writer rows — pinned so the tradeoff is a conscious choice.
+        mcp = tmp_path / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"srv": {"command": "npx"}}}), encoding="utf-8")
+        ledger = OwnershipLedger()
+        ledger.record_mcp(AIToolID.CLAUDE, {"srv"})
+        save_ledger(tmp_path, ledger)
+
+        captured: list[Any] = []
+
+        def _capture(results: list[Any], **_kwargs: Any) -> None:
+            captured.extend(results)
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+        monkeypatch.setattr("crossby.cli.sync._display_results", _capture)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        # (a) No MCP removals.
+        mcp_rows = [r for r in captured if r.concern == SyncConcern.MCP]
+        assert mcp_rows, "expected the MCP dispatch to run and report rows"
+        assert all(r.revoked == 0 for r in mcp_rows)
+        assert any(r.action == "skipped" for r in mcp_rows)
+        # (b) Target config and ledger left unchanged.
+        assert "srv" in json.loads(mcp.read_text())["mcpServers"]
+        assert load_ledger(tmp_path).mcp(AIToolID.CLAUDE) == frozenset({"srv"})
+
+    def test_no_data_and_no_ownership_is_idempotent_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No new data AND no ledger ownership → no run_sync for revocable concerns
+        # and no ledger / report churn.
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["claude", "cursor"],
+        )
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "No tool configs found to sync." in result.output
+        assert not (tmp_path / LEDGER_PATH).exists()
+        assert not (tmp_path / REPORT_PATH).exists()
+
+
+class TestSyncCommandHooks:
+    """`crossby sync hooks --from codex|antigravity-cli` is no longer read-blind."""
+
+    def _claude_hook_commands(self, project: Path) -> list[str]:
+        data = json.loads((project / ".claude" / "settings.json").read_text())
+        return [
+            handler["command"]
+            for entries in data.get("hooks", {}).values()
+            for entry in entries
+            for handler in entry.get("hooks", [])
+        ]
+
+    def test_sync_hooks_from_codex_reaches_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real .codex/hooks.json is read and written to the target tool."""
+        codex = tmp_path / ".codex" / "hooks.json"
+        codex.parent.mkdir()
+        codex.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Edit", "hooks": [{"type": "command", "command": "guard"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["codex", "claude"],
+            )
+            result = runner.invoke(
+                app,
+                ["sync", "hooks", "--from", "codex", "--to", "claude", "--path", str(tmp_path)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no hooks config" not in result.output
+        assert "guard" in self._claude_hook_commands(tmp_path)
+
+    def test_sync_hooks_from_antigravity_cli_reaches_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real .agents/hooks.json is read and written to the target tool."""
+        agy = tmp_path / ".agents" / "hooks.json"
+        agy.parent.mkdir()
+        agy.write_text(
+            json.dumps(
+                {
+                    "guard": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "write_to_file",
+                                "hooks": [{"type": "command", "command": "guard"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["antigravity-cli", "claude"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "hooks",
+                    "--from",
+                    "antigravity-cli",
+                    "--to",
+                    "claude",
+                    "--path",
+                    str(tmp_path),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no hooks config" not in result.output
+        # agy's native tool name reverse-maps to the canonical `Write` on write.
+        assert "guard" in self._claude_hook_commands(tmp_path)
+        settings = json.loads(
+            (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
+        )
+        matchers = [e["matcher"] for e in settings["hooks"]["PreToolUse"]]
+        assert matchers == ["Write"]
+

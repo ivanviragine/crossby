@@ -361,3 +361,50 @@ class TestRunSyncOauthDiscovery:
 
         results = run_sync(SyncData(), tmp_path, installed_tools=[], registry=SyncRegistry())
         assert not [r for r in results if r.concern == SyncConcern.MCP]
+
+
+class TestRunSyncHooksRevocation:
+    """The end-to-end revocable-sync behaviour: sync A then B → B only."""
+
+    def _pre_tool_commands(self, tmp_path: Path) -> set[str]:
+        import json
+
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        return {
+            inner["command"]
+            for entry in data["hooks"].get("PreToolUse", [])
+            for inner in entry["hooks"]
+        }
+
+    def test_syncing_a_then_b_reflects_b_only(self, tmp_path: Path) -> None:
+        from crossby.models.config import HookEntry
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncData, SyncRegistry
+        from crossby.sync.hooks import ClaudeHooksWriter
+
+        reg = SyncRegistry()
+        reg.register(ClaudeHooksWriter())
+        hook_a = HookEntry(event="pre_tool_use", command="guard-a", tools=["Edit"])
+        hook_b = HookEntry(event="pre_tool_use", command="guard-b", tools=["Edit"])
+
+        run_sync(SyncData(hooks=[hook_a]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert self._pre_tool_commands(tmp_path) == {"guard-a"}
+
+        run_sync(SyncData(hooks=[hook_b]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        # A's hook is revoked (it was crossby-owned and absent from B); only B
+        # remains — not the union.
+        assert self._pre_tool_commands(tmp_path) == {"guard-b"}
+
+    def test_second_identical_run_is_idempotent(self, tmp_path: Path) -> None:
+        from crossby.models.config import HookEntry
+        from crossby.sync import run_sync
+        from crossby.sync.base import SyncData, SyncRegistry
+        from crossby.sync.hooks import ClaudeHooksWriter
+
+        reg = SyncRegistry()
+        reg.register(ClaudeHooksWriter())
+        data = SyncData(hooks=[HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])])
+
+        run_sync(data, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        results = run_sync(data, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert all(r.action == "skipped" for r in results if r.concern.value == "hooks")
