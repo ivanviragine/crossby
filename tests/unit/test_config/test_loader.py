@@ -451,6 +451,15 @@ class TestProfileAllowTools:
         config = load_config(tmp_path)
         assert config.get_profile("cop").allow_tools == []
 
+    def test_allow_tools_explicit_null_treated_as_empty(self, tmp_path):
+        # ``allow_tools:`` with no value parses as None — normalized to [] like
+        # every other section, not rejected as an invalid list.
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\nprofiles:\n  cop:\n    tool: copilot\n    allow_tools:\n"
+        )
+        config = load_config(tmp_path)
+        assert config.get_profile("cop").allow_tools == []
+
     def test_allow_tools_must_be_list_of_strings(self, tmp_path):
         data = {"version": 1, "profiles": {"cop": {"allow_tools": [1, 2]}}}
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))

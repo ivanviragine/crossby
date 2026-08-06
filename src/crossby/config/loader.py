@@ -175,7 +175,11 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     for name, profile_raw in profiles_raw.items():
         if not isinstance(profile_raw, dict):
             raise ConfigError(f"'profiles.{name}' must be a mapping")
-        allow_tools_raw = profile_raw.get("allow_tools", [])
+        # An explicit null (``allow_tools:`` with no value) parses as None; treat
+        # it as absent — matching how ai/commands/models/profiles are normalized.
+        allow_tools_raw = profile_raw.get("allow_tools")
+        if allow_tools_raw is None:
+            allow_tools_raw = []
         if not isinstance(allow_tools_raw, list) or not all(
             isinstance(t, str) for t in allow_tools_raw
         ):
