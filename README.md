@@ -280,7 +280,7 @@ Key behaviours:
 
 - **Switching restores the true baseline.** `use B` while `A` is active reverts `A` first, then applies `B` from the original pre-`A` state — so a later `clear` restores your settings, not `A`'s (or `B`'s) output.
 - **Reverting is ledger-driven.** `clear` only undoes what crossby wrote (tracked in `.crossby/owned.json`); a `skillOverrides`, `deny`, or MCP-`disabled` entry you authored by hand is left untouched. `clear` works even after the active scene is renamed or deleted from `.crossby.yml`.
-- **Drift is detected, not clobbered.** `status` compares a content hash captured at apply time against the current file (normalised, so a semantically-neutral reformat is not flagged). `use` and `clear` refuse to revert a scene whose managed files have drifted — pass `--force` to overwrite the drift.
+- **Drift is detected, not clobbered.** `status` compares a per-tool content hash captured at apply time against the current file (normalised, so a semantically-neutral reformat is not flagged; drift is tracked at file granularity, so an unrelated edit to a shared config file such as `.claude/settings.json` can register too). `use` and `clear` refuse to revert a scene whose managed files have drifted — pass `--force` to overwrite the drift.
 - **`--tool`** scopes every subcommand (output for `list`/`show`/`status`, effect for `use`/`clear`). `--plan` previews without writing; `--force` proceeds despite drift.
 
 Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.

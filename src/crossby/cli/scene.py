@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from crossby.scenes.state import SceneState, SceneToolRecord
     from crossby.services.scene_resolution import ResolvedScene
     from crossby.sync.base import SyncResult
+    from crossby.sync.readers import ProjectScan
 
 scene_app = typer.Typer(
     name="scene",
@@ -228,8 +229,11 @@ def list_scenes(
     from rich.table import Table
 
     from crossby.ai_tools.base import AbstractAITool
+    from crossby.sync.readers import scan_project
 
     installed = AbstractAITool.detect_installed()
+    # Scan the project once and reuse it for every scene's resolution.
+    scan = scan_project(project_root, installed)
 
     table = Table(show_header=True, box=None, padding=(0, 2))
     table.add_column("Scene")
@@ -238,7 +242,7 @@ def list_scenes(
 
     for name in sorted(config.scenes):
         description = config.scenes[name].description or ""
-        counts = _concern_counts(config, name, project_root, installed, tool_id)
+        counts = _concern_counts(config, name, project_root, scan, tool_id)
         table.add_row(name, description, counts)
     console.out.print(table)
 
@@ -247,13 +251,12 @@ def _concern_counts(
     config: CrossbyConfig,
     name: str,
     project_root: Path,
-    installed: list[AIToolID],
+    scan: ProjectScan,
     tool_id: AIToolID | None,
 ) -> str:
     """A compact ``skills:3 agents:1`` summary of what *name* resolves to."""
     from crossby.config.loader import ConfigError
     from crossby.services.scene_resolution import resolve_scene
-    from crossby.sync.readers import scan_project
 
     try:
         scene = config.get_scene(name)
@@ -261,7 +264,6 @@ def _concern_counts(
         return f"[error]invalid ({exc})[/]"
     if scene is None:
         return ""
-    scan = scan_project(project_root, installed)
     resolved = resolve_scene(scene, scan, project_root, tool_id=tool_id)
     parts = [
         f"{concern}:{len(resolved.names(concern))}"
@@ -358,14 +360,7 @@ def use_scene(
         console.warn(loaded.warning)
     active = loaded.state
 
-    # Drift on the outgoing scene must be checked before we revert it — reverting
-    # a hand-edited scene would silently discard that work.
-    if active is not None:
-        drifted = detect_drift(project_root, active)
-        if drifted and not force:
-            _report_drift_refusal(active.scene, drifted, verb="switch from")
-            raise typer.Exit(1)
-
+    # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
         results = apply_scene(resolved, project_root, dry_run=True, force=force, tools=scope)
         _display_results(results)
@@ -373,6 +368,14 @@ def use_scene(
         if _has_error(results):
             raise typer.Exit(1)
         return
+
+    # Drift on the outgoing scene must be checked before we revert it — reverting
+    # a hand-edited scene would silently discard that work.
+    if active is not None:
+        drifted = detect_drift(project_root, active)
+        if drifted and not force:
+            _report_drift_refusal(active.scene, drifted, verb="switch from")
+            raise typer.Exit(1)
 
     # The review may change the target tool (interactive only); honour it.
     tool_id = _confirm_scene_defaults(
@@ -383,7 +386,7 @@ def use_scene(
     # Switch: revert the active scene first, scoped to exactly the tools it was
     # applied to, so the new scene applies from the true pre-scene baseline.
     if active is not None:
-        _revert_active(project_root, active, installed)
+        _revert_active(project_root, active)
 
     results = apply_scene(resolved, project_root, force=force, tools=scope)
     _display_results(results)
@@ -416,16 +419,15 @@ def _recorded_tools(active: SceneState) -> list[AIToolID]:
     return tools
 
 
-def _revert_active(
-    project_root: Path,
-    active: SceneState,
-    installed: list[AIToolID],
-) -> None:
+def _revert_active(project_root: Path, active: SceneState) -> None:
     from crossby.scenes.engine import clear_scene
 
-    installed_set = set(installed)
-    revert_tools = [tool for tool in _recorded_tools(active) if tool in installed_set]
-    clear_scene(project_root, tools=revert_tools or None)
+    # Revert exactly the recorded tools (the engine filters to installed itself
+    # for the source re-points). An empty list must mean "revert nothing" — never
+    # collapse to None, which the engine reads as "every installed tool".
+    revert_tools = _recorded_tools(active)
+    if revert_tools:
+        clear_scene(project_root, tools=revert_tools)
 
 
 def _build_state(
@@ -438,18 +440,15 @@ def _build_state(
     from crossby.scenes.state import SceneState, compute_hashes, now_iso
 
     tools = _tool_mechanisms(scene, scope)
+    hashes_by_tool = compute_hashes(project_root, results)
+    for tool_str, record in tools.items():
+        record.hashes = hashes_by_tool.get(tool_str, {})
     for r in results:
         if r.action == "error" and r.tool_id is not None and str(r.tool_id) in tools:
             tools[str(r.tool_id)].status = "failed"
 
     status = "partial" if _has_error(results) else "applied"
-    return SceneState(
-        scene=name,
-        applied_at=now_iso(),
-        status=status,
-        tools=tools,
-        hashes=compute_hashes(project_root, results),
-    )
+    return SceneState(scene=name, applied_at=now_iso(), status=status, tools=tools)
 
 
 def _tool_mechanisms(scene: SceneConfig, scope: list[AIToolID]) -> dict[str, SceneToolRecord]:
@@ -489,7 +488,6 @@ def clear_active(
     from crossby.scenes.engine import clear_scene
     from crossby.scenes.state import (
         clear_scene_state,
-        content_hash,
         detect_drift,
         load_scene_state,
         save_scene_state,
@@ -506,21 +504,26 @@ def clear_active(
         console.info("No active scene — nothing to clear.")
         return
 
-    drifted = detect_drift(project_root, active)
-    if drifted and not force:
-        _report_drift_refusal(active.scene, drifted, verb="clear")
-        raise typer.Exit(1)
-
     recorded = _recorded_tools(active)
+    if tool_id is not None and tool_id not in recorded:
+        console.info(f"Tool {tool_id} is not part of the active scene {active.scene!r}.")
+        console.hint(f"Recorded tools: {', '.join(str(t) for t in recorded) or '(none)'}")
+        return
     scope = [tool_id] if tool_id is not None else recorded
 
+    # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = clear_scene(project_root, dry_run=True, tools=scope or None)
+        results = clear_scene(project_root, dry_run=True, tools=scope)
         _display_results(results)
         console.info("(--plan) no changes written.")
         if _has_error(results):
             raise typer.Exit(1)
         return
+
+    drifted = detect_drift(project_root, active)
+    if drifted and not force:
+        _report_drift_refusal(active.scene, drifted, verb="clear")
+        raise typer.Exit(1)
 
     # The review may change the target tool (interactive only); honour it.
     tool_id = _confirm_scene_defaults(
@@ -528,20 +531,19 @@ def clear_active(
     )
     scope = [tool_id] if tool_id is not None else recorded
 
-    results = clear_scene(project_root, tools=scope or None)
+    results = clear_scene(project_root, tools=scope)
     _display_results(results)
 
     # Update the state file: a full clear removes it; a scoped clear drops just
-    # that tool and re-baselines the drift hashes to the post-revert content.
+    # that tool (its per-tool hashes go with it, so no re-baseline is needed).
     if tool_id is None:
         clear_scene_state(project_root)
     else:
         active.tools.pop(str(tool_id), None)
-        if not active.tools:
-            clear_scene_state(project_root)
-        else:
-            active.hashes = {rel: content_hash(project_root / rel) for rel in active.hashes}
+        if active.tools:
             save_scene_state(project_root, active)
+        else:
+            clear_scene_state(project_root)
 
     if _has_error(results):
         raise typer.Exit(1)

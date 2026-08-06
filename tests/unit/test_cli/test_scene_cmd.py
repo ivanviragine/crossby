@@ -252,6 +252,30 @@ class TestPerToolScope:
         assert state["scene"] == "deploy"
         assert set(state["tools"]) == {str(t) for t in INSTALLED}
 
+    def test_scoped_clear_prunes_tool_from_state(self, tmp_path: Path) -> None:
+        # A scoped clear drops exactly the cleared tool (and its drift hashes),
+        # leaving the other tools recorded and scene-managed.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        assert _invoke(["scene", "clear", "--tool", "cursor"], root).exit_code == 0
+
+        state = read_json(root / SCENE_STATE_PATH)
+        assert "cursor" not in state["tools"]
+        assert "claude" in state["tools"]
+        # Claude's DECLARE is still in force — only cursor was reverted.
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_clear_tool_not_in_active_scene_is_noop(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root).exit_code == 0
+        # codex was never part of the cursor-only scene.
+        result = _invoke(["scene", "clear", "--tool", "codex"], root)
+        assert result.exit_code == 0, result.output
+        assert "not part of the active scene" in result.output
+        # The cursor scene is left intact.
+        assert (root / SCENE_STATE_PATH).exists()
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+
 
 # ---------------------------------------------------------------------------
 # Drift
@@ -307,6 +331,19 @@ class TestDrift:
         assert result.exit_code == 0, result.output
         # Re-applied cleanly, repairing the drift.
         assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_plan_previews_even_when_drifted(self, tmp_path: Path) -> None:
+        # --plan writes nothing, so it must preview rather than refuse on drift.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        _drift_settings(root)
+
+        use_plan = _invoke(["scene", "use", "deploy", "--plan"], root)
+        assert use_plan.exit_code == 0, use_plan.output
+        clear_plan = _invoke(["scene", "clear", "--plan"], root)
+        assert clear_plan.exit_code == 0, clear_plan.output
+        # Neither preview mutated the active scene.
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
 
     def test_clear_refuses_on_drift_without_force(self, tmp_path: Path) -> None:
         root = _project(tmp_path)

@@ -358,3 +358,14 @@ class TestToolScope:
         apply_scene(resolve(tmp_path, SCENE), tmp_path)
         clear_scene(tmp_path)
         assert not (tmp_path / ".crossby" / "scene").exists()
+
+    def test_empty_scope_clear_reverts_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # tools=[] must mean "revert nothing" — it must NOT collapse to "all".
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        clear_scene(tmp_path, tools=[])
+        assert _settings(tmp_path)["skillOverrides"] == {"deploy-prod": "off"}
+        assert (tmp_path / ".crossby" / "scene").exists()

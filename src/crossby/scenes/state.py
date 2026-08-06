@@ -52,11 +52,14 @@ class SceneToolRecord:
 
     ``mechanisms`` maps each participating concern to the mechanism used
     (``declare`` / ``project`` / ``unsupported``); ``status`` is ``applied`` or
-    ``failed`` (the tool produced an ``error`` row during apply).
+    ``failed`` (the tool produced an ``error`` row during apply). ``hashes`` maps
+    each file this tool wrote to a normalised content hash — kept per-tool so a
+    scoped clear that drops a tool also drops exactly its drift baseline.
     """
 
     mechanisms: dict[str, str] = field(default_factory=dict)
     status: str = "applied"
+    hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,7 +70,6 @@ class SceneState:
     applied_at: str
     status: str  # "applied" | "partial"
     tools: dict[str, SceneToolRecord] = field(default_factory=dict)
-    hashes: dict[str, str] = field(default_factory=dict)
 
     @property
     def tool_ids(self) -> list[str]:
@@ -141,7 +143,6 @@ def load_scene_state(project_root: Path) -> LoadedSceneState:
             applied_at=applied_at,
             status=status if isinstance(status, str) else "applied",
             tools=_parse_tools(raw.get("tools")),
-            hashes=_parse_hashes(raw.get("hashes")),
         )
     )
 
@@ -173,10 +174,9 @@ def _to_json(state: SceneState) -> dict[str, Any]:
         "applied_at": state.applied_at,
         "status": state.status,
         "tools": {
-            tool: {"mechanisms": rec.mechanisms, "status": rec.status}
+            tool: {"mechanisms": rec.mechanisms, "status": rec.status, "hashes": rec.hashes}
             for tool, rec in state.tools.items()
         },
-        "hashes": state.hashes,
     }
 
 
@@ -187,19 +187,16 @@ def _parse_tools(raw: object) -> dict[str, SceneToolRecord]:
     for tool, rec in raw.items():
         if not isinstance(tool, str) or not isinstance(rec, dict):
             continue
-        mechanisms = {
-            k: v
-            for k, v in (rec.get("mechanisms") or {}).items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
         status = rec.get("status")
         out[tool] = SceneToolRecord(
-            mechanisms=mechanisms, status=status if isinstance(status, str) else "applied"
+            mechanisms=_str_map(rec.get("mechanisms")),
+            status=status if isinstance(status, str) else "applied",
+            hashes=_str_map(rec.get("hashes")),
         )
     return out
 
 
-def _parse_hashes(raw: object) -> dict[str, str]:
+def _str_map(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
@@ -226,26 +223,24 @@ def now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def scene_managed_paths(project_root: Path, results: Sequence[SyncResult]) -> list[str]:
-    """The relative paths of the files a scene apply touched, order-preserved.
+def compute_hashes(project_root: Path, results: Sequence[SyncResult]) -> dict[str, dict[str, str]]:
+    """Per-tool normalised content hashes for the files an apply *wrote*.
 
-    Derived from the ``file_path`` each :class:`SyncResult` carries, so no
-    per-tool path knowledge is duplicated here.
+    Keyed by tool id (from :attr:`SyncResult.tool_id`), so a scoped clear that
+    drops a tool also drops exactly its drift baseline. Only ``created`` /
+    ``updated`` rows are hashed — a ``skipped`` row means crossby wrote nothing to
+    that file this run, so baselining it would flag unrelated edits (or, for a
+    file that didn't exist yet, its later creation) as drift.
     """
-    seen: dict[str, None] = {}
+    out: dict[str, dict[str, str]] = {}
     for result in results:
-        if result.file_path is None:
+        if result.file_path is None or result.tool_id is None:
+            continue
+        if result.action not in ("created", "updated"):
             continue
         rel = _rel(project_root, result.file_path)
-        seen.setdefault(rel, None)
-    return list(seen)
-
-
-def compute_hashes(project_root: Path, results: Sequence[SyncResult]) -> dict[str, str]:
-    """Capture a normalised content hash for every file the apply touched."""
-    return {
-        rel: content_hash(project_root / rel) for rel in scene_managed_paths(project_root, results)
-    }
+        out.setdefault(str(result.tool_id), {})[rel] = content_hash(project_root / rel)
+    return out
 
 
 def detect_drift(project_root: Path, state: SceneState) -> list[str]:
@@ -253,13 +248,14 @@ def detect_drift(project_root: Path, state: SceneState) -> list[str]:
 
     A semantically-neutral reformat (key reordering / whitespace) leaves the
     normalised hash unchanged, so it is *not* reported; a content change or a
-    deleted file is.
+    deleted file is. Paths are deduplicated across tools and sorted.
     """
-    drifted: list[str] = []
-    for rel, expected in sorted(state.hashes.items()):
-        if content_hash(project_root / rel) != expected:
-            drifted.append(rel)
-    return drifted
+    drifted: dict[str, None] = {}
+    for record in state.tools.values():
+        for rel, expected in record.hashes.items():
+            if content_hash(project_root / rel) != expected:
+                drifted.setdefault(rel, None)
+    return sorted(drifted)
 
 
 def content_hash(path: Path) -> str:
@@ -347,5 +343,4 @@ __all__ = [
     "load_scene_state",
     "now_iso",
     "save_scene_state",
-    "scene_managed_paths",
 ]
