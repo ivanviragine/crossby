@@ -136,13 +136,25 @@ def load_scene_state(project_root: Path) -> LoadedSceneState:
                 "treating as no active scene"
             ),
         )
+    tools = _parse_tools(raw.get("tools"))
+    if not tools:
+        # A real applied scene always records at least one tool. Empty or
+        # malformed ``tools`` is uninterpretable — retain the file (don't delete
+        # it) and report no active scene rather than silently reverting nothing.
+        return LoadedSceneState(
+            None,
+            warning=(
+                f"{SCENE_STATE_PATH.as_posix()} has no readable tool records; "
+                "treating as no active scene"
+            ),
+        )
     status = raw.get("status")
     return LoadedSceneState(
         SceneState(
             scene=scene,
             applied_at=applied_at,
             status=status if isinstance(status, str) else "applied",
-            tools=_parse_tools(raw.get("tools")),
+            tools=tools,
         )
     )
 

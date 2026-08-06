@@ -65,15 +65,19 @@ def apply_scene(
     results: list[SyncResult] = []
 
     # 1. DECLARE surfaces (record scene provenance into the in-memory ledger).
-    results.extend(_declare_skills(ctx))
-    results.extend(_declare_agents(ctx))
-    results.extend(_declare_mcp(ctx))
-
-    # Persist scene DECLARE provenance BEFORE the hooks/permissions run_sync
-    # calls: those load the ledger from disk and re-save it (owned section);
-    # load_ledger/to_json round-trip the scene section, so an early save keeps it.
-    if not dry_run:
-        save_ledger(project_root, ctx.ledger)
+    #    The provenance save runs in a finally so that a DECLARE writer raising
+    #    part-way still persists what was already written — otherwise `clear`
+    #    could not revert an on-disk setting it has no record of. It also lands
+    #    BEFORE the hooks/permissions run_sync calls: those reload the ledger from
+    #    disk and re-save it (owned section), and load_ledger/to_json round-trip
+    #    the scene section, so this early save is preserved.
+    try:
+        results.extend(_declare_skills(ctx))
+        results.extend(_declare_agents(ctx))
+        results.extend(_declare_mcp(ctx))
+    finally:
+        if not dry_run:
+            save_ledger(project_root, ctx.ledger)
 
     # 2. PROJECT the skills/agents directories at the filtered source tree.
     results.extend(_project_concern(ctx, "skills", ctx.base.skills_source))
@@ -119,28 +123,33 @@ def clear_scene(
     #    Each key is gated by scope so a --tool clear leaves other tools' keys
     #    alone (a tool never applied has nothing owned, so its revert is a no-op
     #    regardless, but gating keeps the result rows scoped too).
-    if _in_scope(AIToolID.CLAUDE):
-        results.append(
-            declare.apply_claude_skill_overrides(
-                project_root, set(), ledger, dry_run=dry_run, version=version
+    # The ledger save runs in a finally so a revert that raises part-way still
+    # persists the narrowed ownership — otherwise a re-run would try to revert an
+    # entry crossby already removed.
+    try:
+        if _in_scope(AIToolID.CLAUDE):
+            results.append(
+                declare.apply_claude_skill_overrides(
+                    project_root, set(), ledger, dry_run=dry_run, version=version
+                )
             )
-        )
-        results.append(
-            declare.apply_claude_deny_agents(project_root, set(), ledger, dry_run=dry_run)
-        )
-        results.append(
-            declare.apply_claude_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
-        )
-    if _in_scope(AIToolID.CODEX):
-        results.append(
-            declare.apply_codex_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
-        )
-    if _in_scope(AIToolID.ANTIGRAVITY_CLI):
-        results.append(
-            declare.apply_antigravity_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
-        )
-    if not dry_run:
-        save_ledger(project_root, ledger)
+            results.append(
+                declare.apply_claude_deny_agents(project_root, set(), ledger, dry_run=dry_run)
+            )
+            results.append(
+                declare.apply_claude_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+            )
+        if _in_scope(AIToolID.CODEX):
+            results.append(
+                declare.apply_codex_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+            )
+        if _in_scope(AIToolID.ANTIGRAVITY_CLI):
+            results.append(
+                declare.apply_antigravity_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+            )
+    finally:
+        if not dry_run:
+            save_ledger(project_root, ledger)
 
     # 2. Re-point skills/agents back at the unfiltered source (before removing the
     #    projection, so the tools never briefly resolve to a deleted tree).

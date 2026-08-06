@@ -26,6 +26,8 @@ import typer
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from crossby.models.ai import AIToolID
     from crossby.models.config import CrossbyConfig, SceneConfig
     from crossby.scenes.state import SceneState, SceneToolRecord
@@ -404,19 +406,6 @@ def use_scene(
         console.warn(loaded.warning)
     active = loaded.state
 
-    # A scoped switch to a *different* scene would silently leave the other tools
-    # on the active scene — the single-active-scene state can't represent that.
-    if active is not None and active.scene != name and tool_id is not None:
-        scope_strs = {str(t) for t in scope}
-        others = [t for t in active.tool_ids if t not in scope_strs]
-        if others:
-            console.error(
-                f"Scene {active.scene!r} is active on {', '.join(sorted(others))}; "
-                f"switching to {name!r} with --tool would strand them on {active.scene!r}."
-            )
-            console.hint("Run 'crossby scene clear' first, or re-run without --tool.")
-            raise typer.Exit(1)
-
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
         results = apply_scene(resolved, project_root, dry_run=True, force=force, tools=scope)
@@ -426,7 +415,8 @@ def use_scene(
             raise typer.Exit(1)
         return
 
-    # The review may change the target tool (interactive only); honour it.
+    # The review may change the target tool (interactive only); honour it, and
+    # do the scope-safety checks below against the *final* scope.
     new_tool_id = _confirm_scene_defaults(
         action="use", scene=name, tool_id=tool_id, installed=installed
     )
@@ -436,26 +426,46 @@ def use_scene(
         if tool_id is not None:
             scope = _expand_shared_scope(scope, installed)
 
-    # Switch: revert the active scene first, from the true pre-scene baseline.
-    # Drift on the outgoing scene must be checked before that revert would discard
-    # hand edits, and a failed revert aborts the switch (state left intact).
-    if active is not None:
-        revert_tools = [str(t) for t in _recorded_tools(active)]
-        drifted = detect_drift(project_root, active, tools=revert_tools)
-        if drifted and not force:
-            _report_drift_refusal(active.scene, drifted, verb="switch from")
-            raise typer.Exit(1)
-        if not _revert_active(project_root, active):
-            console.error(f"Could not revert active scene {active.scene!r} — aborting switch.")
-            console.hint("Its state is left intact; resolve the errors above and retry.")
+    scope_strs = {str(t) for t in scope}
+
+    # A scoped switch to a *different* scene would silently leave the other tools
+    # on the active scene — the single-active-scene state can't represent that.
+    if active is not None and active.scene != name and tool_id is not None:
+        others = [t for t in active.tool_ids if t not in scope_strs]
+        if others:
+            console.error(
+                f"Scene {active.scene!r} is active on {', '.join(sorted(others))}; "
+                f"switching to {name!r} with --tool would strand them on {active.scene!r}."
+            )
+            console.hint("Run 'crossby scene clear' first, or re-run without --tool.")
             raise typer.Exit(1)
 
-    results = apply_scene(resolved, project_root, force=force, tools=scope)
+    # Revert only the scope tools' current state (not the whole active scene), so
+    # a same-scene scoped re-apply repairs just those and leaves the rest alone.
+    # Drift on those tools is checked first (the revert would discard hand edits),
+    # and a failed revert aborts before applying, leaving the state intact.
+    if active is not None:
+        revert = [t for t in _recorded_tools(active) if str(t) in scope_strs]
+        if revert:
+            drifted = detect_drift(project_root, active, tools=[str(t) for t in revert])
+            if drifted and not force:
+                _report_drift_refusal(active.scene, drifted, verb="switch from")
+                raise typer.Exit(1)
+            if not _revert_tools(project_root, revert):
+                console.error(f"Could not revert {active.scene!r} — aborting; state left intact.")
+                raise typer.Exit(1)
+
+    results = _apply_or_exit(resolved, project_root, force=force, tools=scope)
     _display_results(results)
     _warn_removed_hooks_permissions(results)
 
     scene = _get_scene_or_exit(config, name)
     state = _build_state(project_root, name, scene, scope, results)
+    # A same-scene re-apply keeps records for tools outside this scope.
+    if active is not None and active.scene == name:
+        merged = dict(active.tools)
+        merged.update(state.tools)
+        state.tools = merged
     save_scene_state(project_root, state)
 
     if _has_error(results):
@@ -482,19 +492,49 @@ def _recorded_tools(active: SceneState) -> list[AIToolID]:
     return tools
 
 
-def _revert_active(project_root: Path, active: SceneState) -> bool:
-    """Revert the recorded tools of the active scene. Returns success.
+def _revert_tools(project_root: Path, tools: list[AIToolID]) -> bool:
+    """Revert *tools* via the engine. Returns success (no ``error`` rows).
 
-    An empty list means "revert nothing" — never collapse to ``None``, which the
-    engine reads as "every installed tool". A revert that produces an ``error``
-    row returns ``False`` so the caller can abort a switch and keep the old state.
+    An empty list is a no-op — never passed to the engine as ``None``, which it
+    reads as "every installed tool". A revert that errors returns ``False`` so a
+    switch can abort and keep the old state.
     """
+    if not tools:
+        return True
     from crossby.scenes.engine import clear_scene
 
-    revert_tools = _recorded_tools(active)
-    if not revert_tools:
-        return True
-    return not _has_error(clear_scene(project_root, tools=revert_tools))
+    return not _has_error(_call_engine_or_exit(clear_scene, project_root, tools=tools))
+
+
+def _apply_or_exit(
+    resolved: ResolvedScene,
+    project_root: Path,
+    *,
+    force: bool,
+    tools: list[AIToolID],
+) -> list[SyncResult]:
+    from crossby.scenes.engine import apply_scene
+
+    return _call_engine_or_exit(apply_scene, resolved, project_root, force=force, tools=tools)
+
+
+def _call_engine_or_exit(
+    fn: Callable[..., list[SyncResult]], *args: object, **kwargs: object
+) -> list[SyncResult]:
+    """Run an engine call, turning an unexpected exception into a clean exit.
+
+    The DECLARE handlers persist provenance in a ``finally``, so anything crossby
+    already wrote stays revertible via ``clear`` — this just avoids surfacing a
+    raw traceback for a genuinely exceptional failure (e.g. a read-only config).
+    """
+    try:
+        return fn(*args, **kwargs)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        console.error(f"Scene engine error: {exc}")
+        console.hint("'crossby scene clear' can revert any partial changes crossby recorded.")
+        raise typer.Exit(1) from exc
 
 
 def _build_state(
@@ -510,12 +550,35 @@ def _build_state(
     hashes_by_tool = compute_hashes(project_root, results)
     for tool_str, record in tools.items():
         record.hashes = hashes_by_tool.get(tool_str, {})
+    _replicate_shared_hashes(tools, scope)
     for r in results:
         if r.action == "error" and r.tool_id is not None and str(r.tool_id) in tools:
             tools[str(r.tool_id)].status = "failed"
 
     status = "partial" if _has_error(results) else "applied"
     return SceneState(scene=name, applied_at=now_iso(), status=status, tools=tools)
+
+
+def _replicate_shared_hashes(tools: dict[str, SceneToolRecord], scope: list[AIToolID]) -> None:
+    """Mirror a shared skills-dir hash onto every tool that resolves to it.
+
+    A shared re-point (Codex + Antigravity CLI on ``.agents/skills``) is reported
+    once, so its hash lands under a single tool. Copy it to the co-sharers so
+    ``status --tool <either>`` and a scoped drift check both see it.
+    """
+    from crossby.config.skills import SKILLS_DIR
+
+    for tool in scope:
+        shared_dir = SKILLS_DIR.get(tool)
+        if shared_dir is None or str(tool) not in tools:
+            continue
+        if shared_dir in tools[str(tool)].hashes:
+            continue
+        for other in scope:
+            other_hashes = tools.get(str(other))
+            if other_hashes is not None and shared_dir in other_hashes.hashes:
+                tools[str(tool)].hashes[shared_dir] = other_hashes.hashes[shared_dir]
+                break
 
 
 def _tool_mechanisms(scene: SceneConfig, scope: list[AIToolID]) -> dict[str, SceneToolRecord]:
@@ -602,7 +665,7 @@ def clear_active(
         tool_id = new_tool_id
         scope = _clear_scope(tool_id, recorded)
 
-    results = clear_scene(project_root, tools=scope)
+    results = _call_engine_or_exit(clear_scene, project_root, tools=scope)
     _display_results(results)
 
     # A failed clear leaves the state untouched so the revert can be retried —

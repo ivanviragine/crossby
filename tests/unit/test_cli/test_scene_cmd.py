@@ -213,6 +213,19 @@ class TestSwitching:
         assert result.exit_code == 0, result.output
         assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
 
+    def test_scoped_reapply_preserves_other_tools(self, tmp_path: Path) -> None:
+        # Applying globally then re-applying the SAME scene scoped to one tool
+        # must repair only that tool and keep the rest recorded/active.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        assert _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root).exit_code == 0
+
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["scene"] == "pr-review"
+        assert set(state["tools"]) == {str(t) for t in INSTALLED}
+        # Claude's DECLARE was never reverted.
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
 
 class TestPerToolScope:
     def test_use_tool_cursor_touches_only_cursor(self, tmp_path: Path) -> None:
@@ -479,6 +492,29 @@ class TestClearAndSchema:
         clear = _invoke(["scene", "clear"], root)
         assert clear.exit_code == 0, clear.output
         assert "nothing to clear" in clear.output.lower()
+
+    def test_empty_tools_state_is_no_active_scene_and_retained(self, tmp_path: Path) -> None:
+        # A state file with no readable tool records is uninterpretable: report
+        # no active scene, and do NOT delete the file (so a bug can't orphan a
+        # ledger-owned setting).
+        root = _project(tmp_path)
+        state_path = root / SCENE_STATE_PATH
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "scene": "pr-review",
+                    "applied_at": "2026-01-01T00:00:00Z",
+                    "tools": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 0, result.output
+        assert "no readable tool records" in result.output
+        assert state_path.exists()
 
 
 # ---------------------------------------------------------------------------
