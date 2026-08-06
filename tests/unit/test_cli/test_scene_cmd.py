@@ -276,6 +276,33 @@ class TestPerToolScope:
         assert (root / SCENE_STATE_PATH).exists()
         assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
 
+    def test_tool_scope_expands_to_shared_skills_dir(self, tmp_path: Path) -> None:
+        # codex and antigravity-cli share .agents/skills, so --tool codex must
+        # also cover antigravity-cli (and record it) to stay honest.
+        root = _project(tmp_path)
+        result = _invoke(["scene", "use", "pr-review", "--tool", "codex"], root)
+        assert result.exit_code == 0, result.output
+        assert "shared skills directory" in result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"codex", "antigravity-cli"}
+
+    def test_scoped_switch_to_different_scene_is_rejected(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        # A different scene, scoped to one tool, would strand the other tools.
+        result = _invoke(["scene", "use", "deploy", "--tool", "cursor"], root)
+        assert result.exit_code == 1
+        assert "strand" in result.output.lower()
+        # The active scene is unchanged.
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+
+    def test_scoped_reapply_same_scene_allowed(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root).exit_code == 0
+        # Re-applying the SAME scene scoped to the same tool is fine (repair).
+        result = _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root)
+        assert result.exit_code == 0, result.output
+
 
 # ---------------------------------------------------------------------------
 # Drift
@@ -358,6 +385,21 @@ class TestDrift:
         # --force lets the clear through.
         assert _invoke(["scene", "clear", "--force"], root).exit_code == 0
         assert not (root / SCENE_STATE_PATH).exists()
+
+    def test_tool_scope_ignores_other_tool_drift(self, tmp_path: Path) -> None:
+        # Drift on a Claude-managed file must not block or be reported by a
+        # cursor-scoped clear / status.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        _drift_settings(root)  # edits .claude/settings.json (Claude's file)
+
+        status = _invoke(["scene", "status", "--tool", "cursor"], root)
+        assert status.exit_code == 0, status.output
+        assert "No drift" in status.output
+
+        # cursor's own files are untouched, so its scoped clear is not refused.
+        clear = _invoke(["scene", "clear", "--tool", "cursor"], root)
+        assert clear.exit_code == 0, clear.output
 
 
 def _drift_settings(root: Path) -> None:
@@ -495,6 +537,19 @@ class TestPartialFailure:
         settings = _settings(root)
         assert "skillOverrides" not in settings
         assert not (root / SCENE_STATE_PATH).exists()
+
+    def test_failed_clear_preserves_state_for_retry(self, tmp_path: Path) -> None:
+        # If the revert errors (e.g. a managed file is now malformed), the state
+        # file must survive so the clear can be retried. --force bypasses the
+        # drift refusal so the clear actually runs and hits the writer error.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        (root / ".claude" / "settings.json").write_text("{ broken", encoding="utf-8")
+
+        result = _invoke(["scene", "clear", "--force"], root)
+        assert result.exit_code == 1
+        assert "left intact" in result.output.lower()
+        assert (root / SCENE_STATE_PATH).exists()
 
 
 # ---------------------------------------------------------------------------

@@ -167,6 +167,46 @@ def _scope_for(tool_id: AIToolID | None, installed: list[AIToolID]) -> list[AITo
     return [tool_id]
 
 
+def _expand_shared_scope(scope: list[AIToolID], candidates: list[AIToolID]) -> list[AIToolID]:
+    """Add any *candidate* that shares a skills directory with a scoped tool.
+
+    Codex and Antigravity CLI both resolve skills to ``.agents/skills``, so
+    re-pointing (or restoring) it for one necessarily affects the other. Scoping
+    to a single one of them would silently reach the other; expanding the scope
+    keeps the operation and the recorded state honest.
+    """
+    from crossby.config.skills import SKILLS_DIR
+
+    scoped_dirs = {SKILLS_DIR.get(tool) for tool in scope} - {None}
+    expanded = list(scope)
+    for tool in candidates:
+        if tool not in expanded and SKILLS_DIR.get(tool) in scoped_dirs:
+            expanded.append(tool)
+    return expanded
+
+
+def _inform_shared_expansion(base: list[AIToolID], expanded: list[AIToolID]) -> None:
+    extra = [tool for tool in expanded if tool not in base]
+    if extra:
+        shared = ", ".join(str(tool) for tool in extra)
+        console.info(f"--tool also affects {shared} (shared skills directory).")
+
+
+def _warn_removed_hooks_permissions(results: list[SyncResult]) -> None:
+    """Flag scene-removed hooks/permissions — ``clear`` does not restore them.
+
+    Those entries are crossby-owned synced items; a scene narrows them through
+    the revocable-sync removal channel, which the ledger-driven revert cannot put
+    back. Re-running ``crossby sync`` restores them.
+    """
+    removed = [r for r in results if r.concern.value in ("hooks", "permissions") and r.revoked > 0]
+    if removed:
+        console.warn(
+            "This scene removed hook(s)/permission(s); 'crossby scene clear' does not restore them."
+        )
+        console.hint("Re-run 'crossby sync' to restore them after clearing the scene.")
+
+
 def _confirm_scene_defaults(
     *, action: str, scene: str | None, tool_id: AIToolID | None, installed: list[AIToolID]
 ) -> AIToolID | None:
@@ -350,6 +390,10 @@ def use_scene(
     tool_id = _validate_tool(tool)
     installed = _installed_or_exit()
     scope = _scope_for(tool_id, installed)
+    if tool_id is not None:
+        expanded = _expand_shared_scope(scope, installed)
+        _inform_shared_expansion(scope, expanded)
+        scope = expanded
 
     # Resolve the full union (every tool) so the disable sets stay anchored on the
     # real inventory; the apply is narrowed to `scope` via the tools= argument.
@@ -360,6 +404,19 @@ def use_scene(
         console.warn(loaded.warning)
     active = loaded.state
 
+    # A scoped switch to a *different* scene would silently leave the other tools
+    # on the active scene — the single-active-scene state can't represent that.
+    if active is not None and active.scene != name and tool_id is not None:
+        scope_strs = {str(t) for t in scope}
+        others = [t for t in active.tool_ids if t not in scope_strs]
+        if others:
+            console.error(
+                f"Scene {active.scene!r} is active on {', '.join(sorted(others))}; "
+                f"switching to {name!r} with --tool would strand them on {active.scene!r}."
+            )
+            console.hint("Run 'crossby scene clear' first, or re-run without --tool.")
+            raise typer.Exit(1)
+
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
         results = apply_scene(resolved, project_root, dry_run=True, force=force, tools=scope)
@@ -369,27 +426,33 @@ def use_scene(
             raise typer.Exit(1)
         return
 
-    # Drift on the outgoing scene must be checked before we revert it — reverting
-    # a hand-edited scene would silently discard that work.
+    # The review may change the target tool (interactive only); honour it.
+    new_tool_id = _confirm_scene_defaults(
+        action="use", scene=name, tool_id=tool_id, installed=installed
+    )
+    if new_tool_id != tool_id:
+        tool_id = new_tool_id
+        scope = _scope_for(tool_id, installed)
+        if tool_id is not None:
+            scope = _expand_shared_scope(scope, installed)
+
+    # Switch: revert the active scene first, from the true pre-scene baseline.
+    # Drift on the outgoing scene must be checked before that revert would discard
+    # hand edits, and a failed revert aborts the switch (state left intact).
     if active is not None:
-        drifted = detect_drift(project_root, active)
+        revert_tools = [str(t) for t in _recorded_tools(active)]
+        drifted = detect_drift(project_root, active, tools=revert_tools)
         if drifted and not force:
             _report_drift_refusal(active.scene, drifted, verb="switch from")
             raise typer.Exit(1)
-
-    # The review may change the target tool (interactive only); honour it.
-    tool_id = _confirm_scene_defaults(
-        action="use", scene=name, tool_id=tool_id, installed=installed
-    )
-    scope = _scope_for(tool_id, installed)
-
-    # Switch: revert the active scene first, scoped to exactly the tools it was
-    # applied to, so the new scene applies from the true pre-scene baseline.
-    if active is not None:
-        _revert_active(project_root, active)
+        if not _revert_active(project_root, active):
+            console.error(f"Could not revert active scene {active.scene!r} — aborting switch.")
+            console.hint("Its state is left intact; resolve the errors above and retry.")
+            raise typer.Exit(1)
 
     results = apply_scene(resolved, project_root, force=force, tools=scope)
     _display_results(results)
+    _warn_removed_hooks_permissions(results)
 
     scene = _get_scene_or_exit(config, name)
     state = _build_state(project_root, name, scene, scope, results)
@@ -419,15 +482,19 @@ def _recorded_tools(active: SceneState) -> list[AIToolID]:
     return tools
 
 
-def _revert_active(project_root: Path, active: SceneState) -> None:
+def _revert_active(project_root: Path, active: SceneState) -> bool:
+    """Revert the recorded tools of the active scene. Returns success.
+
+    An empty list means "revert nothing" — never collapse to ``None``, which the
+    engine reads as "every installed tool". A revert that produces an ``error``
+    row returns ``False`` so the caller can abort a switch and keep the old state.
+    """
     from crossby.scenes.engine import clear_scene
 
-    # Revert exactly the recorded tools (the engine filters to installed itself
-    # for the source re-points). An empty list must mean "revert nothing" — never
-    # collapse to None, which the engine reads as "every installed tool".
     revert_tools = _recorded_tools(active)
-    if revert_tools:
-        clear_scene(project_root, tools=revert_tools)
+    if not revert_tools:
+        return True
+    return not _has_error(clear_scene(project_root, tools=revert_tools))
 
 
 def _build_state(
@@ -509,7 +576,7 @@ def clear_active(
         console.info(f"Tool {tool_id} is not part of the active scene {active.scene!r}.")
         console.hint(f"Recorded tools: {', '.join(str(t) for t in recorded) or '(none)'}")
         return
-    scope = [tool_id] if tool_id is not None else recorded
+    scope = _clear_scope(tool_id, recorded)
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
@@ -520,34 +587,51 @@ def clear_active(
             raise typer.Exit(1)
         return
 
-    drifted = detect_drift(project_root, active)
+    # Drift is scoped to the tools being reverted, so an unrelated tool's drift
+    # neither blocks nor is reported by a --tool clear.
+    drifted = detect_drift(project_root, active, tools=[str(t) for t in scope])
     if drifted and not force:
         _report_drift_refusal(active.scene, drifted, verb="clear")
         raise typer.Exit(1)
 
     # The review may change the target tool (interactive only); honour it.
-    tool_id = _confirm_scene_defaults(
+    new_tool_id = _confirm_scene_defaults(
         action="clear", scene=active.scene, tool_id=tool_id, installed=recorded
     )
-    scope = [tool_id] if tool_id is not None else recorded
+    if new_tool_id != tool_id:
+        tool_id = new_tool_id
+        scope = _clear_scope(tool_id, recorded)
 
     results = clear_scene(project_root, tools=scope)
     _display_results(results)
 
-    # Update the state file: a full clear removes it; a scoped clear drops just
-    # that tool (its per-tool hashes go with it, so no re-baseline is needed).
+    # A failed clear leaves the state untouched so the revert can be retried —
+    # never delete the only record of what to revert on a partial failure.
+    if _has_error(results):
+        console.error("Clear failed for some tools — state left intact for retry.")
+        raise typer.Exit(1)
+
+    # On success update the state file: a full clear removes it; a scoped clear
+    # drops the cleared tools (their per-tool hashes go with them).
     if tool_id is None:
         clear_scene_state(project_root)
     else:
-        active.tools.pop(str(tool_id), None)
+        for cleared in scope:
+            active.tools.pop(str(cleared), None)
         if active.tools:
             save_scene_state(project_root, active)
         else:
             clear_scene_state(project_root)
 
-    if _has_error(results):
-        raise typer.Exit(1)
     console.success(f"Cleared scene {active.scene!r}.")
+
+
+def _clear_scope(tool_id: AIToolID | None, recorded: list[AIToolID]) -> list[AIToolID]:
+    """The recorded tools a clear targets: one tool (plus shared-dir co-sharers),
+    or every recorded tool."""
+    if tool_id is None:
+        return recorded
+    return _expand_shared_scope([tool_id], recorded)
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +676,9 @@ def scene_status(
 
     _render_status_tools(active, tool_id)
 
-    drifted = detect_drift(project_root, active)
+    # With --tool, report drift only for that tool.
+    drift_tools = None if tool_id is None else [str(tool_id)]
+    drifted = detect_drift(project_root, active, tools=drift_tools)
     if drifted:
         console.warn("Drift detected — scene-managed files changed since apply:")
         for rel in drifted:

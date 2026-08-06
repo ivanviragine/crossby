@@ -26,7 +26,7 @@ import hashlib
 import json
 import os
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -243,15 +243,23 @@ def compute_hashes(project_root: Path, results: Sequence[SyncResult]) -> dict[st
     return out
 
 
-def detect_drift(project_root: Path, state: SceneState) -> list[str]:
+def detect_drift(
+    project_root: Path, state: SceneState, tools: Iterable[str] | None = None
+) -> list[str]:
     """Return the scene-managed paths whose current content differs from apply.
 
     A semantically-neutral reformat (key reordering / whitespace) leaves the
     normalised hash unchanged, so it is *not* reported; a content change or a
-    deleted file is. Paths are deduplicated across tools and sorted.
+    deleted file is. ``tools`` restricts the check to those tool ids (so a
+    ``--tool`` operation isn't blocked by, or doesn't report, an unrelated tool's
+    drift); ``None`` checks every recorded tool. Paths are deduplicated and
+    sorted.
     """
+    wanted = None if tools is None else {str(t) for t in tools}
     drifted: dict[str, None] = {}
-    for record in state.tools.values():
+    for tool, record in state.tools.items():
+        if wanted is not None and tool not in wanted:
+            continue
         for rel, expected in record.hashes.items():
             if content_hash(project_root / rel) != expected:
                 drifted.setdefault(rel, None)
