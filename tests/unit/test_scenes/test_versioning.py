@@ -61,6 +61,19 @@ class TestDetectBinaryVersion:
         monkeypatch.setattr("crossby.scenes.versioning.subprocess.run", fake_run)
         assert versioning.detect_binary_version("x") == (0, 9, 1)
 
+    def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A failed --version whose error output still carries a version-shaped
+        # string must read as unknown, not sneak past the feature gate.
+        monkeypatch.setattr("crossby.scenes.versioning.shutil.which", lambda _b: "/x")
+
+        def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="error: unknown flag near v9.9.9"
+            )
+
+        monkeypatch.setattr("crossby.scenes.versioning.subprocess.run", fake_run)
+        assert versioning.detect_binary_version("x") is None
+
     def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("crossby.scenes.versioning.shutil.which", lambda _b: "/x")
 

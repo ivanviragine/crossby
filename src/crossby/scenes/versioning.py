@@ -70,6 +70,11 @@ def detect_binary_version(binary: str) -> tuple[int, int, int] | None:
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("scene.version_probe_failed", binary=binary, error=str(exc))
         return None
+    if proc.returncode != 0:
+        # A failed --version is "unknown", not a version: error output can carry a
+        # version-shaped string that would otherwise pass the Claude feature gate.
+        logger.debug("scene.version_probe_nonzero", binary=binary, returncode=proc.returncode)
+        return None
     # Some tools print the version to stderr; check stdout first, then stderr.
     return parse_semver(proc.stdout) or parse_semver(proc.stderr)
 
