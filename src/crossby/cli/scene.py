@@ -445,7 +445,12 @@ def use_scene(
     # Drift on those tools is checked first (the revert would discard hand edits),
     # and a failed revert aborts before applying, leaving the state intact.
     if active is not None:
-        revert = [t for t in _recorded_tools(active) if str(t) in scope_strs]
+        recorded = _recorded_tools(active)
+        # An unscoped use reverts every recorded tool, including one that is no
+        # longer installed — otherwise its owned keys stay applied but unrecorded.
+        revert = (
+            recorded if tool_id is None else [t for t in recorded if str(t) in scope_strs]
+        )
         if revert:
             drifted = detect_drift(project_root, active, tools=[str(t) for t in revert])
             if drifted and not force:

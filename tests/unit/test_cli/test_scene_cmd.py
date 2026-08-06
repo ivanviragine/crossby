@@ -226,6 +226,31 @@ class TestSwitching:
         # Claude's DECLARE was never reverted.
         assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
 
+    def test_unscoped_switch_reverts_recorded_but_uninstalled_tool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A tool the active scene recorded but that has since been uninstalled must
+        # still be reverted by an unscoped switch — its owned keys would otherwise
+        # stay applied with no state record (the switch replaces, not merges).
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+        # Uninstall Claude, then switch scenes without --tool.
+        remaining = [t for t in INSTALLED if t != AIToolID.CLAUDE]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: list(remaining)),
+        )
+        assert _invoke(["scene", "use", "deploy"], root).exit_code == 0
+
+        # Claude's stale pr-review DECLARE was reverted, not left dangling, and the
+        # new state records only the still-installed tools.
+        assert "skillOverrides" not in _settings(root)
+        state = read_json(root / SCENE_STATE_PATH)
+        assert "claude" not in state["tools"]
+        assert set(state["tools"]) == {str(t) for t in remaining}
+
 
 class TestPerToolScope:
     def test_use_tool_cursor_touches_only_cursor(self, tmp_path: Path) -> None:
