@@ -104,6 +104,10 @@ def apply_claude_skill_overrides(
     version_ok = versioning.at_least(version, versioning.CLAUDE_SKILL_OVERRIDES_MIN)
     adds = diff.to_add if version_ok else set()
     blocked = diff.to_add if not version_ok else set()
+    # Never overwrite an override a human set to a non-"off" value — respect their
+    # intent (and never claim it), the same way the removal path refuses to.
+    protected = {name for name in adds if overrides.get(name) not in (None, _SKILL_OFF)}
+    adds -= protected
 
     for name in adds:
         overrides[name] = _SKILL_OFF
@@ -126,6 +130,8 @@ def apply_claude_skill_overrides(
                 f"skillOverrides needs claude >= {floor} (detected {detected}); "
                 f"{len(blocked)} deselected skill(s) not filtered for Claude"
             )
+        elif protected:
+            message = f"{len(protected)} deselected skill(s) kept a user override; left untouched"
         return SyncResult(
             tool_id=AIToolID.CLAUDE,
             concern=SyncConcern.SKILLS,
@@ -143,6 +149,8 @@ def apply_claude_skill_overrides(
     note = f"skillOverrides off: {_names(adds)}"
     if blocked:
         note += f"; {len(blocked)} skill(s) not filtered (claude too old)"
+    if protected:
+        note += f"; {len(protected)} kept a user override"
     return SyncResult(
         tool_id=AIToolID.CLAUDE,
         concern=SyncConcern.SKILLS,

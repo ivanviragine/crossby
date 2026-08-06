@@ -35,6 +35,18 @@ class TestClaudeSkillOverrides:
         assert "a" not in settings.get("skillOverrides", {})  # owned removal honoured
         assert result.message and "not filtered" in result.message
 
+    def test_never_overwrites_a_user_non_off_override(self, tmp_path: Path) -> None:
+        # A user pinned "review-skill" to a non-"off" value; a scene deselecting it
+        # must not clobber that value or claim ownership of it.
+        write_json(tmp_path / CLAUDE_SETTINGS, {"skillOverrides": {"review-skill": "on"}})
+        ledger = OwnershipLedger()
+        result = declare.apply_claude_skill_overrides(
+            tmp_path, {"review-skill"}, ledger, version=(2, 1, 218)
+        )
+        assert read_json(tmp_path / CLAUDE_SETTINGS)["skillOverrides"] == {"review-skill": "on"}
+        assert ledger.scene_declare(AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES) == frozenset()
+        assert result.message and "user override" in result.message
+
     def test_revert_leaves_user_entry(self, tmp_path: Path) -> None:
         write_json(tmp_path / CLAUDE_SETTINGS, {"skillOverrides": {"user": "off"}})
         ledger = OwnershipLedger()
