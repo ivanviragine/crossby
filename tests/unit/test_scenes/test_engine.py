@@ -369,3 +369,49 @@ class TestToolScope:
         clear_scene(tmp_path, tools=[])
         assert _settings(tmp_path)["skillOverrides"] == {"deploy-prod": "off"}
         assert (tmp_path / ".crossby" / "scene").exists()
+
+    def test_clear_restores_uninstalled_recorded_tool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        assert (tmp_path / ".cursor" / "skills").is_symlink()
+
+        # Cursor is uninstalled, but a clear of the recorded scope must still
+        # re-point its on-disk symlink before deleting the projection.
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI]),
+        )
+        clear_scene(
+            tmp_path,
+            tools=[AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI, AIToolID.CURSOR],
+        )
+        assert not (tmp_path / ".crossby" / "scene").exists()
+        # Cursor's dir resolves to the real source, not a dangling deleted path.
+        resolved = {p.name for p in (tmp_path / ".cursor" / "skills").iterdir()}
+        assert {"review-skill", "knowledge", "deploy-prod"} <= resolved
+
+    def test_clear_keeps_projection_when_restore_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        self._install_four(monkeypatch)
+        populate_project(tmp_path)
+        apply_scene(resolve(tmp_path, SCENE), tmp_path)
+        assert (tmp_path / ".crossby" / "scene").exists()
+
+        def _err(*_a: object, **_kw: object) -> SyncResult:
+            return SyncResult(
+                tool_id=AIToolID.CURSOR, concern=SyncConcern.SKILLS, action="error", message="boom"
+            )
+
+        monkeypatch.setattr("crossby.scenes.projection.restore_source", _err)
+        clear_scene(tmp_path)
+        # A failed re-point must not leave a tool dangling — keep the projection.
+        assert (tmp_path / ".crossby" / "scene").exists()

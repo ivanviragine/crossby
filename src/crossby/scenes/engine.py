@@ -153,12 +153,14 @@ def clear_scene(
 
     # 2. Re-point skills/agents back at the unfiltered source (before removing the
     #    projection, so the tools never briefly resolve to a deleted tree).
-    results.extend(_restore_sources(project_root, base, dry_run=dry_run, tools=scope))
+    restore_results = _restore_sources(project_root, base, dry_run=dry_run, tools=scope)
+    results.extend(restore_results)
 
-    # 3. Remove the projection tree, but only when no tool left out of this scope
-    #    still resolves to it — a scoped clear must not yank the shared tree out
-    #    from under a tool it isn't reverting.
-    if _should_clear_projection(project_root, scope):
+    # 3. Remove the projection tree, but only when (a) every in-scope tool was
+    #    re-pointed cleanly and (b) no tool left out of this scope still resolves
+    #    to it — otherwise a tool would be left dangling at a deleted path.
+    restore_failed = any(r.action == "error" for r in restore_results)
+    if not restore_failed and _should_clear_projection(project_root, scope):
         removed = projection.clear_projection(project_root, dry_run=dry_run)
         if removed is not None:
             results.append(removed)
@@ -461,15 +463,15 @@ def _restore_sources(
 ) -> list[SyncResult]:
     """Re-point every installed tool's skills/agents dir at the unfiltered source.
 
-    ``tools`` narrows the restore to a subset of the installed tools, so a scoped
-    clear never re-points (or creates a fresh symlink for) a tool it isn't
-    reverting.
+    ``tools`` names the exact tools to restore (the recorded scope). Those are
+    re-pointed directly rather than intersected with the currently-installed set:
+    a tool that was applied but has since been uninstalled still has a scene
+    symlink on disk that must be re-pointed before the projection is removed, or
+    it would dangle. ``None`` restores every installed tool.
     """
     from crossby.ai_tools.base import AbstractAITool
 
-    installed = AbstractAITool.detect_installed()
-    if tools is not None:
-        installed = [tool for tool in installed if tool in tools]
+    installed = list(tools) if tools is not None else AbstractAITool.detect_installed()
     results: list[SyncResult] = []
     for concern, source_rel in (
         (SyncConcern.SKILLS, base.skills_source),

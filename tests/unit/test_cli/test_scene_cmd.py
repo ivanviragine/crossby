@@ -516,6 +516,29 @@ class TestClearAndSchema:
         assert "no readable tool records" in result.output
         assert state_path.exists()
 
+    def test_state_with_only_unknown_tools_is_retained(self, tmp_path: Path) -> None:
+        # A state recording only tool ids this build doesn't know is
+        # uninterpretable: clear leaves it in place rather than deleting it (which
+        # could orphan a ledger-owned setting).
+        root = _project(tmp_path)
+        state_path = root / SCENE_STATE_PATH
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "scene": "pr-review",
+                    "applied_at": "2026-01-01T00:00:00Z",
+                    "tools": {"notatool": {"mechanisms": {}, "status": "applied", "hashes": {}}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 0, result.output
+        assert "unknown tools" in result.output.lower()
+        assert state_path.exists()
+
 
 # ---------------------------------------------------------------------------
 # Partial failure
@@ -573,6 +596,25 @@ class TestPartialFailure:
         settings = _settings(root)
         assert "skillOverrides" not in settings
         assert not (root / SCENE_STATE_PATH).exists()
+
+    def test_apply_exception_records_recovery_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If apply raises after the ledger already holds provenance, a recovery
+        # state is written so `clear` still knows a scene is active.
+        root = _project(tmp_path)
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("crossby.scenes.engine.apply_scene", _boom)
+        result = _invoke(["scene", "use", "pr-review"], root)
+        assert result.exit_code == 1
+        assert "apply failed" in result.output.lower()
+
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["scene"] == "pr-review"
+        assert state["status"] == "partial"
 
     def test_failed_clear_preserves_state_for_retry(self, tmp_path: Path) -> None:
         # If the revert errors (e.g. a managed file is now malformed), the state

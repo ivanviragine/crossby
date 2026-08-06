@@ -455,11 +455,20 @@ def use_scene(
                 console.error(f"Could not revert {active.scene!r} — aborting; state left intact.")
                 raise typer.Exit(1)
 
-    results = _apply_or_exit(resolved, project_root, force=force, tools=scope)
+    scene = _get_scene_or_exit(config, name)
+    try:
+        results = apply_scene(resolved, project_root, force=force, tools=scope)
+    except Exception as exc:
+        # apply_scene persists provenance in a finally, so anything already
+        # written is revertible via the ledger. Record a minimal recovery state
+        # so `clear` knows a scene is active and reverts those tools.
+        _save_recovery_state(project_root, name, scene, scope)
+        console.error(f"Scene apply failed: {exc}")
+        console.hint("'crossby scene clear' can revert changes crossby recorded.")
+        raise typer.Exit(1) from exc
     _display_results(results)
     _warn_removed_hooks_permissions(results)
 
-    scene = _get_scene_or_exit(config, name)
     state = _build_state(project_root, name, scene, scope, results)
     # A same-scene re-apply keeps records for tools outside this scope.
     if active is not None and active.scene == name:
@@ -506,16 +515,23 @@ def _revert_tools(project_root: Path, tools: list[AIToolID]) -> bool:
     return not _has_error(_call_engine_or_exit(clear_scene, project_root, tools=tools))
 
 
-def _apply_or_exit(
-    resolved: ResolvedScene,
-    project_root: Path,
-    *,
-    force: bool,
-    tools: list[AIToolID],
-) -> list[SyncResult]:
-    from crossby.scenes.engine import apply_scene
+def _save_recovery_state(
+    project_root: Path, name: str, scene: SceneConfig, scope: list[AIToolID]
+) -> None:
+    """Best-effort record of a scene whose apply raised part-way.
 
-    return _call_engine_or_exit(apply_scene, resolved, project_root, force=force, tools=tools)
+    The ledger already holds provenance (``apply_scene`` saves it in a finally),
+    so recording the scope tools lets ``clear`` revert exactly what was written.
+    Failure here must not mask the original error, so it is suppressed.
+    """
+    import contextlib
+
+    from crossby.scenes.state import save_scene_state
+
+    with contextlib.suppress(Exception):
+        state = _build_state(project_root, name, scene, scope, [])
+        state.status = "partial"
+        save_scene_state(project_root, state)
 
 
 def _call_engine_or_exit(
@@ -617,6 +633,7 @@ def clear_active(
     """Revert the active scene to the pre-scene baseline (from the state file)."""
     from crossby.scenes.engine import clear_scene
     from crossby.scenes.state import (
+        SCENE_STATE_PATH,
         clear_scene_state,
         detect_drift,
         load_scene_state,
@@ -635,6 +652,13 @@ def clear_active(
         return
 
     recorded = _recorded_tools(active)
+    if not recorded:
+        # The state exists but records only tool ids this build doesn't know —
+        # we can't revert them, so leave the file in place rather than delete it
+        # (deleting could orphan a ledger-owned setting).
+        console.warn(f"{SCENE_STATE_PATH.as_posix()} records only unknown tools; left in place.")
+        console.hint("Delete it manually if the scene is no longer applied.")
+        return
     if tool_id is not None and tool_id not in recorded:
         console.info(f"Tool {tool_id} is not part of the active scene {active.scene!r}.")
         console.hint(f"Recorded tools: {', '.join(str(t) for t in recorded) or '(none)'}")
