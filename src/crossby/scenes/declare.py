@@ -291,24 +291,46 @@ def apply_codex_disabled_mcp(
     diff = _diff(owned, target, present)
 
     new_text = text
+    added: set[str] = set()
     for server in sorted(diff.to_add):
         spliced = set_scalar(new_text, ("mcp_servers", server), "enabled", "false")
         if spliced is not None:
             new_text = spliced
+            added.add(server)
     for server in sorted(diff.to_remove):
+        # Only revert crossby's own disable. If the user flipped ``enabled`` back
+        # to true (so the server is no longer in ``present``), leave their value
+        # untouched — ownership is released either way, since a reverted server
+        # never re-enters ``new_owned``.
+        if server not in present:
+            continue
         spliced = unset_scalar(new_text, ("mcp_servers", server), "enabled")
         if spliced is not None:
             new_text = spliced
 
-    ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, diff.new_owned)
+    # Claim ownership only for servers actually disabled now: the ones we just
+    # wrote plus the still-desired ones already disabled — never a planned splice
+    # that silently returned None.
+    new_owned = frozenset((owned & target & present) | added)
+    ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, new_owned)
     if new_text == text:
+        if diff.to_add and not added:
+            # Every planned disable splice failed — report the failure rather than
+            # an "already applied" no-op that claims a toggle that never happened.
+            return SyncResult(
+                tool_id=AIToolID.CODEX,
+                concern=SyncConcern.MCP,
+                action="error",
+                file_path=path,
+                message=f"could not disable {len(diff.to_add)} mcp server(s) in {path.name}",
+            )
         return _skipped(AIToolID.CODEX, SyncConcern.MCP, path)
     if not dry_run:
         from crossby.config.json_utils import atomic_write_text
 
         atomic_write_text(path, new_text)
 
-    message = f"mcp_servers enabled=false: {_names(diff.to_add)}"
+    message = f"mcp_servers enabled=false: {_names(added)}"
     if not trusted:
         message += " — Codex does not trust this project; toggle will not take effect until trusted"
     return SyncResult(
@@ -317,9 +339,9 @@ def apply_codex_disabled_mcp(
         action="updated",  # the config file already existed (early-returned otherwise)
         file_path=path,
         message=message,
-        added=len(diff.to_add),
+        added=len(added),
         revoked=len(diff.to_remove),
-        created=tuple(sorted(diff.to_add)),
+        created=tuple(sorted(added)),
     )
 
 
@@ -370,7 +392,9 @@ def apply_antigravity_disabled_mcp(
 
     raw_servers = settings.get("mcpServers")
     servers: dict[str, object] = dict(raw_servers) if isinstance(raw_servers, dict) else {}
-    defined = set(servers)
+    # Only dict-valued entries can carry a ``disabled`` flag; a malformed non-dict
+    # entry must never enter the target set, the ledger, or the added count.
+    defined = {name for name, cfg in servers.items() if isinstance(cfg, dict)}
     present = {
         name
         for name, cfg in servers.items()

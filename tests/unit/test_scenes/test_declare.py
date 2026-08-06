@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from crossby.models.ai import AIToolID
 from crossby.scenes import declare
 from crossby.sync.ownership import OwnershipLedger, SceneDeclareKey
@@ -124,6 +126,40 @@ class TestCodexDisabledMcp:
         assert data["mcp_servers"]["linear"]["enabled"] is False
         assert "enabled" not in data["mcp_servers"]["github"]
 
+    def test_clear_preserves_user_flipped_enabled_true(self, tmp_path: Path) -> None:
+        # Crossby disables linear (enabled=false); the user then flips it to true.
+        # Clear must release ownership WITHOUT deleting the user's setting.
+        self._config(tmp_path)
+        ledger = OwnershipLedger()
+        declare.apply_codex_disabled_mcp(tmp_path, {"linear"}, ledger, trusted=True)
+        path = tmp_path / CODEX_CONFIG
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("enabled = false", "enabled = true"),
+            encoding="utf-8",
+        )
+        declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)  # clear
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert data["mcp_servers"]["linear"]["enabled"] is True  # user value kept
+        assert (
+            ledger.scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED) == frozenset()
+        )
+
+    def test_all_splices_fail_errors_and_owns_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every enabled=false splice failing must surface an error, not an
+        # "already applied" no-op, and claim no ledger ownership.
+        self._config(tmp_path)
+        monkeypatch.setattr("crossby.scenes.declare.set_scalar", lambda *_a, **_k: None)
+        ledger = OwnershipLedger()
+        result = declare.apply_codex_disabled_mcp(tmp_path, {"linear"}, ledger, trusted=True)
+        assert result.action == "error"
+        assert (
+            ledger.scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED) == frozenset()
+        )
+
 
 class TestAntigravityDisabledMcp:
     def test_sets_disabled_true_and_reverts(self, tmp_path: Path) -> None:
@@ -147,3 +183,20 @@ class TestAntigravityDisabledMcp:
         assert json.loads((tmp_path / ANTIGRAVITY_MCP).read_text())["mcpServers"] == {
             "github": {"command": "gh"}
         }
+
+    def test_non_dict_entry_excluded(self, tmp_path: Path) -> None:
+        # A malformed non-dict server entry must not be disabled, claimed, or
+        # counted — only the valid dict entry is toggled.
+        write_json(
+            tmp_path / ANTIGRAVITY_MCP,
+            {"mcpServers": {"github": {"command": "gh"}, "broken": "not-a-dict"}},
+        )
+        ledger = OwnershipLedger()
+        result = declare.apply_antigravity_disabled_mcp(tmp_path, {"broken", "github"}, ledger)
+        data = read_json(tmp_path / ANTIGRAVITY_MCP)
+        assert data["mcpServers"]["github"]["disabled"] is True
+        assert data["mcpServers"]["broken"] == "not-a-dict"  # left untouched
+        assert result.added == 1
+        assert ledger.scene_declare(
+            AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED
+        ) == frozenset({"github"})
