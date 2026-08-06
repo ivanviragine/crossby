@@ -85,7 +85,7 @@ CLI command
 - **Cross-provider mappings** (`sync/translation.py`) — Claude↔Codex family table for `model`, family-aware `effort` bias, and `permissionMode` ↔ `sandbox_mode`. Used by both the agents writer and `crossby launch`'s `build_launch_command` for cross-provider model translation.
 - **Pre-write inspection** (`sync/plan.py`, `sync/validate.py`) — `--plan` summarizes a dry-run by concern + manual-fix count; `--doctor` adds validation findings and a coarse `high`/`medium`/`low` readiness rating; `--validate-target` re-parses every synced file (TOML / JSON parseability, agent required fields, skill frontmatter, MCP `command` on PATH, instruction file size).
 - **Persistent reports** (`sync/report.py`) — every real (non-dry-run) sync writes `.crossby/sync-report.md` with a portable `| Status | Item | Notes |` table. Statuses: `Added`, `Check before using`, `Not Added` — driven by `(action, file_path)` rather than message-substring matching.
-- **`.crossby.yml`** is loaded by `config/loader.py` into Pydantic v2 models. **Sync does not depend on it** — it reads each tool's native config directly from standard paths. The config is only consulted by `crossby launch` for defaults.
+- **`.crossby.yml`** is loaded by `config/loader.py` into Pydantic v2 models. **Sync does not depend on it** — it reads each tool's native config directly from standard paths. The config is consulted by `crossby launch` for defaults and by `crossby scene` for the `scenes:` definitions it activates.
 - **Symlinks are always relative** (`os.path.relpath`, `config/linker.py`) so they survive repo moves.
 - **Sync is idempotent** — re-running on already-linked files is a no-op. Translate writers hash-compare rendered output before deciding `created` / `updated` / `skipped`.
 
