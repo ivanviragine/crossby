@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +37,36 @@ logger = structlog.get_logger()
 
 # Sits beside ``.crossby/sync-report.md`` (see ``sync/report.py``).
 LEDGER_PATH = Path(".crossby") / "owned.json"
-LEDGER_VERSION = 1
+# v2 adds the ``scene`` section (DECLARE-key provenance). Bumped from 1; older
+# v1 files load unchanged because the version is advisory (never gates a read)
+# and a missing ``scene`` section degrades to "own no DECLARE keys".
+LEDGER_VERSION = 2
 
 # Only these three concerns carry revocation semantics.
 _HOOKS = SyncConcern.HOOKS.value
 _PERMISSIONS = SyncConcern.PERMISSIONS.value
 _MCP = SyncConcern.MCP.value
+
+
+class SceneDeclareKey(StrEnum):
+    """The scene DECLARE surfaces whose crossby-written entries need provenance.
+
+    Every one is *new* — none is covered by the revocable-sync ledger above,
+    which tracks hooks / ``permissions.allow`` / MCP presence. Reverting a scene
+    (``clear_scene``) must revert only the entries crossby wrote for these keys,
+    so each is recorded per ``(tool, key)`` exactly like the additive concerns.
+    """
+
+    #: Claude ``skillOverrides: {"<name>": "off"}`` in ``.claude/settings.json``.
+    SKILL_OVERRIDES = "skill_overrides"
+    #: Claude ``permissions.deny: ["Agent(<name>)"]`` entries.
+    DENY_AGENTS = "deny_agents"
+    #: Claude ``disabledMcpjsonServers`` server names.
+    DISABLED_MCP = "disabled_mcp"
+    #: Codex ``mcp_servers.<id>.enabled = false`` server ids.
+    CODEX_MCP_DISABLED = "codex_mcp_disabled"
+    #: Antigravity CLI ``mcpServers.<name>.disabled = true`` server names.
+    ANTIGRAVITY_MCP_DISABLED = "antigravity_mcp_disabled"
 
 
 @dataclass
@@ -56,6 +81,11 @@ class OwnershipLedger:
 
     # tool_id str → concern str → list of item identities (JSON-native shapes).
     _data: dict[str, dict[str, list[Any]]] = field(default_factory=dict)
+    # tool_id str → SceneDeclareKey value → list of names crossby wrote to that
+    # DECLARE surface. Kept in a separate section so scene provenance never
+    # collides with the revocable-sync concerns above (a concern name and a
+    # DECLARE-key name could otherwise clash in one namespace).
+    _scene: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
     # -- read ----------------------------------------------------------------
 
@@ -117,13 +147,51 @@ class OwnershipLedger:
             if not tool:
                 self._data.pop(key, None)
 
+    # -- scene DECLARE provenance --------------------------------------------
+
+    def scene_declare(self, tool_id: AIToolID, key: SceneDeclareKey) -> frozenset[str]:
+        """Owned entry names crossby wrote to *key* on *tool_id*."""
+        tool = self._scene.get(str(tool_id))
+        if not isinstance(tool, dict):
+            return frozenset()
+        items = tool.get(key.value)
+        if not isinstance(items, list):
+            return frozenset()
+        return frozenset(item for item in items if isinstance(item, str))
+
+    def record_scene_declare(
+        self, tool_id: AIToolID, key: SceneDeclareKey, names: Iterable[str]
+    ) -> None:
+        """Replace the owned entries for *key* on *tool_id* (sorted, deduped).
+
+        Recording an empty set drops the key — and the tool, if it then owns no
+        DECLARE surfaces — mirroring :meth:`_set` so the on-disk file stays
+        minimal and ``is_empty`` comparisons stay clean.
+        """
+        tool_key = str(tool_id)
+        items = sorted(set(names))
+        tool = self._scene.setdefault(tool_key, {})
+        if items:
+            tool[key.value] = items
+        else:
+            tool.pop(key.value, None)
+            if not tool:
+                self._scene.pop(tool_key, None)
+
     def is_empty(self) -> bool:
-        """True when crossby owns nothing anywhere."""
-        return not self._data
+        """True when crossby owns nothing anywhere (revocable or scene DECLARE)."""
+        return not self._data and not self._scene
 
     def to_json(self) -> dict[str, Any]:
-        """Serialisable form written to ``owned.json``."""
-        return {"version": LEDGER_VERSION, "owned": self._data}
+        """Serialisable form written to ``owned.json``.
+
+        The ``scene`` section is emitted only when non-empty, so a project that
+        never used scenes serialises exactly as it did under the v1 schema.
+        """
+        out: dict[str, Any] = {"version": LEDGER_VERSION, "owned": self._data}
+        if self._scene:
+            out["scene"] = self._scene
+        return out
 
 
 def load_ledger(project_root: Path) -> OwnershipLedger:
@@ -154,7 +222,31 @@ def load_ledger(project_root: Path) -> OwnershipLedger:
                 clean[concern] = items
         if clean:
             data[tool] = clean
-    return OwnershipLedger(data)
+
+    scene = _load_scene_section(raw.get("scene"))
+    return OwnershipLedger(data, scene)
+
+
+def _load_scene_section(raw_scene: object) -> dict[str, dict[str, list[str]]]:
+    """Parse the ``scene`` section, keeping only well-formed string entries.
+
+    A missing/malformed section (older v1 ledgers, corruption) yields an empty
+    map — the same graceful degradation the ``owned`` section uses, so scene
+    provenance never blocks a load or invents ownership.
+    """
+    scene: dict[str, dict[str, list[str]]] = {}
+    if not isinstance(raw_scene, dict):
+        return scene
+    for tool, keys in raw_scene.items():
+        if not isinstance(tool, str) or not isinstance(keys, dict):
+            continue
+        clean: dict[str, list[str]] = {}
+        for key, items in keys.items():
+            if isinstance(key, str) and isinstance(items, list):
+                clean[key] = [item for item in items if isinstance(item, str)]
+        if clean:
+            scene[tool] = clean
+    return scene
 
 
 def save_ledger(project_root: Path, ledger: OwnershipLedger) -> bool:
@@ -188,6 +280,7 @@ __all__ = [
     "LEDGER_PATH",
     "LEDGER_VERSION",
     "OwnershipLedger",
+    "SceneDeclareKey",
     "load_ledger",
     "save_ledger",
 ]
