@@ -203,8 +203,9 @@ Rules that keep the matrix honest:
 mutating any tracked file — the session-scoped counterpart to the persistent
 `scene use` above. The two share the resolver (`ResolvedScene`) but diverge on
 enactment: instead of writing tool config files, each adapter renders throwaway
-artefacts under the gitignored `.crossby/scene/<name>/launch/` tree and returns
-the flags/env that point its CLI at them. The code lives in `scenes/launch.py`
+artefacts under `.crossby/scene/<name>/launch/` (kept out of git via
+`.git/info/exclude`, never a tracked `.gitignore` edit) and returns the
+flags/env that point its CLI at them. The code lives in `scenes/launch.py`
 (the `SceneLaunchContext`/`SceneLaunchArgs` types plus rendering, the Codex
 profile helpers, and pruning), each adapter's `scene_launch_args`, the
 `scene_*` capability fields on `AIToolCapabilities`, and the `--scene` handling
@@ -231,12 +232,16 @@ Rules that keep this honest:
   projects), so its profile can't live under `.crossby/scene/`. The generated
   filename is namespaced by a project-root hash
   (`crossby-<slug>-<scene>.config.toml`) so two repos' same-named scenes never
-  collide, and the file carries a generated-by header
-  (`CODEX_PROFILE_MARKER`). Pruning removes stale crossby-owned profiles (for
-  scenes no longer defined) and stale local `.crossby/scene/<name>/launch/`
-  trees on the next launch — but **only** files whose first line is that header;
-  a hand-written profile matching the same naming pattern is never deleted
-  (`is_crossby_codex_profile` is the ownership test, never the filename alone).
+  collide, and the file carries a generated-by header (`CODEX_PROFILE_MARKER`).
+- **Pruning is ownership-gated on both sides.** On the next launch,
+  `prune_stale_artifacts` removes stale crossby-owned Codex profiles and stale
+  local `.crossby/scene/<name>/launch/` trees for scenes no longer defined — but
+  each has an ownership test it must pass first: a Codex profile only when its
+  first line is the header (`is_crossby_codex_profile`), a local tree only when
+  it carries the `.crossby-managed` marker crossby stamps into it. A hand-written
+  profile matching the naming pattern, or a hand-made directory under
+  `.crossby/scene/`, is therefore never deleted — the filename/path alone is
+  never sufficient.
 - **No silent no-op, no silent mutation.** A terminal tool with no launch lever
   (Antigravity CLI) or a runtime gate that failed (Codex too old) falls back to
   persistent `scene use` activation for that tool, warning that config was

@@ -429,9 +429,21 @@ def _prepare_scene_launch(
     from crossby.ai_tools.base import AbstractAITool
     from crossby.models.ai import AIToolID, AIToolType
     from crossby.scenes.engine import apply_scene
-    from crossby.scenes.launch import SceneLaunchContext, prune_stale_artifacts
+    from crossby.scenes.launch import (
+        SceneLaunchContext,
+        prune_stale_artifacts,
+        validate_scene_name,
+    )
     from crossby.services.scene_resolution import resolve_scene
     from crossby.sync.readers import build_sync_data, scan_project
+
+    # A scene name is interpolated into artefact paths — reject an unsafe one
+    # (separators, ``..``, reserved ``active``) before any path is built.
+    try:
+        validate_scene_name(scene_name)
+    except ValueError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
 
     tool_id = AIToolID(resolved_tool)
     installed = AbstractAITool.detect_installed()
@@ -452,6 +464,7 @@ def _prepare_scene_launch(
         return None
 
     if adapter.scene_launch_ready():
+        _warn_unsupported_scene_concerns(scene_cfg, adapter, caps, scene_name)
         return SceneLaunchContext(
             name=scene_name,
             resolved=resolved,
@@ -473,3 +486,32 @@ def _prepare_scene_launch(
     if any(r.action == "error" for r in results):
         console.warn("Scene activation reported errors; launching anyway.")
     return None
+
+
+def _warn_unsupported_scene_concerns(
+    scene_cfg: SceneConfig,
+    adapter: AbstractAITool,
+    caps: AIToolCapabilities,
+    scene_name: str,
+) -> None:
+    """Warn when the scene declares a concern the tool can't scope at launch.
+
+    A tool with *some* launch lever can still lack one for a specific concern
+    (e.g. Cursor scopes MCP but not agents). Rather than silently apply nothing
+    for such a concern, name it and point the user at persistent ``scene use``.
+    """
+    from crossby.models.config import SCENE_CONCERNS
+
+    supported = adapter.scene_launch_concerns()
+    unsupported = [
+        concern
+        for concern in SCENE_CONCERNS
+        if getattr(scene_cfg, concern) is not None and concern not in supported
+    ]
+    if unsupported:
+        console.warn(
+            f"{caps.display_name} has no session-scoped lever for "
+            f"{', '.join(unsupported)}; scene {scene_name!r} scopes "
+            f"{'those' if len(unsupported) > 1 else 'that'} only via persistent "
+            "'crossby scene use'."
+        )

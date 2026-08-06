@@ -438,6 +438,17 @@ class AbstractAITool(ABC):
         """
         return self.capabilities().supports_scene_launch
 
+    def scene_launch_concerns(self) -> set[str]:
+        """Scene concerns this tool can scope at launch (a subset of SCENE_CONCERNS).
+
+        Used by ``cli/launch`` to warn when a scene narrows a concern this tool
+        has no launch lever for (e.g. a Cursor launch of a scene that filters
+        only agents) rather than silently applying nothing for it. Default:
+        empty — adapters that support scene launch override with their real set
+        (typically ``{"mcp"}``, plus ``skills``/``agents`` for Claude).
+        """
+        return set()
+
     def _autonomy_launch_args(
         self,
         caps: AIToolCapabilities,

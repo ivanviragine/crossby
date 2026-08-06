@@ -129,6 +129,10 @@ class CopilotAdapter(AbstractAITool):
             return re.sub(r"(\d)-(\d)", r"\1.\2", model_id)
         return model_id
 
+    def scene_launch_concerns(self) -> set[str]:
+        """Copilot scopes only MCP at launch (per-server disable + allow filter)."""
+        return {"mcp"}
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
         """Scope a scene for one session via Copilot's two independent layers.
 
@@ -158,8 +162,13 @@ class CopilotAdapter(AbstractAITool):
 def _allow_entry_excluded(entry: str, excluded_servers: set[str]) -> bool:
     """True when an ``--allow-tool`` *entry* names a scene-excluded MCP server.
 
-    Matches the bare server name and Copilot's ``<server>__<tool>`` namespacing,
-    so ``github`` and ``github__create_issue`` are both dropped when ``github``
-    is excluded, while an unrelated ``shell(git:*)`` survives.
+    Matches the bare server name and both per-tool spellings Copilot has used —
+    the documented ``<server>(<tool>)`` form and the ``<server>__<tool>``
+    namespacing — so ``github``, ``github(create_issue)`` and
+    ``github__create_issue`` are all dropped when ``github`` is excluded, while
+    an unrelated ``shell(git:*)`` survives.
     """
-    return any(entry == server or entry.startswith(f"{server}__") for server in excluded_servers)
+    return any(
+        entry == server or entry.startswith(f"{server}__") or entry.startswith(f"{server}(")
+        for server in excluded_servers
+    )

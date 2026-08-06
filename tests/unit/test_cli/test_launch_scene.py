@@ -26,6 +26,7 @@ _SCENE_CONFIG: dict[str, Any] = {
     "scenes": {
         "pr-review": {"mcp": {"include": ["github"]}},
         "with-profile": {"profile": "fast", "mcp": {"include": ["github"]}},
+        "agents-only": {"agents": {"include": ["code-reviewer"]}},
     },
     "profiles": {
         "fast": {"tool": "cursor"},
@@ -48,6 +49,7 @@ def _scene_adapter(
     adapter = MagicMock()
     adapter.launch.return_value = 0
     adapter.scene_launch_ready.return_value = scene_ready
+    adapter.scene_launch_concerns.return_value = {"mcp"}
     adapter.capabilities.return_value = MagicMock(
         display_name=display_name,
         supports_initial_message=True,
@@ -202,6 +204,27 @@ class TestPersistentFallback:
         apply_mock.assert_called_once()
         _, kwargs = adapter.launch.call_args
         assert kwargs["scene"] is None
+
+
+class TestUnsupportedConcernWarning:
+    def test_warns_when_scene_narrows_a_concern_the_tool_cannot_scope(self, tmp_path: Path) -> None:
+        _write_config(tmp_path)
+        # Cursor-like: a session lever, but only for MCP (scene_launch_concerns
+        # returns {"mcp"} from _scene_adapter). The scene narrows agents.
+        adapter = _scene_adapter(tool_type=AIToolType.TERMINAL, display_name="Cursor")
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "agents-only"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "no session-scoped lever for agents" in result.output
+        # It still applies the scene for the concerns it *can* scope.
+        _, kwargs = adapter.launch.call_args
+        assert kwargs["scene"] is not None
 
 
 class TestScenePrecedence:

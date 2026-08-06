@@ -202,6 +202,10 @@ class CursorAdapter(AbstractAITool):
     def session_data_dirs(self) -> list[str]:
         return [".cursor"]
 
+    def scene_launch_concerns(self) -> set[str]:
+        """Cursor scopes only MCP at launch (via CURSOR_CONFIG_DIR)."""
+        return {"mcp"}
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
         """Point ``CURSOR_CONFIG_DIR`` at a scene-materialised config dir.
 

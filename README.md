@@ -303,7 +303,7 @@ crossby launch --scene pr-review
 crossby launch --scene pr-review --tool codex --model gpt-5.2
 ```
 
-`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out across tools — that is what `crossby scene use` is for. Rendered artefacts live under the gitignored `.crossby/scene/<name>/launch/` tree, written temp-file-then-atomic-rename.
+`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out across tools — that is what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written temp-file-then-atomic-rename and kept out of git via `.git/info/exclude` (a session-scoped launch never edits the tracked `.gitignore`). If a tool has a session lever but not for a concern the scene narrows (e.g. Cursor scopes MCP but not agents), crossby warns and applies what it can.
 
 Per-tool levers:
 

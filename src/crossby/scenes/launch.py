@@ -36,11 +36,13 @@ last-writer-wins on content is accepted rather than locked.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from crossby.config.json_utils import atomic_write_text
+from crossby.sync.file_utils import MANAGED_MARKER_NAME, write_managed_marker
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -50,13 +52,15 @@ if TYPE_CHECKING:
     from crossby.sync.base import SyncData
 
 # Kept in lockstep with ``crossby.scenes.projection.SCENE_PROJECTION_ROOT`` so
-# the persistent projection tree and the launch artefacts share one gitignored
-# root (``.crossby/scene/``) and one managed gitignore block.
+# the persistent projection tree and the launch artefacts share one root
+# (``.crossby/scene/``).
 SCENE_ROOT = Path(".crossby") / "scene"
 
-# The gitignore managed-block id the projection engine also uses, so launch and
-# ``scene use`` maintain a single ``.crossby/scene/`` entry rather than two.
-_GITIGNORE_BLOCK = "scene projection"
+# Scene names are interpolated into filesystem paths (``.crossby/scene/<name>/``
+# and ``$CODEX_HOME/crossby-<slug>-<name>.config.toml``), so they are validated
+# against this pattern first: it forbids separators and leading punctuation, and
+# ``..``/``active`` are rejected separately.
+_SAFE_SCENE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # First line of every crossby-generated Codex profile. Pruning deletes a profile
 # only when its text starts with this marker — the ownership test that keeps a
@@ -141,29 +145,84 @@ class SceneLaunchContext:
     def write_artifact(self, filename: str, content: str) -> Path:
         """Render *content* to a named artefact, temp-file-then-atomic-rename.
 
-        Also ensures ``.crossby/scene/`` is gitignored so nothing an adapter
-        renders can land in a tracked path.
+        Also stamps the launch dir with the crossby-managed marker (so pruning
+        can tell its own trees from a hand-made directory) and adds
+        ``.crossby/scene/`` to ``.git/info/exclude`` — never ``.gitignore`` — so
+        a session-scoped launch keeps its "writes nothing tracked" promise.
         """
         path = self.artifact(filename)
         atomic_write_text(path, content)
-        ensure_launch_gitignore(self.project_root)
+        write_managed_marker(self.launch_dir)
+        ensure_launch_excluded(self.project_root)
         return path
 
 
 # ---------------------------------------------------------------------------
-# Shared rendering helpers
+# Scene-name validation and shared rendering helpers
 # ---------------------------------------------------------------------------
 
 
-def ensure_launch_gitignore(project_root: Path) -> None:
-    """Ignore ``.crossby/scene/`` via crossby's managed gitignore block.
+def validate_scene_name(name: str) -> None:
+    """Reject a scene name that could escape the artefact tree or reserved dirs.
 
-    Shares the projection engine's block id so ``scene use`` and
-    ``launch --scene`` maintain one entry, not two.
+    Scene names are interpolated into filesystem paths, so a name with a path
+    separator, ``..``, a leading dot, or the reserved ``active`` (the persistent
+    projection's own subdir) is refused before any path is built — raising
+    :class:`ValueError`. Names are project-local config keys, but a typo like
+    ``../../etc`` must never reach the filesystem.
     """
-    from crossby.sync.gitignore_utils import update_managed_block
+    if (
+        not name
+        or name in (".", "..", "active")
+        or "/" in name
+        or "\\" in name
+        or ".." in name
+        or _SAFE_SCENE_NAME.match(name) is None
+    ):
+        raise ValueError(
+            f"unsafe scene name {name!r}: use letters, digits, '.', '_' or '-' "
+            "(no path separators, no '..', not the reserved 'active')"
+        )
 
-    update_managed_block(project_root, _GITIGNORE_BLOCK, [SCENE_ROOT.as_posix() + "/"])
+
+def ensure_launch_excluded(project_root: Path) -> None:
+    """Add ``.crossby/scene/`` to ``.git/info/exclude`` — never ``.gitignore``.
+
+    ``.gitignore`` is a tracked file; a session-scoped launch must not mutate it.
+    ``.git/info/exclude`` is the per-clone, untracked equivalent, so the artefacts
+    stay out of ``git status`` without touching anything tracked. Best-effort and
+    idempotent: resolved via ``git rev-parse --git-path`` (so it works from a
+    worktree), and a no-op outside a git repo or on any I/O error.
+    """
+    import subprocess
+
+    entry = SCENE_ROOT.as_posix() + "/"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return
+    exclude_path = Path(proc.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = project_root / exclude_path
+    try:
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        if entry in existing.splitlines():
+            return
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        with exclude_path.open("a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write(entry + "\n")
+    except OSError:
+        return
 
 
 def project_slug(project_root: Path) -> str:
@@ -192,28 +251,35 @@ def mcp_json_config(servers: dict[str, MCPServerConfig]) -> str:
     return json.dumps(body, indent=2, sort_keys=True) + "\n"
 
 
-def opencode_mcp_config(servers: dict[str, MCPServerConfig]) -> str:
+def opencode_mcp_config(servers: dict[str, MCPServerConfig], enabled_names: set[str]) -> str:
     """Render *servers* as an OpenCode ``{"mcp": {...}}`` config file.
 
     OpenCode's schema differs from the Claude/Cursor JSON shape: a stdio server
     is ``{"type": "local", "command": [cmd, *args]}`` and a remote one is
-    ``{"type": "remote", "url": ...}``, each ``"enabled": true``. Pointed at by
-    ``OPENCODE_CONFIG`` for the session.
+    ``{"type": "remote", "url": ...}``. Every discovered server is emitted with
+    an explicit ``"enabled"`` — ``true`` for names in *enabled_names*, ``false``
+    for the rest — so the scene's deselection is stated outright rather than left
+    implicit by omission. Pointed at by ``OPENCODE_CONFIG`` for the session.
+
+    Caveat: OpenCode loads a custom config *between* its global and project
+    layers, so a project ``opencode.json`` that re-enables a server can still
+    override this — a documented best-effort limit of the env-var lever.
     """
     import json
 
     mcp: dict[str, dict[str, object]] = {}
     for name, cfg in sorted(servers.items()):
+        enabled = name in enabled_names
         if cfg.command is not None:
             entry: dict[str, object] = {
                 "type": "local",
                 "command": [cfg.command, *cfg.args],
-                "enabled": True,
+                "enabled": enabled,
             }
             if cfg.env:
                 entry["environment"] = dict(cfg.env)
         else:
-            entry = {"type": "remote", "url": cfg.url, "enabled": True}
+            entry = {"type": "remote", "url": cfg.url, "enabled": enabled}
             if cfg.headers:
                 entry["headers"] = dict(cfg.headers)
         mcp[name] = entry
@@ -333,7 +399,10 @@ def prune_stale_artifacts(project_root: Path, defined_scenes: set[str]) -> list[
             if not child.is_dir() or child.name == "active" or child.name in defined_scenes:
                 continue
             launch = child / "launch"
-            if not launch.exists():
+            # Only remove a tree crossby stamped — never a hand-made directory
+            # that happens to sit under .crossby/scene/ (the ownership test,
+            # mirroring the Codex-profile header check).
+            if not launch.is_dir() or not (launch / MANAGED_MARKER_NAME).is_file():
                 continue
             try:
                 shutil.rmtree(launch)

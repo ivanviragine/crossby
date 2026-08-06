@@ -246,6 +246,10 @@ class ClaudeAdapter(AbstractAITool):
         """
         return ["--permission-mode", "auto"]
 
+    def scene_launch_concerns(self) -> set[str]:
+        """Claude scopes MCP, skills, and agents at launch."""
+        return {"mcp", "skills", "agents"}
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
         """Render a scene into session-scoped Claude flags — nothing tracked.
 

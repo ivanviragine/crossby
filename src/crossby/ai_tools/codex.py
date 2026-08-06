@@ -154,6 +154,10 @@ class CodexAdapter(AbstractAITool):
         version = versioning.detect_tool_version(AIToolID.CODEX)
         return versioning.at_least(version, CODEX_PROFILE_MIN)
 
+    def scene_launch_concerns(self) -> set[str]:
+        """Codex scopes only MCP at launch (via the layered profile)."""
+        return {"mcp"}
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
         """Compile the scene into a namespaced ``$CODEX_HOME`` profile.
 

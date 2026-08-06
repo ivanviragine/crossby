@@ -88,6 +88,10 @@ class OpenCodeAdapter(AbstractAITool):
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
 
+    def scene_launch_concerns(self) -> set[str]:
+        """OpenCode scopes only MCP at launch (via OPENCODE_CONFIG)."""
+        return {"mcp"}
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
         """Point ``OPENCODE_CONFIG`` at a scene-rendered config file.
 
@@ -101,6 +105,7 @@ class OpenCodeAdapter(AbstractAITool):
         if not scene.narrows_mcp():
             return SceneLaunchArgs()
 
-        path = scene.write_artifact("opencode.json", opencode_mcp_config(scene.selected_mcp()))
+        config = opencode_mcp_config(scene.mcp_universe(), scene.selected("mcp"))
+        path = scene.write_artifact("opencode.json", config)
         env_name = self.capabilities().scene_config_dir_env or "OPENCODE_CONFIG"
         return SceneLaunchArgs(env={env_name: str(path)})

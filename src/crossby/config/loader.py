@@ -175,6 +175,11 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     for name, profile_raw in profiles_raw.items():
         if not isinstance(profile_raw, dict):
             raise ConfigError(f"'profiles.{name}' must be a mapping")
+        allow_tools_raw = profile_raw.get("allow_tools", [])
+        if not isinstance(allow_tools_raw, list) or not all(
+            isinstance(t, str) for t in allow_tools_raw
+        ):
+            raise ConfigError(f"'profiles.{name}.allow_tools' must be a list of strings")
         profiles[name] = ProfileConfig(
             tool=profile_raw.get("tool"),
             model=profile_raw.get("model"),
@@ -182,6 +187,7 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             yolo=profile_raw.get("yolo"),
             accept_edits=profile_raw.get("accept_edits"),
             auto=profile_raw.get("auto"),
+            allow_tools=allow_tools_raw,
         )
 
     # Parse scenes section (after profiles — validates scene.profile against them)

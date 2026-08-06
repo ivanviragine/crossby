@@ -248,20 +248,23 @@ class TestCopilotSceneLaunch:
             tmp_path,
             all_mcp=("github", "linear"),
             selected_mcp=("linear",),
-            allow_tools=("github", "github__create_issue", "shell(git:*)"),
+            allow_tools=(
+                "github",
+                "github__create_issue",
+                "github(create_issue)",
+                "shell(git:*)",
+            ),
         )
         result = CopilotAdapter().scene_launch_args(ctx)
 
         assert list(result.args[:2]) == ["--disable-mcp-server", "github"]
         assert "--allow-tool" in result.args
-        # The unrelated tool is still allowed…
-        assert "shell(git:*)" in result.args
-        # …but neither the excluded server nor its namespaced tool is re-allowed.
+        # The unrelated tool is still allowed; neither the excluded server nor
+        # either per-tool spelling (documented `(...)` or `__` namespacing) is.
         allow_values = [
             result.args[i + 1] for i, a in enumerate(result.args) if a == "--allow-tool"
         ]
-        assert "github" not in allow_values
-        assert "github__create_issue" not in allow_values
+        assert allow_values == ["shell(git:*)"]
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +298,12 @@ class TestOpenCodeSceneLaunch:
         cfg = Path(env["OPENCODE_CONFIG"])
         assert cfg == tmp_path / ".crossby" / "scene" / "pr-review" / "launch" / "opencode.json"
         body = json.loads(cfg.read_text())
-        assert set(body["mcp"]) == {"github"}
+        # Every discovered server is stated explicitly: selected enabled, the
+        # rest enabled=false (rather than omitted) so deselection is authoritative.
+        assert set(body["mcp"]) == {"github", "linear"}
         assert body["mcp"]["github"]["type"] == "local"
+        assert body["mcp"]["github"]["enabled"] is True
+        assert body["mcp"]["linear"]["enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +347,70 @@ class TestLaunchEnvPlumbing:
         OpenCodeAdapter().launch(working_dir=tmp_path)
         # No scene → env stays None so the child inherits this process's env.
         assert captured["env"] is None
+
+
+class TestGitExclude:
+    """A session launch must never mutate .gitignore (a tracked file)."""
+
+    def test_launch_uses_git_info_exclude_not_gitignore(self, tmp_path: Path) -> None:
+        import subprocess
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("existing\n")
+
+        ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
+        ClaudeAdapter().scene_launch_args(ctx)
+
+        # .gitignore is untouched…
+        assert gitignore.read_text() == "existing\n"
+        # …and the ignore rule went to the untracked .git/info/exclude instead.
+        exclude = (tmp_path / ".git" / "info" / "exclude").read_text()
+        assert ".crossby/scene/" in exclude.splitlines()
+
+
+class TestLocalTreePruning:
+    """Pruning removes only crossby-marked launch trees under .crossby/scene/."""
+
+    def test_unmarked_launch_tree_survives(self, tmp_path: Path) -> None:
+        # A crossby-owned launch tree for a scene no longer defined.
+        owned = _context(tmp_path, name="gone", all_mcp=("a", "b"), selected_mcp=("a",))
+        ClaudeAdapter().scene_launch_args(owned)
+        owned_tree = tmp_path / ".crossby" / "scene" / "gone" / "launch"
+        assert owned_tree.is_dir()
+
+        # A hand-made directory under the same root, without the managed marker.
+        handmade = tmp_path / ".crossby" / "scene" / "mine" / "launch"
+        handmade.mkdir(parents=True)
+        (handmade / "notes.txt").write_text("keep me\n")
+
+        pruned = scene_launch.prune_stale_artifacts(tmp_path, defined_scenes=set())
+
+        assert not owned_tree.exists(), "the marked, undefined scene tree is pruned"
+        assert any("gone" in p for p in pruned)
+        assert handmade.exists(), "an unmarked hand-made tree is never deleted"
+        assert (handmade / "notes.txt").exists()
+
+
+class TestSceneNameValidation:
+    def test_rejects_unsafe_names(self) -> None:
+        for bad in ("", ".", "..", "../etc", "a/b", "a\\b", "foo..bar", "active"):
+            with pytest.raises(ValueError, match="unsafe scene name"):
+                scene_launch.validate_scene_name(bad)
+
+    def test_accepts_safe_names(self) -> None:
+        for good in ("pr-review", "base", "review_2", "v1.2", "Scene-A"):
+            scene_launch.validate_scene_name(good)  # no raise
+
+
+class TestAtomicWriteUniqueTemp:
+    def test_writes_and_overwrites_without_leftover_tmp(self, tmp_path: Path) -> None:
+        from crossby.config.json_utils import atomic_write_text
+
+        target = tmp_path / "sub" / "f.json"
+        atomic_write_text(target, "one")
+        assert target.read_text() == "one"
+        atomic_write_text(target, "two")
+        assert target.read_text() == "two"
+        # Unique mkstemp names are cleaned up — no leftover temp files.
+        assert not list(tmp_path.glob("**/*.tmp"))
