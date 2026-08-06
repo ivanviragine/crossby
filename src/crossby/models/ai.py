@@ -203,6 +203,39 @@ class AIToolCapabilities(BaseModel, frozen=True):
     json`` / ``codex exec --json``), so usage need not be scraped from a
     transcript log. False for Cursor (no usage fields in CLI output)."""
 
+    # --- Session-scoped scenes (crossby launch --scene) ---------------------
+    # Declared per adapter following the ``supports_*`` convention. These say
+    # *how* a tool can take a whole scene on the command line for one session
+    # without mutating tracked project files; the per-adapter
+    # ``scene_launch_args`` renders the artefacts and emits the flags. A tool
+    # that leaves ``supports_scene_launch`` False has no session-scoped lever, so
+    # ``crossby launch --scene`` falls back to persistent activation for it.
+    supports_scene_launch: bool = False
+    """Tool has at least one session-scoped scene lever (a settings/mcp-config
+    file flag, a named profile, or a config-dir env var). When False,
+    ``crossby launch --scene`` falls back to persistent ``scene use`` activation
+    for this tool rather than emitting launch flags."""
+    scene_settings_flag: str | None = None
+    """CLI flag that loads a session-scoped settings file (Claude ``--settings``);
+    ``None`` when the tool has no such flag."""
+    scene_mcp_config_flag: str | None = None
+    """CLI flag that loads a session-scoped MCP config file (Claude
+    ``--mcp-config``); ``None`` when unsupported."""
+    scene_mcp_strict_flag: str | None = None
+    """CLI flag that makes the session MCP config authoritative — the tool loads
+    *only* it and ignores other MCP sources (Claude ``--strict-mcp-config``);
+    ``None`` when the tool has no strict mode."""
+    scene_config_dir_env: str | None = None
+    """Environment variable pointing the tool at a scene-materialised config
+    dir/file (Cursor ``CURSOR_CONFIG_DIR``, OpenCode ``OPENCODE_CONFIG``);
+    ``None`` when the tool exposes no config-dir override."""
+    scene_profile_flag: str | None = None
+    """CLI flag selecting a named profile layered over the base config (Codex
+    ``--profile``); ``None`` when unsupported."""
+    scene_tool_denylist_flag: str | None = None
+    """CLI flag excluding named tools for the session (Copilot
+    ``--excluded-tools``); ``None`` when unsupported."""
+
 
 class TokenUsage(BaseModel):
     """Token usage metrics from an AI session."""

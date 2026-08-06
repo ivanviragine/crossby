@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
@@ -21,6 +21,9 @@ from crossby.models.ai import (
     HookStopDialect,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 logger = structlog.get_logger()
 
@@ -62,6 +65,14 @@ class ClaudeAdapter(AbstractAITool):
             hook_output_dialect=HookOutputDialect.HOOK_SPECIFIC_OUTPUT,
             hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
             supports_usage_reporting=True,
+            # Session-scoped scenes: Claude takes a whole scene on the command
+            # line — an MCP config file (strict), a settings file for skill
+            # overrides, and per-agent --disallowedTools entries.
+            supports_scene_launch=True,
+            scene_settings_flag="--settings",
+            scene_mcp_config_flag="--mcp-config",
+            scene_mcp_strict_flag="--strict-mcp-config",
+            scene_tool_denylist_flag="--disallowedTools",
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
@@ -234,3 +245,70 @@ class ClaudeAdapter(AbstractAITool):
         decision, not a crossby error.
         """
         return ["--permission-mode", "auto"]
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Render a scene into session-scoped Claude flags — nothing tracked.
+
+        Three levers, emitted only when the scene actually narrows the concern:
+
+        - **MCP** → an ``.crossby/scene/<name>/launch/mcp.json`` of the selected
+          servers, passed as ``--mcp-config <file> --strict-mcp-config`` so
+          Claude loads *only* those for the session (mirrors the persistent
+          engine, which no-ops when nothing is deselected).
+        - **skills** → a ``settings.json`` of ``skillOverrides: {"<name>":
+          "off"}`` for each deselected skill, passed as ``--settings <file>``.
+          Gated on ``claude >= 2.1.129`` (older builds silently ignore the key);
+          on an older/unknown build the overrides are skipped with a warning.
+        - **agents** → ``--disallowedTools "Agent(<name>)"`` per deselected
+          subagent.
+
+        Writes nothing into ``.claude/`` or ``.mcp.json``.
+        """
+        import warnings
+
+        from crossby.config.skills import SKILLS_DIR, list_skills
+        from crossby.scenes import projection, versioning
+        from crossby.scenes.launch import SceneLaunchArgs, mcp_json_config
+        from crossby.sync.agents import _AGENT_TARGET_PATHS
+
+        caps = self.capabilities()
+        args: list[str] = []
+
+        # MCP — strict config of exactly the selected servers.
+        if scene.narrows_mcp():
+            path = scene.write_artifact("mcp.json", mcp_json_config(scene.selected_mcp()))
+            args += [caps.scene_mcp_config_flag or "--mcp-config", str(path)]
+            if caps.scene_mcp_strict_flag:
+                args.append(caps.scene_mcp_strict_flag)
+
+        # skills — skillOverrides off for each deselected skill (version-gated).
+        skills_dir = scene.project_root / SKILLS_DIR[AIToolID.CLAUDE]
+        skills_disable = set(list_skills(skills_dir)) - scene.selected("skills")
+        if skills_disable:
+            version = versioning.detect_tool_version(AIToolID.CLAUDE)
+            if versioning.at_least(version, versioning.CLAUDE_SKILL_OVERRIDES_MIN):
+                overrides = {name: "off" for name in sorted(skills_disable)}
+                body = {"skillOverrides": overrides}
+                settings = json.dumps(body, indent=2, sort_keys=True) + "\n"
+                path = scene.write_artifact("settings.json", settings)
+                args += [caps.scene_settings_flag or "--settings", str(path)]
+            else:
+                floor = ".".join(map(str, versioning.CLAUDE_SKILL_OVERRIDES_MIN))
+                detected = ".".join(map(str, version)) if version else "unknown"
+                warnings.warn(
+                    f"skillOverrides needs claude >= {floor} (detected {detected}); "
+                    f"{len(skills_disable)} deselected skill(s) not filtered for this launch.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        # agents — block each deselected subagent via --disallowedTools.
+        agents_target = _AGENT_TARGET_PATHS.get(str(AIToolID.CLAUDE))
+        if agents_target is not None:
+            universe = projection.scene_names(scene.project_root, agents_target, "agents")
+            agents_disable = universe - scene.selected("agents")
+            if agents_disable:
+                args.append(caps.scene_tool_denylist_flag or "--disallowedTools")
+                args += [f"Agent({name})" for name in sorted(agents_disable)]
+
+        return SceneLaunchArgs(args=tuple(args))

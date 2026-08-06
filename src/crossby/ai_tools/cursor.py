@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
@@ -20,6 +20,9 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
 )
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 logger = structlog.get_logger()
 
@@ -85,6 +88,12 @@ class CursorAdapter(AbstractAITool):
             # into {"permission": "deny"}. Documented as under-documented
             # rather than unsupported.
             hook_fail_open_default=True,
+            # Session-scoped scenes: CURSOR_CONFIG_DIR points Cursor at a
+            # scene-materialised config dir for one session — where the
+            # persistent matrix has no per-server MCP lever, the session path
+            # supplies a replacement mcp.json of exactly the selected servers.
+            supports_scene_launch=True,
+            scene_config_dir_env="CURSOR_CONFIG_DIR",
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
@@ -192,3 +201,22 @@ class CursorAdapter(AbstractAITool):
 
     def session_data_dirs(self) -> list[str]:
         return [".cursor"]
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Point ``CURSOR_CONFIG_DIR`` at a scene-materialised config dir.
+
+        When the scene narrows MCP, materialise
+        ``.crossby/scene/<name>/launch/cursor/mcp.json`` of exactly the selected
+        servers and set ``CURSOR_CONFIG_DIR`` to that directory for the session —
+        Cursor's only session-scoped config lever. Emitted only when the scene
+        narrows MCP; otherwise Cursor uses its normal config unchanged.
+        """
+        from crossby.scenes.launch import SceneLaunchArgs, mcp_json_config
+
+        if not scene.narrows_mcp():
+            return SceneLaunchArgs()
+
+        config_dir = scene.launch_dir / "cursor"
+        scene.write_artifact("cursor/mcp.json", mcp_json_config(scene.selected_mcp()))
+        env_name = self.capabilities().scene_config_dir_env or "CURSOR_CONFIG_DIR"
+        return SceneLaunchArgs(env={env_name: str(config_dir)})

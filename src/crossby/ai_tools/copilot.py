@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.handoff.models import ConversationTranscript, SessionRef
@@ -16,6 +16,9 @@ from crossby.models.ai import (
     HookStopDialect,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 
 class CopilotAdapter(AbstractAITool):
@@ -54,6 +57,12 @@ class CopilotAdapter(AbstractAITool):
             # per-hook fail-closed switch to opt into. Default timeout is 30s
             # (`timeoutSec`).
             hook_fail_open_default=False,
+            # Session-scoped scenes: deselected MCP servers become repeated
+            # --disable-mcp-server flags; the visibility (--excluded-tools) and
+            # approval (--allow-tool) layers are independent, so a scene-excluded
+            # tool is also filtered out of any profile-supplied allow entries.
+            supports_scene_launch=True,
+            scene_tool_denylist_flag="--excluded-tools",
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
@@ -119,3 +128,38 @@ class CopilotAdapter(AbstractAITool):
             # Only convert version number separators (digit-digit)
             return re.sub(r"(\d)-(\d)", r"\1.\2", model_id)
         return model_id
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Scope a scene for one session via Copilot's two independent layers.
+
+        - **Visibility** — a repeated ``--disable-mcp-server <name>`` for each
+          deselected MCP server. A server hidden here cannot be re-exposed by the
+          approval layer, so this is authoritative.
+        - **Approval** — any profile-supplied ``--allow-tool`` entry that names a
+          scene-excluded server is dropped before the surviving entries are
+          re-emitted, so a profile can never re-allow a tool the scene removed.
+          crossby resolves this itself rather than relying on Copilot's internal
+          precedence between the two layers.
+
+        Writes no artefact files — Copilot's scene is entirely flag-driven.
+        """
+        from crossby.scenes.launch import SceneLaunchArgs
+
+        excluded = scene.deselected_mcp()
+        args: list[str] = []
+        for name in sorted(excluded):
+            args += ["--disable-mcp-server", name]
+        for entry in scene.allow_tools:
+            if not _allow_entry_excluded(entry, excluded):
+                args += ["--allow-tool", entry]
+        return SceneLaunchArgs(args=tuple(args))
+
+
+def _allow_entry_excluded(entry: str, excluded_servers: set[str]) -> bool:
+    """True when an ``--allow-tool`` *entry* names a scene-excluded MCP server.
+
+    Matches the bare server name and Copilot's ``<server>__<tool>`` namespacing,
+    so ``github`` and ``github__create_issue`` are both dropped when ``github``
+    is excluded, while an unrelated ``shell(git:*)`` survives.
+    """
+    return any(entry == server or entry.startswith(f"{server}__") for server in excluded_servers)
