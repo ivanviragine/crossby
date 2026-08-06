@@ -122,7 +122,7 @@ class TestInitMenuVisibility:
 
         _title, items = recorder.calls[0]
         assert "Init" not in items
-        assert items == ["Launch", "Sync", "Handoff", "Convert", "Stats"]
+        assert items == ["Launch", "Sync", "Handoff", "Convert", "Stats", "Scene"]
 
     def test_init_shown_when_no_config(
         self,

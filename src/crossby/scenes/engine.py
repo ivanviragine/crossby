@@ -20,6 +20,7 @@ switch-safe, and both entry points return ``list[SyncResult]`` so the CLI reuses
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import structlog
@@ -50,15 +51,17 @@ def apply_scene(
     *,
     dry_run: bool = False,
     force: bool = False,
+    tools: Iterable[AIToolID] | None = None,
 ) -> list[SyncResult]:
     """Apply *resolved* to every installed tool, least-invasive mechanism first.
 
     Returns one :class:`SyncResult` per action taken. ``dry_run`` computes every
     change and writes nothing; ``force`` reaches only the skills/agents symlink
     re-point of a real, non-crossby directory (crossby's own symlinks always
-    re-point).
+    re-point). ``tools`` narrows the apply to a subset of the installed tools
+    (``crossby scene use --tool``); ``None`` means every installed tool.
     """
-    ctx = _context(project_root, resolved, dry_run=dry_run, force=force)
+    ctx = _context(project_root, resolved, dry_run=dry_run, force=force, tools=tools)
     results: list[SyncResult] = []
 
     # 1. DECLARE surfaces (record scene provenance into the in-memory ledger).
@@ -86,7 +89,9 @@ def apply_scene(
     return results
 
 
-def clear_scene(project_root: Path, *, dry_run: bool = False) -> list[SyncResult]:
+def clear_scene(
+    project_root: Path, *, dry_run: bool = False, tools: Iterable[AIToolID] | None = None
+) -> list[SyncResult]:
     """Revert to the pre-scene state — nothing crossby didn't write is touched.
 
     Every crossby-owned DECLARE key is reverted (``disable`` is the empty set, so
@@ -94,36 +99,87 @@ def clear_scene(project_root: Path, *, dry_run: bool = False) -> list[SyncResult
     and each tool's skills/agents directory is re-pointed at its unfiltered
     source. A human-authored ``skillOverrides`` / ``deny`` / MCP ``disabled``
     entry crossby never recorded survives untouched.
+
+    ``tools`` narrows the revert to a subset of the installed tools
+    (``crossby scene clear --tool``, and the per-tool revert of a switch): only
+    those tools' DECLARE keys and source directories are touched, and the shared
+    projection tree is removed only once no out-of-scope tool still points at it.
+    ``None`` reverts every installed tool.
     """
     base = build_sync_data(project_root)
     ledger = load_ledger(project_root)
     version = versioning.detect_tool_version(AIToolID.CLAUDE)
+    scope = set(tools) if tools is not None else None
     results: list[SyncResult] = []
 
+    def _in_scope(tool: AIToolID) -> bool:
+        return scope is None or tool in scope
+
     # 1. Revert DECLARE keys — an empty desired set reverts everything owned.
-    results.append(
-        declare.apply_claude_skill_overrides(
-            project_root, set(), ledger, dry_run=dry_run, version=version
+    #    Each key is gated by scope so a --tool clear leaves other tools' keys
+    #    alone (a tool never applied has nothing owned, so its revert is a no-op
+    #    regardless, but gating keeps the result rows scoped too).
+    if _in_scope(AIToolID.CLAUDE):
+        results.append(
+            declare.apply_claude_skill_overrides(
+                project_root, set(), ledger, dry_run=dry_run, version=version
+            )
         )
-    )
-    results.append(declare.apply_claude_deny_agents(project_root, set(), ledger, dry_run=dry_run))
-    results.append(declare.apply_claude_disabled_mcp(project_root, set(), ledger, dry_run=dry_run))
-    results.append(declare.apply_codex_disabled_mcp(project_root, set(), ledger, dry_run=dry_run))
-    results.append(
-        declare.apply_antigravity_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
-    )
+        results.append(
+            declare.apply_claude_deny_agents(project_root, set(), ledger, dry_run=dry_run)
+        )
+        results.append(
+            declare.apply_claude_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+        )
+    if _in_scope(AIToolID.CODEX):
+        results.append(
+            declare.apply_codex_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+        )
+    if _in_scope(AIToolID.ANTIGRAVITY_CLI):
+        results.append(
+            declare.apply_antigravity_disabled_mcp(project_root, set(), ledger, dry_run=dry_run)
+        )
     if not dry_run:
         save_ledger(project_root, ledger)
 
     # 2. Re-point skills/agents back at the unfiltered source (before removing the
     #    projection, so the tools never briefly resolve to a deleted tree).
-    results.extend(_restore_sources(project_root, base, dry_run=dry_run))
+    results.extend(_restore_sources(project_root, base, dry_run=dry_run, tools=scope))
 
-    # 3. Remove the projection tree.
-    removed = projection.clear_projection(project_root, dry_run=dry_run)
-    if removed is not None:
-        results.append(removed)
+    # 3. Remove the projection tree, but only when no tool left out of this scope
+    #    still resolves to it — a scoped clear must not yank the shared tree out
+    #    from under a tool it isn't reverting.
+    if _should_clear_projection(project_root, scope):
+        removed = projection.clear_projection(project_root, dry_run=dry_run)
+        if removed is not None:
+            results.append(removed)
     return results
+
+
+def _should_clear_projection(project_root: Path, scope: set[AIToolID] | None) -> bool:
+    """True when removing ``.crossby/scene/`` is safe for the current clear scope.
+
+    An unscoped clear always removes it. A scoped clear removes it only when no
+    installed tool *outside* the scope still points its skills/agents directory
+    at the projection tree — otherwise that tool would be left dangling at a
+    deleted path.
+    """
+    if scope is None:
+        return True
+    if not (project_root / projection.SCENE_PROJECTION_ROOT).exists():
+        return False
+    from crossby.ai_tools.base import AbstractAITool
+
+    for tool in AbstractAITool.detect_installed():
+        if tool in scope:
+            continue
+        for kind, concern in (("skills", SyncConcern.SKILLS), ("agents", SyncConcern.AGENTS)):
+            target = _target_for(tool, concern)
+            if target is not None and projection.tool_points_at_projection(
+                project_root, target, kind
+            ):
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -167,16 +223,26 @@ class _Context:
 
 
 def _context(
-    project_root: Path, resolved: ResolvedScene, *, dry_run: bool, force: bool
+    project_root: Path,
+    resolved: ResolvedScene,
+    *,
+    dry_run: bool,
+    force: bool,
+    tools: Iterable[AIToolID] | None = None,
 ) -> _Context:
     from crossby.ai_tools.base import AbstractAITool
     from crossby.models.config import SCENE_CONCERNS
+
+    installed = AbstractAITool.detect_installed()
+    if tools is not None:
+        scope = set(tools)
+        installed = [tool for tool in installed if tool in scope]
 
     return _Context(
         project_root=project_root,
         base=build_sync_data(project_root),
         ledger=load_ledger(project_root),
-        installed=AbstractAITool.detect_installed(),
+        installed=installed,
         selected={concern: set(resolved.names(concern)) for concern in SCENE_CONCERNS},
         claude_version=versioning.detect_tool_version(AIToolID.CLAUDE),
         codex_trusted=trust.codex_trusts_project(project_root),
@@ -361,7 +427,15 @@ def _filter_removable(ctx: _Context, concern_key: str, concern: SyncConcern) -> 
         data = SyncData(hooks=kept)
     else:
         data = SyncData(allowed_commands=[p for p in ctx.base.allowed_commands if p in selected])
-    return run_sync(data, ctx.project_root, concern=concern, dry_run=ctx.dry_run)
+    # Pass the (possibly scoped) installed set so a --tool run narrows the
+    # removal channel to the same subset the DECLARE/PROJECT handlers touched.
+    return run_sync(
+        data,
+        ctx.project_root,
+        concern=concern,
+        dry_run=ctx.dry_run,
+        installed_tools=ctx.installed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,11 +443,24 @@ def _filter_removable(ctx: _Context, concern_key: str, concern: SyncConcern) -> 
 # ---------------------------------------------------------------------------
 
 
-def _restore_sources(project_root: Path, base: SyncData, *, dry_run: bool) -> list[SyncResult]:
-    """Re-point every installed tool's skills/agents dir at the unfiltered source."""
+def _restore_sources(
+    project_root: Path,
+    base: SyncData,
+    *,
+    dry_run: bool,
+    tools: set[AIToolID] | None = None,
+) -> list[SyncResult]:
+    """Re-point every installed tool's skills/agents dir at the unfiltered source.
+
+    ``tools`` narrows the restore to a subset of the installed tools, so a scoped
+    clear never re-points (or creates a fresh symlink for) a tool it isn't
+    reverting.
+    """
     from crossby.ai_tools.base import AbstractAITool
 
     installed = AbstractAITool.detect_installed()
+    if tools is not None:
+        installed = [tool for tool in installed if tool in tools]
     results: list[SyncResult] = []
     for concern, source_rel in (
         (SyncConcern.SKILLS, base.skills_source),
