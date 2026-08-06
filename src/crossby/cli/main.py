@@ -53,6 +53,7 @@ from crossby.cli.convert import convert  # noqa: E402
 from crossby.cli.handoff import handoff  # noqa: E402
 from crossby.cli.init import init  # noqa: E402
 from crossby.cli.launch import launch  # noqa: E402
+from crossby.cli.scene import scene_app  # noqa: E402
 from crossby.cli.stats import stats  # noqa: E402
 from crossby.cli.sync import sync  # noqa: E402
 
@@ -63,6 +64,7 @@ app.command()(stats)
 app.command()(handoff)
 app.command()(init)
 app.add_typer(agents_app, name="agents")
+app.add_typer(scene_app, name="scene")
 
 
 def _interactive_main_menu(ctx: typer.Context) -> None:
@@ -88,6 +90,7 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
         ("Handoff", "Hand off a session between tools", "crossby handoff"),
         ("Convert", "Translate allowlist patterns", "crossby convert"),
         ("Stats", "Parse session transcripts", "crossby stats"),
+        ("Scene", "Activate a scene", "crossby scene"),
     ]
     if not has_config:
         entries.append(("Init", "Initialize .crossby.yml", "crossby init"))
@@ -147,8 +150,65 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
     elif label == "Stats":
         transcript_path, tool = _prompt_stats_args()
         stats(transcript_path=transcript_path, tool=tool)
+    elif label == "Scene":
+        _run_scene_menu()
     elif label == "Init":
         init(path=Path("."), force=False, non_interactive=False)
+
+
+def _run_scene_menu() -> None:
+    """Dispatch a scene action from the interactive menu.
+
+    Each arm calls a ``crossby.cli.scene`` subcommand function directly with
+    every parameter spelled out, mirroring how the other menu entries dispatch.
+    """
+    from crossby.cli.scene import (
+        clear_active,
+        list_scenes,
+        scene_status,
+        show_scene,
+        use_scene,
+    )
+    from crossby.ui import prompts
+
+    actions = ["Use a scene", "Show a scene", "List scenes", "Status", "Clear active scene"]
+    idx = prompts.select("Scene action", actions)
+    if idx == 2:
+        list_scenes(tool=None, path=Path("."))
+        return
+    if idx == 3:
+        scene_status(tool=None, path=Path("."))
+        return
+    if idx == 4:
+        clear_active(tool=None, plan=False, force=False, path=Path("."))
+        return
+
+    name = _prompt_scene_name()
+    if name is None:
+        return
+    if idx == 0:
+        use_scene(name=name, tool=None, plan=False, force=False, path=Path("."))
+    else:
+        show_scene(name=name, tool=None, path=Path("."))
+
+
+def _prompt_scene_name() -> str | None:
+    """Pick a scene name from ``.crossby.yml``; ``None`` when none are defined."""
+    from crossby.config.loader import ConfigError, load_config
+    from crossby.ui import prompts
+
+    try:
+        config = load_config(Path("."))
+    except ConfigError:
+        config = None
+    names = sorted(config.scenes) if config is not None else []
+    if not names:
+        from crossby.ui.console import console
+
+        console.info("No scenes defined in .crossby.yml.")
+        return None
+    idx = prompts.select("Scene", names)
+    return names[idx]
 
 
 def _prompt_convert_args() -> tuple[str, str, str]:

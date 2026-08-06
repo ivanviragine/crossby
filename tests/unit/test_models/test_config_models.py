@@ -1,10 +1,15 @@
 """Tests for CrossbyConfig generic command map."""
 
+import pytest
+from pydantic import ValidationError
+
 from crossby.models.config import (
     AIConfig,
     CommandConfig,
     ComplexityModelMapping,
     CrossbyConfig,
+    SceneConfig,
+    SceneSelector,
 )
 
 
@@ -121,3 +126,158 @@ class TestCrossbyConfig:
     def test_profiles_empty_default(self):
         config = CrossbyConfig()
         assert config.profiles == {}
+
+    def test_scenes_empty_default(self):
+        config = CrossbyConfig()
+        assert config.scenes == {}
+        assert config.get_scene("anything") is None
+
+
+class TestSceneSelector:
+    def test_defaults(self):
+        sel = SceneSelector()
+        assert sel.include is None  # absent → "everything", distinct from []
+        assert sel.exclude == []
+
+    def test_populated(self):
+        sel = SceneSelector(include=["review-*", "knowledge"], exclude=["deploy-*"])
+        assert sel.include == ["review-*", "knowledge"]
+        assert sel.exclude == ["deploy-*"]
+
+    def test_unknown_key_forbidden(self):
+        with pytest.raises(ValidationError):
+            SceneSelector.model_validate({"includ": ["typo"]})
+
+    def test_include_must_be_a_list(self):
+        with pytest.raises(ValidationError):
+            SceneSelector.model_validate({"include": "not-a-list"})
+
+
+class TestSceneConfig:
+    def test_defaults_all_concerns_none(self):
+        scene = SceneConfig()
+        assert scene.description is None
+        assert scene.extends is None
+        assert scene.profile is None
+        assert scene.skills is None
+        assert scene.agents is None
+        assert scene.mcp is None
+        assert scene.hooks is None
+        assert scene.permissions is None
+
+    def test_unknown_concern_key_forbidden(self):
+        """A typo'd concern (``skils``) must raise, not vanish silently."""
+        with pytest.raises(ValidationError):
+            SceneConfig.model_validate({"skils": {"include": ["x"]}})
+
+    def test_rules_is_not_a_selectable_concern(self):
+        with pytest.raises(ValidationError):
+            SceneConfig.model_validate({"rules": {"include": ["x"]}})
+
+    def test_selectors_parse(self):
+        scene = SceneConfig.model_validate(
+            {
+                "description": "Review a PR",
+                "skills": {"include": ["review-*"]},
+                "mcp": {"include": ["github"]},
+            }
+        )
+        assert scene.description == "Review a PR"
+        assert scene.skills is not None
+        assert scene.skills.include == ["review-*"]
+        assert scene.mcp is not None
+        assert scene.mcp.include == ["github"]
+
+
+class TestGetSceneFlattening:
+    """``get_scene`` folds the ``extends`` chain with per-concern replace."""
+
+    def _config(self, scenes: dict[str, dict[str, object]]) -> CrossbyConfig:
+        return CrossbyConfig(
+            scenes={name: SceneConfig.model_validate(body) for name, body in scenes.items()}
+        )
+
+    def test_child_selector_replaces_parent(self):
+        config = self._config(
+            {
+                "base": {"skills": {"exclude": ["deploy-*"]}},
+                "child": {"extends": "base", "skills": {"include": ["review-*"]}},
+            }
+        )
+        flat = config.get_scene("child")
+        assert flat is not None
+        assert flat.skills is not None
+        # Child declared skills → parent's exclude is NOT inherited.
+        assert flat.skills.include == ["review-*"]
+        assert flat.skills.exclude == []
+        # Parent is left untouched.
+        assert config.scenes["base"].skills is not None
+        assert config.scenes["base"].skills.exclude == ["deploy-*"]
+
+    def test_omitted_concern_inherited_verbatim(self):
+        config = self._config(
+            {
+                "base": {"skills": {"exclude": ["deploy-*"]}, "mcp": {"include": ["github"]}},
+                "child": {"extends": "base", "agents": {"include": ["code-reviewer"]}},
+            }
+        )
+        flat = config.get_scene("child")
+        assert flat is not None
+        assert flat.skills is not None
+        assert flat.skills.exclude == ["deploy-*"]  # inherited
+        assert flat.mcp is not None
+        assert flat.mcp.include == ["github"]  # inherited
+        assert flat.agents is not None
+        assert flat.agents.include == ["code-reviewer"]  # child's own
+
+    def test_description_and_profile_inherit_then_replace(self):
+        config = CrossbyConfig(
+            profiles={},
+            scenes={
+                "base": SceneConfig(description="base desc", profile=None),
+                "inherits": SceneConfig(extends="base"),
+                "overrides": SceneConfig(extends="base", description="own desc"),
+            },
+        )
+        assert config.get_scene("inherits").description == "base desc"  # type: ignore[union-attr]
+        assert config.get_scene("overrides").description == "own desc"  # type: ignore[union-attr]
+
+    def test_three_level_chain(self):
+        config = self._config(
+            {
+                "c": {"mcp": {"include": ["github"]}},
+                "b": {"extends": "c", "hooks": {"include": ["pre_tool_use:*"]}},
+                "a": {"extends": "b", "skills": {"include": ["review-*"]}},
+            }
+        )
+        flat = config.get_scene("a")
+        assert flat is not None
+        assert flat.mcp is not None and flat.mcp.include == ["github"]
+        assert flat.hooks is not None and flat.hooks.include == ["pre_tool_use:*"]
+        assert flat.skills is not None and flat.skills.include == ["review-*"]
+        assert flat.extends is None  # flattened result carries no extends
+
+    def test_unknown_scene_returns_none(self):
+        config = self._config({"base": {}})
+        assert config.get_scene("missing") is None
+
+    def test_undefined_parent_raises(self):
+        from crossby.config.loader import ConfigError
+
+        config = self._config({"child": {"extends": "ghost"}})
+        with pytest.raises(ConfigError, match=r"child.*extends undefined scene.*ghost"):
+            config.get_scene("child")
+
+    def test_self_reference_raises(self):
+        from crossby.config.loader import ConfigError
+
+        config = self._config({"loop": {"extends": "loop"}})
+        with pytest.raises(ConfigError, match=r"cycle detected: loop -> loop"):
+            config.get_scene("loop")
+
+    def test_mutual_cycle_raises_naming_chain(self):
+        from crossby.config.loader import ConfigError
+
+        config = self._config({"a": {"extends": "b"}, "b": {"extends": "a"}})
+        with pytest.raises(ConfigError, match=r"cycle detected: a -> b -> a"):
+            config.get_scene("a")

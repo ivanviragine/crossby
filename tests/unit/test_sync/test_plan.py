@@ -209,3 +209,38 @@ class TestBuildAndRenderDoctor:
         assert "manual-review items: 1" in out
         assert "validation warnings: 1" in out
         assert "recommended flow" in out
+
+
+def _revoked_result(revoked: int = 1, added: int = 0) -> SyncResult:
+    return SyncResult(
+        tool_id=AIToolID.CLAUDE,
+        concern=SyncConcern.HOOKS,
+        action="updated",
+        file_path=Path("x"),
+        added=added,
+        revoked=revoked,
+    )
+
+
+class TestRevocationCounting:
+    def test_revoked_rows_are_counted(self) -> None:
+        s = summarize_plan([_revoked_result(revoked=2), _result(action="created")])
+        assert s.revoked_count == 1
+
+    def test_revocation_is_not_treated_as_manual_fix(self) -> None:
+        # A revocation is a real successful write, not something needing review.
+        s = summarize_plan([_revoked_result()])
+        assert s.manual_fix_count == 0
+
+    def test_revocation_does_not_lower_readiness(self) -> None:
+        s = summarize_plan([_revoked_result()])
+        assert doctor_readiness(s, []) == "high"
+
+    def test_render_plan_reports_revocations(self) -> None:
+        s = summarize_plan([_revoked_result(revoked=3)])
+        assert "revocations:" in render_plan(s)
+
+    def test_render_doctor_reports_revocations(self) -> None:
+        s = summarize_plan([_revoked_result()])
+        out = render_doctor(build_doctor(s, []))
+        assert "revocations: 1" in out
