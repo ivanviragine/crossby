@@ -275,6 +275,17 @@ class TestNonManagedDirRefusal:
         backups = list(tmp_path.glob(".agents/skills.bak*"))
         assert backups and (backups[0] / "user-notes.txt").is_file()
 
+    def test_clear_refuses_real_non_crossby_target(self, tmp_path: Path) -> None:
+        # clear must not back up and replace a real, non-crossby directory it never
+        # managed — the same refusal the apply path enforces.
+        self._project_with_real_agents_skills(tmp_path)
+        results = clear_scene(tmp_path)
+        assert not (tmp_path / ".agents" / "skills").is_symlink()
+        assert (tmp_path / ".agents" / "skills" / "user-notes.txt").is_file()
+        assert not list(tmp_path.glob(".agents/skills.bak*"))
+        skills_errs = [r for r in results if r.concern.value == "skills" and r.action == "error"]
+        assert skills_errs
+
 
 class TestHooksPermissionsFilter:
     def test_selecting_all_permissions_does_not_touch_them(self, tmp_path: Path) -> None:

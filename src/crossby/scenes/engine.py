@@ -399,7 +399,15 @@ def _restore_sources(project_root: Path, base: SyncData, *, dry_run: bool) -> li
             seen.add(target)
             if projection.is_source_dir(project_root, target, source_rel):
                 continue
-            results.append(projection.restore_source(project_root, concern, source_rel, tool))
+            # Mirror the apply-path gate (_repoint_path): re-point only crossby's
+            # own symlink or a missing target. A real, non-crossby directory is
+            # refused here too — clear must not back up and replace a user's own
+            # directory without an explicit opt-in.
+            target_path = project_root / target
+            force = target_path.is_symlink() or not target_path.exists()
+            results.append(
+                projection.restore_source(project_root, concern, source_rel, tool, force=force)
+            )
     return results
 
 
