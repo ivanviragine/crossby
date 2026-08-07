@@ -26,6 +26,22 @@ import yaml
 
 from crossby.models.config import SCENE_CONCERNS, SceneConfig, SceneSelector
 
+
+class SceneAuthoringError(Exception):
+    """Raised when ``.crossby.yml`` cannot be spliced safely at entry granularity.
+
+    Today the one trigger is an inline/flow ``scenes: {a: ..., b: ...}`` block:
+    its entries share a line, so there is no per-entry byte span to rewrite
+    without disturbing siblings. Failing loudly is safer than corrupting.
+    """
+
+
+_FLOW_SCENES_MSG = (
+    "the 'scenes:' block is written in inline/flow style ({...}); reformat it to "
+    "block style (one scene per line) before editing scenes from the CLI"
+)
+
+
 # ---------------------------------------------------------------------------
 # Selector edits (model level) — the cross-channel rule
 # ---------------------------------------------------------------------------
@@ -276,6 +292,15 @@ def _has_entries(value_node: yaml.nodes.Node) -> bool:
     return isinstance(value_node, yaml.nodes.MappingNode) and len(value_node.value) > 0
 
 
+def _is_flow_mapping(value_node: yaml.nodes.Node) -> bool:
+    """True when the mapping is written inline (``{a: ..., b: ...}``).
+
+    Entries of a flow mapping share a line, so there is no per-entry byte span to
+    splice — the caller must reject it rather than corrupt the file.
+    """
+    return isinstance(value_node, yaml.nodes.MappingNode) and bool(value_node.flow_style)
+
+
 def _entry_span(text: str, scenes_val: yaml.nodes.Node, name: str) -> tuple[int, int] | None:
     """Byte span ``[start, end)`` of scene *name*'s entry, or ``None`` if absent.
 
@@ -353,6 +378,8 @@ def splice_scene_text(text: str, name: str, scene: SceneConfig) -> str:
     key_node, scenes_val = nodes
     if not _has_entries(scenes_val):
         return _replace_empty_scenes(text, key_node, render_scene_entry(name, scene))
+    if _is_flow_mapping(scenes_val):
+        raise SceneAuthoringError(_FLOW_SCENES_MSG)
 
     indent = _existing_indent(scenes_val)
     entry = render_scene_entry(name, scene, indent=indent)
@@ -373,6 +400,8 @@ def remove_scene_text(text: str, name: str) -> tuple[str, bool]:
     nodes = _scenes_nodes(text)
     if nodes is None or not _has_entries(nodes[1]):
         return text, False
+    if _is_flow_mapping(nodes[1]):
+        raise SceneAuthoringError(_FLOW_SCENES_MSG)
     span = _entry_span(text, nodes[1], name)
     if span is None:
         return text, False

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from crossby.models.config import SceneConfig, SceneSelector
 from crossby.scenes.authoring import (
+    SceneAuthoringError,
     SelectorEdit,
     add_selectors,
     remove_scene_text,
@@ -174,6 +176,14 @@ class TestSpliceBytePreservation:
         # Every byte before the edited entry — CRLF and all — is unchanged.
         assert out.startswith(head)
         assert yaml.safe_load(out)["scenes"]["x"]["mcp"]["include"] == ["h"]
+
+    def test_inline_flow_scenes_block_rejected(self) -> None:
+        # An inline `scenes: {x: ..., y: ...}` has no per-entry span to splice.
+        doc = "version: 1\nscenes: {x: {mcp: {include: [g]}}, y: {mcp: {include: [h]}}}\n"
+        with pytest.raises(SceneAuthoringError):
+            splice_scene_text(doc, "x", SceneConfig(mcp=SceneSelector(include=["z"])))
+        with pytest.raises(SceneAuthoringError):
+            remove_scene_text(doc, "x")
 
 
 class TestRemoveSceneText:

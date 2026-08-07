@@ -920,13 +920,19 @@ def _apply_scalar_updates(
 
 
 def _report_moves(moves: list[CrossChannelMove]) -> None:
+    # Escape: glob patterns can contain [...] (fnmatch char classes), which Rich
+    # would otherwise interpret as markup and strip from the message.
+    from rich.markup import escape
+
     for move in moves:
-        console.info(move.describe())
+        console.info(escape(move.describe()))
 
 
 def _report_missing(missing: list[str]) -> None:
+    from rich.markup import escape
+
     for pattern in missing:
-        console.warn(f"selector {pattern!r} was not present — nothing removed.")
+        console.warn(escape(f"selector {pattern!r} was not present — nothing removed."))
 
 
 def _require_resolves(name: str) -> Callable[[CrossbyConfig], None]:
@@ -947,15 +953,30 @@ def _require_resolves(name: str) -> Callable[[CrossbyConfig], None]:
     return _validate
 
 
-def _write_scene_entry(project_root: Path, name: str, scene: SceneConfig, *, print_: bool) -> None:
-    """Splice *scene* into ``.crossby.yml`` (or print it), reporting the outcome.
+def _config_target(config: CrossbyConfig, project_root: Path) -> Path:
+    """The ``.crossby.yml`` an authoring command should write.
+
+    Prefer the loaded config's own path so an edit run from a subdirectory
+    targets the same file it *read* (``load_config`` walks up), instead of
+    writing a shadow config into the subdirectory. Falls back to
+    ``project_root/.crossby.yml`` only when no config was found (a fresh create).
+    """
+    return Path(config.config_path) if config.config_path else project_root / ".crossby.yml"
+
+
+def _write_scene_entry(target: Path, name: str, scene: SceneConfig, *, print_: bool) -> None:
+    """Splice *scene* into *target* (or print it), reporting the outcome.
 
     With ``--print`` the rendered entry goes to stdout and nothing is written;
     otherwise the write is backed up, re-parsed, resolution-checked, and rolled
     back byte-for-byte on any error.
     """
     from crossby.config.safe_write import ConfigWriteError, write_config_checked
-    from crossby.scenes.authoring import render_scene_entry, splice_scene_text
+    from crossby.scenes.authoring import (
+        SceneAuthoringError,
+        render_scene_entry,
+        splice_scene_text,
+    )
 
     if print_:
         # Raw YAML: disable Rich markup (flow lists like ``[a, b]`` read as tags)
@@ -968,11 +989,14 @@ def _write_scene_entry(project_root: Path, name: str, scene: SceneConfig, *, pri
         )
         return
 
-    target = project_root / ".crossby.yml"
     # read_bytes().decode() rather than read_text() so a CRLF file's line endings
     # are not silently normalised to LF, which would rewrite every line.
     base = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
-    new_text = splice_scene_text(base, name, scene)
+    try:
+        new_text = splice_scene_text(base, name, scene)
+    except SceneAuthoringError as exc:
+        console.error(f"Cannot edit {target.name}: {exc}")
+        raise typer.Exit(1) from exc
     try:
         write_config_checked(target, new_text, validate=_require_resolves(name))
     except ConfigWriteError as exc:
@@ -1047,7 +1071,7 @@ def add_to_scene(
     scene, moves = add_selectors(config.scenes[name], edits)
     scene = _apply_scalar_updates(scene, description, extends, profile)
     _report_moves(moves)
-    _write_scene_entry(project_root, name, scene, print_=print_)
+    _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
 
 
 @scene_app.command("remove")
@@ -1098,7 +1122,7 @@ def remove_from_scene(
 
     scene, missing = remove_selectors(config.scenes[name], edits)
     _report_missing(missing)
-    _write_scene_entry(project_root, name, scene, print_=print_)
+    _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
 
 
 # ---------------------------------------------------------------------------
@@ -1121,7 +1145,7 @@ def delete_scene(
     leave the child unresolvable.
     """
     from crossby.config.safe_write import ConfigWriteError, write_config_checked
-    from crossby.scenes.authoring import remove_scene_text
+    from crossby.scenes.authoring import SceneAuthoringError, remove_scene_text
     from crossby.scenes.state import load_scene_state
 
     project_root = path.resolve()
@@ -1146,9 +1170,13 @@ def delete_scene(
         console.hint("Update or delete those first, or pass --force.")
         raise typer.Exit(1)
 
-    target = project_root / ".crossby.yml"
+    target = _config_target(config, project_root)
     text = target.read_bytes().decode("utf-8")
-    new_text, found = remove_scene_text(text, name)
+    try:
+        new_text, found = remove_scene_text(text, name)
+    except SceneAuthoringError as exc:
+        console.error(f"Cannot edit {target.name}: {exc}")
+        raise typer.Exit(1) from exc
     if not found:  # pragma: no cover — guarded by the config.scenes check above
         console.error(f"Scene {name!r} was not found in {target.name}.")
         raise typer.Exit(1)
@@ -1177,23 +1205,31 @@ def install_starters(
     project that has none of the skills/servers it names.
     """
     from crossby.config.safe_write import ConfigWriteError, write_config_checked
-    from crossby.scenes.authoring import render_scene_entry, splice_scene_text
+    from crossby.scenes.authoring import (
+        SceneAuthoringError,
+        render_scene_entry,
+        splice_scene_text,
+    )
     from crossby.scenes.starters import load_starter_scenes
 
     project_root = path.resolve()
-    target = project_root / ".crossby.yml"
     starters = load_starter_scenes()
     config = _load_config_or_exit(project_root)
+    target = _config_target(config, project_root)
     existing = set(config.scenes)
 
     text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
     installed: list[str] = []
-    for name, scene in starters.items():
-        if name in existing:
-            console.info(f"Skipped {name!r} — a scene with that name already exists.")
-            continue
-        text = splice_scene_text(text, name, scene)
-        installed.append(name)
+    try:
+        for name, scene in starters.items():
+            if name in existing:
+                console.info(f"Skipped {name!r} — a scene with that name already exists.")
+                continue
+            text = splice_scene_text(text, name, scene)
+            installed.append(name)
+    except SceneAuthoringError as exc:
+        console.error(f"Cannot edit {target.name}: {exc}")
+        raise typer.Exit(1) from exc
 
     if not installed:
         console.info("All starter scenes are already present.")
@@ -1298,7 +1334,7 @@ def create_scene(
         scene, moves = add_selectors(base, seed_edits)
         _report_moves(moves)
 
-    _write_scene_entry(project_root, name, scene, print_=print_)
+    _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
 
 
 def _prompt_new_scene_name(config: CrossbyConfig) -> str | None:
@@ -1517,6 +1553,11 @@ def _review_scene(
     for concern in SCENE_CONCERNS:
         include = cast("list[str] | None", result[concern])
         exclude = excludes[concern]
+        # The user may have re-selected (into include) an item carried in the
+        # exclude channel from a seed flag. Keep the cross-channel invariant by
+        # letting the interactive include win, so the two never contradict.
+        if include is not None:
+            exclude = [pattern for pattern in exclude if pattern not in include]
         selectors[concern] = (
             SceneSelector(include=include, exclude=exclude)
             if include is not None or exclude

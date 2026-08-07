@@ -313,6 +313,39 @@ class TestWizard:
 
 
 # ---------------------------------------------------------------------------
+# path resolution + safety
+# ---------------------------------------------------------------------------
+
+
+class TestPathAndSafety:
+    def test_edit_from_subdir_targets_the_walked_up_config(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+        result = _run(["scene", "add", "base", "--skill", "review-*"], sub)
+        assert result.exit_code == 0, result.output
+        # No shadow config written into the subdirectory.
+        assert not (sub / ".crossby.yml").exists()
+        assert "review-*" in _scenes(root)["base"]["skills"]["include"]
+
+    def test_inline_flow_scenes_block_is_refused(self, tmp_path: Path) -> None:
+        body = "version: 1\nscenes: {base: {skills: {exclude: [deploy-*]}}}\n"
+        root = _project(tmp_path, body)
+        before = (root / ".crossby.yml").read_text(encoding="utf-8")
+        result = _run(["scene", "add", "base", "--skill", "review-*"], root)
+        assert result.exit_code != 0
+        assert "block style" in result.output
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
+
+    def test_glob_pattern_not_mangled_by_rich_markup(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        # A char-class glob would be eaten as Rich markup if not escaped.
+        result = _run(["scene", "remove", "base", "--exclude-skill", "[abc]"], root)
+        assert result.exit_code == 0, result.output
+        assert "[abc]" in result.output
+
+
+# ---------------------------------------------------------------------------
 # rollback on a corrupt render
 # ---------------------------------------------------------------------------
 
