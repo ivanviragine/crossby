@@ -21,6 +21,7 @@ writing).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -46,6 +47,10 @@ LEDGER_VERSION = 2
 _HOOKS = SyncConcern.HOOKS.value
 _PERMISSIONS = SyncConcern.PERMISSIONS.value
 _MCP = SyncConcern.MCP.value
+
+# Sentinel distinguishing an *absent* ``scene`` key (fine) from an explicit
+# ``null`` (corrupt) in corruption classification — ``dict.get`` conflates them.
+_MISSING_SCENE: object = object()
 
 
 class SceneDeclareKey(StrEnum):
@@ -194,23 +199,77 @@ class OwnershipLedger:
         return out
 
 
+@dataclass(frozen=True)
+class LoadedLedger:
+    """Outcome of reading ``owned.json`` with corruption detection.
+
+    ``ledger`` is always usable (an empty ledger on any failure). ``corrupt`` is
+    ``True`` only when the path *exists* but could not be read as a valid ledger —
+    the signal a fail-closed caller (``scene use`` / ``clear``) uses to refuse
+    rather than revert from provenance it cannot parse.
+    """
+
+    ledger: OwnershipLedger
+    corrupt: bool = False  # path exists but could not be read as a valid ledger
+
+
 def load_ledger(project_root: Path) -> OwnershipLedger:
     """Read ``.crossby/owned.json``; a missing or malformed file yields an empty ledger."""
+    return load_ledger_checked(project_root).ledger
+
+
+def load_ledger_checked(project_root: Path) -> LoadedLedger:
+    """Read ``.crossby/owned.json``, flagging a corrupt/unreadable file.
+
+    ``corrupt`` fails closed on anything that is neither a truly-absent path nor a
+    valid ledger:
+
+    - **Not corrupt** when the path is *truly absent* (``os.path.lexists`` is
+      ``False`` — a fresh per-machine clone legitimately owns nothing) or when it
+      holds a valid, possibly-empty ledger.
+    - **Corrupt** when the path exists but is a directory or broken symlink
+      (``not path.is_file()``), ``json.loads`` raises, or the parsed root is not a
+      ``dict``. ``os.path.lexists`` (not ``Path.is_file``) is deliberate so a
+      broken symlink at ``owned.json`` is caught rather than mistaken for missing.
+
+    Lenient sub-parsing of malformed ``owned`` / ``scene`` *entries* is preserved
+    (they degrade to empty, never corrupt) — only a whole-file/root failure fails
+    closed, so a partially-garbage-but-readable ledger is not a false positive.
+    """
     path = project_root / LEDGER_PATH
+    if not os.path.lexists(path):
+        # Truly absent — never corrupt; a fresh clone starts from an empty ledger.
+        return LoadedLedger(OwnershipLedger())
     if not path.is_file():
-        return OwnershipLedger()
+        # A directory or broken symlink at the path: present but not a ledger.
+        logger.warning("ownership.malformed_ledger", path=str(path))
+        return LoadedLedger(OwnershipLedger(), corrupt=True)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, ValueError):
-        # Degrade to "own nothing" rather than crash — the ledger is advisory,
-        # and a corrupt one must never block a sync or delete anything.
+        # Degrade to "own nothing" rather than crash — the ledger is advisory —
+        # but flag corruption so a fail-closed caller can refuse to proceed.
         logger.warning("ownership.malformed_ledger", path=str(path))
-        return OwnershipLedger()
+        return LoadedLedger(OwnershipLedger(), corrupt=True)
     if not isinstance(raw, dict):
-        return OwnershipLedger()
+        logger.warning("ownership.malformed_ledger", path=str(path))
+        return LoadedLedger(OwnershipLedger(), corrupt=True)
+
+    # The scene section is the *authority* for a scene revert, so — unlike the
+    # additive ``owned`` section — a malformed entry here fails closed rather than
+    # degrading silently: dropping a real (tool, key) would let ``clear`` revert
+    # nothing yet delete ``scene-state.json``, leaving the setting applied with no
+    # recovery record (the exact #119 bug). ``owned`` stays lenient (a fresh clone
+    # can only add, never revoke what it has no record of), so its malformed
+    # sub-entries are dropped, not treated as corruption. A sentinel distinguishes
+    # an *absent* scene key (older v1 ledgers — fine) from an explicit ``null``.
+    scene_corrupt = _scene_section_corrupt(raw.get("scene", _MISSING_SCENE))
+
     owned = raw.get("owned")
     if not isinstance(owned, dict):
-        return OwnershipLedger()
+        # Root is a dict but ``owned`` is missing/malformed — leniently empty
+        # (mirrors the historical degradation); still fail closed on a bad scene.
+        return LoadedLedger(OwnershipLedger(), corrupt=scene_corrupt)
 
     data: dict[str, dict[str, list[Any]]] = {}
     for tool, concerns in owned.items():
@@ -224,7 +283,43 @@ def load_ledger(project_root: Path) -> OwnershipLedger:
             data[tool] = clean
 
     scene = _load_scene_section(raw.get("scene"))
-    return OwnershipLedger(data, scene)
+    return LoadedLedger(OwnershipLedger(data, scene), corrupt=scene_corrupt)
+
+
+def _scene_section_corrupt(raw_scene: object) -> bool:
+    """True when a *present* scene section can't be read as clean provenance.
+
+    crossby only ever writes ``{<AIToolID>: {<SceneDeclareKey>: [str, ...]}}`` (and
+    omits the key entirely when it owns nothing), so anything else is external
+    tampering/corruption of the revert authority and fails closed. Fail-closed
+    triggers, all of which would silently orphan real provenance:
+
+    - the section is *present but not a dict* — including an explicit ``null``
+      (distinguished from an absent key, which is ``_MISSING_SCENE`` → not corrupt,
+      so older v1 ledgers stay readable);
+    - a **tool name is not a known** :class:`~crossby.models.ai.AIToolID`, or a
+      **key is not a known** :class:`SceneDeclareKey` — an entry no revert handler
+      will ever consult (a typo, or a newer schema this build can't revert);
+    - a tool entry is not a dict, a key value is not a list, or a list holds a
+      non-string.
+
+    A valid-but-empty ``{}`` is not corrupt.
+    """
+    if raw_scene is _MISSING_SCENE:
+        return False
+    if not isinstance(raw_scene, dict):
+        return True
+    known_tools = {tool.value for tool in AIToolID}
+    known_keys = {key.value for key in SceneDeclareKey}
+    for tool, keys in raw_scene.items():
+        if not isinstance(tool, str) or tool not in known_tools or not isinstance(keys, dict):
+            return True
+        for key, items in keys.items():
+            if not isinstance(key, str) or key not in known_keys or not isinstance(items, list):
+                return True
+            if any(not isinstance(item, str) for item in items):
+                return True
+    return False
 
 
 def _load_scene_section(raw_scene: object) -> dict[str, dict[str, list[str]]]:
@@ -279,8 +374,10 @@ def save_ledger(project_root: Path, ledger: OwnershipLedger) -> bool:
 __all__ = [
     "LEDGER_PATH",
     "LEDGER_VERSION",
+    "LoadedLedger",
     "OwnershipLedger",
     "SceneDeclareKey",
     "load_ledger",
+    "load_ledger_checked",
     "save_ledger",
 ]

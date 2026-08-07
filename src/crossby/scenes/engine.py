@@ -64,10 +64,13 @@ def apply_scene(
     ctx = _context(project_root, resolved, dry_run=dry_run, force=force, tools=tools)
     results: list[SyncResult] = []
 
-    # 1. DECLARE surfaces (record scene provenance into the in-memory ledger).
-    #    The provenance save runs in a finally so that a DECLARE writer raising
-    #    part-way still persists what was already written — otherwise `clear`
-    #    could not revert an on-disk setting it has no record of. It also lands
+    # 1. DECLARE surfaces. Each handler commits provenance for a (tool, key) into
+    #    the in-memory ledger only AFTER its file write succeeds, or inline on a
+    #    verified no-write path — so a handler that raises leaves that key's prior
+    #    ownership untouched, and the in-memory ledger only ever reflects writes
+    #    that actually landed. The provenance save runs in a finally so a writer
+    #    raising part-way still persists a ledger consistent with disk — `clear`
+    #    can always revert an on-disk setting crossby recorded. It also lands
     #    BEFORE the hooks/permissions run_sync calls: those reload the ledger from
     #    disk and re-save it (owned section), and load_ledger/to_json round-trip
     #    the scene section, so this early save is preserved.
@@ -123,9 +126,12 @@ def clear_scene(
     #    Each key is gated by scope so a --tool clear leaves other tools' keys
     #    alone (a tool never applied has nothing owned, so its revert is a no-op
     #    regardless, but gating keeps the result rows scoped too).
-    # The ledger save runs in a finally so a revert that raises part-way still
-    # persists the narrowed ownership — otherwise a re-run would try to revert an
-    # entry crossby already removed.
+    # Each handler commits its narrowed ownership only AFTER a successful write,
+    # or inline on a verified no-write path, and Codex retains ownership of any
+    # entry whose revert splice failed. The ledger save runs in a finally so a
+    # revert that raises part-way still persists ownership consistent with disk —
+    # a (tool, key) crossby could not revert stays owned, so a re-run retries
+    # exactly it rather than dropping the record of a setting still applied.
     try:
         if _in_scope(AIToolID.CLAUDE):
             results.append(

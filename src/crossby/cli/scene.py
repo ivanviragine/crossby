@@ -181,6 +181,29 @@ def _has_error(results: list[SyncResult]) -> bool:
     return any(r.action == "error" for r in results)
 
 
+def _refuse_if_ledger_corrupt(project_root: Path) -> None:
+    """Exit cleanly when ``owned.json`` exists but is unreadable.
+
+    We cannot revert from provenance we cannot parse, and proceeding would let the
+    engine's ``finally: save_ledger`` overwrite the corrupt ledger with an empty
+    *valid* one — destroying any chance of hand-recovery (an empty ledger owns
+    nothing, so a later ``clear`` reverts nothing yet deletes ``scene-state.json``,
+    leaving the settings applied with no record). Every ledger-reverting path
+    routes through this one guard so the refusal can't be forgotten on one of them.
+    """
+    from crossby.sync.ownership import LEDGER_PATH, load_ledger_checked
+
+    if not load_ledger_checked(project_root).corrupt:
+        return
+    console.error(f"{LEDGER_PATH.as_posix()} is unreadable — cannot determine what to revert.")
+    console.hint(
+        "Restore a valid owned.json from backup, or manually revert the applied "
+        "settings. Do NOT delete owned.json — an empty ledger would let 'clear' "
+        "drop the recovery state while leaving settings applied."
+    )
+    raise typer.Exit(1)
+
+
 def _scope_for(tool_id: AIToolID | None, installed: list[AIToolID]) -> list[AIToolID]:
     """The installed tools an operation targets: one tool, or all installed."""
     if tool_id is None:
@@ -428,6 +451,12 @@ def use_scene(
     if loaded.warning:
         console.warn(loaded.warning)
     active = loaded.state
+
+    # Fail closed on a corrupt ledger before ANY engine call — covering first-time
+    # apply, a switch, and --plan uniformly. Reverting (or previewing a revert)
+    # from an empty-loaded ledger is misleading, and the engine's finally:
+    # save_ledger would overwrite the corrupt bytes with an empty valid ledger.
+    _refuse_if_ledger_corrupt(project_root)
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
@@ -699,6 +728,12 @@ def clear_active(
         return
     scope = _clear_scope(tool_id, recorded)
 
+    # Fail closed on a corrupt ledger before BOTH the --plan preview and the real
+    # clear: an empty-loaded ledger reverts nothing yet the engine's finally:
+    # save_ledger would overwrite the corrupt bytes, and the CLI would then delete
+    # scene-state.json — leaving settings applied with no recovery record.
+    _refuse_if_ledger_corrupt(project_root)
+
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
         results = clear_scene(project_root, dry_run=True, tools=scope)
@@ -733,16 +768,27 @@ def clear_active(
         raise typer.Exit(1)
 
     # On success update the state file: a full clear removes it; a scoped clear
-    # drops the cleared tools (their per-tool hashes go with them).
-    if tool_id is None:
-        clear_scene_state(project_root)
-    else:
-        for cleared in scope:
-            active.tools.pop(str(cleared), None)
-        if active.tools:
-            save_scene_state(project_root, active)
-        else:
+    # drops the cleared tools (their per-tool hashes go with them). The engine has
+    # already reverted the in-scope tools, so any OSError here (read-only dir,
+    # permission on unlink) is "cleared but state stale" — surface it cleanly,
+    # never a traceback, mirroring `use`'s "applied but state could not be
+    # recorded." All three finalize call sites route through this one handler
+    # (clear_scene_state only suppresses FileNotFoundError, so a PermissionError
+    # on unlink would otherwise escape).
+    try:
+        if tool_id is None:
             clear_scene_state(project_root)
+        else:
+            for cleared in scope:
+                active.tools.pop(str(cleared), None)
+            if active.tools:
+                save_scene_state(project_root, active)
+            else:
+                clear_scene_state(project_root)
+    except OSError as exc:
+        console.error(f"Scene cleared but its state could not be updated: {exc}")
+        console.hint("Re-run 'crossby scene clear' once the path is writable.")
+        raise typer.Exit(1) from exc
 
     console.success(f"Cleared scene {active.scene!r}.")
 

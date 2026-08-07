@@ -119,9 +119,11 @@ def apply_claude_skill_overrides(
 
     # Never claim ownership of an override we couldn't actually write.
     new_owned = frozenset((owned & disable) | adds)
-    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES, new_owned)
 
     if not adds and not diff.to_remove:
+        # No-write path: record ownership inline (nothing can fail here), which
+        # still reconciles a server the user re-enabled out of our ownership.
+        ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES, new_owned)
         message = None
         if blocked:
             floor = ".".join(map(str, versioning.CLAUDE_SKILL_OVERRIDES_MIN))
@@ -145,6 +147,11 @@ def apply_claude_skill_overrides(
         else:
             settings.pop("skillOverrides", None)
         write_json_file(path, settings)
+    # Record ownership only AFTER a successful write (transactional): if
+    # write_json_file raises, this never runs and the in-memory ledger keeps the
+    # prior ownership for this key. On dry_run no write happened, but recording
+    # the planned ownership matches the write path's committed state.
+    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES, new_owned)
 
     note = f"skillOverrides off: {_names(adds)}"
     if blocked:
@@ -189,8 +196,9 @@ def apply_claude_deny_agents(
     deny = [e for e in deny if e not in diff.to_remove]
     deny.extend(sorted(diff.to_add))
 
-    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DENY_AGENTS, diff.new_owned)
     if not diff.changed:
+        # No-write path: record inline (reconciliation only, nothing can fail).
+        ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DENY_AGENTS, diff.new_owned)
         return _skipped(AIToolID.CLAUDE, SyncConcern.AGENTS, path)
     if not dry_run:
         if deny:
@@ -202,6 +210,9 @@ def apply_claude_deny_agents(
         else:
             settings.pop("permissions", None)
         write_json_file(path, settings)
+    # Record ownership only AFTER a successful write (transactional): a raising
+    # write_json_file leaves the prior ownership for this key intact in memory.
+    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DENY_AGENTS, diff.new_owned)
     return _written(
         AIToolID.CLAUDE,
         SyncConcern.AGENTS,
@@ -234,8 +245,9 @@ def apply_claude_disabled_mcp(
     disabled = [e for e in disabled if e not in diff.to_remove]
     disabled.extend(sorted(diff.to_add))
 
-    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DISABLED_MCP, diff.new_owned)
     if not diff.changed:
+        # No-write path: record inline (reconciliation only, nothing can fail).
+        ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DISABLED_MCP, diff.new_owned)
         return _skipped(AIToolID.CLAUDE, SyncConcern.MCP, path)
     if not dry_run:
         if disabled:
@@ -243,6 +255,9 @@ def apply_claude_disabled_mcp(
         else:
             settings.pop("disabledMcpjsonServers", None)
         write_json_file(path, settings)
+    # Record ownership only AFTER a successful write (transactional): a raising
+    # write_json_file leaves the prior ownership for this key intact in memory.
+    ledger.record_scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DISABLED_MCP, diff.new_owned)
     return _written(
         AIToolID.CLAUDE,
         SyncConcern.MCP,
@@ -292,43 +307,68 @@ def apply_codex_disabled_mcp(
 
     new_text = text
     added: set[str] = set()
+    add_failed: set[str] = set()
     for server in sorted(diff.to_add):
         spliced = set_scalar(new_text, ("mcp_servers", server), "enabled", "false")
         if spliced is not None:
             new_text = spliced
             added.add(server)
+        else:
+            # The disable splice returned None — no file change for this server.
+            add_failed.add(server)
+    removed_ok: set[str] = set()
+    remove_failed: set[str] = set()
     for server in sorted(diff.to_remove):
         # Only revert crossby's own disable. If the user flipped ``enabled`` back
         # to true (so the server is no longer in ``present``), leave their value
-        # untouched — ownership is released either way, since a reverted server
-        # never re-enters ``new_owned``.
+        # untouched — that is a clean release, not a failure: ownership drops
+        # either way, since a reverted server never re-enters ``new_owned``.
         if server not in present:
             continue
         spliced = unset_scalar(new_text, ("mcp_servers", server), "enabled")
-        if spliced is not None:
+        # unset_scalar returns the text UNCHANGED (not None) when the marker lives
+        # in a representation it can't edit textually — an inline table or a dotted
+        # key. Since ``server in present`` means ``enabled = false`` IS in the
+        # parsed data, "no change" means the revert did not land: treat it as a
+        # failure (retain ownership + error below), not a phantom success that
+        # would leave the server disabled on disk with no provenance.
+        if spliced is not None and spliced != new_text:
             new_text = spliced
+            removed_ok.add(server)
+        else:
+            remove_failed.add(server)
 
-    # Claim ownership only for servers actually disabled now: the ones we just
-    # wrote plus the still-desired ones already disabled — never a planned splice
-    # that silently returned None.
-    new_owned = frozenset((owned & target & present) | added)
-    ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, new_owned)
+    # Claim ownership for every server still disabled under our marker: the ones
+    # we just wrote, the still-desired ones already disabled, and any removal
+    # whose splice failed (still on disk, so still ours to revert next time).
+    new_owned = frozenset((owned & target & present) | added | remove_failed)
+    splice_failed = bool(add_failed or remove_failed)
+
     if new_text == text:
-        if diff.to_add and not added:
-            # Every planned disable splice failed — report the failure rather than
-            # an "already applied" no-op that claims a toggle that never happened.
-            return SyncResult(
-                tool_id=AIToolID.CODEX,
-                concern=SyncConcern.MCP,
-                action="error",
-                file_path=path,
-                message=f"could not disable {len(diff.to_add)} mcp server(s) in {path.name}",
-            )
+        # Nothing spliced — no write can fail, so record inline. Report an error
+        # if any planned splice failed (never an "already applied" no-op that
+        # claims a toggle that never happened); otherwise an idempotent skip.
+        ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, new_owned)
+        if splice_failed:
+            return _codex_splice_error(path, add_failed, remove_failed)
         return _skipped(AIToolID.CODEX, SyncConcern.MCP, path)
+
     if not dry_run:
         from crossby.config.json_utils import atomic_write_text
 
         atomic_write_text(path, new_text)
+    # Record ownership only AFTER the (partial or full) write succeeds: a raising
+    # atomic_write_text leaves the prior ownership for this key intact in memory.
+    ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, new_owned)
+
+    if splice_failed:
+        # Some splices landed and were written, but at least one failed. Report an
+        # error (even though the file was partially written) so the CLI keeps
+        # scene-state.json and a retry re-attempts the still-owned failures, while
+        # the successful changes stay on disk.
+        return _codex_splice_error(
+            path, add_failed, remove_failed, added=added, revoked=len(removed_ok)
+        )
 
     message = f"mcp_servers enabled=false: {_names(added)}"
     if not trusted:
@@ -340,8 +380,38 @@ def apply_codex_disabled_mcp(
         file_path=path,
         message=message,
         added=len(added),
-        revoked=len(diff.to_remove),
+        revoked=len(removed_ok),
         created=tuple(sorted(added)),
+    )
+
+
+def _codex_splice_error(
+    path: Path,
+    add_failed: set[str],
+    remove_failed: set[str],
+    *,
+    added: set[str] | None = None,
+    revoked: int = 0,
+) -> SyncResult:
+    """An ``error`` row naming the Codex splices that could not be applied.
+
+    ``added`` / ``revoked`` carry the splices that *did* land (a partial success),
+    so the report still credits the changes written alongside the failure.
+    """
+    parts: list[str] = []
+    if add_failed:
+        parts.append(f"disable {len(add_failed)}")
+    if remove_failed:
+        parts.append(f"revert {len(remove_failed)}")
+    return SyncResult(
+        tool_id=AIToolID.CODEX,
+        concern=SyncConcern.MCP,
+        action="error",
+        file_path=path,
+        message=f"could not {' and '.join(parts)} mcp server(s) in {path.name}",
+        added=len(added) if added else 0,
+        revoked=revoked,
+        created=tuple(sorted(added)) if added else (),
     )
 
 
@@ -412,14 +482,20 @@ def apply_antigravity_disabled_mcp(
         if isinstance(cfg, dict) and cfg.get("disabled") is True:
             servers[name] = {k: v for k, v in cfg.items() if k != "disabled"}
 
-    ledger.record_scene_declare(
-        AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED, diff.new_owned
-    )
     if not diff.changed:
+        # No-write path: record inline (reconciliation only, nothing can fail).
+        ledger.record_scene_declare(
+            AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED, diff.new_owned
+        )
         return _skipped(AIToolID.ANTIGRAVITY_CLI, SyncConcern.MCP, path)
     if not dry_run:
         settings["mcpServers"] = servers
         write_json_file(path, settings)
+    # Record ownership only AFTER a successful write (transactional): a raising
+    # write_json_file leaves the prior ownership for this key intact in memory.
+    ledger.record_scene_declare(
+        AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED, diff.new_owned
+    )
     return _written(
         AIToolID.ANTIGRAVITY_CLI,
         SyncConcern.MCP,

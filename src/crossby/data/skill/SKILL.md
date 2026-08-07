@@ -199,6 +199,15 @@ Inspect and activate.
    $CROSSBY scene status                   # active scene + drift
    ```
 
+Reverting reads `.crossby/owned.json` (what crossby wrote). If that ledger exists
+but is unreadable, `use` and `clear` (and `--plan`) **refuse** (exit 1) rather than
+revert from an empty view — restore it from backup or revert by hand; never delete
+it (a missing ledger reads as "own nothing" and re-opens the gap). Drift compares a
+per-file content hash; a **symlinked** config is hashed by its resolved contents, so
+editing the link target counts as drift, and after upgrading crossby a config
+baselined under the old logic may need `$CROSSBY scene use <name> --force` once to
+refresh the baseline.
+
 Author without hand-editing YAML. `create` runs a wizard on a TTY; pass
 selector flags to build a scene non-interactively (required when stdin is not a
 TTY). Every `--<concern>` flag has an `--exclude-<concern>` counterpart.
