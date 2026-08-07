@@ -239,16 +239,23 @@ def compute_hashes(project_root: Path, results: Sequence[SyncResult]) -> dict[st
     """Per-tool normalised content hashes for the files an apply *wrote*.
 
     Keyed by tool id (from :attr:`SyncResult.tool_id`), so a scoped clear that
-    drops a tool also drops exactly its drift baseline. Only ``created`` /
-    ``updated`` rows are hashed — a ``skipped`` row means crossby wrote nothing to
-    that file this run, so baselining it would flag unrelated edits (or, for a
-    file that didn't exist yet, its later creation) as drift.
+    drops a tool also drops exactly its drift baseline. ``created`` / ``updated``
+    rows are hashed; a ``skipped`` row means crossby wrote nothing to that file
+    this run, so baselining it would flag unrelated edits (or, for a file that
+    didn't exist yet, its later creation) as drift. An ``error`` row is hashed
+    only when it still wrote something (``added`` / ``revoked`` > 0) — e.g. a Codex
+    mixed splice that partially disabled servers before failing — so the
+    partially-written file still gets a drift baseline; a pure failure (malformed
+    refusal, all splices failed) wrote nothing and is skipped.
     """
     out: dict[str, dict[str, str]] = {}
     for result in results:
         if result.file_path is None or result.tool_id is None:
             continue
-        if result.action not in ("created", "updated"):
+        wrote = result.action in ("created", "updated") or (
+            result.action == "error" and (result.added > 0 or result.revoked > 0)
+        )
+        if not wrote:
             continue
         rel = _rel(project_root, result.file_path)
         out.setdefault(str(result.tool_id), {})[rel] = content_hash(project_root / rel)
@@ -279,15 +286,29 @@ def detect_drift(
 
 
 def content_hash(path: Path) -> str:
-    """A normalised content hash for *path*.
+    """A normalised content hash for *path*, dispatching on four cases.
 
-    JSON and TOML files are parsed and re-serialised canonically so a reformat or
-    key reordering hashes identically; a directory (or symlinked directory — a
-    PROJECT re-point) is reduced to its link target and sorted entry names;
-    anything else is hashed raw. A missing path hashes to the sentinel
-    ``"missing"`` so its disappearance reads as drift.
+    ``Path.is_dir()`` / ``Path.is_file()`` follow symlinks, so:
+
+    - **real file** — hashed by contents (JSON/TOML parsed and re-serialised
+      canonically so a reformat or key reordering hashes identically; anything
+      else raw);
+    - **real directory** — reduced to its sorted entry names (``_dir_signature``);
+    - **symlink-to-directory** (a PROJECT re-point) — ``is_dir()`` follows the
+      link, so it still gets a dir signature (link target + entry names);
+    - **symlink-to-file** (a symlinked JSON/TOML config) — ``is_dir()`` is
+      ``False`` so it falls through to the file branch and is hashed by its
+      *resolved contents*, so editing the link target reads as drift.
+
+    A missing path — including a broken symlink (``is_dir()`` and ``is_file()``
+    both ``False``) — hashes to the sentinel ``"missing"`` so its disappearance
+    reads as drift.
     """
-    if path.is_symlink() or path.is_dir():
+    # Dispatch on is_dir() alone (not is_symlink() or is_dir()): a symlink-to-file
+    # must be content-hashed, not reduced to its link target. ``_dir_signature``'s
+    # broken-symlink branch is now reachable only for genuine directories (dead
+    # but harmless), since we only reach it when ``is_dir()`` is true.
+    if path.is_dir():
         return _dir_signature(path)
     if not path.is_file():
         return "missing"

@@ -654,6 +654,40 @@ class TestPartialFailure:
         assert "left intact" in result.output.lower()
         assert (root / SCENE_STATE_PATH).exists()
 
+    def test_clear_write_failure_keeps_ownership_and_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # End-to-end: a JSON write failure during clear must NOT drop ownership of
+        # a setting still on disk. The engine's finally: save_ledger persists a
+        # ledger consistent with disk, and a retried clear reverts everything.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+        real = json.loads((root / LEDGER).read_text(encoding="utf-8"))
+        assert real["scene"]["claude"]["skill_overrides"] == ["deploy-prod"]
+
+        from crossby.scenes import declare
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(declare, "write_json_file", _boom)
+        failed = _invoke(["scene", "clear"], root)
+        assert failed.exit_code == 1
+
+        # The setting is still on disk, and the persisted ledger still records it.
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+        persisted = json.loads((root / LEDGER).read_text(encoding="utf-8"))
+        assert persisted["scene"]["claude"]["skill_overrides"] == ["deploy-prod"]
+        assert (root / SCENE_STATE_PATH).exists()  # never deleted on a failed clear
+
+        # Retry with the write restored fully reverts.
+        monkeypatch.undo()
+        assert _invoke(["scene", "clear"], root).exit_code == 0
+        assert "skillOverrides" not in _settings(root)
+        assert not (root / SCENE_STATE_PATH).exists()
+
 
 # ---------------------------------------------------------------------------
 # Error paths
@@ -686,3 +720,168 @@ class TestErrorPaths:
         result = _invoke(["scene", "list"], tmp_path)
         assert result.exit_code == 0, result.output
         assert "No scenes defined" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Corrupt ledger — fail closed before any engine call
+# ---------------------------------------------------------------------------
+
+
+LEDGER = Path(".crossby") / "owned.json"
+
+
+class TestCorruptLedger:
+    """A corrupt ``owned.json`` must make every mutate/preview scene op refuse
+    (exit 1, clean error+hint), leaving scene-state.json, the applied settings,
+    and the corrupt ledger's bytes all untouched — never letting the engine's
+    ``finally: save_ledger`` overwrite the corrupt file with an empty valid one.
+    """
+
+    GARBAGE = "{ not a valid ledger"
+
+    def _apply_and_corrupt(self, root: Path) -> None:
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        assert (root / LEDGER).is_file()
+        (root / LEDGER).write_text(self.GARBAGE, encoding="utf-8")
+
+    def _assert_untouched(self, root: Path) -> None:
+        # Active scene, applied setting, and corrupt bytes all preserved.
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+        assert (root / LEDGER).read_text(encoding="utf-8") == self.GARBAGE
+
+    def test_clear_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        self._apply_and_corrupt(root)
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        # The hint must never suggest deleting owned.json.
+        assert "do not delete" in result.output.lower()
+        self._assert_untouched(root)
+
+    def test_clear_plan_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        self._apply_and_corrupt(root)
+        result = _invoke(["scene", "clear", "--plan"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        self._assert_untouched(root)
+
+    def test_use_switch_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        self._apply_and_corrupt(root)
+        result = _invoke(["scene", "use", "deploy"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        self._assert_untouched(root)
+
+    def test_use_plan_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        self._apply_and_corrupt(root)
+        result = _invoke(["scene", "use", "deploy", "--plan"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        self._assert_untouched(root)
+
+    def test_malformed_scene_provenance_refuses(self, tmp_path: Path) -> None:
+        # A ledger whose JSON parses but whose SCENE section is malformed (a real
+        # (tool, key) provenance corrupted to the wrong type) must also refuse —
+        # otherwise clear would revert nothing and delete scene-state.json, leaving
+        # the setting applied. The whole-file JSON check alone would miss this.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene"]["claude"]["skill_overrides"] = "bad"  # list -> string
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        # Ledger bytes, state, and applied setting all preserved.
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_typo_scene_key_refuses(self, tmp_path: Path) -> None:
+        # A scene entry under a key no revert handler recognises (a typo'd
+        # SceneDeclareKey) is unreadable provenance — clear must refuse rather than
+        # orphan it and delete the state file.
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene"]["claude"]["skil_overrides"] = data["scene"]["claude"].pop("skill_overrides")
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_first_time_use_refuses_and_preserves_corrupt_bytes(self, tmp_path: Path) -> None:
+        # No active scene, but a corrupt ledger is present: a first-time apply must
+        # refuse and must NOT overwrite the corrupt bytes (which the engine's
+        # finally: save_ledger would otherwise do with an empty valid ledger).
+        root = _project(tmp_path)
+        ledger_path = root / LEDGER
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text(self.GARBAGE, encoding="utf-8")
+
+        result = _invoke(["scene", "use", "pr-review"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert ledger_path.read_text(encoding="utf-8") == self.GARBAGE
+        # Nothing was applied.
+        assert not (root / SCENE_STATE_PATH).exists()
+        assert not (root / ".claude" / "settings.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Clear finalize — a state-write OSError surfaces cleanly (no traceback)
+# ---------------------------------------------------------------------------
+
+
+class TestClearFinalizeOSError:
+    """A ``save_scene_state`` / ``clear_scene_state`` failure in the clear finalize
+    path (after the engine already reverted) must surface a clean error+hint, not a
+    raw traceback — matching ``use``'s "applied but state could not be recorded".
+    """
+
+    def test_scoped_clear_state_write_oserror_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError("read-only file system")
+
+        # A scoped clear that leaves other tools recorded hits save_scene_state.
+        monkeypatch.setattr("crossby.scenes.state.save_scene_state", _boom)
+        result = _invoke(["scene", "clear", "--tool", "cursor"], root)
+        assert result.exit_code == 1
+        assert "could not be updated" in result.output
+        assert "writable" in result.output
+        # A clean typer.Exit, not a leaked OSError traceback.
+        assert not isinstance(result.exception, OSError)
+
+    def test_full_clear_unlink_permissionerror_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+
+        def _boom(*_a: object, **_k: object) -> None:
+            # clear_scene_state only suppresses FileNotFoundError, so a
+            # PermissionError on unlink would escape without the finalize guard.
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr("crossby.scenes.state.clear_scene_state", _boom)
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "could not be updated" in result.output
+        assert not isinstance(result.exception, PermissionError)

@@ -31,7 +31,9 @@ from crossby.sync.ownership import (
     LEDGER_PATH,
     LEDGER_VERSION,
     OwnershipLedger,
+    SceneDeclareKey,
     load_ledger,
+    load_ledger_checked,
     save_ledger,
 )
 from crossby.sync.permissions import ClaudePermissionWriter
@@ -178,6 +180,173 @@ class TestLedgerDegradesGracefully:
         # Only the well-shaped pair survives; the malformed neighbours are dropped.
         assert ledger.hooks(AIToolID.CLAUDE) == frozenset({("pre_tool_use", "ok")})
         assert ledger.hooks(AIToolID.CURSOR) == frozenset()
+
+
+class TestLoadLedgerChecked:
+    """``load_ledger_checked`` fails closed on a present-but-unreadable ledger, so
+    a scene mutate/revert can refuse rather than treat corruption as "own nothing"
+    and silently drop the recovery record.
+    """
+
+    def _write(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / LEDGER_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_garbage_is_corrupt(self, tmp_path: Path) -> None:
+        self._write(tmp_path, "{not valid json!!")
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is True
+        assert loaded.ledger.is_empty()
+
+    def test_non_dict_root_is_corrupt(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps(["not", "a", "dict"]))
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is True
+        assert loaded.ledger.is_empty()
+
+    def test_read_oserror_is_corrupt(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._write(tmp_path, "{}")
+        real_read = Path.read_text
+
+        def _boom(self: Path, *args: object, **kwargs: object) -> str:
+            if self.name == "owned.json":
+                raise OSError("permission denied")
+            return real_read(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", _boom)
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is True
+        assert loaded.ledger.is_empty()
+
+    def test_directory_at_path_is_corrupt(self, tmp_path: Path) -> None:
+        (tmp_path / LEDGER_PATH).mkdir(parents=True)
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is True
+        assert loaded.ledger.is_empty()
+
+    def test_broken_symlink_at_path_is_corrupt(self, tmp_path: Path) -> None:
+        path = tmp_path / LEDGER_PATH
+        path.parent.mkdir(parents=True)
+        path.symlink_to(tmp_path / "does-not-exist.json")
+        # os.path.lexists sees the dangling link (Path.is_file would not), so it is
+        # caught as corrupt rather than mistaken for a truly-absent ledger.
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is True
+        assert loaded.ledger.is_empty()
+
+    def test_truly_absent_is_not_corrupt(self, tmp_path: Path) -> None:
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.is_empty()
+
+    def test_valid_empty_is_not_corrupt(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps({"version": LEDGER_VERSION, "owned": {}}))
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.is_empty()
+
+    def test_valid_dict_with_malformed_owned_entries_is_not_corrupt(self, tmp_path: Path) -> None:
+        # Leniency preserved: a readable root with garbage sub-entries degrades to
+        # dropping those entries, NOT to a corruption refusal (else a single stray
+        # entry would block every scene op).
+        self._write(
+            tmp_path,
+            json.dumps(
+                {
+                    "version": 1,
+                    "owned": {
+                        "claude": {"hooks": [["pre_tool_use", "ok"], "garbage"]},
+                        "cursor": "not-a-dict",
+                    },
+                }
+            ),
+        )
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.hooks(AIToolID.CLAUDE) == frozenset({("pre_tool_use", "ok")})
+
+    def test_load_ledger_wrapper_still_degrades_to_empty(self, tmp_path: Path) -> None:
+        # The thin wrapper hides the corrupt flag — every existing caller keeps its
+        # own-nothing degradation.
+        self._write(tmp_path, "{not valid json!!")
+        assert load_ledger(tmp_path).is_empty()
+
+    def test_malformed_scene_entry_is_corrupt(self, tmp_path: Path) -> None:
+        # The scene section is the scene-revert authority, so a malformed entry
+        # fails closed — unlike ``owned`` — because silently dropping a real
+        # (tool, key) would let ``clear`` revert nothing yet delete the state file.
+        self._write(
+            tmp_path,
+            json.dumps(
+                {"version": 2, "owned": {}, "scene": {"claude": {"skill_overrides": "bad"}}}
+            ),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_non_dict_scene_section_is_corrupt(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps({"version": 2, "owned": {}, "scene": "garbage"}))
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_non_string_scene_item_is_corrupt(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            json.dumps(
+                {"version": 2, "owned": {}, "scene": {"claude": {"skill_overrides": ["ok", 5]}}}
+            ),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_well_formed_scene_is_not_corrupt(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            json.dumps(
+                {
+                    "version": 2,
+                    "owned": {},
+                    "scene": {"claude": {"skill_overrides": ["deploy-prod"]}},
+                }
+            ),
+        )
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.scene_declare(
+            AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES
+        ) == frozenset({"deploy-prod"})
+
+    def test_explicit_null_scene_section_is_corrupt(self, tmp_path: Path) -> None:
+        # An explicit ``null`` (present but wrong type) fails closed, distinct from
+        # an *absent* scene key — a sentinel keeps the two apart despite dict.get.
+        self._write(tmp_path, json.dumps({"version": 2, "owned": {}, "scene": None}))
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_absent_scene_key_is_not_corrupt(self, tmp_path: Path) -> None:
+        # An older v1 ledger with no scene key at all must stay readable.
+        self._write(tmp_path, json.dumps({"version": 1, "owned": {}}))
+        assert load_ledger_checked(tmp_path).corrupt is False
+
+    def test_empty_scene_dict_is_not_corrupt(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps({"version": 2, "owned": {}, "scene": {}}))
+        assert load_ledger_checked(tmp_path).corrupt is False
+
+    def test_unknown_tool_name_is_corrupt(self, tmp_path: Path) -> None:
+        # A tool no revert handler will ever consult (typo / newer schema) would
+        # orphan its provenance — fail closed rather than silently drop it.
+        self._write(
+            tmp_path,
+            json.dumps(
+                {"version": 2, "owned": {}, "scene": {"claudee": {"skill_overrides": ["x"]}}}
+            ),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_unknown_scene_key_name_is_corrupt(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            json.dumps({"version": 2, "owned": {}, "scene": {"claude": {"bogus_key": ["x"]}}}),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
 
 
 # ---------------------------------------------------------------------------

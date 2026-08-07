@@ -9,12 +9,44 @@ import pytest
 
 from crossby.models.ai import AIToolID
 from crossby.scenes import declare
-from crossby.sync.ownership import OwnershipLedger, SceneDeclareKey
+from crossby.sync.ownership import (
+    OwnershipLedger,
+    SceneDeclareKey,
+    load_ledger,
+    save_ledger,
+)
 from tests.unit.test_scenes.conftest import read_json, write_json
 
 CLAUDE_SETTINGS = Path(".claude") / "settings.json"
 CODEX_CONFIG = Path(".codex") / "config.toml"
 ANTIGRAVITY_MCP = Path(".agents") / "mcp_config.json"
+
+
+def _revert_with_failed_write(
+    root: Path, clear_fn, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, bool]:
+    """Run *clear_fn* with the JSON write raising, persisting the ledger in a
+    ``finally`` exactly like ``scenes.engine.clear_scene``.
+
+    Returns a mutable ``{"fail": True}`` flag whose value can be flipped to
+    ``False`` to restore the write for a retry.
+    """
+    real = declare.write_json_file
+    flag = {"fail": True}
+
+    def _maybe(path: Path, data: object) -> None:
+        if flag["fail"]:
+            raise OSError("disk full")
+        real(path, data)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("crossby.scenes.declare.write_json_file", _maybe)
+    ledger = load_ledger(root)
+    with pytest.raises(OSError):
+        try:
+            clear_fn(ledger)
+        finally:
+            save_ledger(root, ledger)
+    return flag
 
 
 class TestClaudeSkillOverrides:
@@ -200,3 +232,237 @@ class TestAntigravityDisabledMcp:
         assert ledger.scene_declare(
             AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED
         ) == frozenset({"github"})
+
+
+class TestTransactionalLedger:
+    """A JSON write failure during clear must never drop ownership of a setting
+    still on disk: ``record_scene_declare`` runs only AFTER the write succeeds, so
+    the ledger the engine persists in its ``finally`` stays consistent with disk
+    and a retried clear reverts it.
+    """
+
+    def test_skill_overrides_write_failure_retains_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = OwnershipLedger()
+        declare.apply_claude_skill_overrides(tmp_path, {"deploy-prod"}, ledger, version=(2, 1, 218))
+        save_ledger(tmp_path, ledger)
+
+        flag = _revert_with_failed_write(
+            tmp_path,
+            lambda lg: declare.apply_claude_skill_overrides(
+                tmp_path, set(), lg, version=(2, 1, 218)
+            ),
+            monkeypatch,
+        )
+        # (a) setting still on disk, (b) ledger still records prior ownership.
+        assert read_json(tmp_path / CLAUDE_SETTINGS)["skillOverrides"] == {"deploy-prod": "off"}
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES
+        ) == frozenset({"deploy-prod"})
+
+        # (c) a retry with the write restored fully reverts.
+        flag["fail"] = False
+        retry = load_ledger(tmp_path)
+        declare.apply_claude_skill_overrides(tmp_path, set(), retry, version=(2, 1, 218))
+        save_ledger(tmp_path, retry)
+        assert "skillOverrides" not in read_json(tmp_path / CLAUDE_SETTINGS)
+        assert (
+            load_ledger(tmp_path).scene_declare(AIToolID.CLAUDE, SceneDeclareKey.SKILL_OVERRIDES)
+            == frozenset()
+        )
+
+    def test_deny_agents_write_failure_retains_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = OwnershipLedger()
+        declare.apply_claude_deny_agents(tmp_path, {"deployer"}, ledger)
+        save_ledger(tmp_path, ledger)
+
+        flag = _revert_with_failed_write(
+            tmp_path,
+            lambda lg: declare.apply_claude_deny_agents(tmp_path, set(), lg),
+            monkeypatch,
+        )
+        assert read_json(tmp_path / CLAUDE_SETTINGS)["permissions"]["deny"] == ["Agent(deployer)"]
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.CLAUDE, SceneDeclareKey.DENY_AGENTS
+        ) == frozenset({"Agent(deployer)"})
+
+        flag["fail"] = False
+        retry = load_ledger(tmp_path)
+        declare.apply_claude_deny_agents(tmp_path, set(), retry)
+        save_ledger(tmp_path, retry)
+        assert read_json(tmp_path / CLAUDE_SETTINGS).get("permissions", {}).get("deny", []) == []
+        assert (
+            load_ledger(tmp_path).scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DENY_AGENTS)
+            == frozenset()
+        )
+
+    def test_disabled_mcp_write_failure_retains_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = OwnershipLedger()
+        declare.apply_claude_disabled_mcp(tmp_path, {"linear"}, ledger)
+        save_ledger(tmp_path, ledger)
+
+        flag = _revert_with_failed_write(
+            tmp_path,
+            lambda lg: declare.apply_claude_disabled_mcp(tmp_path, set(), lg),
+            monkeypatch,
+        )
+        assert read_json(tmp_path / CLAUDE_SETTINGS)["disabledMcpjsonServers"] == ["linear"]
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.CLAUDE, SceneDeclareKey.DISABLED_MCP
+        ) == frozenset({"linear"})
+
+        flag["fail"] = False
+        retry = load_ledger(tmp_path)
+        declare.apply_claude_disabled_mcp(tmp_path, set(), retry)
+        save_ledger(tmp_path, retry)
+        assert "disabledMcpjsonServers" not in read_json(tmp_path / CLAUDE_SETTINGS)
+        assert (
+            load_ledger(tmp_path).scene_declare(AIToolID.CLAUDE, SceneDeclareKey.DISABLED_MCP)
+            == frozenset()
+        )
+
+    def test_antigravity_write_failure_retains_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_json(tmp_path / ANTIGRAVITY_MCP, {"mcpServers": {"linear": {"command": "lin"}}})
+        ledger = OwnershipLedger()
+        declare.apply_antigravity_disabled_mcp(tmp_path, {"linear"}, ledger)
+        save_ledger(tmp_path, ledger)
+
+        flag = _revert_with_failed_write(
+            tmp_path,
+            lambda lg: declare.apply_antigravity_disabled_mcp(tmp_path, set(), lg),
+            monkeypatch,
+        )
+        assert read_json(tmp_path / ANTIGRAVITY_MCP)["mcpServers"]["linear"]["disabled"] is True
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED
+        ) == frozenset({"linear"})
+
+        flag["fail"] = False
+        retry = load_ledger(tmp_path)
+        declare.apply_antigravity_disabled_mcp(tmp_path, set(), retry)
+        save_ledger(tmp_path, retry)
+        assert "disabled" not in read_json(tmp_path / ANTIGRAVITY_MCP)["mcpServers"]["linear"]
+        assert (
+            load_ledger(tmp_path).scene_declare(
+                AIToolID.ANTIGRAVITY_CLI, SceneDeclareKey.ANTIGRAVITY_MCP_DISABLED
+            )
+            == frozenset()
+        )
+
+
+class TestCodexPartialFailure:
+    """A Codex ``unset_scalar`` splice that returns ``None`` during clear must keep
+    the server owned (so a retry reverts it) and emit an ``error`` row — while any
+    splice that *did* land is still written and its ownership released.
+    """
+
+    def _config(self, tmp_path: Path) -> None:
+        (tmp_path / ".codex").mkdir()
+        (tmp_path / CODEX_CONFIG).write_text(
+            '[mcp_servers.github]\ncommand = "gh-mcp"\n\n'
+            '[mcp_servers.linear]\ncommand = "lin-mcp"\n',
+            encoding="utf-8",
+        )
+
+    def _disable_both(self, tmp_path: Path) -> None:
+        ledger = OwnershipLedger()
+        declare.apply_codex_disabled_mcp(tmp_path, {"github", "linear"}, ledger, trusted=True)
+        save_ledger(tmp_path, ledger)
+
+    def _codex_data(self, tmp_path: Path) -> dict:
+        import tomllib
+
+        return tomllib.loads((tmp_path / CODEX_CONFIG).read_text(encoding="utf-8"))
+
+    def test_inline_table_removal_failure_retains_ownership(self, tmp_path: Path) -> None:
+        # linear is defined as an INLINE table with enabled=false. unset_scalar
+        # cannot edit an inline table, so it returns the text UNCHANGED (not None).
+        # The clear must treat "no change" as a failed revert — keep linear owned
+        # and report an error — not a phantom success that drops ownership while
+        # the server stays disabled on disk. No monkeypatch: the real splicer.
+        (tmp_path / ".codex").mkdir()
+        # linear is a top-level inline table (before any header, so it is NOT
+        # nested under [mcp_servers.github]); unset_scalar can't edit it.
+        (tmp_path / CODEX_CONFIG).write_text(
+            'mcp_servers.linear = { command = "lin-mcp", enabled = false }\n\n'
+            '[mcp_servers.github]\ncommand = "gh-mcp"\n',
+            encoding="utf-8",
+        )
+        ledger = OwnershipLedger()
+        ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, {"linear"})
+
+        result = declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)
+        assert result.action == "error"
+        # linear is still disabled on disk (unremovable) and still owned for retry.
+        assert self._codex_data(tmp_path)["mcp_servers"]["linear"]["enabled"] is False
+        assert ledger.scene_declare(
+            AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED
+        ) == frozenset({"linear"})
+
+    def test_all_removals_fail_retain_all_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path)
+        self._disable_both(tmp_path)
+        monkeypatch.setattr("crossby.scenes.declare.unset_scalar", lambda *_a, **_k: None)
+
+        ledger = load_ledger(tmp_path)
+        result = declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)
+        save_ledger(tmp_path, ledger)  # engine's finally
+
+        assert result.action == "error"
+        # Nothing was written — both stay disabled on disk and stay owned.
+        data = self._codex_data(tmp_path)
+        assert data["mcp_servers"]["github"]["enabled"] is False
+        assert data["mcp_servers"]["linear"]["enabled"] is False
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED
+        ) == frozenset({"github", "linear"})
+
+    def test_mixed_writes_success_and_retains_failed_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._config(tmp_path)
+        self._disable_both(tmp_path)
+
+        real = declare.unset_scalar
+
+        def _fail_linear(text: str, path: tuple[str, ...], key: str) -> str | None:
+            return None if path[-1] == "linear" else real(text, path, key)
+
+        monkeypatch.setattr("crossby.scenes.declare.unset_scalar", _fail_linear)
+
+        ledger = load_ledger(tmp_path)
+        result = declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)
+        save_ledger(tmp_path, ledger)  # engine's finally
+
+        assert result.action == "error"
+        # The successful revert (github) is written; the failed one (linear) is not.
+        data = self._codex_data(tmp_path)
+        assert "enabled" not in data["mcp_servers"]["github"]  # reverted + written
+        assert data["mcp_servers"]["linear"]["enabled"] is False  # still disabled
+        # revoked counts only the successful removal.
+        assert result.revoked == 1
+        # Only the failed server stays owned, so a retry re-attempts exactly it.
+        assert load_ledger(tmp_path).scene_declare(
+            AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED
+        ) == frozenset({"linear"})
+
+        # Retry with the splice restored fully reverts linear and drops ownership.
+        monkeypatch.setattr("crossby.scenes.declare.unset_scalar", real)
+        retry = load_ledger(tmp_path)
+        retry_result = declare.apply_codex_disabled_mcp(tmp_path, set(), retry, trusted=True)
+        save_ledger(tmp_path, retry)
+        assert retry_result.action == "updated"
+        assert "enabled" not in self._codex_data(tmp_path)["mcp_servers"]["linear"]
+        assert (
+            load_ledger(tmp_path).scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED)
+            == frozenset()
+        )
