@@ -225,9 +225,11 @@ class TestDelete:
         assert result.exit_code != 0
         assert "active" in result.output.lower()
         assert "clear" in result.output
-        # --force overrides
+        # --force overrides, but warns that state still records the deleted scene.
         forced = _run(["scene", "delete", "base", "--force"], root)
         assert forced.exit_code == 0, forced.output
+        assert "scene-state.json" in forced.output
+        assert "clear" in forced.output
 
     def test_delete_refuses_when_extended(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -235,6 +237,15 @@ class TestDelete:
         result = _run(["scene", "delete", "base"], root)
         assert result.exit_code != 0
         assert "extend" in result.output
+
+    def test_delete_force_warns_about_broken_dependents(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        _run(["scene", "create", "child", "--extends", "base", "--agent", "code-reviewer"], root)
+        forced = _run(["scene", "delete", "base", "--force"], root)
+        assert forced.exit_code == 0, forced.output
+        assert "child" in forced.output
+        assert "unresolvable" in forced.output
+        assert "base" not in _scenes(root)
 
     def test_delete_unknown_fails(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -285,6 +296,23 @@ class TestInstallStarters:
         assert show.exit_code == 0, show.output
         assert "matched no detected item" in show.output
 
+    def test_print_emits_only_valid_yaml(self, tmp_path: Path) -> None:
+        # A same-named user scene forces a "Skipped" notice; --print must keep it
+        # off stdout so the streamed blocks stay parseable YAML.
+        body = CONFIG + "  pr-review:\n    description: mine\n"
+        root = _project(tmp_path, body)
+        before = (root / ".crossby.yml").read_text(encoding="utf-8")
+        result = _run(["scene", "install-starters", "--print"], root)
+        assert result.exit_code == 0, result.output
+        assert "Skipped" not in result.output
+        parsed = yaml.safe_load(result.output)
+        assert isinstance(parsed, dict)
+        # The not-yet-present starters are streamed; the skipped one is not.
+        assert "deploy-watch" in parsed
+        assert "pr-review" not in parsed
+        # --print writes nothing.
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
+
 
 # ---------------------------------------------------------------------------
 # wizard (interactive) — patched prompts
@@ -310,6 +338,45 @@ class TestWizard:
         # A concern was chosen via multi-select, and the seed flag folded in.
         assert scene["agents"]["include"] == ["code-reviewer"]
         assert "skills" in scene
+
+    def test_wizard_confirm_reselect_moves_exclude_to_include(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Seed a scene that *excludes* deploy-prod, then have the user re-select
+        # deploy-prod into the skills include at the confirm step. The interactive
+        # include must win, dropping deploy-prod from exclude (the CrossChannelMove
+        # conflict-resolution path in _review_scene, unreachable from the always
+        # index-0 test above).
+        root = _project(tmp_path)
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: True)
+
+        picking = {"confirm": False}
+
+        def _multi_select(_title: str, items: list[str]) -> list[int]:
+            # Pick nothing while walking concerns; only the confirm re-selection of
+            # skills chooses deploy-prod.
+            if picking["confirm"] and "deploy-prod" in items:
+                return [items.index("deploy-prod")]
+            return []
+
+        confirm_menu = iter(["Change skills include", "Proceed"])
+
+        def _select(title: str, items: list[str], *_a: object, **_k: object) -> int:
+            if title == "Confirm scene":
+                choice = next(confirm_menu)
+                picking["confirm"] = choice != "Proceed"
+                return items.index(choice)
+            return 0  # optional extends/profile pickers -> "(none)"
+
+        monkeypatch.setattr("crossby.ui.prompts.multi_select", _multi_select)
+        monkeypatch.setattr("crossby.ui.prompts.select", _select)
+        monkeypatch.setattr("crossby.ui.prompts.input_prompt", lambda *_a, **_k: "")
+
+        result = _run(["scene", "create", "wiztest", "--exclude-skill", "deploy-prod"], root)
+        assert result.exit_code == 0, result.output
+        skills = _scenes(root)["wiztest"]["skills"]
+        assert skills["include"] == ["deploy-prod"]
+        assert "deploy-prod" not in skills.get("exclude", [])
 
 
 # ---------------------------------------------------------------------------

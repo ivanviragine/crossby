@@ -214,5 +214,7 @@ TTY). Every `--<concern>` flag has an `--exclude-<concern>` counterpart.
    $CROSSBY scene install-starters                     # pr-review, deploy-watch, write-docs, presentation
    ```
 
-Writes touch only the edited `scenes.<name>` entry — comments and sibling scenes
-are preserved — and are backed up and rolled back if the result won't parse.
+Writes touch only the edited `scenes.<name>` entry — everything outside its span
+(comments, sibling scenes) is preserved byte-for-byte, though comments inside the
+entry are not — and creating the first scene appends a `scenes:` key. Writes are
+backed up and rolled back if the result won't parse.

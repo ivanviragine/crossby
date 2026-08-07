@@ -313,7 +313,7 @@ crossby scene delete pr-review
 
 Every selector flag has an `--exclude-*` counterpart (`--skill` / `--exclude-skill`, and the same for `--agent`, `--mcp`, `--hook`, `--permission`) because excludes are first-class in the schema. Adding a pattern to one channel removes it from the other, so include and exclude can never contradict — the move is reported when it happens.
 
-Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, located by parsing the YAML rather than line-scanning, so every comment and every other section — including sibling scenes — is preserved byte-for-byte. Each write is backed up, re-parsed, and rolled back if it would produce an invalid config.
+Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, located by parsing the YAML rather than line-scanning. Everything *outside* that entry's span — every comment and every other section, including sibling scenes — is preserved byte-for-byte (comments *inside* the rewritten entry are not; that is the region you are editing). Creating the first scene appends a `scenes:` key after the last top-level key. Each write is backed up, re-parsed, and rolled back if it would produce an invalid config.
 
 **Starter scenes** are opinionated presets you can drop in and tweak:
 

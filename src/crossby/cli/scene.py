@@ -1158,7 +1158,8 @@ def delete_scene(
         raise typer.Exit(1)
 
     active = load_scene_state(project_root).state
-    if active is not None and active.scene == name and not force:
+    is_active = active is not None and active.scene == name
+    if is_active and not force:
         console.error(f"Scene {name!r} is currently active; refusing to delete it.")
         console.hint("Run 'crossby scene clear' first, or pass --force to delete anyway.")
         raise typer.Exit(1)
@@ -1169,6 +1170,21 @@ def delete_scene(
         console.error(f"Scene(s) {joined} extend {name!r}; deleting it would break them.")
         console.hint("Update or delete those first, or pass --force.")
         raise typer.Exit(1)
+
+    # --force skips the refusals above; spell out the state it leaves behind so the
+    # user is not silently left with a dangling scene reference.
+    if force:
+        if is_active:
+            console.warn(
+                f"Scene {name!r} is active; scene-state.json still records it — "
+                "run 'crossby scene clear' to revert the tools it applied."
+            )
+        if dependents:
+            joined = ", ".join(dependents)
+            console.warn(
+                f"Scene(s) {joined} still extend {name!r}; their 'extends' is now "
+                "unresolvable until you update or delete them."
+            )
 
     target = _config_target(config, project_root)
     text = target.read_bytes().decode("utf-8")
@@ -1220,10 +1236,11 @@ def install_starters(
 
     text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
     installed: list[str] = []
+    skipped: list[str] = []
     try:
         for name, scene in starters.items():
             if name in existing:
-                console.info(f"Skipped {name!r} — a scene with that name already exists.")
+                skipped.append(name)
                 continue
             text = splice_scene_text(text, name, scene)
             installed.append(name)
@@ -1231,10 +1248,9 @@ def install_starters(
         console.error(f"Cannot edit {target.name}: {exc}")
         raise typer.Exit(1) from exc
 
-    if not installed:
-        console.info("All starter scenes are already present.")
-        return
     if print_:
+        # --print streams the scene blocks to stdout for redirection, so the
+        # skipped/all-present notices must stay off stdout — emit only valid YAML.
         for name in installed:
             console.out.print(
                 render_scene_entry(name, starters[name]).rstrip("\n"),
@@ -1242,6 +1258,12 @@ def install_starters(
                 highlight=False,
                 soft_wrap=True,
             )
+        return
+
+    for name in skipped:
+        console.info(f"Skipped {name!r} — a scene with that name already exists.")
+    if not installed:
+        console.info("All starter scenes are already present.")
         return
     try:
         write_config_checked(target, text)
