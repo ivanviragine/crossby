@@ -280,15 +280,23 @@ def _entry_span(text: str, scenes_val: yaml.nodes.Node, name: str) -> tuple[int,
     """Byte span ``[start, end)`` of scene *name*'s entry, or ``None`` if absent.
 
     ``start`` is the beginning of the key's line (indentation included); ``end``
-    is the start of the following sibling's line, walked back over trailing
-    blank/comment lines so nothing belonging to a neighbour is caught.
+    is the start of the following sibling's line — or, for the last entry, the
+    end of the ``scenes:`` block — walked back over trailing blank/comment lines
+    so nothing belonging to a neighbour is caught. Anchoring the end on the
+    *next key* (not the current value's ``end_mark``) is what keeps a flow-style
+    entry (``x: {…}`` whose value ends on the key's own line) from collapsing to
+    a zero-length span.
     """
-    for key_node, value_node in scenes_val.value:
+    entries = scenes_val.value
+    for i, (key_node, _value_node) in enumerate(entries):
         if key_node.value != name:
             continue
         start = _line_start(text, key_node.start_mark.index)
-        end_index = value_node.end_mark.index
-        end = _line_start(text, end_index) if end_index < len(text) else len(text)
+        if i + 1 < len(entries):
+            end = _line_start(text, entries[i + 1][0].start_mark.index)
+        else:
+            end_index = scenes_val.end_mark.index
+            end = _line_start(text, end_index) if end_index < len(text) else len(text)
         return start, _walk_back_trivia(text, end)
     return None
 
@@ -316,12 +324,18 @@ def _replace_empty_scenes(text: str, key_node: yaml.nodes.Node, entry: str) -> s
 
 
 def _insert_entry(text: str, scenes_val: yaml.nodes.Node, entry: str) -> str:
-    """Insert *entry* after the last existing scene entry."""
-    last_value = scenes_val.value[-1][1]
-    end_index = last_value.end_mark.index
+    """Insert *entry* after the last existing scene entry.
+
+    The insertion point is the end of the ``scenes:`` block (walked back over
+    trailing trivia). A newline is prepended when the preceding byte is not one,
+    so a config whose last line lacks a trailing newline does not fuse the new
+    key onto it.
+    """
+    end_index = scenes_val.end_mark.index
     end = _line_start(text, end_index) if end_index < len(text) else len(text)
     insert_at = _walk_back_trivia(text, end)
-    return text[:insert_at] + entry + text[insert_at:]
+    prefix = "" if insert_at == 0 or text[insert_at - 1] == "\n" else "\n"
+    return text[:insert_at] + prefix + entry + text[insert_at:]
 
 
 def splice_scene_text(text: str, name: str, scene: SceneConfig) -> str:

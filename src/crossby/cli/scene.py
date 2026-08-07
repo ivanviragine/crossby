@@ -969,7 +969,9 @@ def _write_scene_entry(project_root: Path, name: str, scene: SceneConfig, *, pri
         return
 
     target = project_root / ".crossby.yml"
-    base = target.read_text(encoding="utf-8") if target.exists() else "version: 1\n"
+    # read_bytes().decode() rather than read_text() so a CRLF file's line endings
+    # are not silently normalised to LF, which would rewrite every line.
+    base = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
     new_text = splice_scene_text(base, name, scene)
     try:
         write_config_checked(target, new_text, validate=_require_resolves(name))
@@ -1145,7 +1147,7 @@ def delete_scene(
         raise typer.Exit(1)
 
     target = project_root / ".crossby.yml"
-    text = target.read_text(encoding="utf-8")
+    text = target.read_bytes().decode("utf-8")
     new_text, found = remove_scene_text(text, name)
     if not found:  # pragma: no cover — guarded by the config.scenes check above
         console.error(f"Scene {name!r} was not found in {target.name}.")
@@ -1184,7 +1186,7 @@ def install_starters(
     config = _load_config_or_exit(project_root)
     existing = set(config.scenes)
 
-    text = target.read_text(encoding="utf-8") if target.exists() else "version: 1\n"
+    text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
     installed: list[str] = []
     for name, scene in starters.items():
         if name in existing:
@@ -1400,6 +1402,10 @@ def _run_create_wizard(
         chosen = [items[i] for i in picked]
         if chosen:
             selectors[concern] = SceneSelector(include=chosen)
+        # Selecting nothing leaves the concern unset (an unfiltered concern —
+        # every item kept). This is deliberate: scenes *remove* capability, so a
+        # concern the user skipped must stay whole rather than be emptied. To
+        # build a scene that selects none of a concern, use `--exclude-<concern>`.
 
     if description is None:
         description = prompts.input_prompt("Description (optional)", allow_empty=True) or None

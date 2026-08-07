@@ -138,6 +138,43 @@ class TestSpliceBytePreservation:
             # exactly one top-level scenes key
             assert out.count("\nscenes:") + out.startswith("scenes:") == 1
 
+    def test_flow_style_entry_replaced_not_duplicated(self) -> None:
+        # A hand-written flow entry ends on its own line; the span must not
+        # collapse to zero length (which would duplicate the key).
+        doc = (
+            "version: 1\nscenes:\n  x: {skills: {include: [a]}}\n"
+            "  y:\n    mcp:\n      include: [g]\n"
+        )
+        out = splice_scene_text(doc, "x", SceneConfig(skills=SceneSelector(include=["b"])))
+        data = yaml.safe_load(out)
+        assert data["scenes"]["x"]["skills"]["include"] == ["b"]
+        assert data["scenes"]["y"]["mcp"]["include"] == ["g"]
+        assert out.count("  x:") == 1
+
+    def test_flow_style_last_entry_replaced(self) -> None:
+        doc = (
+            "version: 1\nscenes:\n  base:\n    skills:\n      include: [a]\n"
+            "  x: {mcp: {include: [g]}}\n"
+        )
+        out = splice_scene_text(doc, "x", SceneConfig(mcp=SceneSelector(include=["h"])))
+        data = yaml.safe_load(out)
+        assert data["scenes"]["x"]["mcp"]["include"] == ["h"]
+        assert data["scenes"]["base"]["skills"]["include"] == ["a"]
+
+    def test_insert_into_config_without_trailing_newline(self) -> None:
+        doc = "version: 1\nscenes:\n  x:\n    skills:\n      include: [a]"  # no final newline
+        out = splice_scene_text(doc, "new", SceneConfig(mcp=SceneSelector(include=["g"])))
+        data = yaml.safe_load(out)  # must be valid YAML, not `include: [a]  new:`
+        assert set(data["scenes"]) == {"x", "new"}
+
+    def test_crlf_endings_preserved_outside_span(self) -> None:
+        head = "version: 1\r\n# keep\r\nscenes:\r\n  base:\r\n    skills:\r\n      include: [a]\r\n"
+        doc = head + "  x:\r\n    mcp:\r\n      include: [g]\r\n"
+        out = splice_scene_text(doc, "x", SceneConfig(mcp=SceneSelector(include=["h"])))
+        # Every byte before the edited entry — CRLF and all — is unchanged.
+        assert out.startswith(head)
+        assert yaml.safe_load(out)["scenes"]["x"]["mcp"]["include"] == ["h"]
+
 
 class TestRemoveSceneText:
     def test_removes_only_named_entry(self) -> None:
@@ -150,6 +187,15 @@ class TestRemoveSceneText:
     def test_absent_scene_is_noop(self) -> None:
         out, found = remove_scene_text(DOC, "nope")
         assert not found and out == DOC
+
+    def test_removes_flow_style_entry(self) -> None:
+        doc = (
+            "version: 1\nscenes:\n  x: {skills: {include: [a]}}\n"
+            "  y:\n    mcp:\n      include: [g]\n"
+        )
+        out, found = remove_scene_text(doc, "x")
+        assert found
+        assert list(yaml.safe_load(out)["scenes"]) == ["y"]
 
 
 class TestSelectorEdits:
