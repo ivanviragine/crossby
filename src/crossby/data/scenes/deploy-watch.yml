@@ -1,0 +1,10 @@
+# Starter scene: watching a deploy. The natural home for exclude selectors —
+# it keeps observability tooling while dropping anything edit-oriented.
+deploy-watch:
+  description: Watch a deploy — deployment/observability skills and servers, minus edit-oriented tooling.
+  skills:
+    include: ["deploy-*", "*-deploy", "*deploy*", "observ*", "monitor*", "*-watch", "*ops*"]
+  mcp:
+    include: ["*deploy*", "*sentry*", "*datadog*", "*grafana*", "*observ*", "*prometheus*"]
+  permissions:
+    exclude: ["*Edit*", "*Write*", "*write*", "rm *", "*delete*"]

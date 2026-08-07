@@ -1,0 +1,13 @@
+# Starter scene: reviewing a pull request.
+# Selectors are globs, so this degrades gracefully in a project that has none
+# of the named skills/agents/servers — unmatched globs warn, they never error.
+pr-review:
+  description: Review a pull request — review/knowledge skills, a code-review agent, GitHub, read-only tooling.
+  skills:
+    include: ["review-*", "*-review", "knowledge", "code-review*"]
+  agents:
+    include: ["*review*", "code-reviewer"]
+  mcp:
+    include: ["github", "*github*"]
+  permissions:
+    include: ["git diff*", "git log*", "git status*", "gh pr*", "gh api*"]

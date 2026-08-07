@@ -251,6 +251,54 @@ Rules that keep this honest:
   `--profile` (or positional profile name) overrides it. `--scene` targets
   exactly one tool and never fans out.
 
+### Scene authoring (writing `.crossby.yml`)
+
+`crossby init` is not the only thing that writes `.crossby.yml` — `crossby scene
+create`/`add`/`remove`/`delete` do too, and they run repeatedly. Two pieces make
+that safe:
+
+- **One checked-write helper.** `config/safe_write.py:write_config_checked`
+  backs up → writes atomically → re-parses (and runs an optional `validate`
+  callback, used to resolve a scene's `extends` chain) → restores the previous
+  file byte-for-byte on any failure. `init` passes `keep_backup=True` (a
+  full-file overwrite deserves a recovery net); the scene commands leave no
+  `.bak`. Both callers funnel through it rather than re-implementing the
+  sequence.
+- **Scoped splicing, not re-render.** `scenes/authoring.py` rewrites only the
+  byte span of the single `scenes.<name>` entry being edited. The span is found
+  with `yaml.compose()` node `start_mark`/`end_mark` offsets — **never**
+  line-scanning for "the next top-level key", which a block scalar containing a
+  `key:`-looking line would break. Everything outside that span (comments in
+  `ai:`/`profiles:`/`models:`, sibling scenes) is preserved. A brand-new
+  `scenes:` key is appended deterministically after the last top-level key.
+  Selector edits enforce the cross-channel rule (adding a pattern to `include`
+  drops it from `exclude`, and vice-versa) so the two can never contradict.
+
+Starter scenes are bundled YAML under `src/crossby/data/scenes/` and loaded by
+`scenes/starters.py:load_starter_scenes`. Keep them **self-contained** — glob
+selectors only, no `extends`/`profile` — so `install-starters` can drop them
+into any project and they resolve (with warnings, never errors) where the named
+items are absent. Add a starter by dropping a `<name>.yml` (one `<name>: <body>`
+mapping) into that directory; the parse test asserts every bundle validates
+under the schema.
+
+### Adding a scene mechanism for a new tool
+
+When you teach crossby a new tool (see **Adding a New AI Tool**), give it a
+scene cell in the matrix under **Scene activation mechanisms** for each concern:
+
+1. Prefer **DECLARE** — a native, non-destructive disable key. Add the read side
+   to the tool's config reader and the write/revert side in `scenes/declare.py`,
+   record its provenance as a `SceneDeclareKey` in `sync/ownership.py`, and gate
+   it on the minimum tool version in `scenes/versioning.py` if the key is new.
+2. If the tool has no per-item key, fall back to **PROJECT**: the engine already
+   re-points skills/agents directories and drives the revocable-sync removal
+   channel for hooks/permissions — you usually add no per-tool path knowledge,
+   just map the concern to PROJECT in `scenes/mechanism.py`.
+3. If neither exists, mark the cell **UNSUPPORTED** so it is *reported*, never
+   silently faked, and add a row to the matrix in this file and in
+   `references/differences.md`.
+
 ### Symlink, copy, or translate
 
 Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:

@@ -1,0 +1,8 @@
+# Starter scene: authoring documentation. Docs/diagram skills, and no
+# shell-heavy permissions (excluded so the session stays writing, not running).
+write-docs:
+  description: Author documentation — docs and diagram skills, no shell-heavy permissions.
+  skills:
+    include: ["*doc*", "*diagram*", "*mermaid*", "*writing*", "markdown*", "*readme*"]
+  permissions:
+    exclude: ["Bash*", "*shell*", "run_command*", "rm *", "*sudo*"]

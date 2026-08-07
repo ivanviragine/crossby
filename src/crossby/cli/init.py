@@ -18,7 +18,6 @@ from typing import Any
 import typer
 import yaml
 
-from crossby.config.json_utils import atomic_write_text
 from crossby.ui.console import console
 
 _CUSTOM = "Custom…"
@@ -49,7 +48,7 @@ def init(
         crossby init --install-skill       # also install the agent runbook
     """
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.config.loader import parse_config_file
+    from crossby.config.safe_write import ConfigWriteError, write_config_checked
     from crossby.ui import prompts
 
     project_root = path.resolve()
@@ -79,32 +78,24 @@ def init(
             raise typer.Exit(1)
         answers = _interactive_wizard(installed)
 
-    backup: Path | None = None
-    if target.exists():
-        from crossby.sync.file_utils import backup_path
-
-        backup = backup_path(target)
-        backup.write_bytes(target.read_bytes())
-        console.info(f"Backed up existing config to {backup.name}")
-
+    # Backs up, writes atomically, re-parses, and restores the previous file
+    # byte-for-byte if the render is somehow unparseable — see write_config_checked.
+    # --force is a destructive full-file overwrite, so the backup is kept as a
+    # recovery net (the surgical scene commands leave none).
     rendered = _render_init_yaml(answers, preserved)
-    atomic_write_text(target, rendered)
-
-    # Sanity check — the file must round-trip through the real loader.
     try:
-        parse_config_file(target)
-    except Exception as exc:  # pragma: no cover — keeps user out of a broken state
-        target.unlink(missing_ok=True)
-        if backup is not None:
-            # Don't leave the user with no config at all just because we wrote
-            # a bad one — put theirs back exactly as it was.
-            target.write_bytes(backup.read_bytes())
-            backup.unlink(missing_ok=True)
-            console.error(f"Wrote invalid config ({exc}); restored the previous one and aborted.")
+        backup = write_config_checked(target, rendered, keep_backup=True)
+    except ConfigWriteError as exc:  # pragma: no cover — keeps user out of a broken state
+        if exc.restored:
+            console.error(
+                f"Wrote invalid config ({exc.original}); restored the previous one and aborted."
+            )
         else:
-            console.error(f"Wrote invalid config ({exc}); removing and aborting.")
+            console.error(f"Wrote invalid config ({exc.original}); removing and aborting.")
         raise typer.Exit(1) from exc
 
+    if backup is not None:
+        console.info(f"Backed up existing config to {backup.name}")
     console.success(f"Wrote {target}")
 
     if install_skill:

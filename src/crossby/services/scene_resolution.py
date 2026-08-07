@@ -142,6 +142,29 @@ def resolve_scene(
     return ResolvedScene(tool_id=tool_id, groups=tuple(groups), warnings=tuple(warnings))
 
 
+def concern_universe(scan: ProjectScan, project_root: Path) -> dict[str, tuple[str, ...]]:
+    """Every candidate item name per concern, before any selector is applied.
+
+    This is exactly the inventory :func:`resolve_scene` matches globs against —
+    exposed directly so the authoring wizard and the ``--skill`` / ``--agent`` /
+    … selectors can offer only items that actually exist in the project, without
+    having to resolve an all-inclusive scene to enumerate them. Keys are the
+    members of :data:`SCENE_CONCERNS`; each value is sorted and de-duplicated.
+    """
+    return {
+        concern: tuple(
+            sorted(
+                {
+                    name
+                    for group in _collect_groups(concern, scan, project_root)
+                    for name in group.names
+                }
+            )
+        )
+        for concern in SCENE_CONCERNS
+    }
+
+
 # ---------------------------------------------------------------------------
 # Selector matching
 # ---------------------------------------------------------------------------

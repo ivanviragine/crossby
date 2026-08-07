@@ -183,3 +183,36 @@ Get a portable result table.
 
 Run `$CROSSBY sync --help` for the full flag reference. The deeper
 schema mapping table lives in `references/differences.md`.
+
+## Scenes
+
+A scene is a task-shaped slice of the project's skills, agents, MCP servers,
+hooks and permissions (stored under `scenes:` in `.crossby.yml`).
+
+Inspect and activate.
+
+   ```bash
+   $CROSSBY scene list                     # defined scenes + per-concern counts
+   $CROSSBY scene show <name>              # what it resolves to, per-tool mechanism
+   $CROSSBY scene use <name>               # apply to installed tools (--plan previews)
+   $CROSSBY scene clear                    # revert to the pre-scene baseline
+   $CROSSBY scene status                   # active scene + drift
+   ```
+
+Author without hand-editing YAML. `create` runs a wizard on a TTY; pass
+selector flags to build a scene non-interactively (required when stdin is not a
+TTY). Every `--<concern>` flag has an `--exclude-<concern>` counterpart.
+
+   ```bash
+   $CROSSBY scene create <name> \
+     --skill "review-*" --agent code-reviewer --mcp github --exclude-mcp linear \
+     --description "..." --extends base --profile ccyolo
+   $CROSSBY scene add <name> --permission "gh pr *"    # append selectors (idempotent)
+   $CROSSBY scene remove <name> --exclude-mcp linear   # drop selectors (idempotent)
+   $CROSSBY scene create <name> --skill "review-*" --print   # emit block, write nothing
+   $CROSSBY scene delete <name>                        # refused while active; --force overrides
+   $CROSSBY scene install-starters                     # pr-review, deploy-watch, write-docs, presentation
+   ```
+
+Writes touch only the edited `scenes.<name>` entry — comments and sibling scenes
+are preserved — and are backed up and rolled back if the result won't parse.

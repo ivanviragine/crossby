@@ -29,7 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from crossby.models.ai import AIToolID
-    from crossby.models.config import CrossbyConfig, SceneConfig
+    from crossby.models.config import CrossbyConfig, SceneConfig, SceneSelector
+    from crossby.scenes.authoring import CrossChannelMove, SelectorEdit
     from crossby.scenes.state import SceneState, SceneToolRecord
     from crossby.services.scene_resolution import ResolvedScene
     from crossby.sync.base import SyncResult
@@ -46,6 +47,28 @@ _CONCERN_ORDER: tuple[str, ...] = ("skills", "agents", "mcp", "hooks", "permissi
 
 _TOOL_OPTION = typer.Option(None, "--tool", help="Limit to a single tool (e.g. claude, cursor).")
 _PATH_OPTION = typer.Option(Path("."), "--path", help="Project root directory.")
+
+# Selector flags shared by create / add / remove. Each singular flag maps to a
+# plural concern; both the include and the exclude channel are first-class,
+# because excludes are first-class in the schema and starters rely on them.
+_SKILL_OPT = typer.Option([], "--skill", help="Skill glob to include (repeatable).")
+_EXCLUDE_SKILL_OPT = typer.Option([], "--exclude-skill", help="Skill glob to exclude (repeatable).")
+_AGENT_OPT = typer.Option([], "--agent", help="Agent glob to include (repeatable).")
+_EXCLUDE_AGENT_OPT = typer.Option([], "--exclude-agent", help="Agent glob to exclude (repeatable).")
+_MCP_OPT = typer.Option([], "--mcp", help="MCP server glob to include (repeatable).")
+_EXCLUDE_MCP_OPT = typer.Option(
+    [], "--exclude-mcp", help="MCP server glob to exclude (repeatable)."
+)
+_HOOK_OPT = typer.Option([], "--hook", help="Hook glob to include (repeatable).")
+_EXCLUDE_HOOK_OPT = typer.Option([], "--exclude-hook", help="Hook glob to exclude (repeatable).")
+_PERMISSION_OPT = typer.Option([], "--permission", help="Permission glob to include (repeatable).")
+_EXCLUDE_PERMISSION_OPT = typer.Option(
+    [], "--exclude-permission", help="Permission glob to exclude (repeatable)."
+)
+_DESCRIPTION_OPT = typer.Option(None, "--description", help="One-line scene description.")
+_EXTENDS_OPT = typer.Option(None, "--extends", help="Parent scene to compose from (single parent).")
+_PROFILE_OPT = typer.Option(None, "--profile", help="Default launch profile for this scene.")
+_PRINT_OPT = typer.Option(False, "--print", help="Print the scene block to stdout; write nothing.")
 
 
 # ---------------------------------------------------------------------------
@@ -448,9 +471,7 @@ def use_scene(
         recorded = _recorded_tools(active)
         # An unscoped use reverts every recorded tool, including one that is no
         # longer installed — otherwise its owned keys stay applied but unrecorded.
-        revert = (
-            recorded if tool_id is None else [t for t in recorded if str(t) in scope_strs]
-        )
+        revert = recorded if tool_id is None else [t for t in recorded if str(t) in scope_strs]
         if revert:
             drifted = detect_drift(project_root, active, tools=[str(t) for t in revert])
             if drifted and not force:
@@ -837,3 +858,667 @@ def _report_drift_refusal(scene: str, drifted: list[str], *, verb: str) -> None:
     for rel in drifted:
         console.detail(rel)
     console.hint("Re-run with --force to overwrite the drift.")
+
+
+# ---------------------------------------------------------------------------
+# Authoring — shared helpers (create / add / remove / delete / install-starters)
+# ---------------------------------------------------------------------------
+
+
+def _collect_selector_edits(
+    *,
+    skill: list[str],
+    exclude_skill: list[str],
+    agent: list[str],
+    exclude_agent: list[str],
+    mcp: list[str],
+    exclude_mcp: list[str],
+    hook: list[str],
+    exclude_hook: list[str],
+    permission: list[str],
+    exclude_permission: list[str],
+) -> list[SelectorEdit]:
+    """Turn the raw selector flags into SelectorEdits, dropping empty channels."""
+    from crossby.scenes.authoring import SelectorEdit
+
+    spec: tuple[tuple[str, list[str], bool], ...] = (
+        ("skills", skill, False),
+        ("skills", exclude_skill, True),
+        ("agents", agent, False),
+        ("agents", exclude_agent, True),
+        ("mcp", mcp, False),
+        ("mcp", exclude_mcp, True),
+        ("hooks", hook, False),
+        ("hooks", exclude_hook, True),
+        ("permissions", permission, False),
+        ("permissions", exclude_permission, True),
+    )
+    return [
+        SelectorEdit(concern, tuple(values), exclude) for concern, values, exclude in spec if values
+    ]
+
+
+def _apply_scalar_updates(
+    scene: SceneConfig,
+    description: str | None,
+    extends: str | None,
+    profile: str | None,
+) -> SceneConfig:
+    """Override description/extends/profile for any flag that was given.
+
+    An empty string clears the field (``--description ""`` drops it), so a scalar
+    can be removed as well as set.
+    """
+    updates: dict[str, str | None] = {}
+    if description is not None:
+        updates["description"] = description or None
+    if extends is not None:
+        updates["extends"] = extends or None
+    if profile is not None:
+        updates["profile"] = profile or None
+    return scene.model_copy(update=updates) if updates else scene
+
+
+def _report_moves(moves: list[CrossChannelMove]) -> None:
+    for move in moves:
+        console.info(move.describe())
+
+
+def _report_missing(missing: list[str]) -> None:
+    for pattern in missing:
+        console.warn(f"selector {pattern!r} was not present — nothing removed.")
+
+
+def _require_resolves(name: str) -> Callable[[CrossbyConfig], None]:
+    """A write_config_checked validator asserting scene *name* still resolves.
+
+    A structural parse accepts an ``extends`` that names a missing scene or forms
+    a cycle — those surface only in ``get_scene``. Failing here lets
+    write_config_checked roll the file back before the user is left with a config
+    that parses but can never be applied.
+    """
+
+    def _validate(config: CrossbyConfig) -> None:
+        from crossby.config.loader import ConfigError
+
+        if config.get_scene(name) is None:  # pragma: no cover — just written
+            raise ConfigError(f"scene {name!r} did not round-trip through the loader")
+
+    return _validate
+
+
+def _write_scene_entry(project_root: Path, name: str, scene: SceneConfig, *, print_: bool) -> None:
+    """Splice *scene* into ``.crossby.yml`` (or print it), reporting the outcome.
+
+    With ``--print`` the rendered entry goes to stdout and nothing is written;
+    otherwise the write is backed up, re-parsed, resolution-checked, and rolled
+    back byte-for-byte on any error.
+    """
+    from crossby.config.safe_write import ConfigWriteError, write_config_checked
+    from crossby.scenes.authoring import render_scene_entry, splice_scene_text
+
+    if print_:
+        # Raw YAML: disable Rich markup (flow lists like ``[a, b]`` read as tags)
+        # and wrapping so the block stays pasteable.
+        console.out.print(
+            render_scene_entry(name, scene).rstrip("\n"),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        return
+
+    target = project_root / ".crossby.yml"
+    base = target.read_text(encoding="utf-8") if target.exists() else "version: 1\n"
+    new_text = splice_scene_text(base, name, scene)
+    try:
+        write_config_checked(target, new_text, validate=_require_resolves(name))
+    except ConfigWriteError as exc:
+        console.error(f"Refusing to write scene {name!r}: {exc.original}")
+        console.hint(
+            ".crossby.yml was left unchanged." if exc.restored else "No config file was written."
+        )
+        raise typer.Exit(1) from exc
+    console.success(f"Wrote scene {name!r} to {target.name}.")
+
+
+# ---------------------------------------------------------------------------
+# add / remove — non-interactive selector editing of an existing scene
+# ---------------------------------------------------------------------------
+
+
+@scene_app.command("add")
+def add_to_scene(
+    name: str = typer.Argument(..., help="Existing scene to append selectors to."),
+    skill: list[str] = _SKILL_OPT,
+    exclude_skill: list[str] = _EXCLUDE_SKILL_OPT,
+    agent: list[str] = _AGENT_OPT,
+    exclude_agent: list[str] = _EXCLUDE_AGENT_OPT,
+    mcp: list[str] = _MCP_OPT,
+    exclude_mcp: list[str] = _EXCLUDE_MCP_OPT,
+    hook: list[str] = _HOOK_OPT,
+    exclude_hook: list[str] = _EXCLUDE_HOOK_OPT,
+    permission: list[str] = _PERMISSION_OPT,
+    exclude_permission: list[str] = _EXCLUDE_PERMISSION_OPT,
+    description: str | None = _DESCRIPTION_OPT,
+    extends: str | None = _EXTENDS_OPT,
+    profile: str | None = _PROFILE_OPT,
+    print_: bool = _PRINT_OPT,
+    path: Path = _PATH_OPTION,
+) -> None:
+    """Append selectors (and optionally set description/extends/profile) on a scene.
+
+    Adding a pattern to one channel removes it from the other, so include and
+    exclude can never contradict; each such move is reported. Idempotent — adding
+    an already-present selector changes nothing.
+    """
+    from crossby.scenes.authoring import add_selectors
+
+    project_root = path.resolve()
+    config = _load_config_or_exit(project_root)
+    if name not in config.scenes:
+        console.error(f"Unknown scene: {name!r}")
+        console.hint("Use 'crossby scene create' to define a new scene.")
+        raise typer.Exit(1)
+
+    edits = _collect_selector_edits(
+        skill=skill,
+        exclude_skill=exclude_skill,
+        agent=agent,
+        exclude_agent=exclude_agent,
+        mcp=mcp,
+        exclude_mcp=exclude_mcp,
+        hook=hook,
+        exclude_hook=exclude_hook,
+        permission=permission,
+        exclude_permission=exclude_permission,
+    )
+    if not edits and description is None and extends is None and profile is None:
+        console.error("Nothing to add.")
+        console.hint(
+            "Pass a selector flag (e.g. --skill review-*) or --description/--extends/--profile."
+        )
+        raise typer.Exit(1)
+
+    # Edit the *raw* entry, not the extends-flattened scene, so a child keeps
+    # inheriting from its parent instead of the parent being inlined.
+    scene, moves = add_selectors(config.scenes[name], edits)
+    scene = _apply_scalar_updates(scene, description, extends, profile)
+    _report_moves(moves)
+    _write_scene_entry(project_root, name, scene, print_=print_)
+
+
+@scene_app.command("remove")
+def remove_from_scene(
+    name: str = typer.Argument(..., help="Existing scene to remove selectors from."),
+    skill: list[str] = _SKILL_OPT,
+    exclude_skill: list[str] = _EXCLUDE_SKILL_OPT,
+    agent: list[str] = _AGENT_OPT,
+    exclude_agent: list[str] = _EXCLUDE_AGENT_OPT,
+    mcp: list[str] = _MCP_OPT,
+    exclude_mcp: list[str] = _EXCLUDE_MCP_OPT,
+    hook: list[str] = _HOOK_OPT,
+    exclude_hook: list[str] = _EXCLUDE_HOOK_OPT,
+    permission: list[str] = _PERMISSION_OPT,
+    exclude_permission: list[str] = _EXCLUDE_PERMISSION_OPT,
+    print_: bool = _PRINT_OPT,
+    path: Path = _PATH_OPTION,
+) -> None:
+    """Remove selector patterns from a scene's include/exclude channels.
+
+    Idempotent — removing a pattern that is not present changes nothing and is
+    reported as a no-op.
+    """
+    from crossby.scenes.authoring import remove_selectors
+
+    project_root = path.resolve()
+    config = _load_config_or_exit(project_root)
+    if name not in config.scenes:
+        console.error(f"Unknown scene: {name!r}")
+        raise typer.Exit(1)
+
+    edits = _collect_selector_edits(
+        skill=skill,
+        exclude_skill=exclude_skill,
+        agent=agent,
+        exclude_agent=exclude_agent,
+        mcp=mcp,
+        exclude_mcp=exclude_mcp,
+        hook=hook,
+        exclude_hook=exclude_hook,
+        permission=permission,
+        exclude_permission=exclude_permission,
+    )
+    if not edits:
+        console.error("Nothing to remove.")
+        console.hint("Pass a selector flag (e.g. --skill review-* or --exclude-mcp linear).")
+        raise typer.Exit(1)
+
+    scene, missing = remove_selectors(config.scenes[name], edits)
+    _report_missing(missing)
+    _write_scene_entry(project_root, name, scene, print_=print_)
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+
+@scene_app.command("delete")
+def delete_scene(
+    name: str = typer.Argument(..., help="Scene to delete."),
+    force: bool = typer.Option(
+        False, "--force", help="Delete even if the scene is active or extended by another."
+    ),
+    path: Path = _PATH_OPTION,
+) -> None:
+    """Drop a scene's entry from ``.crossby.yml``.
+
+    Refuses to delete the currently active scene (clear it first, or pass
+    ``--force``) and refuses when another scene ``extends`` it, since that would
+    leave the child unresolvable.
+    """
+    from crossby.config.safe_write import ConfigWriteError, write_config_checked
+    from crossby.scenes.authoring import remove_scene_text
+    from crossby.scenes.state import load_scene_state
+
+    project_root = path.resolve()
+    config = _load_config_or_exit(project_root)
+    if name not in config.scenes:
+        console.error(f"Unknown scene: {name!r}")
+        available = sorted(config.scenes)
+        if available:
+            console.hint(f"Available scenes: {', '.join(available)}")
+        raise typer.Exit(1)
+
+    active = load_scene_state(project_root).state
+    if active is not None and active.scene == name and not force:
+        console.error(f"Scene {name!r} is currently active; refusing to delete it.")
+        console.hint("Run 'crossby scene clear' first, or pass --force to delete anyway.")
+        raise typer.Exit(1)
+
+    dependents = sorted(s for s, sc in config.scenes.items() if sc.extends == name and s != name)
+    if dependents and not force:
+        joined = ", ".join(dependents)
+        console.error(f"Scene(s) {joined} extend {name!r}; deleting it would break them.")
+        console.hint("Update or delete those first, or pass --force.")
+        raise typer.Exit(1)
+
+    target = project_root / ".crossby.yml"
+    text = target.read_text(encoding="utf-8")
+    new_text, found = remove_scene_text(text, name)
+    if not found:  # pragma: no cover — guarded by the config.scenes check above
+        console.error(f"Scene {name!r} was not found in {target.name}.")
+        raise typer.Exit(1)
+    try:
+        write_config_checked(target, new_text)
+    except ConfigWriteError as exc:
+        console.error(f"Could not delete scene {name!r}: {exc.original}")
+        raise typer.Exit(1) from exc
+    console.success(f"Deleted scene {name!r}.")
+
+
+# ---------------------------------------------------------------------------
+# install-starters
+# ---------------------------------------------------------------------------
+
+
+@scene_app.command("install-starters")
+def install_starters(
+    print_: bool = _PRINT_OPT,
+    path: Path = _PATH_OPTION,
+) -> None:
+    """Install the bundled starter scenes, skipping any name already defined.
+
+    Idempotent: a re-run installs nothing new. Same-named user scenes are left
+    untouched. Each starter uses glob selectors, so it stays valid even in a
+    project that has none of the skills/servers it names.
+    """
+    from crossby.config.safe_write import ConfigWriteError, write_config_checked
+    from crossby.scenes.authoring import render_scene_entry, splice_scene_text
+    from crossby.scenes.starters import load_starter_scenes
+
+    project_root = path.resolve()
+    target = project_root / ".crossby.yml"
+    starters = load_starter_scenes()
+    config = _load_config_or_exit(project_root)
+    existing = set(config.scenes)
+
+    text = target.read_text(encoding="utf-8") if target.exists() else "version: 1\n"
+    installed: list[str] = []
+    for name, scene in starters.items():
+        if name in existing:
+            console.info(f"Skipped {name!r} — a scene with that name already exists.")
+            continue
+        text = splice_scene_text(text, name, scene)
+        installed.append(name)
+
+    if not installed:
+        console.info("All starter scenes are already present.")
+        return
+    if print_:
+        for name in installed:
+            console.out.print(
+                render_scene_entry(name, starters[name]).rstrip("\n"),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
+        return
+    try:
+        write_config_checked(target, text)
+    except ConfigWriteError as exc:
+        console.error(f"Could not install starters: {exc.original}")
+        raise typer.Exit(1) from exc
+    console.success(f"Installed starter scene(s): {', '.join(installed)}.")
+
+
+# ---------------------------------------------------------------------------
+# create — interactive wizard (TTY) or flag-driven (non-TTY)
+# ---------------------------------------------------------------------------
+
+
+@scene_app.command("create")
+def create_scene(
+    name: str | None = typer.Argument(None, help="Name for the new scene (prompted if omitted)."),
+    skill: list[str] = _SKILL_OPT,
+    exclude_skill: list[str] = _EXCLUDE_SKILL_OPT,
+    agent: list[str] = _AGENT_OPT,
+    exclude_agent: list[str] = _EXCLUDE_AGENT_OPT,
+    mcp: list[str] = _MCP_OPT,
+    exclude_mcp: list[str] = _EXCLUDE_MCP_OPT,
+    hook: list[str] = _HOOK_OPT,
+    exclude_hook: list[str] = _EXCLUDE_HOOK_OPT,
+    permission: list[str] = _PERMISSION_OPT,
+    exclude_permission: list[str] = _EXCLUDE_PERMISSION_OPT,
+    description: str | None = _DESCRIPTION_OPT,
+    extends: str | None = _EXTENDS_OPT,
+    profile: str | None = _PROFILE_OPT,
+    print_: bool = _PRINT_OPT,
+    path: Path = _PATH_OPTION,
+) -> None:
+    """Create a new scene — an interactive wizard on a TTY, flags otherwise.
+
+    On a TTY this multi-selects over the skills/agents/servers/hooks/permissions
+    discovered in the project, then a confirm-and-review step. With stdin not a
+    TTY it builds the scene from the selector flags alone and never prompts — and
+    refuses (non-zero) if no selector flag was given, rather than silently
+    selecting every item.
+    """
+    from crossby.models.config import SceneConfig
+    from crossby.scenes.authoring import add_selectors
+    from crossby.ui import prompts
+
+    project_root = path.resolve()
+    config = _load_config_or_exit(project_root)
+    seed_edits = _collect_selector_edits(
+        skill=skill,
+        exclude_skill=exclude_skill,
+        agent=agent,
+        exclude_agent=exclude_agent,
+        mcp=mcp,
+        exclude_mcp=exclude_mcp,
+        hook=hook,
+        exclude_hook=exclude_hook,
+        permission=permission,
+        exclude_permission=exclude_permission,
+    )
+
+    if name is None:
+        if not prompts.is_tty():
+            console.error("A scene name is required.")
+            console.hint("Usage: crossby scene create <name> [--skill ... --exclude-mcp ...].")
+            raise typer.Exit(1)
+        name = _prompt_new_scene_name(config)
+        if name is None:
+            raise typer.Exit(1)
+
+    if name in config.scenes:
+        console.error(f"Scene {name!r} already exists.")
+        console.hint("Use 'crossby scene add' to modify it, or choose another name.")
+        raise typer.Exit(1)
+
+    if prompts.is_tty():
+        scene = _run_create_wizard(project_root, config, seed_edits, description, extends, profile)
+    else:
+        # Non-TTY guard sits here, before any prompt could run: require explicit
+        # selectors rather than fall through to multi_select's "select everything".
+        if not seed_edits:
+            console.error("Interactive prompts require a TTY.")
+            console.hint(
+                "Pass selectors (e.g. --skill review-* --exclude-mcp linear) "
+                "to build a scene non-interactively."
+            )
+            raise typer.Exit(1)
+        base = SceneConfig(
+            description=description or None, extends=extends or None, profile=profile or None
+        )
+        scene, moves = add_selectors(base, seed_edits)
+        _report_moves(moves)
+
+    _write_scene_entry(project_root, name, scene, print_=print_)
+
+
+def _prompt_new_scene_name(config: CrossbyConfig) -> str | None:
+    from crossby.ui import prompts
+
+    name = prompts.input_prompt("New scene name", allow_empty=True).strip()
+    if not name:
+        console.info("No name given — aborting.")
+        return None
+    if name in config.scenes:
+        console.error(f"Scene {name!r} already exists.")
+        return None
+    return name
+
+
+def _pick_optional(title: str, names: list[str]) -> str | None:
+    """Pick one of *names* or ``(none)``; ``None`` when there is nothing to pick."""
+    from crossby.ui import prompts
+
+    if not names:
+        return None
+    choices = ["(none)", *names]
+    idx = prompts.select(title, choices)
+    return None if idx == 0 else choices[idx]
+
+
+def _scene_from_selectors(
+    *,
+    description: str | None,
+    extends: str | None,
+    profile: str | None,
+    selectors: dict[str, SceneSelector | None],
+) -> SceneConfig:
+    """Build a :class:`SceneConfig` from scalar fields and a per-concern map."""
+    from crossby.models.config import SceneConfig
+
+    return SceneConfig(
+        description=description,
+        extends=extends,
+        profile=profile,
+        skills=selectors.get("skills"),
+        agents=selectors.get("agents"),
+        mcp=selectors.get("mcp"),
+        hooks=selectors.get("hooks"),
+        permissions=selectors.get("permissions"),
+    )
+
+
+def _concern_visible(
+    universe: dict[str, tuple[str, ...]], concern: str
+) -> Callable[[dict[str, object]], bool]:
+    """A ``visible_when`` predicate: show a concern only if it has candidates.
+
+    Built as a factory so each concern binds its own value (a loop-local lambda
+    would capture the last concern instead).
+    """
+    return lambda _state: bool(universe[concern])
+
+
+def _render_names(value: object) -> str | None:
+    """Render a selected-name list for the review's ``kv`` line (``None`` skips)."""
+    from typing import cast
+
+    if not value:
+        return None
+    return ", ".join(cast("list[str]", value))
+
+
+def _run_create_wizard(
+    project_root: Path,
+    config: CrossbyConfig,
+    seed_edits: list[SelectorEdit],
+    description: str | None,
+    extends: str | None,
+    profile: str | None,
+) -> SceneConfig:
+    """Walk discovered items with multi-select, then a confirm/review step.
+
+    Only ever called on a TTY (guarded by the caller). Any selector flags already
+    given are folded in on top of the interactive picks, so ``create --exclude-mcp
+    linear`` still works interactively.
+    """
+    from crossby.ai_tools.base import AbstractAITool
+    from crossby.models.config import SCENE_CONCERNS, SceneSelector
+    from crossby.scenes.authoring import add_selectors
+    from crossby.services.scene_resolution import concern_universe
+    from crossby.sync.readers import scan_project
+    from crossby.ui import prompts
+
+    installed = AbstractAITool.detect_installed()
+    scan = scan_project(project_root, installed)
+    universe = concern_universe(scan, project_root)
+
+    selectors: dict[str, SceneSelector | None] = {}
+    for concern in SCENE_CONCERNS:
+        items = list(universe[concern])
+        if not items:
+            console.info(f"No {concern} detected in the project — skipping.")
+            continue
+        picked = prompts.multi_select(f"Include which {concern}?", items)
+        chosen = [items[i] for i in picked]
+        if chosen:
+            selectors[concern] = SceneSelector(include=chosen)
+
+    if description is None:
+        description = prompts.input_prompt("Description (optional)", allow_empty=True) or None
+    else:
+        description = description or None
+    extends = (
+        extends or None
+        if extends is not None
+        else _pick_optional("Extend a parent scene?", sorted(config.scenes))
+    )
+    profile = (
+        profile or None
+        if profile is not None
+        else _pick_optional("Default launch profile?", sorted(config.profiles))
+    )
+
+    scene = _scene_from_selectors(
+        description=description, extends=extends, profile=profile, selectors=selectors
+    )
+    if seed_edits:
+        scene, moves = add_selectors(scene, seed_edits)
+        _report_moves(moves)
+
+    return _review_scene(config, scene, universe)
+
+
+def _review_scene(
+    config: CrossbyConfig,
+    initial: SceneConfig,
+    universe: dict[str, tuple[str, ...]],
+) -> SceneConfig:
+    """The ``confirm_defaults`` review — mirror of ``crossby init``'s final step."""
+    from typing import Any, cast
+
+    from crossby.models.config import SCENE_CONCERNS, SceneSelector
+    from crossby.services.confirm import ConfirmField, confirm_defaults
+    from crossby.ui import prompts
+
+    state: dict[str, Any] = {
+        "description": initial.description,
+        "extends": initial.extends,
+        "profile": initial.profile,
+    }
+    excludes: dict[str, list[str]] = {}
+    for concern in SCENE_CONCERNS:
+        sel: SceneSelector | None = getattr(initial, concern)
+        state[concern] = list(sel.include) if sel and sel.include is not None else None
+        excludes[concern] = list(sel.exclude) if sel else []
+
+    def _desc_change(_current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"description": prompts.input_prompt("Description", allow_empty=True) or None}
+
+    def _extends_change(_current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"extends": _pick_optional("Extend a parent scene?", sorted(config.scenes))}
+
+    def _profile_change(_current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+        return {"profile": _pick_optional("Default launch profile?", sorted(config.profiles))}
+
+    def _concern_change(concern: str) -> Callable[[Any, dict[str, Any]], dict[str, Any]]:
+        def _change(_current: Any, _state: dict[str, Any]) -> dict[str, Any]:
+            items = list(universe[concern])
+            picked = prompts.multi_select(f"Include which {concern}?", items)
+            chosen = [items[i] for i in picked]
+            return {concern: chosen or None}
+
+        return _change
+
+    fields: list[ConfirmField] = [
+        ConfirmField(
+            name="description",
+            label="Description",
+            current_value=state["description"],
+            explicit=False,
+            change_fn=_desc_change,
+        ),
+        ConfirmField(
+            name="extends",
+            label="Extends",
+            current_value=state["extends"],
+            explicit=False,
+            change_fn=_extends_change,
+            visible_when=lambda _s: bool(config.scenes),
+        ),
+        ConfirmField(
+            name="profile",
+            label="Profile",
+            current_value=state["profile"],
+            explicit=False,
+            change_fn=_profile_change,
+            visible_when=lambda _s: bool(config.profiles),
+        ),
+    ]
+    for concern in SCENE_CONCERNS:
+        fields.append(
+            ConfirmField(
+                name=concern,
+                label=f"{concern.capitalize()} include",
+                current_value=state[concern],
+                explicit=False,
+                change_fn=_concern_change(concern),
+                visible_when=_concern_visible(universe, concern),
+                render_value=_render_names,
+            )
+        )
+
+    result = confirm_defaults(fields, title="Confirm scene")
+
+    selectors: dict[str, SceneSelector | None] = {}
+    for concern in SCENE_CONCERNS:
+        include = cast("list[str] | None", result[concern])
+        exclude = excludes[concern]
+        selectors[concern] = (
+            SceneSelector(include=include, exclude=exclude)
+            if include is not None or exclude
+            else None
+        )
+    return _scene_from_selectors(
+        description=cast("str | None", result["description"]) or None,
+        extends=cast("str | None", result["extends"]),
+        profile=cast("str | None", result["profile"]),
+        selectors=selectors,
+    )

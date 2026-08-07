@@ -285,6 +285,44 @@ Key behaviours:
 
 Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.
 
+### Authoring scenes
+
+You don't have to hand-write `scenes:` YAML. `crossby scene create` walks a wizard over the skills, agents, MCP servers, hooks and permissions it actually finds in the project, and `add`/`remove` edit a scene's selectors from the command line:
+
+```bash
+# Interactive wizard — multi-select each concern, then a review step
+crossby scene create pr-review
+
+# Or build the exact same scene non-interactively (required when stdin is not a
+# TTY — the wizard refuses rather than silently selecting everything)
+crossby scene create pr-review \
+  --skill "review-*" --skill knowledge --agent code-reviewer \
+  --mcp github --exclude-mcp linear \
+  --description "Review a pull request" --extends base --profile ccyolo
+
+# Append to / remove from an existing scene's selectors (idempotent)
+crossby scene add pr-review --permission "gh pr *"
+crossby scene remove pr-review --exclude-mcp linear
+
+# Print the scene block to stdout instead of writing it
+crossby scene create pr-review --skill "review-*" --print
+
+# Delete a scene (refused while it is active — clear it first, or --force)
+crossby scene delete pr-review
+```
+
+Every selector flag has an `--exclude-*` counterpart (`--skill` / `--exclude-skill`, and the same for `--agent`, `--mcp`, `--hook`, `--permission`) because excludes are first-class in the schema. Adding a pattern to one channel removes it from the other, so include and exclude can never contradict — the move is reported when it happens.
+
+Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, located by parsing the YAML rather than line-scanning, so every comment and every other section — including sibling scenes — is preserved byte-for-byte. Each write is backed up, re-parsed, and rolled back if it would produce an invalid config.
+
+**Starter scenes** are opinionated presets you can drop in and tweak:
+
+```bash
+crossby scene install-starters   # installs pr-review, deploy-watch, write-docs, presentation
+```
+
+Installation skips any same-named scene you already have and is idempotent on re-run. Because starters use glob selectors, they stay valid in a project that has none of the skills they name — unmatched selectors warn, they never error.
+
 ### Session-scoped scenes — `crossby launch --scene`
 
 `crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterwards — pass `--scene` to `crossby launch`:
