@@ -33,8 +33,11 @@ class SceneMechanism(StrEnum):
 # Base matrix. Concern strings match ``models.config.SCENE_CONCERNS``:
 # ("skills", "agents", "mcp", "hooks", "permissions"). Tools without any sync
 # writer for a concern (or any lever at all) map to UNSUPPORTED. Only the five
-# scene-participating tools appear; vscode / opencode / antigravity (IDE) have
-# no registered sync writers and are handled at launch time, not here.
+# scene-participating tools appear; vscode / antigravity (IDE) are GUI tools
+# dropped at launch time. opencode has no scene lever either (no launch flag,
+# no sync writer), so it isn't listed — base_mechanism() returns UNSUPPORTED for
+# it, and a scene narrowing its MCP set is reported "deselected server(s) remain
+# enabled" rather than silently dropped.
 # ---------------------------------------------------------------------------
 
 _BASE_MATRIX: dict[tuple[AIToolID, str], SceneMechanism] = {

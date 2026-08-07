@@ -352,7 +352,7 @@ Per-tool levers:
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
 | Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
 | Cursor | none — falls back to persistent activation (its only knob, `CURSOR_CONFIG_DIR`, relocates the whole config base including auth, not just MCP) |
-| OpenCode | `OPENCODE_CONFIG` pointed at a scene-rendered config file |
+| OpenCode | none — falls back to persistent activation (`OPENCODE_CONFIG` loads between the global and project layers, so a project `opencode.json` can re-enable a deselected server; isolation isn't guaranteed) |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
 | VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |
 

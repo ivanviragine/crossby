@@ -327,6 +327,7 @@ def _declare_mcp(ctx: _Context) -> list[SyncResult]:
                             f"{tool} has no per-server disable key; "
                             f"{len(disable)} deselected server(s) remain enabled"
                         ),
+                        unsupported=True,
                     )
                 )
             continue

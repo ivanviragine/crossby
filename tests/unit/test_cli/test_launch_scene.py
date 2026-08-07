@@ -8,6 +8,7 @@ GUI normalisation, and the two persistent-activation fallbacks.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -16,7 +17,8 @@ import yaml
 from typer.testing import CliRunner
 
 from crossby.cli.main import app
-from crossby.models.ai import AIToolType
+from crossby.models.ai import AIToolID, AIToolType
+from crossby.sync.base import SyncConcern, SyncResult
 
 runner = CliRunner()
 
@@ -271,3 +273,155 @@ class TestScenePrecedence:
             )
         assert result.exit_code == 0, result.output
         assert get_mock.call_args.args[0] == "codex"
+
+
+class TestFallbackReporting:
+    """The persistent-activation fallback surfaces only genuinely-unsupported
+    outcomes, and its message is result-dependent (no premature writes-config
+    claim)."""
+
+    def test_benign_skip_not_surfaced_and_message_not_premature(self, tmp_path: Path) -> None:
+        _write_config(tmp_path)
+        adapter = _scene_adapter(
+            tool_type=AIToolType.TERMINAL,
+            supports_scene_launch=False,
+            scene_ready=False,
+            display_name="Antigravity CLI",
+        )
+        benign = SyncResult(
+            tool_id=AIToolID.ANTIGRAVITY_CLI,
+            concern=SyncConcern.MCP,
+            action="skipped",
+            message="already applied; nothing to do",
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[benign]),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "antigravity-cli", "--scene", "pr-review"]
+            )
+        assert result.exit_code == 0, result.output
+        # A benign skip is not surfaced…
+        assert "already applied" not in result.output
+        # …and the fallback message never makes a premature writes-config claim.
+        assert "this writes tool config files" not in result.output
+
+    def test_unsupported_result_is_surfaced(self, tmp_path: Path) -> None:
+        _write_config(tmp_path)
+        adapter = _scene_adapter(
+            tool_type=AIToolType.TERMINAL,
+            supports_scene_launch=False,
+            scene_ready=False,
+            display_name="OpenCode",
+        )
+        unsupported = SyncResult(
+            tool_id=AIToolID.OPENCODE,
+            concern=SyncConcern.MCP,
+            action="skipped",
+            message="opencode has no per-server disable key; 1 deselected server(s) remain enabled",
+            unsupported=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[unsupported]),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "opencode", "--scene", "pr-review"]
+            )
+        assert result.exit_code == 0, result.output
+        # Collapse Rich's line-wrapping before matching the surfaced message.
+        assert "remain enabled" in " ".join(result.output.split())
+
+
+class TestOpenCodeRealAdapterFallback:
+    """Integration test through the real OpenCodeAdapter (no session lever)."""
+
+    def test_deselected_mcp_warns_and_no_env_leak(self, tmp_path: Path) -> None:
+        config: dict[str, Any] = {
+            "version": 1,
+            "ai": {"default_tool": "opencode"},
+            "scenes": {"pr-review": {"mcp": {"include": ["github"]}}},
+        }
+        _write_config(tmp_path, config)
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}})
+        )
+
+        captured: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], transcript_path: Any, cwd: Any = None, env: Any = None) -> int:
+            captured["cmd"] = cmd
+            captured["env"] = env
+            return 0
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.OPENCODE],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", side_effect=fake_run),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "opencode", "--scene", "pr-review"]
+            )
+        assert result.exit_code == 0, result.output
+        # OpenCode honestly reports it has no session lever and that the
+        # deselected server stays enabled — no silent isolation claim. Collapse
+        # Rich's line-wrapping before matching.
+        normalized = " ".join(result.output.split())
+        assert "no session-scoped scene lever" in normalized
+        assert "remain enabled" in normalized
+        # No env leak: OPENCODE_CONFIG was never set for the child process.
+        assert captured["env"] is None or "OPENCODE_CONFIG" not in captured["env"]
+
+
+class TestContainmentAbort:
+    """A containment violation aborts the launch cleanly with no fallback and no
+    partial artefact."""
+
+    def test_symlinked_crossby_aborts_launch(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        config: dict[str, Any] = {
+            "version": 1,
+            "ai": {"default_tool": "claude"},
+            "scenes": {"pr-review": {"mcp": {"include": ["github"]}}},
+        }
+        (project / ".crossby.yml").write_text(yaml.dump(config))
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}})
+        )
+        # Symlink the .crossby dir out of the project → any artefact write would
+        # escape the project root.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (project / ".crossby").symlink_to(outside, target_is_directory=True)
+
+        apply_mock = MagicMock(return_value=[])
+
+        def fake_run(cmd: list[str], transcript_path: Any, cwd: Any = None, env: Any = None) -> int:
+            return 0
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CLAUDE],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", apply_mock),
+            patch("crossby.utils.process.run_with_transcript", side_effect=fake_run),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(project), "--tool", "claude", "--scene", "pr-review"]
+            )
+        assert result.exit_code == 1, result.output
+        # No persistent-write fallback after a containment violation…
+        apply_mock.assert_not_called()
+        # …and no partial artefact escaped into the symlink target.
+        assert list(outside.iterdir()) == []

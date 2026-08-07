@@ -227,8 +227,11 @@ class AIToolCapabilities(BaseModel, frozen=True):
     ``None`` when the tool has no strict mode."""
     scene_config_dir_env: str | None = None
     """Environment variable pointing the tool at a scene-materialised config
-    dir/file (Cursor ``CURSOR_CONFIG_DIR``, OpenCode ``OPENCODE_CONFIG``);
-    ``None`` when the tool exposes no config-dir override."""
+    dir/file; ``None`` when the tool exposes no usable config-dir override.
+    Currently ``None`` for every adapter: Cursor's ``CURSOR_CONFIG_DIR``
+    relocates the whole config base (auth included) and OpenCode's
+    ``OPENCODE_CONFIG`` loads between the global and project layers (a project
+    config can override it), so neither is a sound session-scoped lever."""
     scene_profile_flag: str | None = None
     """CLI flag selecting a named profile layered over the base config (Codex
     ``--profile``); ``None`` when unsupported."""
