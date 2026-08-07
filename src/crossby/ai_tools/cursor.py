@@ -85,6 +85,11 @@ class CursorAdapter(AbstractAITool):
             # into {"permission": "deny"}. Documented as under-documented
             # rather than unsupported.
             hook_fail_open_default=True,
+            # No session-scoped scene lever: CURSOR_CONFIG_DIR is Cursor's only
+            # per-session config knob, but it relocates the *entire* config base
+            # (auth + cli-config.json, not just mcp.json), so pointing it at a
+            # scene-only dir would launch Cursor unauthenticated. crossby falls
+            # back to persistent ``scene use`` activation for Cursor instead.
         )
 
     def initial_message_args(self, prompt: str) -> list[str]:
@@ -118,7 +123,7 @@ class CursorAdapter(AbstractAITool):
         CLI and IDE differ.)"""
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
+    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
         """For high/xhigh/max effort, append ``-thinking`` to the model ID.
 
         Models that already encode effort (e.g. ``-high``, ``-xhigh``) or

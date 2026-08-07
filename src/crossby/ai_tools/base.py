@@ -7,6 +7,7 @@ The `__init_subclass__` hook auto-registers each concrete adapter.
 from __future__ import annotations
 
 import inspect
+import os
 import shutil
 import warnings
 from abc import ABC, abstractmethod
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from crossby.handoff.models import ConversationTranscript, SessionRef
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 import structlog
 
@@ -139,6 +141,7 @@ class AbstractAITool(ABC):
         plan_mode: bool = False,
         accept_edits: bool = False,
         auto: bool = False,
+        scene: SceneLaunchContext | None = None,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -166,12 +169,21 @@ class AbstractAITool(ABC):
             auto: If True, request the tool's classifier-mediated auto mode
                 (Claude-only); downgrades to accept-edits, then default
                 prompting, on tools that lack it.
+            scene: Optional session-scoped scene context. When set, this
+                adapter's ``scene_launch_args`` renders the scene's artefacts and
+                contributes extra argv (appended to the launch command) and env
+                (merged over ``os.environ`` for the child) — touching nothing in
+                the tracked project files.
 
         Returns:
             Exit code from the tool process (0 for detached).
         """
         from crossby.utils.process import run_with_transcript
 
+        # Render the scene once, then split its result across the command builder
+        # (argv) and the environment builder (env) so the artefacts are written a
+        # single time per launch.
+        scene_args = self.scene_launch_args(scene) if scene is not None else None
         cmd = self.build_launch_command(
             model=model,
             initial_message=prompt,
@@ -182,9 +194,12 @@ class AbstractAITool(ABC):
             yolo=yolo,
             accept_edits=accept_edits,
             auto=auto,
+            scene=scene_args,
         )
+        extra_env = self.build_launch_environment(scene=scene_args)
+        child_env = {**os.environ, **extra_env} if extra_env else None
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
-        return run_with_transcript(cmd, transcript_path, cwd=working_dir)
+        return run_with_transcript(cmd, transcript_path, cwd=working_dir, env=child_env)
 
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         """Parse a transcript file for token usage.
@@ -338,11 +353,12 @@ class AbstractAITool(ABC):
         """
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel) -> str | None:
+    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
         """Resolve model variant based on effort level.
 
         Some tools use different model IDs for higher effort (e.g., thinking
-        model variants). Default: return model unchanged. Override per tool.
+        model variants). Called for every model at launch (``effort`` may be
+        ``None``). Default: return model unchanged. Override per tool.
         """
         return model
 
@@ -383,6 +399,56 @@ class AbstractAITool(ABC):
         in capabilities).
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Session-scoped scenes (crossby launch --scene)
+    # ------------------------------------------------------------------
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Render *scene* for one session and return extra argv + env.
+
+        Default: no session-scoped lever — empty argv and env. Adapters that can
+        take a scene on the command line (Claude, Codex, Copilot, Cursor,
+        OpenCode) override this to materialise the scene's artefacts under
+        ``scene.launch_dir`` and point their CLI at them. An override must render
+        idempotently: :meth:`launch` calls it once per launch, but a library
+        consumer may call it directly, and repeated calls must produce the same
+        artefacts and the same argv/env.
+        """
+        from crossby.scenes.launch import SceneLaunchArgs
+
+        return SceneLaunchArgs()
+
+    def build_launch_environment(self, scene: SceneLaunchArgs | None = None) -> dict[str, str]:
+        """Return the scene's environment additions for the child process.
+
+        Sibling of :meth:`build_launch_command`: the command builder consumes a
+        rendered :class:`SceneLaunchArgs`' argv, this one consumes its env.
+        Defaults to ``{}`` (no additions); :meth:`launch` merges the result over
+        ``os.environ`` for the child.
+        """
+        return dict(scene.env) if scene is not None else {}
+
+    def scene_launch_ready(self) -> bool:
+        """Whether this tool can apply a scene at launch *right now*.
+
+        Combines the static capability (``supports_scene_launch``) with any
+        runtime gate an adapter adds (e.g. Codex's minimum CLI version for
+        ``--profile``). ``False`` tells ``cli/launch`` to fall back to persistent
+        ``scene use`` activation for this tool rather than emitting launch flags.
+        """
+        return self.capabilities().supports_scene_launch
+
+    def scene_launch_concerns(self) -> set[str]:
+        """Scene concerns this tool can scope at launch (a subset of SCENE_CONCERNS).
+
+        Used by ``cli/launch`` to warn when a scene narrows a concern this tool
+        has no launch lever for (e.g. a Cursor launch of a scene that filters
+        only agents) rather than silently applying nothing for it. Default:
+        empty — adapters that support scene launch override with their real set
+        (typically ``{"mcp"}``, plus ``skills``/``agents`` for Claude).
+        """
+        return set()
 
     def _autonomy_launch_args(
         self,
@@ -464,8 +530,15 @@ class AbstractAITool(ABC):
         yolo: bool = False,
         accept_edits: bool = False,
         auto: bool = False,
+        scene: SceneLaunchArgs | None = None,
     ) -> list[str]:
-        """Build the command line for launching this tool."""
+        """Build the command line for launching this tool.
+
+        ``scene`` carries the argv an adapter's ``scene_launch_args`` rendered
+        for a session-scoped scene; its ``args`` are appended last. When it is
+        ``None`` (every non-scene launch) the command is byte-identical to
+        before, so the existing argv-assertion tests need no changes.
+        """
         caps = self.capabilities()
         cmd = [caps.binary]
 
@@ -474,12 +547,13 @@ class AbstractAITool(ABC):
         if initial_message:
             cmd.extend(self.initial_message_args(initial_message))
 
-        # Resolve effort-based model variant before applying model flag
+        # Resolve effort-based model variant before applying model flag. Called
+        # for every model (effort may be None): tools that bake effort into the
+        # ID (Cursor, antigravity-cli) need to translate even when no separate
+        # effort is passed — e.g. a bare agy Gemini model requires a baked effort.
         effective_model = model
-        if effort and effective_model:
+        if effective_model:
             effective_model = self.resolve_effort_model(effective_model, effort)
-        elif effort and not effective_model:
-            effective_model = self.resolve_effort_model(None, effort)
 
         # Cross-provider translation: if the user passed a model id that
         # belongs to another provider's family (Claude → Codex or Codex →
@@ -534,6 +608,11 @@ class AbstractAITool(ABC):
 
         if allowed_commands:
             cmd.extend(self.allowed_commands_args(allowed_commands))
+
+        # Scene argv is appended last so it never interferes with the parser's
+        # reading of the positional initial message or the tool/model flags.
+        if scene is not None:
+            cmd.extend(scene.args)
 
         return cmd
 

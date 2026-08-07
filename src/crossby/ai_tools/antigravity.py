@@ -17,7 +17,7 @@ CLI's targets. See ``UNSUPPORTED_TOOLS`` in ``config/instructions.py``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
@@ -30,6 +30,9 @@ from crossby.models.ai import (
     TokenUsage,
 )
 from crossby.utils.process import run_with_transcript
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchContext
 
 logger = structlog.get_logger()
 
@@ -66,7 +69,11 @@ class AntigravityAdapter(AbstractAITool):
         plan_mode: bool = False,
         accept_edits: bool = False,
         auto: bool = False,
+        scene: SceneLaunchContext | None = None,
     ) -> int:
+        # The Antigravity IDE is a GUI launcher with no session-scoped scene
+        # lever; the CLI warns and drops --scene before dispatch, so `scene` is
+        # inert here.
         # `antigravity <path>` opens the workspace, mirroring the VS Code-family
         # launcher convention (`code <path>` / `cursor <path>`). Pass the working
         # dir explicitly rather than "." so the target is unambiguous.

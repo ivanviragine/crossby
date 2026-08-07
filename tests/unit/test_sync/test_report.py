@@ -219,3 +219,37 @@ class TestWritePersistentReport:
         body = (tmp_path / REPORT_PATH).read_text(encoding="utf-8")
         # Only the second run's row should be present.
         assert body.count("Added") == 1
+
+
+class TestClassifyRemoved:
+    def _row(self, added: int, revoked: int, message: str | None = None) -> SyncResult:
+        return SyncResult(
+            tool_id=AIToolID.CLAUDE,
+            concern=SyncConcern.HOOKS,
+            action="updated",
+            file_path=Path(".claude/settings.json"),
+            message=message,
+            added=added,
+            revoked=revoked,
+        )
+
+    def test_revocation_only_is_removed(self) -> None:
+        assert classify_status(self._row(added=0, revoked=2)) == "Removed"
+
+    def test_mixed_add_and_revoke_is_added(self) -> None:
+        # Something was added, so the row is not a pure revocation.
+        assert classify_status(self._row(added=1, revoked=1)) == "Added"
+
+    def test_pure_addition_is_added(self) -> None:
+        assert classify_status(self._row(added=3, revoked=0)) == "Added"
+
+    def test_revocation_with_manual_fix_prefers_check(self) -> None:
+        # A lossy-translation hint still wins over the revocation label.
+        assert (
+            classify_status(self._row(added=0, revoked=1, message="manual_fix: x"))
+            == "Check before using"
+        )
+
+    def test_removed_appears_in_markdown_table(self) -> None:
+        table = render_markdown_table([self._row(added=0, revoked=1)])
+        assert "`Removed`" in table

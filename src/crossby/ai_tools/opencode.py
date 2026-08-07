@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.model_utils import classify_tier_universal, has_date_suffix
@@ -15,6 +15,9 @@ from crossby.models.ai import (
     EffortLevel,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 
 class OpenCodeAdapter(AbstractAITool):
@@ -41,6 +44,10 @@ class OpenCodeAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_resume=True,
+            # Session-scoped scenes: OPENCODE_CONFIG points OpenCode at a
+            # scene-rendered config file of exactly the selected MCP servers.
+            supports_scene_launch=True,
+            scene_config_dir_env="OPENCODE_CONFIG",
         )
 
     def get_models(self) -> list[AIModel]:
@@ -80,3 +87,25 @@ class OpenCodeAdapter(AbstractAITool):
         """OpenCode uses ``--variant <level>`` (xhigh/max both map to high)."""
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
+
+    def scene_launch_concerns(self) -> set[str]:
+        """OpenCode scopes only MCP at launch (via OPENCODE_CONFIG)."""
+        return {"mcp"}
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Point ``OPENCODE_CONFIG`` at a scene-rendered config file.
+
+        When the scene narrows MCP, render
+        ``.crossby/scene/<name>/launch/opencode.json`` of exactly the selected
+        servers (OpenCode's ``{"mcp": {...}}`` shape) and set ``OPENCODE_CONFIG``
+        to it for the session. Emitted only when the scene narrows MCP.
+        """
+        from crossby.scenes.launch import SceneLaunchArgs, opencode_mcp_config
+
+        if not scene.narrows_mcp():
+            return SceneLaunchArgs()
+
+        config = opencode_mcp_config(scene.mcp_universe(), scene.selected("mcp"))
+        path = scene.write_artifact("opencode.json", config)
+        env_name = self.capabilities().scene_config_dir_env or "OPENCODE_CONFIG"
+        return SceneLaunchArgs(env={env_name: str(path)})

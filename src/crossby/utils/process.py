@@ -81,15 +81,25 @@ def run_with_transcript(
     cmd: list[str],
     transcript_path: Path | None,
     cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
 ) -> int:
     """Run a command, capturing terminal output to transcript_path via `script`.
 
     Uses the `script` utility (BSD on macOS, GNU on Linux) to record the
     interactive session. Falls back to plain subprocess.run when transcript_path
     is None or `script` is not available.
+
+    ``env``, when given, is the **complete** environment for the child (callers
+    merge their additions over ``os.environ`` before passing it in — a partial
+    map would drop the inherited environment). It is forwarded on every execution
+    path: the plain ``subprocess.run``, the GNU ``script -c`` wrapper, and the
+    BSD ``script`` wrapper. ``None`` (the default) inherits this process's
+    environment unchanged, so existing callers behave exactly as before. The
+    ``script --version`` probe is a pure capability check and deliberately keeps
+    the ambient environment.
     """
     if transcript_path is None or not shutil.which("script"):
-        result = subprocess.run(cmd, cwd=cwd)
+        result = subprocess.run(cmd, cwd=cwd, env=env)
         return result.returncode
 
     # Detect GNU vs BSD script: GNU accepts --version; BSD does not.
@@ -113,7 +123,7 @@ def run_with_transcript(
         cwd=str(cwd) if cwd else None,
     )
 
-    result = subprocess.run(full_cmd, cwd=cwd)
+    result = subprocess.run(full_cmd, cwd=cwd, env=env)
     return result.returncode
 
 

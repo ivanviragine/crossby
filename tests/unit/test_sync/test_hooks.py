@@ -18,7 +18,12 @@ from crossby.sync.hooks import (
     _translate_tools,
     _widen_matcher,
 )
-from crossby.sync.readers import discover_hooks
+from crossby.sync.readers import (
+    _read_agy_hooks,
+    _read_codex_hooks,
+    _read_cursor_hooks,
+    discover_hooks,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -158,6 +163,18 @@ class TestWidenMatcher:
     def test_idempotent_subset(self) -> None:
         # Desired is already covered → matcher unchanged.
         assert _widen_matcher("Edit|Write", ["Edit"]) == "Edit|Write"
+
+    def test_plain_alternation_existing_still_broadens_on_empty_desired(self) -> None:
+        # A plain alternation is a tool list crossby understands, so empty desired
+        # (all tools) still legitimately broadens it to ".*".
+        assert _widen_matcher("Edit|Write", []) == ".*"
+
+    def test_non_plain_existing_not_broadened_on_empty_desired(self) -> None:
+        # A concrete regex crossby can't represent as a tool list reads back as
+        # tools=[] (desired ".*"); broadening it to ".*" would silently widen a
+        # deliberately-narrow guard, so it is kept unchanged instead.
+        assert _widen_matcher("Write.*", []) == "Write.*"
+        assert _widen_matcher("(Write|Shell)", []) == "(Write|Shell)"
 
 
 # ---------------------------------------------------------------------------
@@ -1339,3 +1356,513 @@ class TestAntigravityCLIHooksWriter:
         assert result.action == "skipped"
         data = _read_json(path)
         assert "plan-write-guard" not in data
+
+
+# ---------------------------------------------------------------------------
+# Revocation — driven ONLY by SyncData.hooks_remove (never inferred)
+# ---------------------------------------------------------------------------
+
+
+def _remove(*pairs: tuple[str, str]) -> SyncData:
+    return SyncData(hooks=[], hooks_remove=list(pairs))
+
+
+class TestClaudeHooksRemoval:
+    def _path(self, root: Path) -> Path:
+        return root / ".claude" / "settings.json"
+
+    def test_removes_named_hook_and_drops_empty_event(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.action == "updated"
+        assert result.revoked == 1
+        assert result.added == 0
+        # Removing the last hook for the event drops the event key, leaving a
+        # valid (parseable, empty) structure — not malformed scaffolding.
+        assert "PreToolUse" not in _read_json(self._path(tmp_path)).get("hooks", {})
+
+    def test_removal_leaves_sibling_hooks(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK, BARE_HOOK), tmp_path)
+        writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        commands = {
+            inner["command"]
+            for entry in _read_json(self._path(tmp_path))["hooks"]["PreToolUse"]
+            for inner in entry["hooks"]
+        }
+        assert GUARD_HOOK.command not in commands
+        assert BARE_HOOK.command in commands
+
+    def test_removing_an_absent_hook_is_skipped(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", "never-written")), tmp_path)
+        assert result.action == "skipped"
+        assert result.revoked == 0
+
+    def test_empty_data_and_empty_removal_is_skipped(self, tmp_path: Path) -> None:
+        result = ClaudeHooksWriter().sync(SyncData(), tmp_path)
+        assert result.action == "skipped"
+        assert result.message == "no hooks config"
+
+    def test_add_and_remove_in_one_run(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(
+            SyncData(hooks=[BARE_HOOK], hooks_remove=[("pre_tool_use", GUARD_HOOK.command)]),
+            tmp_path,
+        )
+        assert result.added == 1
+        assert result.revoked == 1
+
+    def test_dry_run_reports_revocation_but_writes_nothing(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        before = self._path(tmp_path).read_text(encoding="utf-8")
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path, dry_run=True)
+        # The intended revocation is reported...
+        assert result.revoked == 1
+        # ...but the file on disk is untouched.
+        assert self._path(tmp_path).read_text(encoding="utf-8") == before
+
+
+class TestClaudeMatcherNarrowing:
+    """A crossby-owned matcher narrows on scope shrink; a human's never does."""
+
+    def _entry(self, root: Path) -> dict:
+        data = _read_json(root / ".claude" / "settings.json")
+        return data["hooks"]["PreToolUse"][0]
+
+    def test_owned_matcher_narrows(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        wide = HookEntry(event="pre_tool_use", command="guard", tools=["Edit", "Write"])
+        writer.sync(_cfg(wide), tmp_path)
+        assert set(self._entry(tmp_path)["matcher"].split("|")) == {"Edit", "Write"}
+
+        narrow = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
+        result = writer.sync(
+            SyncData(hooks=[narrow], hooks_owned=frozenset({("pre_tool_use", "guard")})),
+            tmp_path,
+        )
+        assert result.action == "updated"
+        assert self._entry(tmp_path)["matcher"] == "Edit"
+
+    def test_unowned_matcher_is_never_narrowed(self, tmp_path: Path) -> None:
+        writer = ClaudeHooksWriter()
+        wide = HookEntry(event="pre_tool_use", command="guard", tools=["Edit", "Write"])
+        writer.sync(_cfg(wide), tmp_path)
+        narrow = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
+        # hooks_owned empty → crossby doesn't own it → widen-only (no change).
+        result = writer.sync(SyncData(hooks=[narrow]), tmp_path)
+        assert result.action == "skipped"
+        assert set(self._entry(tmp_path)["matcher"].split("|")) == {"Edit", "Write"}
+
+
+class TestOtherWritersRemoval:
+    """Each native hooks writer removes the named (event, command) entry."""
+
+    def test_cursor_removes_and_drops_shell_fanout(self, tmp_path: Path) -> None:
+        writer = CursorHooksWriter()
+        shell_hook = HookEntry(event="pre_tool_use", command="guard", tools=["Bash"])
+        writer.sync(_cfg(shell_hook), tmp_path)
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        assert data["hooks"]["preToolUse"]
+        assert data["hooks"]["beforeShellExecution"]  # fanned out
+
+        result = writer.sync(_remove(("pre_tool_use", "guard")), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".cursor" / "hooks.json")
+        # Both the primary entry and its shell mirror are gone.
+        assert "preToolUse" not in data["hooks"]
+        assert "beforeShellExecution" not in data["hooks"]
+
+    def test_copilot_removes_named_hook(self, tmp_path: Path) -> None:
+        writer = CopilotHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".github" / "hooks" / "hooks.json")
+        assert "preToolUse" not in data["hooks"]
+
+    def test_codex_removes_named_hook(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".codex" / "hooks.json")
+        assert "PreToolUse" not in data.get("hooks", {})
+
+    def test_antigravity_removes_named_hook(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        writer = AntigravityCLIHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+        assert result.revoked == 1
+        data = _read_json(tmp_path / ".agents" / "hooks.json")
+        # The container's command is gone; an emptied container is pruned.
+        commands = [
+            handler.get("command")
+            for container in data.values()
+            if isinstance(container, dict)
+            for entries in container.values()
+            if isinstance(entries, list)
+            for entry in entries
+            for handler in [entry, *entry.get("hooks", [])]
+            if isinstance(handler, dict)
+        ]
+        assert GUARD_HOOK.command not in commands
+
+
+# ---------------------------------------------------------------------------
+# Codex hooks reader — .codex/hooks.json is Claude-shaped
+# ---------------------------------------------------------------------------
+
+
+class TestCodexHooksReader:
+    def _write(self, root: Path, hooks_section: dict) -> Path:
+        path = root / ".codex" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"hooks": hooks_section}), encoding="utf-8")
+        return path
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        assert _read_codex_hooks(tmp_path) == []
+
+    def test_reads_written_codex_hooks(self, tmp_path: Path) -> None:
+        """The writer's own output reads back as canonical entries."""
+        from crossby.sync.hooks import CodexHooksWriter
+
+        CodexHooksWriter().sync(_cfg(GUARD_HOOK, _stop_hook()), tmp_path)
+        entries = {(e.event, e.command): e for e in _read_codex_hooks(tmp_path)}
+        assert (GUARD_HOOK.event, GUARD_HOOK.command) in entries
+        assert entries[(GUARD_HOOK.event, GUARD_HOOK.command)].tools == ["Edit", "Write"]
+        stop = entries[("stop", "python3 ./scripts/post.py")]
+        assert stop.tools == []
+
+    def test_matcher_becomes_tools(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": "Edit|Bash", "hooks": [{"type": "command", "command": "g"}]}
+                ]
+            },
+        )
+        entry = _read_codex_hooks(tmp_path)[0]
+        assert entry.tools == ["Edit", "Bash"]
+
+    def test_catchall_and_missing_matcher_are_unscoped(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": ".*", "hooks": [{"type": "command", "command": "wild"}]},
+                    {"hooks": [{"type": "command", "command": "nomatcher"}]},
+                ]
+            },
+        )
+        by_command = {e.command: e.tools for e in _read_codex_hooks(tmp_path)}
+        assert by_command["wild"] == []
+        assert by_command["nomatcher"] == []
+
+    def test_malformed_handler_entries_are_skipped(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": "Edit", "hooks": ["not-a-dict", {"type": "command"}]},
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": 123}]},
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": ""}]},
+                    {"matcher": "Edit", "hooks": [{"type": "command", "command": "ok"}]},
+                ]
+            },
+        )
+        entries = _read_codex_hooks(tmp_path)
+        assert [e.command for e in entries] == ["ok"]
+
+    def test_writer_reader_writer_round_trip_is_noop(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK, _stop_hook()), tmp_path)
+        path = tmp_path / ".codex" / "hooks.json"
+        before = _read_json(path)
+
+        read_back = _read_codex_hooks(tmp_path)
+        writer.sync(SyncData(hooks=read_back), tmp_path)
+        assert _read_json(path) == before
+
+    def test_hand_authored_wildcard_matcher_round_trips_unchanged(self, tmp_path: Path) -> None:
+        """A hand-authored `Write.*` re-syncs unchanged — never broadened to `.*`."""
+        from crossby.sync.hooks import CodexHooksWriter
+
+        path = self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": "Write.*", "hooks": [{"type": "command", "command": "g"}]}
+                ]
+            },
+        )
+        before = _read_json(path)
+
+        read_back = _read_codex_hooks(tmp_path)
+        CodexHooksWriter().sync(SyncData(hooks=read_back), tmp_path)
+
+        after = _read_json(path)
+        assert after == before
+        assert after["hooks"]["PreToolUse"][0]["matcher"] == "Write.*"
+
+    def test_exotic_matcher_syncs_cross_tool_as_catchall_not_inert(self, tmp_path: Path) -> None:
+        """An exotic matcher reaches another tool as `.*` (fires), not a dead token.
+
+        `.split("|")` would read `Write.*` as `tools=["Write.*"]`; synced on to
+        Antigravity that token translates to nothing agy ever emits, so the guard
+        installs but never fires. Reading it as unscoped re-scopes to `.*`, which
+        still fires (fail-safe) — the point of the security guard.
+        """
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        self._write(
+            tmp_path,
+            {
+                "PreToolUse": [
+                    {"matcher": "Write.*", "hooks": [{"type": "command", "command": "guard"}]}
+                ]
+            },
+        )
+        read_back = _read_codex_hooks(tmp_path)
+        assert read_back[0].tools == []  # unrepresentable regex → unscoped, not ["Write.*"]
+
+        AntigravityCLIHooksWriter().sync(SyncData(hooks=read_back), tmp_path)
+        agy = _read_json(tmp_path / ".agents" / "hooks.json")
+        matchers = [e["matcher"] for c in agy.values() for e in c.get("PreToolUse", [])]
+        assert matchers == [".*"]
+
+
+# ---------------------------------------------------------------------------
+# Antigravity CLI hooks reader — .agents/hooks.json is a container map
+# ---------------------------------------------------------------------------
+
+
+class TestAntigravityCLIHooksReader:
+    def _write(self, root: Path, data: dict) -> Path:
+        path = root / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        assert _read_agy_hooks(tmp_path) == []
+
+    def test_matcher_wrapped_and_bare_stop_both_parse(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "guard": {
+                    "PreToolUse": [
+                        {"matcher": "write_to_file", "hooks": [{"type": "command", "command": "g"}]}
+                    ]
+                },
+                "done": {"Stop": [{"type": "command", "command": "s"}]},
+            },
+        )
+        by_command = {(e.event, e.command): e for e in _read_agy_hooks(tmp_path)}
+        assert by_command[("pre_tool_use", "g")].tools == ["Write"]
+        assert by_command[("stop", "s")].tools == []
+
+    def test_native_matcher_recovers_canonical_tools(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "guard": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "write_to_file|run_command",
+                            "hooks": [{"type": "command", "command": "g"}],
+                        }
+                    ]
+                }
+            },
+        )
+        assert _read_agy_hooks(tmp_path)[0].tools == ["Write", "Bash"]
+
+    def test_all_six_writer_emitted_natives_reverse_map(self, tmp_path: Path) -> None:
+        """Every native the writer can emit reverses cleanly (writer→reader parity)."""
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        canonical = ["Write", "Edit", "MultiEdit", "Bash", "Read", "Grep"]
+        hook = HookEntry(
+            event="pre_tool_use", command="g", tools=canonical, description="six natives"
+        )
+        AntigravityCLIHooksWriter().sync(_cfg(hook), tmp_path)
+        assert _read_agy_hooks(tmp_path)[0].tools == canonical
+
+    def test_catchall_and_non_plain_matcher_are_unscoped(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "c": {
+                    "PreToolUse": [
+                        {"matcher": ".*", "hooks": [{"type": "command", "command": "wild"}]},
+                        {
+                            "matcher": "write_to_file.*",
+                            "hooks": [{"type": "command", "command": "re"}],
+                        },
+                    ]
+                }
+            },
+        )
+        by_command = {e.command: e.tools for e in _read_agy_hooks(tmp_path)}
+        assert by_command["wild"] == []
+        assert by_command["re"] == []
+
+    def test_pre_post_invocation_keys_are_skipped(self, tmp_path: Path) -> None:
+        """agy's Pre/PostInvocation have no canonical crossby event — skip them."""
+        self._write(
+            tmp_path,
+            {
+                "c": {
+                    "PreInvocation": [
+                        {"matcher": ".*", "hooks": [{"type": "command", "command": "pre"}]}
+                    ],
+                    "PostInvocation": [{"type": "command", "command": "post"}],
+                    "PreToolUse": [
+                        {
+                            "matcher": "write_to_file",
+                            "hooks": [{"type": "command", "command": "keep"}],
+                        }
+                    ],
+                }
+            },
+        )
+        commands = {e.command for e in _read_agy_hooks(tmp_path)}
+        assert commands == {"keep"}
+
+    def test_malformed_entries_are_skipped(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            {
+                "bad": {
+                    "PreToolUse": [
+                        "not-a-dict",
+                        {"matcher": "write_to_file", "hooks": "not-a-list"},
+                        {"matcher": "write_to_file", "hooks": ["nope", {"type": "command"}]},
+                        {"matcher": "write_to_file", "hooks": [{"type": "command", "command": 5}]},
+                    ],
+                    "Stop": [{"type": "command", "command": ""}, {"type": "command"}],
+                },
+                "not-a-container": [1, 2, 3],
+                "ok": {"Stop": [{"type": "command", "command": "good"}]},
+            },
+        )
+        assert [e.command for e in _read_agy_hooks(tmp_path)] == ["good"]
+
+    def test_writer_reader_writer_round_trip_is_noop(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        writer = AntigravityCLIHooksWriter()
+        writer.sync(
+            _cfg(GUARD_HOOK, HookEntry(event="stop", command="wade stop", description="done")),
+            tmp_path,
+        )
+        path = tmp_path / ".agents" / "hooks.json"
+        before = _read_json(path)
+
+        read_back = _read_agy_hooks(tmp_path)
+        result = writer.sync(SyncData(hooks=read_back), tmp_path)
+        assert result.action == "skipped"
+        assert _read_json(path) == before
+
+
+# ---------------------------------------------------------------------------
+# Round-trip guard — a hand-authored non-plain matcher is never broadened to .*
+# ---------------------------------------------------------------------------
+
+
+class TestHooksRoundTripGuard:
+    def test_agy_hand_authored_wildcard_matcher_not_broadened(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        path = tmp_path / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "mine": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Write.*",
+                                "hooks": [{"type": "command", "command": "guard"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = _read_json(path)
+
+        read_back = _read_agy_hooks(tmp_path)
+        assert read_back[0].tools == []  # non-plain matcher → unscoped
+        result = AntigravityCLIHooksWriter().sync(SyncData(hooks=read_back), tmp_path)
+
+        assert result.action == "skipped"
+        after = _read_json(path)
+        assert after == before
+        assert after["mine"]["PreToolUse"][0]["matcher"] == "Write.*"
+
+    def test_cursor_hand_authored_wildcard_matcher_not_broadened(self, tmp_path: Path) -> None:
+        path = tmp_path / ".cursor" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "preToolUse": [
+                            {"type": "command", "command": "guard", "matcher": "Write.*"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = _read_json(path)
+
+        read_back = _read_cursor_hooks(tmp_path)
+        assert read_back[0].tools == []  # non-plain matcher → unscoped
+        result = CursorHooksWriter().sync(SyncData(hooks=read_back), tmp_path)
+
+        assert result.action == "skipped"
+        after = _read_json(path)
+        assert after == before
+        assert after["hooks"]["preToolUse"][0]["matcher"] == "Write.*"
+
+
+# ---------------------------------------------------------------------------
+# discover_hooks(from_tool=...) — Codex / agy are no longer read-blind
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverHooksFromTool:
+    def test_codex_from_tool_returns_real_entries(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        CodexHooksWriter().sync(_cfg(GUARD_HOOK), tmp_path)
+        hooks = discover_hooks(tmp_path, AIToolID.CODEX)
+        assert [(h.event, h.command) for h in hooks] == [("pre_tool_use", GUARD_HOOK.command)]
+
+    def test_antigravity_cli_from_tool_returns_real_entries(self, tmp_path: Path) -> None:
+        from crossby.sync.hooks import AntigravityCLIHooksWriter
+
+        AntigravityCLIHooksWriter().sync(_cfg(GUARD_HOOK), tmp_path)
+        hooks = discover_hooks(tmp_path, AIToolID.ANTIGRAVITY_CLI)
+        assert [(h.event, h.command) for h in hooks] == [("pre_tool_use", GUARD_HOOK.command)]
+
+    def test_codex_from_tool_empty_when_no_config(self, tmp_path: Path) -> None:
+        assert discover_hooks(tmp_path, AIToolID.CODEX) == []

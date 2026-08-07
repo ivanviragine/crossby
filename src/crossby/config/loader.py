@@ -16,6 +16,7 @@ from crossby.models.config import (
     CrossbyConfig,
     HandoffDefaults,
     ProfileConfig,
+    SceneConfig,
     SyncDefaults,
 )
 
@@ -174,6 +175,15 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     for name, profile_raw in profiles_raw.items():
         if not isinstance(profile_raw, dict):
             raise ConfigError(f"'profiles.{name}' must be a mapping")
+        # An explicit null (``allow_tools:`` with no value) parses as None; treat
+        # it as absent — matching how ai/commands/models/profiles are normalized.
+        allow_tools_raw = profile_raw.get("allow_tools")
+        if allow_tools_raw is None:
+            allow_tools_raw = []
+        if not isinstance(allow_tools_raw, list) or not all(
+            isinstance(t, str) for t in allow_tools_raw
+        ):
+            raise ConfigError(f"'profiles.{name}.allow_tools' must be a list of strings")
         profiles[name] = ProfileConfig(
             tool=profile_raw.get("tool"),
             model=profile_raw.get("model"),
@@ -181,7 +191,11 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             yolo=profile_raw.get("yolo"),
             accept_edits=profile_raw.get("accept_edits"),
             auto=profile_raw.get("auto"),
+            allow_tools=allow_tools_raw,
         )
+
+    # Parse scenes section (after profiles — validates scene.profile against them)
+    scenes = _parse_scenes(raw.get("scenes"), profiles)
 
     # Parse sync_defaults / handoff_defaults sections
     sync_defaults = _parse_sync_defaults(raw.get("sync_defaults"))
@@ -192,11 +206,46 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         ai=ai,
         models=models,
         profiles=profiles,
+        scenes=scenes,
         sync_defaults=sync_defaults,
         handoff_defaults=handoff_defaults,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )
+
+
+def _parse_scenes(raw: Any, profiles: dict[str, ProfileConfig]) -> dict[str, SceneConfig]:
+    """Parse the ``scenes:`` section, mirroring the ``profiles:`` block.
+
+    Uses the same separate ``is None`` / ``isinstance`` checks so a falsy scalar
+    (``scenes: 0``) still raises, and the same path-qualified message form
+    (``'scenes.<name>' must be a mapping``). Each scene's own declared
+    ``profile:`` is validated against *profiles* **eagerly here** so a typo
+    fails at load time rather than resolving to ``None`` at launch. ``extends``
+    flattening and its cycle / undefined-parent checks are deferred to
+    :meth:`CrossbyConfig.get_scene`.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("'scenes' must be a mapping")
+
+    scenes: dict[str, SceneConfig] = {}
+    for name, scene_raw in raw.items():
+        if not isinstance(scene_raw, dict):
+            raise ConfigError(f"'scenes.{name}' must be a mapping")
+        try:
+            scene = SceneConfig.model_validate(scene_raw)
+        except ValidationError as exc:
+            raise ConfigError(f"Invalid 'scenes.{name}': {exc}") from exc
+        if scene.profile is not None and scene.profile not in profiles:
+            valid = ", ".join(sorted(profiles)) if profiles else "(none defined)"
+            raise ConfigError(
+                f"scene '{name}' references undefined profile '{scene.profile}'. "
+                f"Defined profiles: {valid}."
+            )
+        scenes[name] = scene
+    return scenes
 
 
 def _parse_sync_defaults(raw: Any) -> SyncDefaults:

@@ -1,5 +1,7 @@
 """Tests for the static model registry and adapter get_models() behavior."""
 
+import pytest
+
 from crossby.ai_tools import AbstractAITool
 from crossby.data import MODELS, get_models_for_tool
 from crossby.models.ai import AIToolID
@@ -28,6 +30,17 @@ class TestModelRegistry:
         for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-opus-5", "claude-fable-5"):
             assert model in claude_models
 
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_registry_includes_gpt_5_6(self, model: str) -> None:
+        """Codex now ships the gpt-5.6 family (luna/sol/terra) — Issue #112."""
+        assert model in get_models_for_tool("codex")
+
+    def test_codex_gpt_5_6_subset_is_exactly_luna_sol_terra(self) -> None:
+        """The codex catalog exposes only the three bare gpt-5.6 IDs — no
+        gpt-5.6-codex* variant slipped in."""
+        codex_5_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-5.6")}
+        assert codex_5_6 == {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
+
 
 class TestRegistryGetModels:
     """Verify that adapters read correctly from the static registry."""
@@ -47,8 +60,12 @@ class TestRegistryGetModels:
     def test_antigravity_cli_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
         models = adapter.get_models()
+        model_ids = [m.id for m in models]
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
-        assert "gemini-3.6-flash-high" in [m.id for m in models]
+        # Catalog lists base IDs only — effort is baked in at launch, not stored.
+        assert "gemini-3.6-flash" in model_ids
+        assert "gemini-3.6-flash-high" not in model_ids
+        assert "gpt-oss-120b-medium" not in model_ids
 
     def test_codex_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)

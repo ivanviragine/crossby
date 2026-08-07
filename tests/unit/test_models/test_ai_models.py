@@ -13,7 +13,7 @@ from crossby.ai_tools.model_utils import (
     classify_tier_universal,
     has_date_suffix,
 )
-from crossby.models.ai import AIModel, AIToolID, AIToolType, ModelTier
+from crossby.models.ai import AIModel, AIToolID, AIToolType, EffortLevel, ModelTier
 
 
 class TestSelfRegistration:
@@ -103,6 +103,19 @@ class TestCapabilities:
         assert caps.supports_initial_message is True
         assert caps.blocks_until_exit is True
 
+    def test_supported_efforts_defaults_to_all_levels(self) -> None:
+        # A tool that doesn't narrow effort offers every EffortLevel.
+        caps = AbstractAITool.get("claude").capabilities()
+        assert caps.supported_efforts == tuple(EffortLevel)
+
+    def test_antigravity_cli_narrows_supported_efforts(self) -> None:
+        caps = AbstractAITool.get("antigravity-cli").capabilities()
+        assert caps.supported_efforts == (
+            EffortLevel.LOW,
+            EffortLevel.MEDIUM,
+            EffortLevel.HIGH,
+        )
+
 
 class TestModelCompatibility:
     def test_claude_accepts_claude_models(self) -> None:
@@ -130,6 +143,12 @@ class TestModelCompatibility:
         assert adapter.is_model_compatible("gpt-4o") is True
         assert adapter.is_model_compatible("o3") is True
         assert adapter.is_model_compatible("claude-opus") is False
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_accepts_gpt_5_6(self, model: str) -> None:
+        """The gpt-5.6 family (luna/sol/terra) is codex-native — Issue #112."""
+        adapter = AbstractAITool.get("codex")
+        assert adapter.is_model_compatible(model) is True
 
     def test_opencode_accepts_all(self) -> None:
         adapter = AbstractAITool.get("opencode")
@@ -236,6 +255,26 @@ class TestBuildLaunchCommand:
         cmd = adapter.build_launch_command(model="gpt-5.3-codex")
         assert cmd == ["agent", "--model", "gpt-5.3-codex"]
 
+    @pytest.mark.parametrize(
+        ("tool_id", "model"),
+        [
+            ("claude", "claude-opus-4-6"),
+            ("copilot", "gpt-5.1"),
+            ("codex", "gpt-5.1"),
+            ("opencode", "anthropic/claude-sonnet-4"),
+            ("cursor", "opus-4.6"),
+            # A bare model for antigravity-cli: a Gemini base would legitimately
+            # bake a default effort; a non-Gemini model must stay untouched.
+            ("antigravity-cli", "gpt-oss-120b"),
+        ],
+    )
+    def test_effort_none_leaves_model_unchanged(self, tool_id: str, model: str) -> None:
+        # build_launch_command now resolves effort for every model; effort=None
+        # must be a no-op (no -thinking / -effort suffix added) for every adapter.
+        adapter = AbstractAITool.get(tool_id)
+        cmd = adapter.build_launch_command(model=model, effort=None)
+        assert cmd[cmd.index("--model") + 1] == model
+
 
 class TestDateSuffix:
     def test_with_date(self) -> None:
@@ -289,6 +328,13 @@ class TestClassifyTierUniversal:
     def test_unrecognized_defaults_to_balanced(self) -> None:
         assert classify_tier_universal("gpt-4o") == ModelTier.BALANCED
         assert classify_tier_universal("some-unknown-model") == ModelTier.BALANCED
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_gpt_5_6_classifies_balanced(self, model: str) -> None:
+        """luna/sol/terra carry no tier keyword, so they classify to BALANCED
+        like the existing gpt-5.4/gpt-5.5 entries — Issue #112. Guards against a
+        keyword-regex regression."""
+        assert classify_tier_universal(model) == ModelTier.BALANCED
 
 
 class TestTrustedDirsArgs:
@@ -470,6 +516,22 @@ class TestCrossProviderModelTranslation:
             cmd = adapter.build_launch_command(model="claude-haiku-4.5")
         assert "--model" in cmd
         assert "claude-haiku-4-5" in cmd
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    def test_codex_gpt_5_6_launches_unchanged_with_effort(self, model: str) -> None:
+        """A codex-native gpt-5.6 model launches through CodexAdapter with the
+        bare id preserved and effort applied via ``-c model_reasoning_effort``,
+        with no cross-provider translation warning — Issue #112."""
+        from crossby.models.ai import EffortLevel
+
+        adapter = AbstractAITool.get("codex")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning (incl. translation) becomes an error
+            cmd = adapter.build_launch_command(model=model, effort=EffortLevel.HIGH)
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == model  # bare id, no effort suffix, not translated
+        assert "-c" in cmd
+        assert 'model_reasoning_effort="high"' in cmd
 
     def test_passthrough_for_arbitrary_accepting_tool(self) -> None:
         # Cursor / Copilot / OpenCode accept arbitrary model ids — no

@@ -11,6 +11,7 @@ crossby only ever needs three edits, so these helpers splice the document
 textually and leave everything they don't own byte-for-byte intact:
 
 - :func:`set_scalar` — set one key inside one table (``[features].codex_hooks``)
+- :func:`unset_scalar` — remove one key from one table (revert an added key)
 - :func:`upsert_table` — add or replace one table (``[mcp_servers.<name>]``)
 - :func:`remove_table` — drop one table
 
@@ -471,6 +472,31 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
             return _still_parses(text[: assign.start] + line + text[assign.end :])
 
     return _still_parses(text[: header.body_start] + line + text[header.body_start :])
+
+
+def unset_scalar(text: str, table: tuple[str, ...], key: str) -> str | None:
+    """Remove ``key = ...`` from ``[table]`` if present, preserving the rest.
+
+    Returns the edited text, the unchanged *text* when the table or key is
+    absent (a clean no-op — used to revert a key crossby added earlier without
+    leaving an ``enabled = true`` residue), or ``None`` when the document does
+    not scan. Only the one assignment line is removed; the table header,
+    comments, ordering and every other key survive. Removing an emptied table's
+    header is :func:`remove_table`'s job, not this one.
+    """
+    scan = _scan(text)
+    if scan is None:
+        return None
+    headers, assigns = scan
+    idx = _find_table(headers, table)
+    if idx is None:
+        return text
+    header = headers[idx]
+    body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)
+    for assign in assigns:
+        if assign.parts == (key,) and header.body_start <= assign.start < body_end:
+            return _still_parses(text[: assign.start] + text[assign.end :])
+    return text
 
 
 def splice_or_none(spliced: str | None, expected: dict[str, object]) -> str | None:

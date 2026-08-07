@@ -206,6 +206,54 @@ class TestScanProjectSkills:
 
 
 # ---------------------------------------------------------------------------
+# scan_project — hooks branch (Codex / Antigravity CLI are no longer read-blind)
+# ---------------------------------------------------------------------------
+
+
+class TestScanProjectHooks:
+    def _write_codex_hooks(self, root: Path) -> None:
+        path = root / ".codex" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Edit", "hooks": [{"type": "command", "command": "g"}]}
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_agy_hooks(self, root: Path) -> None:
+        path = root / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"done": {"Stop": [{"type": "command", "command": "s"}]}}),
+            encoding="utf-8",
+        )
+
+    def test_hooks_none_found(self, tmp_path: Path) -> None:
+        scan = scan_project(tmp_path, [AIToolID.CODEX])
+        assert scan.hooks.found == {}
+        assert "none found" in scan.hooks.summary
+
+    def test_scan_lists_codex_hooks(self, tmp_path: Path) -> None:
+        self._write_codex_hooks(tmp_path)
+        scan = scan_project(tmp_path, [AIToolID.CODEX])
+        assert AIToolID.CODEX in scan.hooks.found
+        assert "codex" in scan.hooks.summary
+
+    def test_scan_lists_antigravity_cli_hooks(self, tmp_path: Path) -> None:
+        self._write_agy_hooks(tmp_path)
+        scan = scan_project(tmp_path, [AIToolID.ANTIGRAVITY_CLI])
+        assert AIToolID.ANTIGRAVITY_CLI in scan.hooks.found
+        assert "antigravity-cli" in scan.hooks.summary
+
+
+# ---------------------------------------------------------------------------
 # discover_mcp — conflict surfacing
 # ---------------------------------------------------------------------------
 

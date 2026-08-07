@@ -9,7 +9,7 @@ import pytest
 
 from crossby.models.ai import AIToolID
 from crossby.sync import run_sync
-from crossby.sync.base import SyncConcern, SyncData
+from crossby.sync.base import SyncConcern, SyncData, SyncRegistry
 from crossby.sync.permissions import (
     ClaudePermissionWriter,
     CursorPermissionWriter,
@@ -124,7 +124,7 @@ class TestClaudePermissionWriterWrite:
         path.parent.mkdir()
         original = "{bad json!!"
         path.write_text(original)
-        action, error = ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        action, error, _added, _revoked = ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
         assert action == "error"
         assert error is not None and "invalid JSON" in error
         # File is untouched.
@@ -135,7 +135,7 @@ class TestClaudePermissionWriterWrite:
         path.parent.mkdir()
         path.write_text(json.dumps(["list", "value"]))
         original = path.read_text()
-        action, error = ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
+        action, error, _added, _revoked = ClaudePermissionWriter.write(tmp_path, ["myapp:*"])
         assert action == "error"
         assert error is not None
         assert path.read_text() == original
@@ -393,3 +393,71 @@ class TestPatternTranslators:
     def test_canonical_to_cursor(self) -> None:
         assert canonical_to_cursor("myapp:*") == "Shell(myapp:*)"
         assert canonical_to_cursor("./scripts/run.sh") == "Shell(./scripts/run.sh)"
+
+
+# ---------------------------------------------------------------------------
+# Revocation — driven ONLY by SyncData.permissions_remove
+# ---------------------------------------------------------------------------
+
+
+class TestClaudePermissionRevoke:
+    def _allow(self, root: Path) -> list[str]:
+        data = json.loads((root / ".claude" / "settings.json").read_text())
+        return data["permissions"]["allow"]
+
+    def test_revokes_named_pattern(self, tmp_path: Path) -> None:
+        writer = ClaudePermissionWriter()
+        writer.sync(_make_data(["a:*", "b:*"]), tmp_path)
+        result = writer.sync(
+            SyncData(allowed_commands=["a:*"], permissions_remove=["b:*"]), tmp_path
+        )
+        assert result.action == "updated"
+        assert result.revoked == 1
+        assert self._allow(tmp_path) == ["Bash(a:*)"]
+
+    def test_revoke_only_row_reports_removal(self, tmp_path: Path) -> None:
+        writer = ClaudePermissionWriter()
+        writer.sync(_make_data(["a:*"]), tmp_path)
+        result = writer.sync(SyncData(allowed_commands=[], permissions_remove=["a:*"]), tmp_path)
+        assert result.action == "updated"
+        assert result.revoked == 1
+        assert result.added == 0
+        assert result.message is not None and "removed" in result.message.lower()
+        assert self._allow(tmp_path) == []
+
+    def test_revoking_absent_pattern_is_skipped(self, tmp_path: Path) -> None:
+        writer = ClaudePermissionWriter()
+        writer.sync(_make_data(["a:*"]), tmp_path)
+        result = writer.sync(
+            SyncData(allowed_commands=["a:*"], permissions_remove=["gone:*"]), tmp_path
+        )
+        assert result.action == "skipped"
+        assert self._allow(tmp_path) == ["Bash(a:*)"]
+
+    def test_hand_written_pattern_never_removed(self, tmp_path: Path) -> None:
+        # A pattern absent from permissions_remove is never touched even when it
+        # is not in allowed_commands.
+        path = tmp_path / ".claude" / "settings.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"permissions": {"allow": ["Bash(human:*)"]}}))
+        writer = ClaudePermissionWriter()
+        writer.sync(SyncData(allowed_commands=["crossby:*"]), tmp_path)
+        allow = self._allow(tmp_path)
+        assert "Bash(human:*)" in allow
+        assert "Bash(crossby:*)" in allow
+
+
+class TestRunSyncPermissionRevocation:
+    def _allow(self, root: Path) -> list[str]:
+        data = json.loads((root / ".claude" / "settings.json").read_text())
+        return data["permissions"]["allow"]
+
+    def test_syncing_a_then_b_reflects_b_only(self, tmp_path: Path) -> None:
+        # First sync records ownership of a:*; the second sync (without a:*)
+        # revokes it via the ledger diff, leaving b:* only.
+        reg = SyncRegistry()
+        reg.register(ClaudePermissionWriter())
+        run_sync(_make_data(["a:*"]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert self._allow(tmp_path) == ["Bash(a:*)"]
+        run_sync(_make_data(["b:*"]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+        assert self._allow(tmp_path) == ["Bash(b:*)"]
