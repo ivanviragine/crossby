@@ -427,9 +427,14 @@ def _prepare_scene_launch(
     - the tool is a GUI launcher (VS Code / Antigravity IDE), which overrides
       ``launch()`` and never reaches the launch flags — the scene can't apply, so
       the launch proceeds without it; or
-    - the tool has no session-scoped lever (Antigravity CLI), or a runtime gate
-      failed (Codex CLI too old) — crossby falls back to **persistent**
-      ``scene use`` activation for that tool, warning that config is written.
+    - the tool has no session-scoped lever (Antigravity CLI, OpenCode), or a
+      runtime gate failed (Codex CLI too old) — crossby *attempts* **persistent**
+      ``scene use`` activation for that tool and surfaces the results. What that
+      writes is tool-dependent: it applies what the tool has a persistent
+      mechanism for, reports genuinely-unsupported narrowings (e.g. OpenCode's
+      MCP servers that stay enabled), and can be a complete no-op for a tool with
+      no persistent mechanism — so the message states the attempt, not a
+      guaranteed write.
 
     The resolver runs across every tool (``tool_id=None``) so its disable sets
     stay anchored on the real project inventory; the adapters and the persistent
