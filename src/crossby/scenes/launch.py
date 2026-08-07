@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from crossby.config.json_utils import assert_within, atomic_write_text
+from crossby.config.json_utils import PathContainmentError, assert_within, atomic_write_text
 from crossby.sync.file_utils import MANAGED_MARKER_NAME, write_managed_marker
 
 if TYPE_CHECKING:
@@ -154,14 +154,27 @@ class SceneLaunchContext:
         containment-checked up front (via :func:`assert_within`), so a symlinked
         component anywhere in ``.crossby/scene/<name>/launch`` or a pre-existing
         symlinked marker leaf refuses the whole write rather than leaving a
-        partial artefact behind. Raises :class:`PathContainmentError` on a
-        violation; ``within=`` is retained on the ``atomic_write_text`` call as
-        defense in depth for any direct caller.
+        partial artefact behind. Because an adapter may write several artefacts
+        across successive calls (Claude renders ``mcp.json`` then
+        ``settings.json``), any pre-existing symlink already sitting in the
+        launch dir — a planted sibling leaf a *later* call would target — is also
+        rejected before the *first* artefact lands, so an aborted launch never
+        leaves an earlier clean artefact behind. crossby never creates symlinks
+        here, so any symlink present is foreign. Raises
+        :class:`PathContainmentError` on a violation; ``within=`` is retained on
+        the ``atomic_write_text`` call as defense in depth for any direct caller.
         """
         path = self.artifact(filename)
         marker = self.launch_dir / MANAGED_MARKER_NAME
         assert_within(self.project_root, path)
         assert_within(self.project_root, marker)
+        if self.launch_dir.is_dir() and not self.launch_dir.is_symlink():
+            for entry in self.launch_dir.iterdir():
+                if entry.is_symlink():
+                    raise PathContainmentError(
+                        f"refusing to write scene artefacts: {entry} is a symlink "
+                        "(crossby never creates symlinks under the launch dir)"
+                    )
         atomic_write_text(path, content, within=self.project_root)
         write_managed_marker(self.launch_dir)
         ensure_launch_excluded(self.project_root)
@@ -371,8 +384,6 @@ def prune_stale_artifacts(project_root: Path, defined_scenes: set[str]) -> list[
     TOCTOU symlink insertion is out of scope).
     """
     import shutil
-
-    from crossby.config.json_utils import PathContainmentError
 
     pruned: list[str] = []
 

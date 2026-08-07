@@ -502,6 +502,28 @@ def _prepare_scene_launch(
     for result in results:
         if result.unsupported and result.message:
             console.warn(result.message)
+    # A concern the scene declares that this tool can scope neither at launch nor
+    # persistently (its cell is UNSUPPORTED) produces no result at all, so it
+    # would be silently ignored. Name it. ``mcp`` is excluded — it has its own
+    # surfaced result above (and its universe drives whether there is anything to
+    # scope). This restores the honesty the pre-de-scope ``scene_launch_ready``
+    # path gave, e.g. for OpenCode's skills/agents/hooks/permissions.
+    from crossby.models.config import SCENE_CONCERNS
+    from crossby.scenes.mechanism import SceneMechanism, base_mechanism
+
+    no_mechanism = [
+        concern
+        for concern in SCENE_CONCERNS
+        if concern != "mcp"
+        and getattr(scene_cfg, concern) is not None
+        and base_mechanism(tool_id, concern) == SceneMechanism.UNSUPPORTED
+    ]
+    if no_mechanism:
+        console.warn(
+            f"{caps.display_name} cannot scope {', '.join(no_mechanism)} for scene "
+            f"{scene_name!r} at launch or persistently; "
+            f"{'those remain' if len(no_mechanism) > 1 else 'that remains'} unchanged."
+        )
     if any(r.action == "error" for r in results):
         console.warn("Scene activation reported errors; launching anyway.")
     return None

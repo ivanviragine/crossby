@@ -549,6 +549,32 @@ class TestArtifactContainment:
         # somewhere outside the project.
         assert (real / ".crossby" / "scene" / "sc" / "launch" / "mcp.json").exists()
 
+    def test_symlinked_sibling_leaf_leaves_no_partial_artifact(self, tmp_path: Path) -> None:
+        """A planted symlinked sibling leaf refuses before the first artefact lands.
+
+        Claude renders ``mcp.json`` *then* ``settings.json``; a pre-existing
+        symlinked ``settings.json`` (with clean dir components and a clean
+        ``mcp.json`` leaf) must not let ``mcp.json`` land and then abort the
+        launch with a partial tree.
+        """
+        project = tmp_path / "proj"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        launch = project / ".crossby" / "scene" / "pr-review" / "launch"
+        launch.mkdir(parents=True)
+        (launch / "settings.json").symlink_to(outside / "escaped.json")
+
+        ctx = _context(
+            project, name="pr-review", all_mcp=("github", "linear"), selected_mcp=("github",)
+        )
+        with pytest.raises(PathContainmentError):
+            ClaudeAdapter().scene_launch_args(ctx)
+
+        # The earlier artefact never landed, and nothing escaped.
+        assert not (launch / "mcp.json").exists()
+        assert list(outside.iterdir()) == []
+
 
 class TestPruningContainment:
     """Pruning never follows a symlinked component into an external deletion."""

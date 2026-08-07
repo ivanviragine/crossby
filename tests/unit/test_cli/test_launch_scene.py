@@ -380,6 +380,36 @@ class TestOpenCodeRealAdapterFallback:
         # No env leak: OPENCODE_CONFIG was never set for the child process.
         assert captured["env"] is None or "OPENCODE_CONFIG" not in captured["env"]
 
+    def test_non_mcp_concern_is_warned_not_silently_ignored(self, tmp_path: Path) -> None:
+        """A scene narrowing a concern OpenCode can scope neither way is named.
+
+        OpenCode has no launch lever and no persistent mechanism for agents, so
+        the restriction can't be honoured — warn instead of silently ignoring it.
+        """
+        config: dict[str, Any] = {
+            "version": 1,
+            "ai": {"default_tool": "opencode"},
+            "scenes": {"agents-only": {"agents": {"include": ["code-reviewer"]}}},
+        }
+        _write_config(tmp_path, config)
+
+        def fake_run(cmd: list[str], transcript_path: Any, cwd: Any = None, env: Any = None) -> int:
+            return 0
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.OPENCODE],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", side_effect=fake_run),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "opencode", "--scene", "agents-only"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "cannot scope agents" in " ".join(result.output.split())
+
 
 class TestContainmentAbort:
     """A containment violation aborts the launch cleanly with no fallback and no
