@@ -1,0 +1,8 @@
+# Starter scene: building a presentation. Slide/diagram authoring with a
+# deliberately minimal MCP surface (include: [] selects no servers at all).
+presentation:
+  description: Build a presentation — slide and diagram authoring, minimal MCP surface.
+  skills:
+    include: ["*slide*", "*present*", "*deck*", "*diagram*", "*mermaid*", "*keynote*"]
+  mcp:
+    include: []
