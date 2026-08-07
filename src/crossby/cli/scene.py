@@ -919,7 +919,11 @@ def _apply_scalar_updates(
     return scene.model_copy(update=updates) if updates else scene
 
 
-def _report_moves(moves: list[CrossChannelMove]) -> None:
+def _report_moves(moves: list[CrossChannelMove], *, print_: bool = False) -> None:
+    # In --print mode stdout must stay pure YAML, so defer these info notices
+    # (they describe a side effect of the edit, not the rendered block itself).
+    if print_:
+        return
     # Escape: glob patterns can contain [...] (fnmatch char classes), which Rich
     # would otherwise interpret as markup and strip from the message.
     from rich.markup import escape
@@ -1070,7 +1074,7 @@ def add_to_scene(
     # inheriting from its parent instead of the parent being inlined.
     scene, moves = add_selectors(config.scenes[name], edits)
     scene = _apply_scalar_updates(scene, description, extends, profile)
-    _report_moves(moves)
+    _report_moves(moves, print_=print_)
     _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
 
 
@@ -1233,24 +1237,13 @@ def install_starters(
     config = _load_config_or_exit(project_root)
     target = _config_target(config, project_root)
     existing = set(config.scenes)
-
-    text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
-    installed: list[str] = []
-    skipped: list[str] = []
-    try:
-        for name, scene in starters.items():
-            if name in existing:
-                skipped.append(name)
-                continue
-            text = splice_scene_text(text, name, scene)
-            installed.append(name)
-    except SceneAuthoringError as exc:
-        console.error(f"Cannot edit {target.name}: {exc}")
-        raise typer.Exit(1) from exc
+    installed = [name for name in starters if name not in existing]
+    skipped = [name for name in starters if name in existing]
 
     if print_:
-        # --print streams the scene blocks to stdout for redirection, so the
-        # skipped/all-present notices must stay off stdout — emit only valid YAML.
+        # --print never edits the file, so skip splicing entirely (splicing a
+        # flow-style ``scenes:`` block would raise even though we only render) and
+        # keep skipped/all-present notices off stdout — emit only valid YAML.
         for name in installed:
             console.out.print(
                 render_scene_entry(name, starters[name]).rstrip("\n"),
@@ -1259,6 +1252,14 @@ def install_starters(
                 soft_wrap=True,
             )
         return
+
+    text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
+    try:
+        for name in installed:
+            text = splice_scene_text(text, name, starters[name])
+    except SceneAuthoringError as exc:
+        console.error(f"Cannot edit {target.name}: {exc}")
+        raise typer.Exit(1) from exc
 
     for name in skipped:
         console.info(f"Skipped {name!r} — a scene with that name already exists.")
@@ -1339,7 +1340,9 @@ def create_scene(
         raise typer.Exit(1)
 
     if prompts.is_tty():
-        scene = _run_create_wizard(project_root, config, seed_edits, description, extends, profile)
+        scene = _run_create_wizard(
+            project_root, config, seed_edits, description, extends, profile, print_=print_
+        )
     else:
         # Non-TTY guard sits here, before any prompt could run: require explicit
         # selectors rather than fall through to multi_select's "select everything".
@@ -1354,7 +1357,7 @@ def create_scene(
             description=description or None, extends=extends or None, profile=profile or None
         )
         scene, moves = add_selectors(base, seed_edits)
-        _report_moves(moves)
+        _report_moves(moves, print_=print_)
 
     _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
 
@@ -1432,6 +1435,8 @@ def _run_create_wizard(
     description: str | None,
     extends: str | None,
     profile: str | None,
+    *,
+    print_: bool = False,
 ) -> SceneConfig:
     """Walk discovered items with multi-select, then a confirm/review step.
 
@@ -1485,7 +1490,7 @@ def _run_create_wizard(
     )
     if seed_edits:
         scene, moves = add_selectors(scene, seed_edits)
-        _report_moves(moves)
+        _report_moves(moves, print_=print_)
 
     return _review_scene(config, scene, universe)
 

@@ -178,6 +178,19 @@ class TestAddRemove:
         assert "deploy-*" in skills["include"]
         assert "deploy-*" not in skills.get("exclude", [])
 
+    def test_add_print_suppresses_move_notice(self, tmp_path: Path) -> None:
+        # A contradictory add triggers a cross-channel move; --print must keep the
+        # move notice off stdout so the streamed block stays valid YAML.
+        root = _project(tmp_path)
+        before = (root / ".crossby.yml").read_text(encoding="utf-8")
+        result = _run(["scene", "add", "base", "--skill", "deploy-*", "--print"], root)
+        assert result.exit_code == 0, result.output
+        assert "moved" not in result.output
+        parsed = yaml.safe_load(result.output)
+        assert isinstance(parsed, dict)
+        assert "deploy-*" in parsed["base"]["skills"]["include"]
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
+
     def test_add_unknown_scene_fails(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
         result = _run(["scene", "add", "ghost", "--skill", "x"], root)
@@ -311,6 +324,19 @@ class TestInstallStarters:
         assert "deploy-watch" in parsed
         assert "pr-review" not in parsed
         # --print writes nothing.
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
+
+    def test_print_ignores_flow_style_scenes(self, tmp_path: Path) -> None:
+        # A flow-style scenes block cannot be spliced, but --print never edits, so
+        # it must render the starters instead of raising the block-style error.
+        body = "version: 1\nscenes: {base: {skills: {exclude: [deploy-*]}}}\n"
+        root = _project(tmp_path, body)
+        before = (root / ".crossby.yml").read_text(encoding="utf-8")
+        result = _run(["scene", "install-starters", "--print"], root)
+        assert result.exit_code == 0, result.output
+        assert "block style" not in result.output
+        parsed = yaml.safe_load(result.output)
+        assert "deploy-watch" in parsed
         assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
 
 
