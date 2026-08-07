@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.handoff.models import ConversationTranscript, SessionRef
@@ -17,6 +17,9 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
 )
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 # Codex uses "xhigh" for both our XHIGH and MAX levels
 _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
@@ -56,6 +59,11 @@ class CodexAdapter(AbstractAITool):
             hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
             sandboxes_writes=True,
             supports_usage_reporting=True,
+            # Session-scoped scenes: Codex takes a named profile that layers a
+            # generated ``$CODEX_HOME/<name>.config.toml`` over the base config
+            # (requires codex >= 0.134.0 — gated in scene_launch_ready()).
+            supports_scene_launch=True,
+            scene_profile_flag="--profile",
         )
 
     def build_resume_command(self, session_id: str) -> list[str] | None:
@@ -127,3 +135,74 @@ class CodexAdapter(AbstractAITool):
         approval prompts", not "remove the sandbox".
         """
         return ["-a", "never"]
+
+    def scene_launch_ready(self) -> bool:
+        """Codex ``--profile`` scenes need ``codex >= 0.134.0``.
+
+        The legacy in-config ``[profiles.<name>]`` tables were removed in that
+        release; only from it on does ``--profile <name>`` layer
+        ``$CODEX_HOME/<name>.config.toml`` over the base config. On an older or
+        unknown build this returns False so the launch path falls back to
+        persistent activation rather than emitting a ``--profile`` the CLI would
+        ignore.
+        """
+        if not self.capabilities().supports_scene_launch:
+            return False
+        from crossby.scenes import versioning
+        from crossby.scenes.launch import CODEX_PROFILE_MIN
+
+        version = versioning.detect_tool_version(AIToolID.CODEX)
+        return versioning.at_least(version, CODEX_PROFILE_MIN)
+
+    def scene_launch_concerns(self) -> set[str]:
+        """Codex scopes only MCP at launch (via the layered profile)."""
+        return {"mcp"}
+
+    def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
+        """Compile the scene into a namespaced ``$CODEX_HOME`` profile.
+
+        The scene's deselected MCP servers become ``[mcp_servers.<id>] enabled =
+        false`` in ``$CODEX_HOME/crossby-<project-slug>-<scene>.config.toml``,
+        and ``--profile crossby-<project-slug>-<scene>`` layers it over the base
+        config for the session. Emitted only when the scene narrows MCP (the one
+        Codex session lever); skills/agents/hooks/permissions have no Codex
+        launch flag and are left to persistent ``scene use``.
+
+        The profile lives under ``$CODEX_HOME`` — the documented exception to the
+        "everything under ``.crossby/scene/``" rule — because ``--profile`` reads
+        nowhere else. It is namespaced by a project-root hash and carries a
+        generated-by header so pruning never deletes a hand-written profile.
+
+        If that namespaced path is already occupied by a hand-written profile,
+        ``write_codex_profile`` raises :class:`FileExistsError` rather than
+        clobber it. Instead of letting that abort ``crossby launch --scene``, the
+        launch degrades to persistent ``scene use`` activation for Codex — the
+        same fallback taken when the CLI is too old for ``--profile``.
+        """
+        import warnings
+
+        from crossby.scenes.launch import (
+            SceneLaunchArgs,
+            codex_profile_name,
+            write_codex_profile,
+        )
+
+        if not scene.narrows_mcp():
+            return SceneLaunchArgs()
+
+        try:
+            write_codex_profile(scene.project_root, scene.name, scene.deselected_mcp())
+        except FileExistsError as exc:
+            from crossby.scenes.engine import apply_scene
+
+            warnings.warn(
+                f"{exc} Falling back to persistent 'scene use' activation for scene "
+                f"{scene.name!r}; this writes Codex config files.",
+                UserWarning,
+                stacklevel=2,
+            )
+            apply_scene(scene.resolved, scene.project_root, tools=(self.TOOL_ID,))
+            return SceneLaunchArgs()
+
+        flag = self.capabilities().scene_profile_flag or "--profile"
+        return SceneLaunchArgs(args=(flag, codex_profile_name(scene.project_root, scene.name)))

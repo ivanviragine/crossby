@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import structlog
 
@@ -16,6 +16,9 @@ from crossby.models.ai import (
     TokenUsage,
 )
 from crossby.utils.process import run_with_transcript
+
+if TYPE_CHECKING:
+    from crossby.scenes.launch import SceneLaunchContext
 
 logger = structlog.get_logger()
 
@@ -51,7 +54,10 @@ class VSCodeAdapter(AbstractAITool):
         plan_mode: bool = False,
         accept_edits: bool = False,
         auto: bool = False,
+        scene: SceneLaunchContext | None = None,
     ) -> int:
+        # VS Code is a GUI launcher and has no session-scoped scene lever; the
+        # CLI warns and drops --scene before dispatch, so `scene` is inert here.
         cmd = ["code", str(working_dir)]
         logger.info("ai_tool.launch", tool="vscode", cwd=str(working_dir))
         return run_with_transcript(cmd, transcript_path, cwd=working_dir)

@@ -192,6 +192,11 @@ class ProfileConfig(BaseModel):
     yolo: bool | None = None
     accept_edits: bool | None = None
     auto: bool | None = None
+    allow_tools: list[str] = Field(default_factory=list)
+    """Approval-layer tool patterns pre-authorised for the session (Copilot
+    ``--allow-tool``). When a scene is also applied, ``crossby launch --scene``
+    drops any entry naming a scene-excluded tool before emitting the rest, so a
+    profile can never re-allow what the scene removed."""
 
 
 class SceneSelector(BaseModel):

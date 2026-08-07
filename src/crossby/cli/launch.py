@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from crossby.ui.console import console
+
+if TYPE_CHECKING:
+    from crossby.ai_tools.base import AbstractAITool
+    from crossby.models.ai import AIToolCapabilities
+    from crossby.models.config import CrossbyConfig, SceneConfig
+    from crossby.scenes.launch import SceneLaunchContext
 
 
 def launch(
@@ -48,6 +55,16 @@ def launch(
     ),
     profile: str | None = typer.Option(
         None, "--profile", "-P", help="Named launch profile from .crossby.yml."
+    ),
+    scene: str | None = typer.Option(
+        None,
+        "--scene",
+        "-S",
+        help=(
+            "Apply a scene from .crossby.yml for this session only — session-scoped "
+            "and writes nothing tracked (falls back to persistent activation on "
+            "tools without a launch lever)."
+        ),
     ),
     resume: str | None = typer.Option(None, "--resume", help="Resume a previous session by ID."),
     trusted_dirs: list[str] | None = typer.Option(
@@ -101,6 +118,33 @@ def launch(
         console.error(str(exc))
         raise typer.Exit(1) from exc
 
+    # Validate --scene early. Precedence is explicit CLI flags > scene > profile >
+    # ai: defaults, and a scene may name a default `profile:`. An explicit
+    # --profile (or a positional profile name) therefore wins over the scene's
+    # profile: only fall back to it when no profile was named.
+    scene_cfg = None
+    if scene is not None:
+        if resume is not None:
+            console.error("--scene cannot be combined with --resume.")
+            raise typer.Exit(1)
+        try:
+            scene_cfg = config.get_scene(scene)
+        except ConfigError as exc:
+            console.error(str(exc))
+            raise typer.Exit(1) from exc
+        if scene_cfg is None:
+            console.error(f"Unknown scene: {scene!r}")
+            available = sorted(config.scenes)
+            console.hint(
+                f"Available scenes: {', '.join(available)}"
+                if available
+                else "No scenes are defined in .crossby.yml."
+            )
+            raise typer.Exit(1)
+        if profile_name is None and scene_cfg.profile:
+            profile_name = scene_cfg.profile
+
+    profile_allow_tools: list[str] = []
     if profile_name:
         prof = config.get_profile(profile_name)
         if prof is None:
@@ -120,6 +164,7 @@ def launch(
             accept_edits = prof.accept_edits
         if auto is None and prof.auto is not None:
             auto = prof.auto
+        profile_allow_tools = list(prof.allow_tools)
 
     # Resolve relative transcript path against work_dir so that mkdir and the
     # subprocess cwd=work_dir agree on where the file lands.
@@ -298,6 +343,21 @@ def launch(
         effective_shown = True
     console.empty()
 
+    # Resolve a session-scoped scene into a per-launch context (or apply the
+    # persistent fallback / warn for GUI tools) before dispatch.
+    scene_ctx = None
+    if scene is not None and scene_cfg is not None:
+        scene_ctx = _prepare_scene_launch(
+            scene_name=scene,
+            scene_cfg=scene_cfg,
+            resolved_tool=resolved_tool,
+            adapter=adapter,
+            caps=caps,
+            work_dir=work_dir,
+            config=config,
+            allow_tools=profile_allow_tools,
+        )
+
     # Deliver prompt if tool doesn't support initial messages
     if prompt:
         deliver_prompt_if_needed(adapter, prompt)
@@ -322,6 +382,7 @@ def launch(
         plan_mode=plan,
         accept_edits=resolved_accept_edits,
         auto=resolved_auto,
+        scene=scene_ctx,
     )
 
     if exit_code != 0:
@@ -336,3 +397,121 @@ def launch(
             console.kv("Session ID", usage.session_id)
 
     raise typer.Exit(exit_code)
+
+
+def _prepare_scene_launch(
+    *,
+    scene_name: str,
+    scene_cfg: SceneConfig,
+    resolved_tool: str,
+    adapter: AbstractAITool,
+    caps: AIToolCapabilities,
+    work_dir: Path,
+    config: CrossbyConfig,
+    allow_tools: list[str],
+) -> SceneLaunchContext | None:
+    """Resolve *scene_cfg* for one launch and pick how it applies to the tool.
+
+    Returns a :class:`SceneLaunchContext` when the tool can take the scene on the
+    command line for the session. Returns ``None`` (after warning) when:
+
+    - the tool is a GUI launcher (VS Code / Antigravity IDE), which overrides
+      ``launch()`` and never reaches the launch flags — the scene can't apply, so
+      the launch proceeds without it; or
+    - the tool has no session-scoped lever (Antigravity CLI), or a runtime gate
+      failed (Codex CLI too old) — crossby falls back to **persistent**
+      ``scene use`` activation for that tool, warning that config is written.
+
+    The resolver runs across every tool (``tool_id=None``) so its disable sets
+    stay anchored on the real project inventory; the adapters and the persistent
+    engine narrow to the launch's single tool themselves.
+    """
+    from crossby.ai_tools.base import AbstractAITool
+    from crossby.models.ai import AIToolID, AIToolType
+    from crossby.scenes.engine import apply_scene
+    from crossby.scenes.launch import (
+        SceneLaunchContext,
+        prune_stale_artifacts,
+        validate_scene_name,
+    )
+    from crossby.services.scene_resolution import resolve_scene
+    from crossby.sync.readers import build_sync_data, scan_project
+
+    # A scene name is interpolated into artefact paths — reject an unsafe one
+    # (separators, ``..``, reserved ``active``) before any path is built.
+    try:
+        validate_scene_name(scene_name)
+    except ValueError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
+
+    tool_id = AIToolID(resolved_tool)
+    installed = AbstractAITool.detect_installed()
+    scan = scan_project(work_dir, installed)
+    resolved = resolve_scene(scene_cfg, scan, work_dir, tool_id=None)
+    for warning in resolved.warnings:
+        console.warn(warning)
+
+    # Clean up artefacts left by scenes since renamed or deleted (best-effort).
+    for pruned in prune_stale_artifacts(work_dir, set(config.scenes)):
+        console.detail(f"pruned stale scene artefact: {pruned}")
+
+    if caps.tool_type == AIToolType.GUI:
+        console.warn(
+            f"{caps.display_name} is a GUI tool; scene {scene_name!r} cannot be applied "
+            "to it — launching without the scene."
+        )
+        return None
+
+    if adapter.scene_launch_ready():
+        _warn_unsupported_scene_concerns(scene_cfg, adapter, caps, scene_name)
+        return SceneLaunchContext(
+            name=scene_name,
+            resolved=resolved,
+            project_root=work_dir,
+            sync_data=build_sync_data(work_dir),
+            allow_tools=tuple(allow_tools),
+        )
+
+    reason = (
+        "CLI is too old for a session-scoped scene"
+        if caps.supports_scene_launch
+        else "has no session-scoped scene lever"
+    )
+    console.warn(
+        f"{caps.display_name} {reason}; applying persistent activation for scene "
+        f"{scene_name!r} instead — this writes tool config files."
+    )
+    results = apply_scene(resolved, work_dir, tools=[tool_id])
+    if any(r.action == "error" for r in results):
+        console.warn("Scene activation reported errors; launching anyway.")
+    return None
+
+
+def _warn_unsupported_scene_concerns(
+    scene_cfg: SceneConfig,
+    adapter: AbstractAITool,
+    caps: AIToolCapabilities,
+    scene_name: str,
+) -> None:
+    """Warn when the scene declares a concern the tool can't scope at launch.
+
+    A tool with *some* launch lever can still lack one for a specific concern
+    (e.g. Cursor scopes MCP but not agents). Rather than silently apply nothing
+    for such a concern, name it and point the user at persistent ``scene use``.
+    """
+    from crossby.models.config import SCENE_CONCERNS
+
+    supported = adapter.scene_launch_concerns()
+    unsupported = [
+        concern
+        for concern in SCENE_CONCERNS
+        if getattr(scene_cfg, concern) is not None and concern not in supported
+    ]
+    if unsupported:
+        console.warn(
+            f"{caps.display_name} has no session-scoped lever for "
+            f"{', '.join(unsupported)}; scene {scene_name!r} scopes "
+            f"{'those' if len(unsupported) > 1 else 'that'} only via persistent "
+            "'crossby scene use'."
+        )

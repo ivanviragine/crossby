@@ -29,17 +29,29 @@ def read_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None, bool]
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    """Write *text* to *path* via a temp file plus rename.
+    """Write *text* to *path* via a **unique** temp file plus atomic rename.
 
     A crash or interrupt part-way through leaves the original file intact
     rather than truncated — which matters most for the config files crossby
     merges into rather than owns (``.codex/config.toml``, tool settings).
+
+    The temp file is created with :func:`tempfile.mkstemp` in the target's own
+    directory (so the final ``os.replace`` stays on one filesystem and is
+    atomic), and its name is unique per call — two concurrent writers to the
+    same path therefore never clobber or unlink each other's temp file. The
+    content race is still last-writer-wins, but neither writer ever observes a
+    torn file.
     """
+    import os
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

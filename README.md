@@ -285,6 +285,40 @@ Key behaviours:
 
 Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.
 
+### Session-scoped scenes — `crossby launch --scene`
+
+`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterwards — pass `--scene` to `crossby launch`:
+
+```bash
+# Launch Claude with the pr-review scene for this session only.
+# Emits --mcp-config <file> --strict-mcp-config and a --settings file, and
+# writes nothing into .claude/ or .mcp.json.
+crossby launch --scene pr-review --tool claude
+
+# A scene may name a default profile:; --scene alone picks it up.
+crossby launch --scene pr-review
+
+# Precedence is explicit flags > scene > profile > ai: defaults, so an explicit
+# --profile or --model still wins over the scene's profile.
+crossby launch --scene pr-review --tool codex --model gpt-5.2
+```
+
+`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out across tools — that is what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written temp-file-then-atomic-rename and kept out of git via `.git/info/exclude` (a session-scoped launch never edits the tracked `.gitignore`). If a tool has a session lever but not for a concern the scene narrows (e.g. Codex scopes MCP but not agents), crossby warns and applies what it can.
+
+Per-tool levers:
+
+| Tool | Session-scoped lever |
+| --- | --- |
+| Claude | `--mcp-config <file> --strict-mcp-config`, a `--settings` file of `skillOverrides` (needs `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
+| Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
+| Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
+| Cursor | none — falls back to persistent activation (its only knob, `CURSOR_CONFIG_DIR`, relocates the whole config base including auth, not just MCP) |
+| OpenCode | `OPENCODE_CONFIG` pointed at a scene-rendered config file |
+| Antigravity CLI | none — falls back to persistent activation, warning that config was written |
+| VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |
+
+The **Codex profile is the one exception** to "everything under `.crossby/scene/`": `--profile` only reads `$CODEX_HOME/<name>.config.toml` (usually `~/.codex`, shared across projects). crossby namespaces that filename by a project-root hash and writes a generated-by header inside it; stale profiles for renamed/deleted scenes are pruned on the next launch, and **only** files carrying that header are ever removed — a hand-written profile matching the same naming pattern is never touched.
+
 ## Supported tools
 
 | Tool           | Sync | Launch | Handoff (source) | Handoff (target) |

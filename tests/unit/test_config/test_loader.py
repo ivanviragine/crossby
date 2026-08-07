@@ -431,3 +431,37 @@ class TestDeprecatedSyncKeyUnchanged:
             str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)
         ]
         assert not deprecation_msgs, deprecation_msgs
+
+
+class TestProfileAllowTools:
+    """A profile's ``allow_tools`` list must survive the load (not be dropped)."""
+
+    def test_allow_tools_loaded(self, tmp_path):
+        data = {
+            "version": 1,
+            "profiles": {"cop": {"tool": "copilot", "allow_tools": ["github", "shell(git:*)"]}},
+        }
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        config = load_config(tmp_path)
+        assert config.get_profile("cop").allow_tools == ["github", "shell(git:*)"]
+
+    def test_allow_tools_defaults_empty(self, tmp_path):
+        data = {"version": 1, "profiles": {"cop": {"tool": "copilot"}}}
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        config = load_config(tmp_path)
+        assert config.get_profile("cop").allow_tools == []
+
+    def test_allow_tools_explicit_null_treated_as_empty(self, tmp_path):
+        # ``allow_tools:`` with no value parses as None — normalized to [] like
+        # every other section, not rejected as an invalid list.
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\nprofiles:\n  cop:\n    tool: copilot\n    allow_tools:\n"
+        )
+        config = load_config(tmp_path)
+        assert config.get_profile("cop").allow_tools == []
+
+    def test_allow_tools_must_be_list_of_strings(self, tmp_path):
+        data = {"version": 1, "profiles": {"cop": {"allow_tools": [1, 2]}}}
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        with pytest.raises(ConfigError, match="allow_tools"):
+            load_config(tmp_path)

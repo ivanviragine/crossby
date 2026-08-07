@@ -197,6 +197,60 @@ Rules that keep the matrix honest:
   quiet no-op. `dry_run` computes the full result set and never touches disk;
   `apply_scene` is idempotent and safe to re-run from a half-applied state.
 
+### Session-scoped scene launch
+
+`crossby launch --scene <name>` applies a scene to a **single session** without
+mutating any tracked file — the session-scoped counterpart to the persistent
+`scene use` above. The two share the resolver (`ResolvedScene`) but diverge on
+enactment: instead of writing tool config files, each adapter renders throwaway
+artefacts under `.crossby/scene/<name>/launch/` (kept out of git via
+`.git/info/exclude`, never a tracked `.gitignore` edit) and returns the
+flags/env that point its CLI at them. The code lives in `scenes/launch.py`
+(the `SceneLaunchContext`/`SceneLaunchArgs` types plus rendering, the Codex
+profile helpers, and pruning), each adapter's `scene_launch_args`, the
+`scene_*` capability fields on `AIToolCapabilities`, and the `--scene` handling
+in `cli/launch.py`.
+
+| Tool | Session-scoped lever |
+|---|---|
+| Claude | `--mcp-config <file> --strict-mcp-config` (selected servers), a `--settings` file of `skillOverrides` (gated on `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
+| Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
+| Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
+| Cursor | `CURSOR_CONFIG_DIR` → a scene-materialised config dir (`mcp.json` of selected servers) |
+| OpenCode | `OPENCODE_CONFIG` → a scene-rendered config file (`{"mcp": {…}}` of selected servers) |
+| Antigravity CLI | none — no launch lever; falls back to persistent activation |
+| VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
+
+Rules that keep this honest:
+
+- **Every artefact is temp-file-then-atomic-rename** (`atomic_write_text`), so a
+  crash mid-render never leaves a half-written file. Concurrent launches of the
+  same scene race to the same paths; the atomic rename removes the torn-read
+  failure mode and last-writer-wins on content is accepted rather than locked.
+- **`$CODEX_HOME` is the one location exception.** `codex --profile <name>` only
+  reads `$CODEX_HOME/<name>.config.toml` (usually `~/.codex`, shared across
+  projects), so its profile can't live under `.crossby/scene/`. The generated
+  filename is namespaced by a project-root hash
+  (`crossby-<slug>-<scene>.config.toml`) so two repos' same-named scenes never
+  collide, and the file carries a generated-by header (`CODEX_PROFILE_MARKER`).
+- **Pruning is ownership-gated on both sides.** On the next launch,
+  `prune_stale_artifacts` removes stale crossby-owned Codex profiles and stale
+  local `.crossby/scene/<name>/launch/` trees for scenes no longer defined — but
+  each has an ownership test it must pass first: a Codex profile only when its
+  first line is the header (`is_crossby_codex_profile`), a local tree only when
+  it carries the `.crossby-managed` marker crossby stamps into it. A hand-written
+  profile matching the naming pattern, or a hand-made directory under
+  `.crossby/scene/`, is therefore never deleted — the filename/path alone is
+  never sufficient.
+- **No silent no-op, no silent mutation.** A terminal tool with no launch lever
+  (Antigravity CLI) or a runtime gate that failed (Codex too old) falls back to
+  persistent `scene use` activation for that tool, warning that config was
+  written. A GUI tool warns that a scene cannot apply and launches without it.
+- **Precedence** matches the profile rule: explicit CLI flags > scene > profile
+  > `ai:` defaults. A scene may name a default `profile:`; an explicit
+  `--profile` (or positional profile name) overrides it. `--scene` targets
+  exactly one tool and never fans out.
+
 ### Symlink, copy, or translate
 
 Writers that own file-tree concerns (rules, agents, skills) support up to three strategies via `SyncData.<concern>_strategy`:
