@@ -276,10 +276,15 @@ that safe:
   symlink counts. `load_config` surfaces such a link as an *empty* config
   rooted at that dir (it never walks past it to an ancestor), so a subdir run
   authors *through* the link and roots scan/state there, instead of splicing
-  into an ancestor config while state roots at the child. `find_config_file`
-  (which does walk past a broken link to a readable ancestor file) is **only**
-  the interactive menu's "is there a readable config up-tree?" probe — not
-  parse discovery.
+  into an ancestor config while state roots at the child. That empty-config
+  fallback is restricted to *genuinely dangling* links; a `.crossby.yml`
+  symlink whose target **exists but is not a regular file** (e.g. a link to a
+  directory) is rejected as a `ConfigError` rather than masked as empty —
+  otherwise a read would silently use defaults and an authoring command would
+  later crash in `write_config_checked` with `IsADirectoryError`.
+  `find_config_file` (which does walk past a broken link to a readable ancestor
+  file) is **only** the interactive menu's "is there a readable config
+  up-tree?" probe — not parse discovery.
 - **Scoped splicing, not re-render.** `scenes/authoring.py` rewrites only the
   byte span of the single `scenes.<name>` entry being edited. The span is found
   with `yaml.compose()` node `start_mark`/`end_mark` offsets — **never**
