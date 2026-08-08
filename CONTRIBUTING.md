@@ -272,24 +272,27 @@ that safe:
   intentional, not containment-checked, matching config writes generally.
 - **Parse and root discovery stop at the same boundary.** `load_config` and
   `find_config_entry`/`services.scene_resolution.scene_root` both stop at the
-  nearest ancestor holding a `.crossby.yml` *entry* — a broken (dangling)
-  symlink counts. `load_config` surfaces such a link as an *empty* config
-  rooted at that dir (it never walks past it to an ancestor), so a subdir run
-  authors *through* the link and roots scan/state there, instead of splicing
-  into an ancestor config while state roots at the child. That empty-config
-  fallback is restricted to *genuinely dangling* links — the target must be
-  missing (`resolve(strict=True)` raises `FileNotFoundError`). A `.crossby.yml`
-  symlink whose target **exists but is not a regular file** (e.g. a link to a
-  directory), a **symlink loop**, or an otherwise unresolvable target is
-  rejected as a `ConfigError` rather than masked as empty — otherwise a read
-  would silently use defaults and an authoring command would later crash in
-  `write_config_checked` with `IsADirectoryError`. (`exists()` alone can't draw
-  this line: it also returns `False` for loops, over-long names, and permission
-  errors, which would slip through as "dangling".) `crossby init` writes its
-  target directly rather than through `load_config`, so it repeats the same
-  guard before writing. `find_config_file` (which does walk past a broken link
-  to a readable ancestor file) is **only** the interactive menu's "is there a
-  readable config up-tree?" probe — not parse discovery.
+  nearest ancestor holding *any* `.crossby.yml` *entry* — a broken (dangling)
+  symlink and a direct non-regular file (a plain directory, fifo) both count, so
+  discovery never walks *past* one to an ancestor (which would silently load —
+  and let an authoring command edit — the wrong file). `load_config` then
+  classifies the entry: a *genuinely dangling* symlink (target missing,
+  `resolve(strict=True)` raises `FileNotFoundError`) is surfaced as an *empty*
+  config rooted at that dir, so a subdir run authors *through* the link and roots
+  scan/state there. Every other non-file entry is rejected as a `ConfigError`
+  rather than masked as empty: a **direct** non-regular entry (a plain-directory
+  `.crossby.yml`), a symlink whose target **exists but is not a regular file**
+  (e.g. a link to a directory), a **symlink loop**, or an otherwise unresolvable
+  target. (`exists()` alone can't draw this line: it also returns `False` for
+  loops, over-long names, and permission errors, which would slip through as
+  "dangling".) `write_config_checked`/`resolve_config_target` is the write-path
+  safety net for the same target classes (it refuses cleanly rather than
+  clobbering a symlink or crashing on a directory). `crossby init` writes its
+  target directly rather than through `load_config`, so it repeats the guard
+  before *reading* the target to preserve sections. `find_config_file` (which
+  does walk past a broken link to a readable ancestor file) is **only** the
+  interactive menu's "is there a readable config up-tree?" probe — not parse
+  discovery.
 - **Scoped splicing, not re-render.** `scenes/authoring.py` rewrites only the
   byte span of the single `scenes.<name>` entry being edited. The span is found
   with `yaml.compose()` node `start_mark`/`end_mark` offsets — **never**
