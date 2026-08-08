@@ -550,6 +550,37 @@ class TestPathAndSafety:
         assert "wiztest" in _scenes(root)
         assert not (sub / ".crossby.yml").exists()
 
+    def test_create_from_subdir_prefers_broken_child_symlink_over_ancestor(
+        self, tmp_path: Path
+    ) -> None:
+        # With a dangling child .crossby.yml symlink AND a valid ancestor config,
+        # authoring must write THROUGH the child link, never splice into the
+        # ancestor: parse discovery now stops at the same broken-symlink boundary
+        # root discovery does, so scene create can't target the ancestor while
+        # scans/state root at the child.
+        ancestor_cfg = tmp_path / ".crossby.yml"
+        ancestor_cfg.write_text(CONFIG, encoding="utf-8")
+        root = tmp_path / "project"
+        populate_project(root)
+        real = tmp_path / "real.crossby.yml"
+        (root / ".crossby.yml").symlink_to(real)
+        assert not real.exists()
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+
+        result = _run(["scene", "create", "wiztest", "--skill", "review-*"], sub)
+
+        assert result.exit_code == 0, result.output
+        target = root / ".crossby.yml"
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        assert real.exists()
+        assert "wiztest" in _scenes(root)
+        # The ancestor config was left untouched — no shadow write to it.
+        ancestor_scenes = yaml.safe_load(ancestor_cfg.read_text(encoding="utf-8"))["scenes"]
+        assert "wiztest" not in ancestor_scenes
+        assert not (sub / ".crossby.yml").exists()
+
     def test_add_writes_through_symlinked_config(self, tmp_path: Path) -> None:
         # Splice writes must go through the link's resolved target so the
         # symlink itself survives (config/safe_write.py write-through fix).

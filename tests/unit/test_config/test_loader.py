@@ -1,6 +1,7 @@
 """Tests for .crossby.yml config loader."""
 
 import warnings
+from pathlib import Path
 
 import pytest
 import yaml
@@ -8,6 +9,7 @@ import yaml
 from crossby.config.loader import (
     ConfigError,
     ensure_yaml_mapping,
+    find_config_entry,
     find_config_file,
     load_config,
 )
@@ -465,3 +467,54 @@ class TestProfileAllowTools:
         (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
         with pytest.raises(ConfigError, match="allow_tools"):
             load_config(tmp_path)
+
+
+class TestBrokenSymlinkBoundary:
+    """load_config must stop at the same boundary as find_config_entry.
+
+    A dangling ``.crossby.yml`` symlink is a not-yet-populated config identity —
+    parse discovery must not walk past it to an ancestor config, or a subdir run
+    would resolve scenes from that ancestor while root discovery (scene_root /
+    find_config_entry) stops at the broken-symlink dir, rooting scene state/scan
+    there. Both discoveries must agree on the same directory.
+    """
+
+    def test_dangling_child_symlink_is_empty_config_rooted_at_child(self, tmp_path):
+        # Ancestor holds a real config defining scene 'foo'.
+        (tmp_path / ".crossby.yml").write_text("version: 1\nscenes:\n  foo: {}\n")
+        child = tmp_path / "project"
+        child.mkdir()
+        # Child's config is a not-yet-populated (dangling) symlink.
+        (child / ".crossby.yml").symlink_to(tmp_path / "nonexistent.yml")
+        deep = child / "packages" / "app"
+        deep.mkdir(parents=True)
+
+        config = load_config(deep)
+
+        # Rooted at the child (the broken-symlink dir), NOT the ancestor, and
+        # the ancestor's scenes never bleed in.
+        assert config.project_root is not None
+        assert config.config_path is not None
+        assert Path(config.project_root) == child.resolve()
+        assert Path(config.config_path) == child.resolve() / ".crossby.yml"
+        assert config.scenes == {}
+        assert config.get_scene("foo") is None
+        # Parse discovery and root discovery agree on the boundary.
+        entry = find_config_entry(deep)
+        assert entry is not None
+        assert Path(config.project_root) == entry.parent
+
+    def test_dangling_symlink_without_ancestor_roots_at_link_dir(self, tmp_path):
+        # No ancestor config at all: still surfaced as an empty config rooted at
+        # the link's dir (config_path set), so authoring writes through it.
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").symlink_to(tmp_path / "nonexistent.yml")
+
+        config = load_config(child)
+
+        assert config.scenes == {}
+        assert config.project_root is not None
+        assert config.config_path is not None
+        assert Path(config.project_root) == child.resolve()
+        assert Path(config.config_path) == child.resolve() / ".crossby.yml"

@@ -56,16 +56,17 @@ def ensure_yaml_mapping(raw: Any) -> dict[str, Any] | None:
 
 
 def find_config_file(start: Path | None = None) -> Path | None:
-    """Walk up from start (or CWD) looking for .crossby.yml.
+    """Walk up from start (or CWD) looking for a *readable* .crossby.yml.
 
     Returns the path to the config file, or None if not found. A *broken*
     (dangling) ``.crossby.yml`` symlink does not count — ``is_file()``
-    resolves through the link and requires the target to exist — so a caller
-    that walks past one and finds nothing ends up reading a parent config or
-    defaults instead of raising on the unreadable link. Callers that only
-    need to know *where* the project's config identity lives, not read it
-    (e.g. resolving state/scan roots, or an authoring command's write
-    target), want :func:`find_config_entry` instead.
+    resolves through the link and requires the target to exist — so this walks
+    past one to a parent file (or None). This is a "is there a readable config
+    up-tree?" probe (e.g. the interactive menu's Init toggle). Parse discovery
+    (:func:`load_config`) and root resolution (:func:`find_config_entry`)
+    instead stop *at* a broken symlink so the two never diverge; callers that
+    need to know *where* the project's config identity lives, or to actually
+    load it, want those functions, not this one.
     """
     current = (start or Path.cwd()).resolve()
 
@@ -92,9 +93,11 @@ def find_config_entry(start: Path | None = None) -> Path | None:
     (not the — possibly nonexistent — resolved target), so a caller
     combining this with ``write_config_checked`` writes through the link.
 
-    Not for parsing: a broken symlink can't be read, so callers that need
-    the parsed config (``load_config``) must keep using
-    :func:`find_config_file`, which only returns a file that round-trips.
+    :func:`load_config` stops at this same boundary — a broken symlink can't
+    be parsed, so it is surfaced as an *empty* config rooted at this directory
+    rather than being walked past to an ancestor. That keeps parse discovery
+    and root discovery aligned: a subdir run never resolves scenes from an
+    ancestor while rooting state/scan at the broken-symlink dir.
     """
     current = (start or Path.cwd()).resolve()
 
@@ -114,12 +117,33 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     """Find and parse the project config.
 
     Returns a CrossbyConfig with defaults if no config file exists.
+
+    Discovery stops at the SAME boundary as :func:`find_config_entry` (and thus
+    :func:`~crossby.services.scene_resolution.scene_root`): the nearest ancestor
+    holding a ``.crossby.yml`` entry. When that entry is a *broken* (dangling)
+    symlink it can't be parsed, but it is still a legitimate, not-yet-populated
+    config identity — so it is surfaced as an *empty* config rooted at that
+    directory rather than walking past it to an ancestor. That keeps parse
+    discovery from diverging from root discovery: without it a subdir run with a
+    broken-symlink config would resolve scenes from an ancestor config while
+    rooting scene state/scan at the broken-symlink dir (and an authoring command
+    would splice into the ancestor). The empty config's ``config_path`` points
+    at the link, so authoring writes *through* it (``write_config_checked``
+    supports a not-yet-populated symlink).
     """
-    config_path = find_config_file(start)
-    if config_path is None:
+    entry = find_config_entry(start)
+    if entry is None:
         return CrossbyConfig()
 
-    return parse_config_file(config_path)
+    if entry.is_file():
+        return parse_config_file(entry)
+
+    # A broken .crossby.yml symlink: a config identity we must not walk past,
+    # but cannot read. Treat it as an empty config rooted here.
+    return CrossbyConfig(
+        config_path=str(entry),
+        project_root=str(entry.parent),
+    )
 
 
 def parse_config_file(config_path: Path) -> CrossbyConfig:

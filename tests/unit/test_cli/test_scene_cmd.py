@@ -178,6 +178,24 @@ class TestUse:
         assert "Unknown scene" in result.output
         assert "pr-review" in result.output
 
+    def test_ignores_ancestor_scene_through_broken_child_symlink(self, tmp_path: Path) -> None:
+        # The ancestor defines pr-review; the child has only a dangling
+        # .crossby.yml symlink. `scene use` must NOT resolve the ancestor's scene
+        # while rooting state/scan at the child (the shadow-state divergence):
+        # parse discovery stops at the same broken-symlink boundary root
+        # discovery does, so the child's config is simply empty here.
+        _write_config(tmp_path)  # ancestor: pr-review / deploy
+        child = tmp_path / "project"
+        populate_project(child)
+        (child / ".crossby.yml").symlink_to(tmp_path / "nonexistent.yml")
+
+        result = _invoke(["scene", "use", "pr-review"], child)
+
+        assert result.exit_code == 1
+        assert "Unknown scene" in result.output
+        # Nothing applied — no scene state shadowed under the child.
+        assert not (child / SCENE_STATE_PATH).exists()
+
 
 # ---------------------------------------------------------------------------
 # Scene switching — the central correctness requirement

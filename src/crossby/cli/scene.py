@@ -1020,12 +1020,13 @@ def _config_target(config: CrossbyConfig, project_root: Path) -> Path:
 
     Prefer the loaded config's own path so an edit run from a subdirectory
     targets the same file it *read* (``load_config`` walks up), instead of
-    writing a shadow config into the subdirectory. Falls back to
-    ``scene_root(project_root)/.crossby.yml`` when no *parseable* config was
-    found — ``scene_root`` (unlike ``load_config``) still resolves up to a
-    broken ``.crossby.yml`` symlink, so a fresh ``scene create`` run from a
-    subdirectory writes through that link (``write_config_checked`` supports
-    it) instead of shadowing it with a fresh file in the subdirectory.
+    writing a shadow config into the subdirectory. ``load_config`` sets
+    ``config_path`` even for a broken ``.crossby.yml`` symlink (it surfaces one
+    as an empty config rooted at that dir), so a fresh ``scene create`` from a
+    subdirectory writes *through* that link here (``write_config_checked``
+    supports it) rather than shadowing it. Falls back to
+    ``scene_root(project_root)/.crossby.yml`` only when there is no config entry
+    at all, i.e. a brand-new project.
     """
     if config.config_path:
         return Path(config.config_path)
