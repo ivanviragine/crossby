@@ -130,6 +130,18 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     would splice into the ancestor). The empty config's ``config_path`` points
     at the link, so authoring writes *through* it (``write_config_checked``
     supports a not-yet-populated symlink).
+
+    A ``.crossby.yml`` symlink whose target *exists* but is not a regular file
+    (e.g. a link to a directory) is neither: reading it would silently yield an
+    empty config, and an authoring command would later fail deep inside
+    ``write_config_checked`` with an unhandled ``IsADirectoryError`` (its
+    ``read_bytes()`` on the directory target). It is rejected here as a
+    :class:`ConfigError` instead.
+
+    Raises:
+        ConfigError: the discovered ``.crossby.yml`` is a symlink to an existing
+            non-file target (a directory or other non-regular file), or its
+            contents fail to parse (see :func:`parse_config_file`).
     """
     entry = find_config_entry(start)
     if entry is None:
@@ -137,6 +149,17 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
 
     if entry.is_file():
         return parse_config_file(entry)
+
+    # ``find_config_entry`` returns only file-or-symlink entries, so a non-file
+    # entry here is necessarily a symlink. If its target exists it is a non-file
+    # target (a directory or other non-regular file) — not a config we can read
+    # and not a dangling identity — so reject it rather than masking it as an
+    # empty config (``exists()`` follows the link; a dangling symlink is False).
+    if entry.exists():
+        raise ConfigError(
+            f"Config {entry} is a symlink to a non-file target "
+            f"({entry.resolve()}); expected a regular file or a dangling symlink"
+        )
 
     # A broken .crossby.yml symlink: a config identity we must not walk past,
     # but cannot read. Treat it as an empty config rooted here.

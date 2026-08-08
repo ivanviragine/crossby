@@ -518,3 +518,31 @@ class TestBrokenSymlinkBoundary:
         assert config.config_path is not None
         assert Path(config.project_root) == child.resolve()
         assert Path(config.config_path) == child.resolve() / ".crossby.yml"
+
+    def test_symlink_to_directory_is_rejected(self, tmp_path):
+        # A .crossby.yml symlink whose target *exists* but is a directory is not
+        # a readable config and not a dangling identity — it must not be masked
+        # as an empty config (a read command would use empty config, and an
+        # authoring command would later blow up in write_config_checked's
+        # read_bytes() with IsADirectoryError). Reject it up front.
+        target_dir = tmp_path / "somedir"
+        target_dir.mkdir()
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").symlink_to(target_dir)
+
+        with pytest.raises(ConfigError, match="non-file target"):
+            load_config(child)
+
+    def test_symlink_to_directory_does_not_walk_past_to_ancestor(self, tmp_path):
+        # The non-file symlink is still a config identity: it is rejected rather
+        # than silently resolving the ancestor's real config.
+        (tmp_path / ".crossby.yml").write_text("version: 1\nscenes:\n  foo: {}\n")
+        target_dir = tmp_path / "somedir"
+        target_dir.mkdir()
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").symlink_to(target_dir)
+
+        with pytest.raises(ConfigError, match="non-file target"):
+            load_config(child)
