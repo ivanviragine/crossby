@@ -105,18 +105,22 @@ def scene_root(project_root: Path) -> Path:
     must resolve state/scan against ``config.config_path.parent``, not the
     invocation dir. Falls back to *project_root* itself when no config exists.
 
-    Uses :func:`~crossby.config.loader.find_config_file` (no parse) rather than
-    ``load_config``, so callers that must stay robust to a malformed config
-    (``clear``/``status``, which revert from the ledger) can still resolve a
-    root without a parse error getting in the way.
+    Uses :func:`~crossby.config.loader.find_config_entry` (no parse) rather
+    than ``load_config``, so callers that must stay robust to a malformed
+    config (``clear``/``status``, which revert from the ledger) can still
+    resolve a root without a parse error getting in the way. A *broken*
+    ``.crossby.yml`` symlink also counts as found here — it is a legitimate,
+    not-yet-populated config identity (``write_config_checked`` supports
+    writing through it), and treating it as "no config" would silently root
+    a subdirectory invocation at itself instead of the real project root.
 
     NOTE: pre-existing shadow ``.crossby/`` state left by older buggy subdir
     runs is not migrated — this only stops NEW shadows and always operates on
     the config-rooted state.
     """
-    from crossby.config.loader import find_config_file
+    from crossby.config.loader import find_config_entry
 
-    found = find_config_file(project_root)
+    found = find_config_entry(project_root)
     return found.parent if found is not None else project_root
 
 

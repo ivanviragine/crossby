@@ -525,6 +525,31 @@ class TestPathAndSafety:
         assert result.exit_code == 0, result.output
         assert "[abc]" in result.output
 
+    def test_create_from_subdir_with_broken_root_symlink_writes_through_it(
+        self, tmp_path: Path
+    ) -> None:
+        # A broken (dangling) .crossby.yml symlink at the root is a legitimate,
+        # not-yet-populated config identity (write_config_checked supports
+        # writing through it) — root discovery must not walk past it just
+        # because it isn't parseable yet, or a subdir run shadows it instead.
+        root = tmp_path / "project"
+        populate_project(root)
+        real = tmp_path / "real.crossby.yml"
+        (root / ".crossby.yml").symlink_to(real)
+        assert not real.exists()
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+
+        result = _run(["scene", "create", "wiztest", "--skill", "review-*"], sub)
+
+        assert result.exit_code == 0, result.output
+        target = root / ".crossby.yml"
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        assert real.exists()
+        assert "wiztest" in _scenes(root)
+        assert not (sub / ".crossby.yml").exists()
+
     def test_add_writes_through_symlinked_config(self, tmp_path: Path) -> None:
         # Splice writes must go through the link's resolved target so the
         # symlink itself survives (config/safe_write.py write-through fix).

@@ -58,13 +58,49 @@ def ensure_yaml_mapping(raw: Any) -> dict[str, Any] | None:
 def find_config_file(start: Path | None = None) -> Path | None:
     """Walk up from start (or CWD) looking for .crossby.yml.
 
-    Returns the path to the config file, or None if not found.
+    Returns the path to the config file, or None if not found. A *broken*
+    (dangling) ``.crossby.yml`` symlink does not count — ``is_file()``
+    resolves through the link and requires the target to exist — so a caller
+    that walks past one and finds nothing ends up reading a parent config or
+    defaults instead of raising on the unreadable link. Callers that only
+    need to know *where* the project's config identity lives, not read it
+    (e.g. resolving state/scan roots, or an authoring command's write
+    target), want :func:`find_config_entry` instead.
     """
     current = (start or Path.cwd()).resolve()
 
     while True:
         candidate = current / CONFIG_FILENAME
         if candidate.is_file():
+            return candidate
+        parent = current.parent
+        if parent == current:
+            break  # Reached filesystem root
+        current = parent
+
+    return None
+
+
+def find_config_entry(start: Path | None = None) -> Path | None:
+    """Walk up from start (or CWD) looking for a ``.crossby.yml`` entry.
+
+    Like :func:`find_config_file`, but a broken symlink also counts as
+    found — ``write_config_checked`` (``config/safe_write.py``) supports
+    writing through a not-yet-populated symlink, so a broken
+    ``.crossby.yml`` symlink is a legitimate config identity that
+    root-resolution must not walk past. Returns the symlink path itself
+    (not the — possibly nonexistent — resolved target), so a caller
+    combining this with ``write_config_checked`` writes through the link.
+
+    Not for parsing: a broken symlink can't be read, so callers that need
+    the parsed config (``load_config``) must keep using
+    :func:`find_config_file`, which only returns a file that round-trips.
+    """
+    current = (start or Path.cwd()).resolve()
+
+    while True:
+        candidate = current / CONFIG_FILENAME
+        if candidate.is_file() or candidate.is_symlink():
             return candidate
         parent = current.parent
         if parent == current:
