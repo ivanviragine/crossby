@@ -255,7 +255,7 @@ Rules that keep this honest:
 ### Scene authoring (writing `.crossby.yml`)
 
 `crossby init` is not the only thing that writes `.crossby.yml` — `crossby scene
-create`/`add`/`remove`/`delete` do too, and they run repeatedly. Two pieces make
+create`/`add`/`remove`/`delete` do too, and they run repeatedly. Three pieces make
 that safe:
 
 - **One checked-write helper.** `config/safe_write.py:write_config_checked`
@@ -264,7 +264,32 @@ that safe:
   file byte-for-byte on any failure. `init` passes `keep_backup=True` (a
   full-file overwrite deserves a recovery net); the scene commands leave no
   `.bak`. Both callers funnel through it rather than re-implementing the
-  sequence.
+  sequence. When `.crossby.yml` is a symlink (including a broken one — a
+  dotfiles-repo config not yet cloned), the write goes through to the
+  resolved real file so the link itself survives; only the re-parse reads
+  through the original symlinked path. The backup then sits beside the
+  *resolved* target, which can be outside the project root — this is
+  intentional, not containment-checked, matching config writes generally.
+- **Parse and root discovery stop at the same boundary.** `load_config` and
+  `find_config_entry`/`services.scene_resolution.scene_root` both stop at the
+  nearest ancestor holding a `.crossby.yml` *entry* — a broken (dangling)
+  symlink counts. `load_config` surfaces such a link as an *empty* config
+  rooted at that dir (it never walks past it to an ancestor), so a subdir run
+  authors *through* the link and roots scan/state there, instead of splicing
+  into an ancestor config while state roots at the child. That empty-config
+  fallback is restricted to *genuinely dangling* links — the target must be
+  missing (`resolve(strict=True)` raises `FileNotFoundError`). A `.crossby.yml`
+  symlink whose target **exists but is not a regular file** (e.g. a link to a
+  directory), a **symlink loop**, or an otherwise unresolvable target is
+  rejected as a `ConfigError` rather than masked as empty — otherwise a read
+  would silently use defaults and an authoring command would later crash in
+  `write_config_checked` with `IsADirectoryError`. (`exists()` alone can't draw
+  this line: it also returns `False` for loops, over-long names, and permission
+  errors, which would slip through as "dangling".) `crossby init` writes its
+  target directly rather than through `load_config`, so it repeats the same
+  guard before writing. `find_config_file` (which does walk past a broken link
+  to a readable ancestor file) is **only** the interactive menu's "is there a
+  readable config up-tree?" probe — not parse discovery.
 - **Scoped splicing, not re-render.** `scenes/authoring.py` rewrites only the
   byte span of the single `scenes.<name>` entry being edited. The span is found
   with `yaml.compose()` node `start_mark`/`end_mark` offsets — **never**

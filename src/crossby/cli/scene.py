@@ -305,8 +305,11 @@ def list_scenes(
     path: Path = _PATH_OPTION,
 ) -> None:
     """List the scenes defined in ``.crossby.yml`` with per-concern counts."""
+    from crossby.services.scene_resolution import scene_root
+
     project_root = path.resolve()
     config = _load_config_or_exit(project_root)
+    root = scene_root(project_root)
     tool_id = _validate_tool(tool)
 
     if not config.scenes:
@@ -321,7 +324,7 @@ def list_scenes(
 
     installed = AbstractAITool.detect_installed()
     # Scan the project once and reuse it for every scene's resolution.
-    scan = scan_project(project_root, installed)
+    scan = scan_project(root, installed)
 
     table = Table(show_header=True, box=None, padding=(0, 2))
     table.add_column("Scene")
@@ -330,7 +333,7 @@ def list_scenes(
 
     for name in sorted(config.scenes):
         description = config.scenes[name].description or ""
-        counts = _concern_counts(config, name, project_root, scan, tool_id)
+        counts = _concern_counts(config, name, root, scan, tool_id)
         table.add_row(name, description, counts)
     console.out.print(table)
 
@@ -373,12 +376,15 @@ def show_scene(
     path: Path = _PATH_OPTION,
 ) -> None:
     """Show what a scene resolves to per tool, and the mechanism each would use."""
+    from crossby.services.scene_resolution import scene_root
+
     project_root = path.resolve()
     config = _load_config_or_exit(project_root)
+    root = scene_root(project_root)
     tool_id = _validate_tool(tool)
     installed = _installed_or_exit()
 
-    resolved = _resolve(config, name, project_root, installed, tool_id=tool_id)
+    resolved = _resolve(config, name, root, installed, tool_id=tool_id)
 
     from rich.table import Table
 
@@ -432,9 +438,11 @@ def use_scene(
         load_scene_state,
         save_scene_state,
     )
+    from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
     config = _load_config_or_exit(project_root)
+    root = scene_root(project_root)
     tool_id = _validate_tool(tool)
     installed = _installed_or_exit()
     scope = _scope_for(tool_id, installed)
@@ -445,9 +453,9 @@ def use_scene(
 
     # Resolve the full union (every tool) so the disable sets stay anchored on the
     # real inventory; the apply is narrowed to `scope` via the tools= argument.
-    resolved = _resolve(config, name, project_root, installed)
+    resolved = _resolve(config, name, root, installed)
 
-    loaded = load_scene_state(project_root)
+    loaded = load_scene_state(root)
     if loaded.warning:
         console.warn(loaded.warning)
     active = loaded.state
@@ -456,11 +464,11 @@ def use_scene(
     # apply, a switch, and --plan uniformly. Reverting (or previewing a revert)
     # from an empty-loaded ledger is misleading, and the engine's finally:
     # save_ledger would overwrite the corrupt bytes with an empty valid ledger.
-    _refuse_if_ledger_corrupt(project_root)
+    _refuse_if_ledger_corrupt(root)
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = apply_scene(resolved, project_root, dry_run=True, force=force, tools=scope)
+        results = apply_scene(resolved, root, dry_run=True, force=force, tools=scope)
         _display_results(results)
         console.info("(--plan) no changes written.")
         if _has_error(results):
@@ -502,36 +510,36 @@ def use_scene(
         # longer installed — otherwise its owned keys stay applied but unrecorded.
         revert = recorded if tool_id is None else [t for t in recorded if str(t) in scope_strs]
         if revert:
-            drifted = detect_drift(project_root, active, tools=[str(t) for t in revert])
+            drifted = detect_drift(root, active, tools=[str(t) for t in revert])
             if drifted and not force:
                 _report_drift_refusal(active.scene, drifted, verb="switch from")
                 raise typer.Exit(1)
-            if not _revert_tools(project_root, revert):
+            if not _revert_tools(root, revert):
                 console.error(f"Could not revert {active.scene!r} — aborting; state left intact.")
                 raise typer.Exit(1)
 
     scene = _get_scene_or_exit(config, name)
     try:
-        results = apply_scene(resolved, project_root, force=force, tools=scope)
+        results = apply_scene(resolved, root, force=force, tools=scope)
     except Exception as exc:
         # apply_scene persists provenance in a finally, so anything already
         # written is revertible via the ledger. Record a minimal recovery state
         # so `clear` knows a scene is active and reverts those tools.
-        _save_recovery_state(project_root, name, scene, scope)
+        _save_recovery_state(root, name, scene, scope)
         console.error(f"Scene apply failed: {exc}")
         console.hint("'crossby scene clear' can revert changes crossby recorded.")
         raise typer.Exit(1) from exc
     _display_results(results)
     _warn_removed_hooks_permissions(results)
 
-    state = _build_state(project_root, name, scene, scope, results)
+    state = _build_state(root, name, scene, scope, results)
     # A same-scene re-apply keeps records for tools outside this scope.
     if active is not None and active.scene == name:
         merged = dict(active.tools)
         merged.update(state.tools)
         state.tools = merged
     try:
-        save_scene_state(project_root, state)
+        save_scene_state(root, state)
     except OSError as exc:
         # The scene is applied (the ledger has provenance) but its state could
         # not be recorded — surface it cleanly so the user can re-run rather than
@@ -702,11 +710,13 @@ def clear_active(
         load_scene_state,
         save_scene_state,
     )
+    from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
+    root = scene_root(project_root)
     tool_id = _validate_tool(tool)
 
-    loaded = load_scene_state(project_root)
+    loaded = load_scene_state(root)
     if loaded.warning:
         console.warn(loaded.warning)
     active = loaded.state
@@ -732,11 +742,11 @@ def clear_active(
     # clear: an empty-loaded ledger reverts nothing yet the engine's finally:
     # save_ledger would overwrite the corrupt bytes, and the CLI would then delete
     # scene-state.json — leaving settings applied with no recovery record.
-    _refuse_if_ledger_corrupt(project_root)
+    _refuse_if_ledger_corrupt(root)
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = clear_scene(project_root, dry_run=True, tools=scope)
+        results = clear_scene(root, dry_run=True, tools=scope)
         _display_results(results)
         console.info("(--plan) no changes written.")
         if _has_error(results):
@@ -745,7 +755,7 @@ def clear_active(
 
     # Drift is scoped to the tools being reverted, so an unrelated tool's drift
     # neither blocks nor is reported by a --tool clear.
-    drifted = detect_drift(project_root, active, tools=[str(t) for t in scope])
+    drifted = detect_drift(root, active, tools=[str(t) for t in scope])
     if drifted and not force:
         _report_drift_refusal(active.scene, drifted, verb="clear")
         raise typer.Exit(1)
@@ -758,7 +768,7 @@ def clear_active(
         tool_id = new_tool_id
         scope = _clear_scope(tool_id, recorded)
 
-    results = _call_engine_or_exit(clear_scene, project_root, tools=scope)
+    results = _call_engine_or_exit(clear_scene, root, tools=scope)
     _display_results(results)
 
     # A failed clear leaves the state untouched so the revert can be retried —
@@ -777,14 +787,14 @@ def clear_active(
     # on unlink would otherwise escape).
     try:
         if tool_id is None:
-            clear_scene_state(project_root)
+            clear_scene_state(root)
         else:
             for cleared in scope:
                 active.tools.pop(str(cleared), None)
             if active.tools:
-                save_scene_state(project_root, active)
+                save_scene_state(root, active)
             else:
-                clear_scene_state(project_root)
+                clear_scene_state(root)
     except OSError as exc:
         console.error(f"Scene cleared but its state could not be updated: {exc}")
         console.hint("Re-run 'crossby scene clear' once the path is writable.")
@@ -814,11 +824,13 @@ def scene_status(
     """Report the active scene, its per-tool mechanism, and any drift."""
     from crossby.config.loader import ConfigError, load_config
     from crossby.scenes.state import detect_drift, load_scene_state
+    from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
+    root = scene_root(project_root)
     tool_id = _validate_tool(tool)
 
-    loaded = load_scene_state(project_root)
+    loaded = load_scene_state(root)
     if loaded.warning:
         console.warn(loaded.warning)
     active = loaded.state
@@ -845,7 +857,7 @@ def scene_status(
 
     # With --tool, report drift only for that tool.
     drift_tools = None if tool_id is None else [str(tool_id)]
-    drifted = detect_drift(project_root, active, tools=drift_tools)
+    drifted = detect_drift(root, active, tools=drift_tools)
     if drifted:
         console.warn("Drift detected — scene-managed files changed since apply:")
         for rel in drifted:
@@ -1008,10 +1020,19 @@ def _config_target(config: CrossbyConfig, project_root: Path) -> Path:
 
     Prefer the loaded config's own path so an edit run from a subdirectory
     targets the same file it *read* (``load_config`` walks up), instead of
-    writing a shadow config into the subdirectory. Falls back to
-    ``project_root/.crossby.yml`` only when no config was found (a fresh create).
+    writing a shadow config into the subdirectory. ``load_config`` sets
+    ``config_path`` even for a broken ``.crossby.yml`` symlink (it surfaces one
+    as an empty config rooted at that dir), so a fresh ``scene create`` from a
+    subdirectory writes *through* that link here (``write_config_checked``
+    supports it) rather than shadowing it. Falls back to
+    ``scene_root(project_root)/.crossby.yml`` only when there is no config entry
+    at all, i.e. a brand-new project.
     """
-    return Path(config.config_path) if config.config_path else project_root / ".crossby.yml"
+    if config.config_path:
+        return Path(config.config_path)
+    from crossby.services.scene_resolution import scene_root
+
+    return scene_root(project_root) / ".crossby.yml"
 
 
 def _write_scene_entry(target: Path, name: str, scene: SceneConfig, *, print_: bool) -> None:
@@ -1197,9 +1218,11 @@ def delete_scene(
     from crossby.config.safe_write import ConfigWriteError, write_config_checked
     from crossby.scenes.authoring import SceneAuthoringError, remove_scene_text
     from crossby.scenes.state import load_scene_state
+    from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
     config = _load_config_or_exit(project_root)
+    root = scene_root(project_root)
     if name not in config.scenes:
         console.error(f"Unknown scene: {name!r}")
         available = sorted(config.scenes)
@@ -1207,7 +1230,7 @@ def delete_scene(
             console.hint(f"Available scenes: {', '.join(available)}")
         raise typer.Exit(1)
 
-    active = load_scene_state(project_root).state
+    active = load_scene_state(root).state
     is_active = active is not None and active.scene == name
     if is_active and not force:
         console.error(f"Scene {name!r} is currently active; refusing to delete it.")
@@ -1351,13 +1374,22 @@ def create_scene(
     TTY it builds the scene from the selector flags alone and never prompts — and
     refuses (non-zero) if no selector flag was given, rather than silently
     selecting every item.
+
+    With ``--print`` on a TTY, the entire interactive phase (name prompt through
+    the wizard) runs with stdout redirected to stderr — questionary/prompt-toolkit
+    resolves ``sys.stdout`` at call time regardless of what ``is_tty()`` (which
+    gates on stdin) reports, so a piped stdout would otherwise get interactive
+    menus interleaved with the final YAML. Only the final rendered block, printed
+    after this function returns to its caller, reaches real stdout.
     """
     from crossby.models.config import SceneConfig
     from crossby.scenes.authoring import add_selectors
+    from crossby.services.scene_resolution import scene_root
     from crossby.ui import prompts
 
     project_root = path.resolve()
     config = _load_config_or_exit(project_root)
+    root = scene_root(project_root)
     seed_edits = _collect_selector_edits(
         skill=skill,
         exclude_skill=exclude_skill,
@@ -1371,25 +1403,26 @@ def create_scene(
         exclude_permission=exclude_permission,
     )
 
-    if name is None:
-        if not prompts.is_tty():
+    if prompts.is_tty():
+        import contextlib
+        import sys
+
+        redirect = contextlib.redirect_stdout(sys.stderr) if print_ else contextlib.nullcontext()
+        with redirect:
+            if name is None:
+                name = _prompt_new_scene_name(config)
+                if name is None:
+                    raise typer.Exit(1)
+            _refuse_if_scene_exists(config, name)
+            scene = _run_create_wizard(
+                root, config, seed_edits, description, extends, profile, print_=print_
+            )
+    else:
+        if name is None:
             console.error("A scene name is required.")
             console.hint("Usage: crossby scene create <name> [--skill ... --exclude-mcp ...].")
             raise typer.Exit(1)
-        name = _prompt_new_scene_name(config)
-        if name is None:
-            raise typer.Exit(1)
-
-    if name in config.scenes:
-        console.error(f"Scene {name!r} already exists.")
-        console.hint("Use 'crossby scene add' to modify it, or choose another name.")
-        raise typer.Exit(1)
-
-    if prompts.is_tty():
-        scene = _run_create_wizard(
-            project_root, config, seed_edits, description, extends, profile, print_=print_
-        )
-    else:
+        _refuse_if_scene_exists(config, name)
         # Non-TTY guard sits here, before any prompt could run: require explicit
         # selectors rather than fall through to multi_select's "select everything".
         if not seed_edits:
@@ -1406,6 +1439,13 @@ def create_scene(
         _report_moves(moves, print_=print_)
 
     _write_scene_entry(_config_target(config, project_root), name, scene, print_=print_)
+
+
+def _refuse_if_scene_exists(config: CrossbyConfig, name: str) -> None:
+    if name in config.scenes:
+        console.error(f"Scene {name!r} already exists.")
+        console.hint("Use 'crossby scene add' to modify it, or choose another name.")
+        raise typer.Exit(1)
 
 
 def _prompt_new_scene_name(config: CrossbyConfig) -> str | None:
@@ -1475,7 +1515,7 @@ def _render_names(value: object) -> str | None:
 
 
 def _run_create_wizard(
-    project_root: Path,
+    root: Path,
     config: CrossbyConfig,
     seed_edits: list[SelectorEdit],
     description: str | None,
@@ -1488,7 +1528,9 @@ def _run_create_wizard(
 
     Only ever called on a TTY (guarded by the caller). Any selector flags already
     given are folded in on top of the interactive picks, so ``create --exclude-mcp
-    linear`` still works interactively.
+    linear`` still works interactively. *root* is the config-rooted scene root
+    (see :func:`crossby.services.scene_resolution.scene_root`), not necessarily
+    the invocation directory.
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.models.config import SCENE_CONCERNS, SceneSelector
@@ -1498,8 +1540,8 @@ def _run_create_wizard(
     from crossby.ui import prompts
 
     installed = AbstractAITool.detect_installed()
-    scan = scan_project(project_root, installed)
-    universe = concern_universe(scan, project_root)
+    scan = scan_project(root, installed)
+    universe = concern_universe(scan, root)
 
     selectors: dict[str, SceneSelector | None] = {}
     for concern in SCENE_CONCERNS:

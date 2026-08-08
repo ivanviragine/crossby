@@ -54,6 +54,31 @@ def init(
     project_root = path.resolve()
     target = project_root / ".crossby.yml"
 
+    # ``init`` writes ``target`` directly (it never goes through ``load_config``,
+    # which now rejects such a config for the read/scene paths). A ``.crossby.yml``
+    # symlinked to an existing non-file target — or a loop — would otherwise crash
+    # later in ``write_config_checked``'s ``read_bytes()`` on the resolved target
+    # with an uncaught ``IsADirectoryError`` (or ``OSError``). Refuse cleanly here.
+    # A dangling symlink is fine: the write goes *through* to its not-yet-existing
+    # target (``write_config_checked`` supports that).
+    if target.is_symlink():
+        try:
+            resolved = target.resolve(strict=True)
+        except FileNotFoundError:
+            resolved = None  # dangling — intended write-through to the target
+        except (OSError, RuntimeError) as exc:
+            # Symlink loops raise OSError(ELOOP) on 3.13+ but RuntimeError on
+            # 3.11/3.12; both (and permission/over-long-name OSErrors) mean the
+            # target is unusable.
+            console.error(f"Config {target} is a symlink that cannot be resolved: {exc}")
+            raise typer.Exit(1) from exc
+        if resolved is not None and not resolved.is_file():
+            console.error(
+                f"Config {target} is a symlink to a non-file target ({resolved}); "
+                "refusing to overwrite. Repoint or remove the symlink first."
+            )
+            raise typer.Exit(1)
+
     if target.exists() and not force:
         console.error(
             f"Refusing to overwrite existing config: {target}. Pass --force to replace it."
@@ -95,7 +120,13 @@ def init(
         raise typer.Exit(1) from exc
 
     if backup is not None:
-        console.info(f"Backed up existing config to {backup.name}")
+        # backup sits beside the *resolved* target, so for a symlinked config
+        # it can land outside the project root — show the full path, not just
+        # the name, so the user can find it. Escaped: a path component could
+        # otherwise be misread as Rich markup.
+        from rich.markup import escape
+
+        console.info(f"Backed up existing config to {escape(str(backup))}")
     console.success(f"Wrote {target}")
 
     if install_skill:

@@ -156,6 +156,68 @@ class TestInitExistingFileGuard:
         assert scene.skills is not None
         assert scene.skills.include == ["review-*"]
 
+    def test_force_writes_through_symlinked_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --force keeps a backup; for a symlinked target it must land beside
+        # the resolved real file, not the symlink, and the link must survive.
+        project = tmp_path / "project"
+        project.mkdir()
+        real = tmp_path / "real.crossby.yml"
+        real.write_text("version: 1\nai:\n  default_tool: cursor\n", encoding="utf-8")
+        target = project / ".crossby.yml"
+        target.symlink_to(real)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(project), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        parsed = parse_config_file(target)
+        assert parsed.ai.default_tool == "claude"
+        backups = list(tmp_path.glob("real.crossby.yml.bak*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == (
+            "version: 1\nai:\n  default_tool: cursor\n"
+        )
+
+    def test_force_on_symlink_to_directory_errors_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A .crossby.yml symlinked to an existing directory must be refused with
+        # a clean CLI error, not crash inside write_config_checked's read_bytes()
+        # on the directory target (IsADirectoryError). init bypasses load_config,
+        # so it validates the symlink target itself.
+        project = tmp_path / "project"
+        project.mkdir()
+        some_dir = tmp_path / "some_dir"
+        some_dir.mkdir()
+        target = project / ".crossby.yml"
+        target.symlink_to(some_dir)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(project), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "non-file target" in result.output
+        # The link is left untouched — nothing written, no backup created.
+        assert target.is_symlink()
+        assert target.resolve() == some_dir.resolve()
+        assert list(tmp_path.rglob("*.bak*")) == []
+
 
 class TestRenderInitYaml:
     def test_empty_answers_round_trip(self, tmp_path: Path) -> None:
