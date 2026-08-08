@@ -885,3 +885,121 @@ class TestClearFinalizeOSError:
         assert result.exit_code == 1
         assert "could not be updated" in result.output
         assert not isinstance(result.exception, PermissionError)
+
+
+# ---------------------------------------------------------------------------
+# Subdirectory invocation — state/scan must root at the config's dir, not the
+# invocation dir (issue #121, Part 2).
+# ---------------------------------------------------------------------------
+
+
+def _subdir(root: Path) -> Path:
+    sub = root / "packages" / "app"
+    sub.mkdir(parents=True)
+    return sub
+
+
+class TestSubdirRoot:
+    def test_status_from_subdir_reports_active_scene(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "status"], sub)
+        assert result.exit_code == 0, result.output
+        assert "pr-review" in result.output
+        assert not (sub / ".crossby").exists()
+
+    def test_delete_active_from_subdir_refused_without_force(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "delete", "pr-review"], sub)
+        assert result.exit_code == 1
+        assert "currently active" in result.output
+        assert not (sub / ".crossby").exists()
+
+    def test_clear_from_subdir_reverts_root_and_removes_root_state(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "clear"], sub)
+        assert result.exit_code == 0, result.output
+        assert "skillOverrides" not in _settings(root)
+        assert not (root / SCENE_STATE_PATH).exists()
+        assert not (sub / ".crossby").exists()
+
+    def test_switch_from_subdir_sees_root_rooted_active_scene(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "use", "deploy"], sub)
+        assert result.exit_code == 0, result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["scene"] == "deploy"
+        assert not (sub / ".crossby").exists()
+
+    def test_scoped_reapply_from_subdir_sees_root_rooted_active_scene(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "use", "pr-review", "--tool", "cursor"], sub)
+        assert result.exit_code == 0, result.output
+        assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+        assert not (sub / ".crossby").exists()
+
+    def test_status_from_subdir_with_malformed_config_still_resolves_root(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        # Corrupt the config after applying — status must still resolve the
+        # root and report the active scene rather than crashing.
+        _write_config(root, "version: 1\nscenes: [unclosed\n")
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "status"], sub)
+        assert result.exit_code == 0, result.output
+        assert "pr-review" in result.output
+
+    def test_clear_from_subdir_with_malformed_config_still_resolves_root(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        _write_config(root, "version: 1\nscenes: [unclosed\n")
+        sub = _subdir(root)
+
+        result = _invoke(["scene", "clear"], sub)
+        assert result.exit_code == 0, result.output
+        assert not (root / SCENE_STATE_PATH).exists()
+
+
+class TestSubdirScanParity:
+    """``list``/``show`` from a subdir must scan the same root as from root —
+    otherwise the displayed per-concern counts silently drift from what
+    ``use``/``create`` actually resolve."""
+
+    def test_list_from_subdir_matches_root(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        sub = _subdir(root)
+
+        from_root = _invoke(["scene", "list"], root)
+        from_sub = _invoke(["scene", "list"], sub)
+        assert from_root.exit_code == 0, from_root.output
+        assert from_sub.exit_code == 0, from_sub.output
+        assert from_root.output == from_sub.output
+
+    def test_show_from_subdir_matches_root(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        sub = _subdir(root)
+
+        from_root = _invoke(["scene", "show", "pr-review"], root)
+        from_sub = _invoke(["scene", "show", "pr-review"], sub)
+        assert from_root.exit_code == 0, from_root.output
+        assert from_sub.exit_code == 0, from_sub.output
+        assert from_root.output == from_sub.output

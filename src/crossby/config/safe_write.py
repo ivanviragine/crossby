@@ -63,10 +63,22 @@ def write_config_checked(
     undefined-parent errors surface only in
     :meth:`crossby.models.config.CrossbyConfig.get_scene`.
 
+    When *target* is a symlink, the write goes through to the resolved real
+    file so the link itself survives — ``os.replace`` inside
+    :func:`~crossby.config.json_utils.atomic_write_text` would otherwise
+    replace the symlink with a regular file. Backup, atomic write, and
+    rollback all operate on the resolved path; only the re-parse reads through
+    the original *target* (the real read path). A broken symlink (points
+    nowhere yet) is resolved to its intended, not-yet-existing target: no
+    backup is taken, and on failure the newly created file is removed rather
+    than restored, leaving the link exactly as broken as it started.
+
     Returns:
         On success, the retained backup path when *keep_backup* is set and a
         prior file existed, else ``None``. When *keep_backup* is false the
-        backup is removed on success.
+        backup is removed on success. Note the backup sits beside the
+        *resolved* target, so for a symlinked config it can land outside the
+        project root.
 
     Raises:
         ConfigWriteError: the rendered text did not parse or failed *validate*;
@@ -76,22 +88,24 @@ def write_config_checked(
     from crossby.config.loader import parse_config_file
     from crossby.sync.file_utils import backup_path
 
+    write_target = target.resolve() if target.is_symlink() else target
+
     backup: Path | None = None
-    if target.exists():
-        backup = backup_path(target)
-        backup.write_bytes(target.read_bytes())
+    if write_target.exists():
+        backup = backup_path(write_target)
+        backup.write_bytes(write_target.read_bytes())
 
     try:
-        atomic_write_text(target, rendered)
+        atomic_write_text(write_target, rendered)
         config = parse_config_file(target)
         if validate is not None:
             validate(config)
     except Exception as exc:
         if backup is not None:
-            target.write_bytes(backup.read_bytes())
+            write_target.write_bytes(backup.read_bytes())
             backup.unlink(missing_ok=True)
         else:
-            target.unlink(missing_ok=True)
+            write_target.unlink(missing_ok=True)
         raise ConfigWriteError(exc, restored=backup is not None) from exc
 
     if backup is not None and keep_backup:

@@ -156,6 +156,38 @@ class TestInitExistingFileGuard:
         assert scene.skills is not None
         assert scene.skills.include == ["review-*"]
 
+    def test_force_writes_through_symlinked_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # --force keeps a backup; for a symlinked target it must land beside
+        # the resolved real file, not the symlink, and the link must survive.
+        project = tmp_path / "project"
+        project.mkdir()
+        real = tmp_path / "real.crossby.yml"
+        real.write_text("version: 1\nai:\n  default_tool: cursor\n", encoding="utf-8")
+        target = project / ".crossby.yml"
+        target.symlink_to(real)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(project), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        parsed = parse_config_file(target)
+        assert parsed.ai.default_tool == "claude"
+        backups = list(tmp_path.glob("real.crossby.yml.bak*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == (
+            "version: 1\nai:\n  default_tool: cursor\n"
+        )
+
 
 class TestRenderInitYaml:
     def test_empty_answers_round_trip(self, tmp_path: Path) -> None:

@@ -95,7 +95,10 @@ def init(
         raise typer.Exit(1) from exc
 
     if backup is not None:
-        console.info(f"Backed up existing config to {backup.name}")
+        # backup sits beside the *resolved* target, so for a symlinked config
+        # it can land outside the project root — show the full path, not just
+        # the name, so the user can find it.
+        console.info(f"Backed up existing config to {backup}")
     console.success(f"Wrote {target}")
 
     if install_skill:

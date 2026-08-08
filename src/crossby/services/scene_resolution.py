@@ -95,6 +95,31 @@ class _RawGroup:
     names: tuple[str, ...]
 
 
+def scene_root(project_root: Path) -> Path:
+    """The dir the scene subsystem operates in — the found config's parent.
+
+    Scene state (``.crossby/scene-state.json``), the ``owned.json`` ledger, the
+    projection tree, and the project scan must all root at the SAME directory
+    the config loaded from. :func:`~crossby.config.loader.load_config` walks
+    *up* to a parent ``.crossby.yml``, so a command run from a subdirectory
+    must resolve state/scan against ``config.config_path.parent``, not the
+    invocation dir. Falls back to *project_root* itself when no config exists.
+
+    Uses :func:`~crossby.config.loader.find_config_file` (no parse) rather than
+    ``load_config``, so callers that must stay robust to a malformed config
+    (``clear``/``status``, which revert from the ledger) can still resolve a
+    root without a parse error getting in the way.
+
+    NOTE: pre-existing shadow ``.crossby/`` state left by older buggy subdir
+    runs is not migrated — this only stops NEW shadows and always operates on
+    the config-rooted state.
+    """
+    from crossby.config.loader import find_config_file
+
+    found = find_config_file(project_root)
+    return found.parent if found is not None else project_root
+
+
 def resolve_scene(
     scene: SceneConfig,
     scan: ProjectScan,
