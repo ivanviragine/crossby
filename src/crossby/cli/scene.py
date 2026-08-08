@@ -1035,6 +1035,28 @@ def _config_target(config: CrossbyConfig, project_root: Path) -> Path:
     return scene_root(project_root) / ".crossby.yml"
 
 
+def _preflight_config_target(target: Path, *, action: str) -> None:
+    """Refuse a cyclic/non-file config *target* before an authoring read.
+
+    Authoring commands read *target* with ``read_bytes()`` before handing it to
+    :func:`~crossby.config.safe_write.write_config_checked`. ``load_config``
+    guards symlinked non-file/loop targets, but a *plain-directory*
+    ``.crossby.yml`` is neither a file nor a symlink, so ``find_config_entry``
+    walks *past* it rather than rejecting it — the read would then crash with an
+    uncaught ``IsADirectoryError``. Run the shared write preflight up front so
+    the command exits cleanly with the same message ``write_config_checked``
+    would raise. A regular file, a dangling symlink, and a not-yet-existing path
+    all pass through untouched.
+    """
+    from crossby.config.safe_write import ConfigWriteError, resolve_config_target
+
+    try:
+        resolve_config_target(target)
+    except ConfigWriteError as exc:
+        console.error(f"{action}: {exc.original}")
+        raise typer.Exit(1) from exc
+
+
 def _write_scene_entry(target: Path, name: str, scene: SceneConfig, *, print_: bool) -> None:
     """Splice *scene* into *target* (or print it), reporting the outcome.
 
@@ -1060,6 +1082,7 @@ def _write_scene_entry(target: Path, name: str, scene: SceneConfig, *, print_: b
         )
         return
 
+    _preflight_config_target(target, action=f"Refusing to write scene {name!r}")
     # read_bytes().decode() rather than read_text() so a CRLF file's line endings
     # are not silently normalised to LF, which would rewrite every line.
     base = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
@@ -1260,6 +1283,7 @@ def delete_scene(
             )
 
     target = _config_target(config, project_root)
+    _preflight_config_target(target, action=f"Could not delete scene {name!r}")
     text = target.read_bytes().decode("utf-8")
     try:
         new_text, found = remove_scene_text(text, name)
@@ -1322,6 +1346,7 @@ def install_starters(
             )
         return
 
+    _preflight_config_target(target, action="Could not install starters")
     text = target.read_bytes().decode("utf-8") if target.exists() else "version: 1\n"
     try:
         for name in installed:

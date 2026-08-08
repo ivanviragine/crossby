@@ -344,6 +344,42 @@ class TestInstallStarters:
         assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
 
 
+class TestDirectDirectoryConfigTarget:
+    """A plain-directory ``.crossby.yml`` is not returned by ``find_config_entry``
+    (neither file nor symlink), so ``load_config`` walks past it rather than
+    rejecting it — authoring commands then read the target directly. The shared
+    preflight must refuse it cleanly instead of crashing with a raw
+    ``IsADirectoryError`` in ``read_bytes()``.
+    """
+
+    def test_create_refuses_directory_target(self, tmp_path: Path) -> None:
+        populate_project(tmp_path)
+        target = tmp_path / ".crossby.yml"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+
+        result = _run(["scene", "create", "foo", "--skill", "x"], tmp_path)
+
+        assert result.exit_code == 1, result.output
+        assert "non-regular-file" in result.output
+        # No crash, directory untouched.
+        assert "IsADirectoryError" not in result.output
+        assert target.is_dir()
+        assert list(target.iterdir()) == [target / "keep.txt"]
+
+    def test_install_starters_refuses_directory_target(self, tmp_path: Path) -> None:
+        populate_project(tmp_path)
+        target = tmp_path / ".crossby.yml"
+        target.mkdir()
+
+        result = _run(["scene", "install-starters"], tmp_path)
+
+        assert result.exit_code == 1, result.output
+        assert "non-regular-file" in result.output
+        assert "IsADirectoryError" not in result.output
+        assert target.is_dir()
+
+
 # ---------------------------------------------------------------------------
 # wizard (interactive) — patched prompts
 # ---------------------------------------------------------------------------
