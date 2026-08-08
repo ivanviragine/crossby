@@ -18,12 +18,14 @@ from crossby.ai_tools.codex import CodexAdapter
 from crossby.ai_tools.copilot import CopilotAdapter
 from crossby.ai_tools.cursor import CursorAdapter
 from crossby.ai_tools.opencode import OpenCodeAdapter
+from crossby.config.json_utils import PathContainmentError
 from crossby.models.ai import AIToolID
 from crossby.models.config import MCPServerConfig
 from crossby.scenes import launch as scene_launch
 from crossby.scenes.launch import SceneLaunchContext
 from crossby.services.scene_resolution import ResolvedGroup, ResolvedScene
 from crossby.sync.base import SyncData
+from crossby.sync.file_utils import MANAGED_MARKER_NAME
 
 # ---------------------------------------------------------------------------
 # Fixtures / builders
@@ -246,6 +248,27 @@ class TestCodexSceneLaunch:
         assert not owned.exists(), "must prune the crossby-owned stale profile"
         assert str(owned) in pruned
 
+    def test_non_utf8_profile_does_not_abort_pruning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-UTF-8 profile matching the naming pattern raises UnicodeDecodeError
+        # (a ValueError, not OSError) when read for the ownership test. Pruning
+        # must skip it — never raise — and leave it untouched.
+        home = tmp_path / "codex_home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        slug = scene_launch.project_slug(tmp_path)
+
+        binary = home / f"crossby-{slug}-legacy.config.toml"
+        binary.write_bytes(b"\xff\xfe not valid utf-8\n")
+        owned = scene_launch.write_codex_profile(tmp_path, "gone", {"linear"})
+
+        pruned = scene_launch.prune_stale_artifacts(tmp_path, defined_scenes=set())
+
+        assert binary.exists(), "an unverifiable (non-UTF-8) profile is never deleted"
+        assert not owned.exists(), "the readable crossby-owned stale profile is still pruned"
+        assert str(owned) in pruned
+
     def test_write_refuses_to_clobber_handwritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -360,20 +383,29 @@ class TestCursorSceneLaunch:
 
 
 class TestOpenCodeSceneLaunch:
-    def test_opencode_config_env(self, tmp_path: Path) -> None:
+    """OpenCode has no session-scoped lever (mirrors the Cursor de-scope).
+
+    ``OPENCODE_CONFIG`` loads *between* OpenCode's global and project config
+    layers, so a project ``opencode.json`` can re-enable a server the scene
+    deselected — the isolation a scene promises can't be guaranteed. crossby
+    therefore drops the launch-time MCP lever and falls back to persistent
+    ``scene use`` activation.
+    """
+
+    def test_no_session_lever(self) -> None:
+        adapter = OpenCodeAdapter()
+        assert adapter.capabilities().supports_scene_launch is False
+        assert adapter.capabilities().scene_config_dir_env is None
+        assert adapter.scene_launch_ready() is False
+        assert adapter.scene_launch_concerns() == set()
+
+    def test_scene_launch_args_is_noop(self, tmp_path: Path) -> None:
+        # Even called directly, OpenCode renders nothing and sets no env var.
         ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
         result = OpenCodeAdapter().scene_launch_args(ctx)
-        env = dict(result.env)
-        assert "OPENCODE_CONFIG" in env
-        cfg = Path(env["OPENCODE_CONFIG"])
-        assert cfg == tmp_path / ".crossby" / "scene" / "pr-review" / "launch" / "opencode.json"
-        body = json.loads(cfg.read_text())
-        # Every discovered server is stated explicitly: selected enabled, the
-        # rest enabled=false (rather than omitted) so deselection is authoritative.
-        assert set(body["mcp"]) == {"github", "linear"}
-        assert body["mcp"]["github"]["type"] == "local"
-        assert body["mcp"]["github"]["enabled"] is True
-        assert body["mcp"]["linear"]["enabled"] is False
+        assert result.args == ()
+        assert dict(result.env) == {}
+        assert not (tmp_path / ".crossby").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -394,13 +426,22 @@ class TestLaunchEnvPlumbing:
         monkeypatch.setattr("crossby.utils.process.run_with_transcript", fake_run)
         monkeypatch.setenv("PATH_MARKER", "present")
 
+        # No adapter emits scene env after the OpenCode de-scope, so synthesize a
+        # scene contributing an env var to keep the merge-over-os.environ path
+        # covered: stub scene_launch_args to return SceneLaunchArgs(env=...).
         ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
-        OpenCodeAdapter().launch(working_dir=tmp_path, scene=ctx)
+        adapter = OpenCodeAdapter()
+        monkeypatch.setattr(
+            adapter,
+            "scene_launch_args",
+            lambda _scene: scene_launch.SceneLaunchArgs(env={"SCENE_MARKER": "on"}),
+        )
+        adapter.launch(working_dir=tmp_path, scene=ctx)
 
         env = captured["env"]
         assert env is not None
         # Scene addition present…
-        assert "OPENCODE_CONFIG" in env
+        assert env["SCENE_MARKER"] == "on"
         # …and the inherited environment is preserved (merged over os.environ).
         assert env["PATH_MARKER"] == "present"
 
@@ -460,6 +501,205 @@ class TestLocalTreePruning:
         assert any("gone" in p for p in pruned)
         assert handmade.exists(), "an unmarked hand-made tree is never deleted"
         assert (handmade / "notes.txt").exists()
+
+
+class TestArtifactContainment:
+    """write_artifact refuses to write through a symlinked path component.
+
+    The scene *name* is validated separately; this guards the orthogonal escape
+    route — a symlinked ``.crossby`` / ``scene`` / ``<name>`` / ``launch`` dir,
+    or a pre-existing symlinked artefact / marker leaf.
+    """
+
+    @pytest.mark.parametrize("component", [".crossby", "scene", "name", "launch", "leaf", "marker"])
+    def test_symlinked_component_rejected_and_writes_nothing_outside(
+        self, tmp_path: Path, component: str
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        scene_dir = project / ".crossby" / "scene"
+        name_dir = scene_dir / "sc"
+        launch_dir = name_dir / "launch"
+
+        if component == ".crossby":
+            (project / ".crossby").symlink_to(outside, target_is_directory=True)
+        elif component == "scene":
+            (project / ".crossby").mkdir()
+            scene_dir.symlink_to(outside, target_is_directory=True)
+        elif component == "name":
+            scene_dir.mkdir(parents=True)
+            name_dir.symlink_to(outside, target_is_directory=True)
+        elif component == "launch":
+            name_dir.mkdir(parents=True)
+            launch_dir.symlink_to(outside, target_is_directory=True)
+        elif component == "leaf":
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "mcp.json").symlink_to(outside / "escaped.json")
+        elif component == "marker":
+            launch_dir.mkdir(parents=True)
+            (launch_dir / MANAGED_MARKER_NAME).symlink_to(outside / "escaped-marker")
+
+        ctx = _context(project, name="sc", all_mcp=("a", "b"), selected_mcp=("a",))
+        with pytest.raises(PathContainmentError):
+            ctx.write_artifact("mcp.json", "{}")
+
+        # Nothing escaped into the symlink target.
+        assert list(outside.iterdir()) == []
+
+    def test_symlinked_ancestor_writes_normally(self, tmp_path: Path) -> None:
+        """A project reached through a symlinked *ancestor* still writes.
+
+        Only components strictly below ``project_root`` are checked, and both
+        sides are resolved for the containment assertion, so a project under a
+        symlinked parent (macOS ``/tmp`` → ``/private/tmp``) is not a false
+        positive.
+        """
+        real = tmp_path / "real_proj"
+        real.mkdir()
+        link = tmp_path / "linked_proj"
+        link.symlink_to(real, target_is_directory=True)
+
+        ctx = _context(link, name="sc", all_mcp=("a", "b"), selected_mcp=("a",))
+        path = ctx.write_artifact("mcp.json", "{}")
+
+        assert path.read_text() == "{}"
+        # It wrote under the real target (through the symlinked ancestor), not
+        # somewhere outside the project.
+        assert (real / ".crossby" / "scene" / "sc" / "launch" / "mcp.json").exists()
+
+    def test_symlinked_sibling_leaf_leaves_no_partial_artifact(self, tmp_path: Path) -> None:
+        """A planted symlinked sibling leaf refuses before the first artefact lands.
+
+        Claude renders ``mcp.json`` *then* ``settings.json``; a pre-existing
+        symlinked ``settings.json`` (with clean dir components and a clean
+        ``mcp.json`` leaf) must not let ``mcp.json`` land and then abort the
+        launch with a partial tree.
+        """
+        project = tmp_path / "proj"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        launch = project / ".crossby" / "scene" / "pr-review" / "launch"
+        launch.mkdir(parents=True)
+        (launch / "settings.json").symlink_to(outside / "escaped.json")
+
+        ctx = _context(
+            project, name="pr-review", all_mcp=("github", "linear"), selected_mcp=("github",)
+        )
+        with pytest.raises(PathContainmentError):
+            ClaudeAdapter().scene_launch_args(ctx)
+
+        # The earlier artefact never landed, and nothing escaped.
+        assert not (launch / "mcp.json").exists()
+        assert list(outside.iterdir()) == []
+
+
+class TestPruningContainment:
+    """Pruning never follows a symlinked component into an external deletion."""
+
+    def test_symlinked_scene_child_not_followed_into_external_deletion(
+        self, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "proj"
+        (project / ".crossby" / "scene").mkdir(parents=True)
+
+        # An external marked launch tree that must survive.
+        external = tmp_path / "external"
+        ext_launch = external / "launch"
+        ext_launch.mkdir(parents=True)
+        (ext_launch / MANAGED_MARKER_NAME).write_text("marker")
+        (ext_launch / "keep.txt").write_text("keep")
+
+        # A scene-name dir that is actually a symlink to the external tree, so
+        # `.crossby/scene/gone/launch` resolves to a real, markered dir outside
+        # the project — an rmtree here would delete external content.
+        (project / ".crossby" / "scene" / "gone").symlink_to(external, target_is_directory=True)
+
+        pruned = scene_launch.prune_stale_artifacts(project, defined_scenes=set())
+
+        assert ext_launch.exists(), "external content must survive"
+        assert (ext_launch / "keep.txt").exists()
+        assert not any("gone" in p for p in pruned)
+
+    def test_iterdir_oserror_is_swallowed_and_glob_still_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = tmp_path / "proj"
+        (project / ".crossby" / "scene" / "gone" / "launch").mkdir(parents=True)
+        home = tmp_path / "codex_home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        # A stale crossby-owned Codex profile that pruning SHOULD still remove
+        # even though enumerating the local tree errors.
+        owned = scene_launch.write_codex_profile(project, "gone", {"linear"})
+
+        orig_iterdir = Path.iterdir
+
+        def boom(self: Path) -> object:
+            if self.name == "scene":
+                raise OSError("permission denied")
+            return orig_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", boom)
+
+        pruned = scene_launch.prune_stale_artifacts(project, defined_scenes=set())
+
+        # No raise, and the independent Codex cleanup path was not blocked.
+        assert not owned.exists()
+        assert str(owned) in pruned
+
+    def test_glob_oserror_is_swallowed_and_local_cleanup_still_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = tmp_path / "proj"
+        owned_ctx = _context(project, name="gone", all_mcp=("a", "b"), selected_mcp=("a",))
+        owned_ctx.write_artifact("mcp.json", "{}")
+        owned_launch = project / ".crossby" / "scene" / "gone" / "launch"
+        assert owned_launch.is_dir()
+
+        home = tmp_path / "codex_home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+
+        def boom(self: Path, pattern: str) -> object:
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "glob", boom)
+
+        pruned = scene_launch.prune_stale_artifacts(project, defined_scenes=set())
+
+        # No raise, and the local-tree cleanup ran despite the glob error.
+        assert not owned_launch.exists()
+        assert any("gone" in p for p in pruned)
+
+
+class TestUncontainedWritesUnaffected:
+    """The intentional exceptions to containment keep writing outside the tree."""
+
+    def test_codex_profile_writes_outside_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        home = tmp_path / "codex_home"  # genuinely outside project_root
+        monkeypatch.setenv("CODEX_HOME", str(home))
+
+        path = scene_launch.write_codex_profile(project, "sc", {"linear"})
+
+        assert path.read_text().startswith(scene_launch.CODEX_PROFILE_MARKER)
+        # It wrote under $CODEX_HOME, outside the project — not contained.
+        assert home in path.parents
+        assert project not in path.parents
+
+    def test_direct_atomic_write_outside_any_project(self, tmp_path: Path) -> None:
+        from crossby.config.json_utils import atomic_write_text
+
+        target = tmp_path / "somewhere" / "file.txt"
+        atomic_write_text(target, "hello")  # no within= → uncontained
+        assert target.read_text() == "hello"
 
 
 class TestSceneNameValidation:

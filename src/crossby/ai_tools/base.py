@@ -408,9 +408,12 @@ class AbstractAITool(ABC):
         """Render *scene* for one session and return extra argv + env.
 
         Default: no session-scoped lever — empty argv and env. Adapters that can
-        take a scene on the command line (Claude, Codex, Copilot, Cursor,
-        OpenCode) override this to materialise the scene's artefacts under
-        ``scene.launch_dir`` and point their CLI at them. An override must render
+        take a scene on the command line (Claude, Codex, Copilot) override this
+        to materialise the scene's artefacts under ``scene.launch_dir`` and point
+        their CLI at them. Cursor and OpenCode have no launch lever (their only
+        config-dir override relocates auth / can be overridden by a project
+        config), so they inherit this no-op and fall back to persistent
+        ``scene use`` activation. An override must render
         idempotently: :meth:`launch` calls it once per launch, but a library
         consumer may call it directly, and repeated calls must produce the same
         artefacts and the same argv/env.

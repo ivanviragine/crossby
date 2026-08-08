@@ -217,8 +217,8 @@ in `cli/launch.py`.
 | Claude | `--mcp-config <file> --strict-mcp-config` (selected servers), a `--settings` file of `skillOverrides` (gated on `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
 | Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
-| Cursor | `CURSOR_CONFIG_DIR` → a scene-materialised config dir (`mcp.json` of selected servers) |
-| OpenCode | `OPENCODE_CONFIG` → a scene-rendered config file (`{"mcp": {…}}` of selected servers) |
+| Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
+| OpenCode | none — falls back to persistent activation (`OPENCODE_CONFIG` loads between the global and project layers, so a project `opencode.json` can re-enable a deselected server) |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |
 | VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
 

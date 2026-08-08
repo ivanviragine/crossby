@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from crossby.config.json_utils import atomic_write_text
+from crossby.config.json_utils import PathContainmentError, assert_within, atomic_write_text
 from crossby.sync.file_utils import MANAGED_MARKER_NAME, write_managed_marker
 
 if TYPE_CHECKING:
@@ -149,9 +149,33 @@ class SceneLaunchContext:
         can tell its own trees from a hand-made directory) and adds
         ``.crossby/scene/`` to ``.git/info/exclude`` — never ``.gitignore`` — so
         a session-scoped launch keeps its "writes nothing tracked" promise.
+
+        Both write targets — the artefact leaf *and* the managed marker — are
+        containment-checked up front (via :func:`assert_within`), so a symlinked
+        component anywhere in ``.crossby/scene/<name>/launch`` or a pre-existing
+        symlinked marker leaf refuses the whole write rather than leaving a
+        partial artefact behind. Because an adapter may write several artefacts
+        across successive calls (Claude renders ``mcp.json`` then
+        ``settings.json``), any pre-existing symlink already sitting in the
+        launch dir — a planted sibling leaf a *later* call would target — is also
+        rejected before the *first* artefact lands, so an aborted launch never
+        leaves an earlier clean artefact behind. crossby never creates symlinks
+        here, so any symlink present is foreign. Raises
+        :class:`PathContainmentError` on a violation; ``within=`` is retained on
+        the ``atomic_write_text`` call as defense in depth for any direct caller.
         """
         path = self.artifact(filename)
-        atomic_write_text(path, content)
+        marker = self.launch_dir / MANAGED_MARKER_NAME
+        assert_within(self.project_root, path)
+        assert_within(self.project_root, marker)
+        if self.launch_dir.is_dir() and not self.launch_dir.is_symlink():
+            for entry in self.launch_dir.iterdir():
+                if entry.is_symlink():
+                    raise PathContainmentError(
+                        f"refusing to write scene artefacts: {entry} is a symlink "
+                        "(crossby never creates symlinks under the launch dir)"
+                    )
+        atomic_write_text(path, content, within=self.project_root)
         write_managed_marker(self.launch_dir)
         ensure_launch_excluded(self.project_root)
         return path
@@ -251,42 +275,6 @@ def mcp_json_config(servers: dict[str, MCPServerConfig]) -> str:
     return json.dumps(body, indent=2, sort_keys=True) + "\n"
 
 
-def opencode_mcp_config(servers: dict[str, MCPServerConfig], enabled_names: set[str]) -> str:
-    """Render *servers* as an OpenCode ``{"mcp": {...}}`` config file.
-
-    OpenCode's schema differs from the Claude/Cursor JSON shape: a stdio server
-    is ``{"type": "local", "command": [cmd, *args]}`` and a remote one is
-    ``{"type": "remote", "url": ...}``. Every discovered server is emitted with
-    an explicit ``"enabled"`` — ``true`` for names in *enabled_names*, ``false``
-    for the rest — so the scene's deselection is stated outright rather than left
-    implicit by omission. Pointed at by ``OPENCODE_CONFIG`` for the session.
-
-    Caveat: OpenCode loads a custom config *between* its global and project
-    layers, so a project ``opencode.json`` that re-enables a server can still
-    override this — a documented best-effort limit of the env-var lever.
-    """
-    import json
-
-    mcp: dict[str, dict[str, object]] = {}
-    for name, cfg in sorted(servers.items()):
-        enabled = name in enabled_names
-        if cfg.command is not None:
-            entry: dict[str, object] = {
-                "type": "local",
-                "command": [cfg.command, *cfg.args],
-                "enabled": enabled,
-            }
-            if cfg.env:
-                entry["environment"] = dict(cfg.env)
-        else:
-            entry = {"type": "remote", "url": cfg.url, "enabled": enabled}
-            if cfg.headers:
-                entry["headers"] = dict(cfg.headers)
-        mcp[name] = entry
-    body = {"$schema": "https://opencode.ai/config.json", "mcp": mcp}
-    return json.dumps(body, indent=2, sort_keys=True) + "\n"
-
-
 # ---------------------------------------------------------------------------
 # Codex profile — the $CODEX_HOME exception
 # ---------------------------------------------------------------------------
@@ -342,11 +330,14 @@ def is_crossby_codex_profile(path: Path) -> bool:
     The ownership test for pruning: a file whose first line is not
     :data:`CODEX_PROFILE_MARKER` — including a hand-written profile that happens
     to match the ``crossby-*.config.toml`` naming pattern — is never deleted.
+    An unreadable or non-UTF-8 file returns ``False`` (fail closed, never
+    deleted) so a bad profile can never abort :func:`prune_stale_artifacts`;
+    ``UnicodeDecodeError`` is a :class:`ValueError`, not an :class:`OSError`.
     """
     try:
         with path.open("r", encoding="utf-8") as handle:
             first = handle.readline()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
     return first.strip() == CODEX_PROFILE_MARKER
 
@@ -388,41 +379,56 @@ def prune_stale_artifacts(project_root: Path, defined_scenes: set[str]) -> list[
       header is never deleted.
 
     Best-effort: any single unreadable/undeletable path is skipped, never raised.
+    Both top-level enumerations are independently guarded, so an I/O error
+    listing one accumulation site never aborts the launch nor blocks the other
+    cleanup path. A ``launch`` reached through a symlinked component is skipped
+    (never followed into a deletion outside the project) via
+    :func:`assert_within`, which covers pre-existing symlinks only (a concurrent
+    TOCTOU symlink insertion is out of scope).
     """
     import shutil
 
     pruned: list[str] = []
 
     scene_root = project_root / SCENE_ROOT
-    if scene_root.is_dir():
-        for child in scene_root.iterdir():
-            if not child.is_dir() or child.name == "active" or child.name in defined_scenes:
-                continue
-            launch = child / "launch"
-            # Only remove a tree crossby stamped — never a hand-made directory
-            # that happens to sit under .crossby/scene/ (the ownership test,
-            # mirroring the Codex-profile header check).
-            if not launch.is_dir() or not (launch / MANAGED_MARKER_NAME).is_file():
-                continue
-            try:
-                shutil.rmtree(launch)
-                if not any(child.iterdir()):
-                    child.rmdir()
-                pruned.append((child.relative_to(project_root) / "launch").as_posix())
-            except OSError:
-                continue
+    try:
+        children = list(scene_root.iterdir()) if scene_root.is_dir() else []
+    except OSError:
+        children = []
+    for child in children:
+        if not child.is_dir() or child.name == "active" or child.name in defined_scenes:
+            continue
+        launch = child / "launch"
+        # Only remove a tree crossby stamped — never a hand-made directory
+        # that happens to sit under .crossby/scene/ (the ownership test,
+        # mirroring the Codex-profile header check).
+        if not launch.is_dir() or not (launch / MANAGED_MARKER_NAME).is_file():
+            continue
+        try:
+            # Refuse to rmtree through a symlinked .crossby/scene/<name>/launch
+            # component — that would delete content outside the project.
+            assert_within(project_root, launch)
+            shutil.rmtree(launch)
+            if not any(child.iterdir()):
+                child.rmdir()
+            pruned.append((child.relative_to(project_root) / "launch").as_posix())
+        except (OSError, PathContainmentError):
+            continue
 
     prefix = f"crossby-{project_slug(project_root)}-"
     home = codex_home()
-    if home.is_dir():
-        for profile in sorted(home.glob(f"{prefix}*.config.toml")):
-            scene = profile.name[len(prefix) : -len(".config.toml")]
-            if scene in defined_scenes or not is_crossby_codex_profile(profile):
-                continue
-            try:
-                profile.unlink()
-                pruned.append(str(profile))
-            except OSError:
-                continue
+    try:
+        profiles = sorted(home.glob(f"{prefix}*.config.toml")) if home.is_dir() else []
+    except OSError:
+        profiles = []
+    for profile in profiles:
+        scene = profile.name[len(prefix) : -len(".config.toml")]
+        if scene in defined_scenes or not is_crossby_codex_profile(profile):
+            continue
+        try:
+            profile.unlink()
+            pruned.append(str(profile))
+        except OSError:
+            continue
 
     return pruned

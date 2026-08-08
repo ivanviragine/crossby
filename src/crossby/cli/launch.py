@@ -83,6 +83,7 @@ def launch(
         crossby launch --profile ccyolo    # use saved profile
     """
     from crossby.ai_tools.base import AbstractAITool
+    from crossby.config.json_utils import PathContainmentError
     from crossby.config.loader import ConfigError, load_config
     from crossby.services.ai_resolution import (
         confirm_ai_selection,
@@ -370,20 +371,28 @@ def launch(
             console.error(f"Cannot create transcript directory: {e}")
             raise typer.Exit(1) from e
 
-    # Launch
-    exit_code = adapter.launch(
-        working_dir=work_dir,
-        model=resolved_model,
-        prompt=prompt if caps.supports_initial_message else None,
-        transcript_path=transcript,
-        trusted_dirs=normalized_trusted_dirs,
-        effort=resolved_effort,
-        yolo=resolved_yolo,
-        plan_mode=plan,
-        accept_edits=resolved_accept_edits,
-        auto=resolved_auto,
-        scene=scene_ctx,
-    )
+    # Launch. A scene artefact write that would escape the project root raises
+    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
+    # cleanly here rather than let it become a persistent-write fallback (the
+    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
+    # containment error already propagates untouched).
+    try:
+        exit_code = adapter.launch(
+            working_dir=work_dir,
+            model=resolved_model,
+            prompt=prompt if caps.supports_initial_message else None,
+            transcript_path=transcript,
+            trusted_dirs=normalized_trusted_dirs,
+            effort=resolved_effort,
+            yolo=resolved_yolo,
+            plan_mode=plan,
+            accept_edits=resolved_accept_edits,
+            auto=resolved_auto,
+            scene=scene_ctx,
+        )
+    except PathContainmentError as exc:
+        console.error(f"Refusing to launch scene {scene!r}: {exc}")
+        raise typer.Exit(1) from exc
 
     if exit_code != 0:
         console.warn(f"AI tool exited with code {exit_code}")
@@ -418,9 +427,14 @@ def _prepare_scene_launch(
     - the tool is a GUI launcher (VS Code / Antigravity IDE), which overrides
       ``launch()`` and never reaches the launch flags — the scene can't apply, so
       the launch proceeds without it; or
-    - the tool has no session-scoped lever (Antigravity CLI), or a runtime gate
-      failed (Codex CLI too old) — crossby falls back to **persistent**
-      ``scene use`` activation for that tool, warning that config is written.
+    - the tool has no session-scoped lever (Antigravity CLI, OpenCode), or a
+      runtime gate failed (Codex CLI too old) — crossby *attempts* **persistent**
+      ``scene use`` activation for that tool and surfaces the results. What that
+      writes is tool-dependent: it applies what the tool has a persistent
+      mechanism for, reports genuinely-unsupported narrowings (e.g. OpenCode's
+      MCP servers that stay enabled), and can be a complete no-op for a tool with
+      no persistent mechanism — so the message states the attempt, not a
+      guaranteed write.
 
     The resolver runs across every tool (``tool_id=None``) so its disable sets
     stay anchored on the real project inventory; the adapters and the persistent
@@ -478,11 +492,43 @@ def _prepare_scene_launch(
         if caps.supports_scene_launch
         else "has no session-scoped scene lever"
     )
+    # Result-dependent: state the *attempt*, then let the surfaced results say
+    # what actually happened. For a tool whose narrowed concern has no lever
+    # (OpenCode's MCP), persistent activation writes nothing, so a premature
+    # "this writes tool config files" claim would be false.
     console.warn(
-        f"{caps.display_name} {reason}; applying persistent activation for scene "
-        f"{scene_name!r} instead — this writes tool config files."
+        f"{caps.display_name} {reason}; attempting persistent activation for scene "
+        f"{scene_name!r} instead — results follow."
     )
     results = apply_scene(resolved, work_dir, tools=[tool_id])
+    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
+    # lever for, e.g. deselected MCP servers that stay enabled). Benign skips
+    # (already linked / already applied) stay quiet.
+    for result in results:
+        if result.unsupported and result.message:
+            console.warn(result.message)
+    # A concern the scene declares that this tool can scope neither at launch nor
+    # persistently (its cell is UNSUPPORTED) produces no result at all, so it
+    # would be silently ignored. Name it. ``mcp`` is excluded — it has its own
+    # surfaced result above (and its universe drives whether there is anything to
+    # scope). This restores the honesty the pre-de-scope ``scene_launch_ready``
+    # path gave, e.g. for OpenCode's skills/agents/hooks/permissions.
+    from crossby.models.config import SCENE_CONCERNS
+    from crossby.scenes.mechanism import SceneMechanism, base_mechanism
+
+    no_mechanism = [
+        concern
+        for concern in SCENE_CONCERNS
+        if concern != "mcp"
+        and getattr(scene_cfg, concern) is not None
+        and base_mechanism(tool_id, concern) == SceneMechanism.UNSUPPORTED
+    ]
+    if no_mechanism:
+        console.warn(
+            f"{caps.display_name} cannot scope {', '.join(no_mechanism)} for scene "
+            f"{scene_name!r} at launch or persistently; "
+            f"{'those remain' if len(no_mechanism) > 1 else 'that remains'} unchanged."
+        )
     if any(r.action == "error" for r in results):
         console.warn("Scene activation reported errors; launching anyway.")
     return None

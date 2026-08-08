@@ -103,6 +103,13 @@ class SyncResult:
     # human entry that merely shares an identity with a source entry. Hooks use
     # ``(event, command)`` tuples; permissions/MCP use strings.
     created: tuple[object, ...] = ()
+    # True when this row reports a concern the tool has *no* lever for — a
+    # narrowing the scene asked for that simply cannot be applied (e.g. a scene
+    # dropping an MCP server on a tool with no per-server disable key). Distinct
+    # from a benign ``skipped`` (already applied / already linked): the launch
+    # fallback surfaces only ``unsupported`` rows as warnings, never benign
+    # skips. Set by the ``UNSUPPORTED`` branch of ``scenes/engine._declare_mcp``.
+    unsupported: bool = False
 
 
 class AbstractSyncWriter(ABC):
