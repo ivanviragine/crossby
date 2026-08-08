@@ -546,3 +546,15 @@ class TestBrokenSymlinkBoundary:
 
         with pytest.raises(ConfigError, match="non-file target"):
             load_config(child)
+
+    def test_symlink_loop_is_rejected_not_treated_as_dangling(self, tmp_path):
+        # A symlink loop has exists() == False just like a dangling link, but it
+        # is not a not-yet-populated identity — it must be rejected, not masked
+        # as an empty config (which would later crash write_config_checked).
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").symlink_to(child / "loop-other")
+        (child / "loop-other").symlink_to(child / ".crossby.yml")
+
+        with pytest.raises(ConfigError, match="cannot be resolved"):
+            load_config(child)

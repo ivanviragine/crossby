@@ -131,17 +131,23 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     at the link, so authoring writes *through* it (``write_config_checked``
     supports a not-yet-populated symlink).
 
-    A ``.crossby.yml`` symlink whose target *exists* but is not a regular file
-    (e.g. a link to a directory) is neither: reading it would silently yield an
-    empty config, and an authoring command would later fail deep inside
-    ``write_config_checked`` with an unhandled ``IsADirectoryError`` (its
-    ``read_bytes()`` on the directory target). It is rejected here as a
-    :class:`ConfigError` instead.
+    Only a *genuinely dangling* symlink — whose target does not exist yet —
+    gets that empty-config treatment. Any other non-file entry is rejected as a
+    :class:`ConfigError`: a link to an existing non-regular target (e.g. a
+    directory) would otherwise silently yield an empty config on read and later
+    crash an authoring command deep inside ``write_config_checked`` with an
+    unhandled ``IsADirectoryError`` (its ``read_bytes()`` on the directory
+    target); a symlink loop or an unreadable target is likewise not a
+    not-yet-populated identity. (``exists()`` alone can't make this call — it
+    also returns ``False`` for symlink loops, over-long names, and permission
+    errors, masking them as dangling; ``resolve(strict=True)`` distinguishes a
+    truly missing target, which raises ``FileNotFoundError``, from those.)
 
     Raises:
         ConfigError: the discovered ``.crossby.yml`` is a symlink to an existing
-            non-file target (a directory or other non-regular file), or its
-            contents fail to parse (see :func:`parse_config_file`).
+            non-file target (a directory or other non-regular file), a symlink
+            loop, or an otherwise unresolvable target — or its contents fail to
+            parse (see :func:`parse_config_file`).
     """
     entry = find_config_entry(start)
     if entry is None:
@@ -151,21 +157,28 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
         return parse_config_file(entry)
 
     # ``find_config_entry`` returns only file-or-symlink entries, so a non-file
-    # entry here is necessarily a symlink. If its target exists it is a non-file
-    # target (a directory or other non-regular file) — not a config we can read
-    # and not a dangling identity — so reject it rather than masking it as an
-    # empty config (``exists()`` follows the link; a dangling symlink is False).
-    if entry.exists():
-        raise ConfigError(
-            f"Config {entry} is a symlink to a non-file target "
-            f"({entry.resolve()}); expected a regular file or a dangling symlink"
+    # entry here is necessarily a symlink. Classify it precisely: a genuinely
+    # dangling link (target missing -> FileNotFoundError) is a legitimate
+    # not-yet-populated config identity surfaced as an empty config rooted here;
+    # anything else — a link to an existing non-regular target, a loop, an
+    # unreadable target — is rejected rather than masked as empty.
+    try:
+        resolved = entry.resolve(strict=True)
+    except FileNotFoundError:
+        # A broken .crossby.yml symlink: a config identity we must not walk
+        # past, but cannot read. Treat it as an empty config rooted here.
+        return CrossbyConfig(
+            config_path=str(entry),
+            project_root=str(entry.parent),
         )
+    except OSError as exc:
+        raise ConfigError(f"Config {entry} is a symlink that cannot be resolved: {exc}") from exc
 
-    # A broken .crossby.yml symlink: a config identity we must not walk past,
-    # but cannot read. Treat it as an empty config rooted here.
-    return CrossbyConfig(
-        config_path=str(entry),
-        project_root=str(entry.parent),
+    # Resolved, but ``is_file()`` was False above: an existing non-regular
+    # target (directory, socket, ...).
+    raise ConfigError(
+        f"Config {entry} is a symlink to a non-file target ({resolved}); "
+        f"expected a regular file or a dangling symlink"
     )
 
 

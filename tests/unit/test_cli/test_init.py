@@ -188,6 +188,36 @@ class TestInitExistingFileGuard:
             "version: 1\nai:\n  default_tool: cursor\n"
         )
 
+    def test_force_on_symlink_to_directory_errors_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A .crossby.yml symlinked to an existing directory must be refused with
+        # a clean CLI error, not crash inside write_config_checked's read_bytes()
+        # on the directory target (IsADirectoryError). init bypasses load_config,
+        # so it validates the symlink target itself.
+        project = tmp_path / "project"
+        project.mkdir()
+        some_dir = tmp_path / "some_dir"
+        some_dir.mkdir()
+        target = project / ".crossby.yml"
+        target.symlink_to(some_dir)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(project), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "non-file target" in result.output
+        # The link is left untouched — nothing written, no backup created.
+        assert target.is_symlink()
+        assert target.resolve() == some_dir.resolve()
+        assert list(tmp_path.rglob("*.bak*")) == []
+
 
 class TestRenderInitYaml:
     def test_empty_answers_round_trip(self, tmp_path: Path) -> None:
