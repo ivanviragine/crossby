@@ -139,23 +139,26 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     supports a not-yet-populated symlink).
 
     Only a *genuinely dangling* symlink — whose target does not exist yet —
-    gets that empty-config treatment. Any other non-file entry is rejected as a
-    :class:`ConfigError`: a link to an existing non-regular target (e.g. a
-    directory) would otherwise silently yield an empty config on read, so a read
-    command would run against empty config and an authoring command would splice
-    into it (``write_config_checked`` now refuses such a target cleanly, but only
-    after this read path has already misclassified it); a symlink loop or an
-    unreadable target is likewise not a not-yet-populated identity. (``exists()``
-    alone can't make this call — it also returns ``False`` for symlink loops,
-    over-long names, and permission errors, masking them as dangling;
-    ``resolve(strict=True)`` distinguishes a truly missing target, which raises
-    ``FileNotFoundError``, from those.)
+    gets that empty-config treatment. Every other non-file entry is rejected as a
+    :class:`ConfigError` rather than masked as empty:
+      - a *direct* (non-symlink) non-regular entry — a plain directory or fifo
+        named ``.crossby.yml`` — is not a readable config; ``find_config_entry``
+        stops at it (instead of walking past to an ancestor, which would silently
+        load/edit the wrong file), and it is rejected here;
+      - a symlink to an existing non-regular target (e.g. a directory) would
+        otherwise silently yield an empty config on read, so a read command would
+        run against empty config and an authoring command would splice into it;
+      - a symlink loop or an unreadable target is likewise not a not-yet-populated
+        identity. (``exists()`` alone can't make this call for a symlink — it also
+        returns ``False`` for loops, over-long names, and permission errors,
+        masking them as dangling; ``resolve(strict=True)`` distinguishes a truly
+        missing target, which raises ``FileNotFoundError``, from those.)
 
     Raises:
-        ConfigError: the discovered ``.crossby.yml`` is a symlink to an existing
-            non-file target (a directory or other non-regular file), a symlink
-            loop, or an otherwise unresolvable target — or its contents fail to
-            parse (see :func:`parse_config_file`).
+        ConfigError: the discovered ``.crossby.yml`` is a direct non-regular file
+            (a directory or fifo/socket), a symlink to an existing non-file target,
+            a symlink loop, or an otherwise unresolvable target — or its contents
+            fail to parse (see :func:`parse_config_file`).
     """
     entry = find_config_entry(start)
     if entry is None:
