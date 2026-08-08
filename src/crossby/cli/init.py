@@ -66,7 +66,10 @@ def init(
             resolved = target.resolve(strict=True)
         except FileNotFoundError:
             resolved = None  # dangling — intended write-through to the target
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
+            # Symlink loops raise OSError(ELOOP) on 3.13+ but RuntimeError on
+            # 3.11/3.12; both (and permission/over-long-name OSErrors) mean the
+            # target is unusable.
             console.error(f"Config {target} is a symlink that cannot be resolved: {exc}")
             raise typer.Exit(1) from exc
         if resolved is not None and not resolved.is_file():

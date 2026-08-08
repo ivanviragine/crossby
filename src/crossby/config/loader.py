@@ -171,7 +171,10 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
             config_path=str(entry),
             project_root=str(entry.parent),
         )
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
+        # A symlink loop raises OSError(ELOOP) on Python 3.13+ but RuntimeError
+        # on 3.11/3.12; other errors (permission, over-long name) come through
+        # as OSError. All mean "not a resolvable config identity" -> reject.
         raise ConfigError(f"Config {entry} is a symlink that cannot be resolved: {exc}") from exc
 
     # Resolved, but ``is_file()`` was False above: an existing non-regular
