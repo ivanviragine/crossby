@@ -248,6 +248,27 @@ class TestCodexSceneLaunch:
         assert not owned.exists(), "must prune the crossby-owned stale profile"
         assert str(owned) in pruned
 
+    def test_non_utf8_profile_does_not_abort_pruning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-UTF-8 profile matching the naming pattern raises UnicodeDecodeError
+        # (a ValueError, not OSError) when read for the ownership test. Pruning
+        # must skip it — never raise — and leave it untouched.
+        home = tmp_path / "codex_home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        slug = scene_launch.project_slug(tmp_path)
+
+        binary = home / f"crossby-{slug}-legacy.config.toml"
+        binary.write_bytes(b"\xff\xfe not valid utf-8\n")
+        owned = scene_launch.write_codex_profile(tmp_path, "gone", {"linear"})
+
+        pruned = scene_launch.prune_stale_artifacts(tmp_path, defined_scenes=set())
+
+        assert binary.exists(), "an unverifiable (non-UTF-8) profile is never deleted"
+        assert not owned.exists(), "the readable crossby-owned stale profile is still pruned"
+        assert str(owned) in pruned
+
     def test_write_refuses_to_clobber_handwritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

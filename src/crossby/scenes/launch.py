@@ -330,11 +330,14 @@ def is_crossby_codex_profile(path: Path) -> bool:
     The ownership test for pruning: a file whose first line is not
     :data:`CODEX_PROFILE_MARKER` — including a hand-written profile that happens
     to match the ``crossby-*.config.toml`` naming pattern — is never deleted.
+    An unreadable or non-UTF-8 file returns ``False`` (fail closed, never
+    deleted) so a bad profile can never abort :func:`prune_stale_artifacts`;
+    ``UnicodeDecodeError`` is a :class:`ValueError`, not an :class:`OSError`.
     """
     try:
         with path.open("r", encoding="utf-8") as handle:
             first = handle.readline()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
     return first.strip() == CODEX_PROFILE_MARKER
 
