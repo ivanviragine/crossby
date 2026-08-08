@@ -42,6 +42,10 @@ class CodexAdapter(AbstractAITool):
             display_name="Codex CLI",
             binary="codex",
             tool_type=AIToolType.TERMINAL,
+            # `codex update` — updates Codex to the latest version. Like Claude,
+            # can update a different install than the one on PATH under a
+            # package-manager setup; the version-unchanged warning signals it.
+            update_command=("codex", "update"),
             supports_model_flag=True,
             headless_flag="exec",
             supports_headless=True,

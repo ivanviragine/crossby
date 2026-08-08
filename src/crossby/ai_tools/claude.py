@@ -47,6 +47,10 @@ class ClaudeAdapter(AbstractAITool):
             display_name="Claude Code",
             binary="claude",
             tool_type=AIToolType.TERMINAL,
+            # `claude update|upgrade` — self-updates the installed CLI. Can update
+            # the wrong install under package-manager setups; the service's
+            # version-unchanged warning surfaces that mismatch.
+            update_command=("claude", "update"),
             supports_model_flag=True,
             headless_flag="--print",
             supports_headless=True,

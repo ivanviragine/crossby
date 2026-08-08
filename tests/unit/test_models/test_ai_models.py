@@ -117,6 +117,44 @@ class TestCapabilities:
         )
 
 
+class TestUpdateCommand:
+    """Exact ``update_command`` per adapter — the static, verified tuples.
+
+    A wrong tuple ships a guaranteed-failing updater, so assert the precise
+    value (not merely "is not None") for the terminal tools and ``None`` for the
+    GUI tools that self-update through their IDE.
+    """
+
+    @pytest.mark.parametrize(
+        ("tool_id", "expected"),
+        [
+            ("claude", ("claude", "update")),
+            ("codex", ("codex", "update")),
+            ("cursor", ("agent", "update")),
+            ("copilot", ("copilot", "update")),
+            ("antigravity-cli", ("agy", "update")),
+            ("opencode", ("opencode", "upgrade")),
+        ],
+    )
+    def test_terminal_tools_declare_exact_command(
+        self, tool_id: str, expected: tuple[str, ...]
+    ) -> None:
+        caps = AbstractAITool.get(tool_id).capabilities()
+        assert caps.update_command == expected
+
+    @pytest.mark.parametrize("tool_id", ["antigravity", "vscode"])
+    def test_gui_tools_have_no_update_command(self, tool_id: str) -> None:
+        # GUI adapters self-update through their IDE and must be excluded.
+        caps = AbstractAITool.get(tool_id).capabilities()
+        assert caps.update_command is None
+
+    def test_update_command_is_hashable_tuple(self) -> None:
+        # A tuple (not a list) keeps the frozen capability model hashable.
+        caps = AbstractAITool.get("claude").capabilities()
+        assert isinstance(caps.update_command, tuple)
+        hash(caps)  # must not raise
+
+
 class TestModelCompatibility:
     def test_claude_accepts_claude_models(self) -> None:
         adapter = AbstractAITool.get("claude")

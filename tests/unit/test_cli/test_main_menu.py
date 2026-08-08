@@ -54,6 +54,7 @@ def _patch_subcommands(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         "handoff": MagicMock(return_value=None),
         "convert": MagicMock(return_value=None),
         "stats": MagicMock(return_value=None),
+        "update": MagicMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"crossby.cli.main.{name}", mock)
@@ -122,7 +123,15 @@ class TestInitMenuVisibility:
 
         _title, items = recorder.calls[0]
         assert "Init" not in items
-        assert items == ["Launch", "Sync", "Handoff", "Convert", "Stats", "Scene"]
+        assert items == [
+            "Launch",
+            "Sync",
+            "Handoff",
+            "Convert",
+            "Stats",
+            "Scene",
+            "Update tools",
+        ]
 
     def test_init_shown_when_no_config(
         self,
@@ -208,6 +217,15 @@ class TestMenuDispatch:
         kwargs = self.mocks["stats"].call_args.kwargs
         assert kwargs["tool"] is None
         assert kwargs["transcript_path"] == Path("x")
+
+    def test_update_tools(self) -> None:
+        # "Update tools" is index 6 (after Scene) when a config exists.
+        self._run(6)
+        self.mocks["update"].assert_called_once()
+        kwargs = self.mocks["update"].call_args.kwargs
+        assert kwargs["tool"] is None
+        assert kwargs["yes"] is False
+        assert kwargs["dry_run"] is False
 
 
 class TestPromptHelpers:

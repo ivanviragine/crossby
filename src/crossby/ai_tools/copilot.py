@@ -32,6 +32,8 @@ class CopilotAdapter(AbstractAITool):
             display_name="GitHub Copilot",
             binary="copilot",
             tool_type=AIToolType.TERMINAL,
+            # `copilot update [channel]` — downloads the latest version.
+            update_command=("copilot", "update"),
             supports_model_flag=True,
             headless_flag="--prompt",
             supports_headless=True,

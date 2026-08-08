@@ -70,6 +70,9 @@ crossby handoff --from claude --to codex
 
 # Parse a session transcript for token usage
 crossby stats /path/to/transcript.txt
+
+# Update your installed AI CLIs — pick which to update, then run each tool's own updater
+crossby tools update
 ```
 
 Every command with missing arguments drops into a "Proceed / Change X" review so you can accept the resolved defaults with one keystroke or tweak any single value before it runs.
@@ -193,6 +196,28 @@ crossby handoff --from claude --to codex --prompt ./my-prompt.md
 The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
 
 Supported sources: Claude, Cursor, Codex, Copilot. Supported targets: all of the above plus Antigravity CLI, OpenCode, Antigravity IDE, VS Code.
+
+## Update installed tools
+
+Keep your AI CLIs current without remembering each tool's own updater (`claude update`, `codex update`, `agent update`, `agy update`, `copilot update`, `opencode upgrade`, …):
+
+```bash
+# Pick which installed tools to update (default all), then run each updater
+crossby tools update
+
+# Update specific tools only
+crossby tools update --tool claude --tool codex
+
+# See the resolved command per tool without running anything
+crossby tools update --dry-run
+
+# Skip crossby's confirmation prompt (e.g. in a script)
+crossby tools update --yes
+```
+
+crossby lists the installed, updatable tools, runs each tool's own updater sequentially — continuing past any failure — and prints a report of `Tool · Version (before → after) · ✓/✗`, with failure detail for anything that failed.
+
+**v1 limitations.** Each tool declares one **static** update command; there is no detection of the install method (npm / brew / standalone). `opencode upgrade` covers its own install methods, but the others run a single fixed subcommand — so a tool that updates a *different* installation than the one on `PATH` can report success without changing the active version (surfaced as a "version did not change" warning, not resolved). Updaters run non-interactively with no injected tool-specific `-y` flags — an updater that blocks on its own prompt is bounded only by a generous timeout. GUI tools (the Antigravity IDE, VS Code) self-update through their IDE and are never offered. This updates the *managed AI tools*, not the crossby CLI itself.
 
 ## Optional: `.crossby.yml`
 

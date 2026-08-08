@@ -144,6 +144,14 @@ class AIToolCapabilities(BaseModel, frozen=True):
     display_name: str
     binary: str
     tool_type: AIToolType
+    update_command: tuple[str, ...] | None = None
+    """Static command that updates this tool in place (e.g. ``("claude",
+    "update")``). ``None`` means the tool has no crossby-driven update path (GUI
+    tools that self-update, or a tool whose update subcommand crossby can't
+    assume) and is excluded from ``crossby tools update``. This is a STATIC
+    declaration only — crossby does not introspect the install method (npm vs
+    brew vs standalone). A tuple (not a list) keeps this frozen model hashable,
+    matching the ``supported_efforts`` convention."""
     supports_model_flag: bool = True
     model_flag: str = "--model"
     headless_flag: str | None = None

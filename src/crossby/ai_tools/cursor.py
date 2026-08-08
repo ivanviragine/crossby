@@ -53,6 +53,11 @@ class CursorAdapter(AbstractAITool):
             display_name="Cursor",
             binary="agent",
             tool_type=AIToolType.TERMINAL,
+            # `agent update` — updates Cursor Agent to the latest version. The
+            # `agent` and `cursor-agent` binaries are the same tool; `agent`
+            # matches the launch/probe binary, so the update tuple reuses it
+            # rather than the `cursor-agent` alias.
+            update_command=("agent", "update"),
             supports_model_flag=True,
             headless_flag="--print",
             supports_headless=True,
