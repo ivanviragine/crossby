@@ -73,6 +73,12 @@ def write_config_checked(
     backup is taken, and on failure the newly created file is removed rather
     than restored, leaving the link exactly as broken as it started.
 
+    A symlink resolving outside the project root is followed intentionally,
+    not refused — a config split out into a dotfiles repo is a legitimate,
+    supported layout, and this write path has never containment-checked
+    (``atomic_write_text`` is called here without ``within=``); scene
+    artefact writes are the ones that stay containment-checked.
+
     Returns:
         On success, the retained backup path when *keep_backup* is set and a
         prior file existed, else ``None``. When *keep_backup* is false the

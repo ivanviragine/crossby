@@ -97,8 +97,11 @@ def init(
     if backup is not None:
         # backup sits beside the *resolved* target, so for a symlinked config
         # it can land outside the project root — show the full path, not just
-        # the name, so the user can find it.
-        console.info(f"Backed up existing config to {backup}")
+        # the name, so the user can find it. Escaped: a path component could
+        # otherwise be misread as Rich markup.
+        from rich.markup import escape
+
+        console.info(f"Backed up existing config to {escape(str(backup))}")
     console.success(f"Wrote {target}")
 
     if install_skill:
