@@ -36,6 +36,10 @@ class OpenCodeAdapter(AbstractAITool):
             display_name="OpenCode",
             binary="opencode",
             tool_type=AIToolType.TERMINAL,
+            # `opencode upgrade` (not `update`) — the tool's own self-updater
+            # handles its install method (npm/brew/pnpm/bun) internally, so
+            # crossby needs no Homebrew assumption.
+            update_command=("opencode", "upgrade"),
             supports_model_flag=True,
             headless_flag="run",
             supports_headless=True,

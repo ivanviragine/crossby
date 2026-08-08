@@ -85,6 +85,8 @@ class AntigravityCLIAdapter(AbstractAITool):
             display_name="Antigravity CLI",
             binary="agy",
             tool_type=AIToolType.TERMINAL,
+            # `agy update` — "Update CLI" per the tool's own help.
+            update_command=("agy", "update"),
             supports_model_flag=True,
             # -p/--print/--prompt run a single prompt non-interactively and exit.
             headless_flag="--print",
