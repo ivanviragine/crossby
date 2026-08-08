@@ -264,7 +264,12 @@ that safe:
   file byte-for-byte on any failure. `init` passes `keep_backup=True` (a
   full-file overwrite deserves a recovery net); the scene commands leave no
   `.bak`. Both callers funnel through it rather than re-implementing the
-  sequence.
+  sequence. When `.crossby.yml` is a symlink (including a broken one — a
+  dotfiles-repo config not yet cloned), the write goes through to the
+  resolved real file so the link itself survives; only the re-parse reads
+  through the original symlinked path. The backup then sits beside the
+  *resolved* target, which can be outside the project root — this is
+  intentional, not containment-checked, matching config writes generally.
 - **Scoped splicing, not re-render.** `scenes/authoring.py` rewrites only the
   byte span of the single `scenes.<name>` entry being edited. The span is found
   with `yaml.compose()` node `start_mark`/`end_mark` offsets — **never**
