@@ -219,6 +219,38 @@ class TestInitExistingFileGuard:
         assert target.resolve() == some_dir.resolve()
         assert list(tmp_path.rglob("*.bak*")) == []
 
+    def test_force_on_direct_directory_errors_before_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A plain-directory .crossby.yml (not a symlink) is refused up front,
+        # before _read_preserved_sections reads it — read_bytes() on a directory
+        # raises (and on a fifo would block) ahead of write_config_checked's
+        # guard. So no misleading "could not read … to preserve" warning and no
+        # IsADirectoryError; the directory is left untouched.
+        project = tmp_path / "project"
+        project.mkdir()
+        target = project / ".crossby.yml"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE]),
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(project), "--non-interactive", "--force"],
+        )
+
+        assert result.exit_code == 1, result.output
+        # Rich wraps the message across lines for long paths; normalise first.
+        assert "not a regular file" in " ".join(result.output.split())
+        assert "preserve its sections" not in " ".join(result.output.split())
+        assert "IsADirectoryError" not in result.output
+        assert target.is_dir()
+        assert list(target.iterdir()) == [target / "keep.txt"]
+        assert list(tmp_path.rglob("*.bak*")) == []
+
 
 class TestRenderInitYaml:
     def test_empty_answers_round_trip(self, tmp_path: Path) -> None:

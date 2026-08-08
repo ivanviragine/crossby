@@ -55,13 +55,15 @@ def init(
     target = project_root / ".crossby.yml"
 
     # ``init`` writes ``target`` directly (it never goes through ``load_config``,
-    # which now rejects such a config for the read/scene paths). ``resolve_config_target``
-    # inside ``write_config_checked`` already refuses a ``.crossby.yml`` symlinked
-    # to an existing non-file target — or a loop — with a clean ``ConfigWriteError``;
-    # this pre-check refuses it earlier with a message tailored to ``init`` (name
-    # the symlink, tell the user to repoint it) before the wizard even runs.
-    # A dangling symlink is fine: the write goes *through* to its not-yet-existing
-    # target (``write_config_checked`` supports that).
+    # which rejects such a config for the read/scene paths). ``resolve_config_target``
+    # inside ``write_config_checked`` already refuses a non-file/loop target with a
+    # clean ``ConfigWriteError``, but ``init`` *reads* the target first
+    # (``_read_preserved_sections`` below) — ``read_bytes()`` on a directory raises
+    # and on a fifo blocks, before the write-time guard ever runs. So refuse a
+    # non-regular target here, up front: with a message tailored to ``init`` for a
+    # symlink (name it, tell the user to repoint), and a plain refusal for a direct
+    # directory/fifo. A dangling symlink is fine: the write goes *through* to its
+    # not-yet-existing target (``write_config_checked`` supports that).
     if target.is_symlink():
         try:
             resolved = target.resolve(strict=True)
@@ -79,6 +81,16 @@ def init(
                 "refusing to overwrite. Repoint or remove the symlink first."
             )
             raise typer.Exit(1)
+    elif target.exists() and not target.is_file():
+        # A direct (non-symlink) non-regular target: a plain directory or fifo
+        # named ``.crossby.yml``. Never a valid config to overwrite, and reading
+        # it below would crash/block — refuse before the preservation read.
+        kind = "directory" if target.is_dir() else "non-regular file"
+        console.error(
+            f"Config {target} is not a regular file (it is a {kind}); "
+            "refusing to overwrite. Remove or replace it first."
+        )
+        raise typer.Exit(1)
 
     if target.exists() and not force:
         console.error(

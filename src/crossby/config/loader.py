@@ -85,25 +85,32 @@ def find_config_file(start: Path | None = None) -> Path | None:
 def find_config_entry(start: Path | None = None) -> Path | None:
     """Walk up from start (or CWD) looking for a ``.crossby.yml`` entry.
 
-    Like :func:`find_config_file`, but a broken symlink also counts as
-    found — ``write_config_checked`` (``config/safe_write.py``) supports
-    writing through a not-yet-populated symlink, so a broken
-    ``.crossby.yml`` symlink is a legitimate config identity that
-    root-resolution must not walk past. Returns the symlink path itself
-    (not the — possibly nonexistent — resolved target), so a caller
-    combining this with ``write_config_checked`` writes through the link.
+    Like :func:`find_config_file`, but stops at *any* existing ``.crossby.yml``
+    entry — including a broken symlink and a non-regular file (a plain
+    directory, fifo, ...) — rather than only a readable regular file. A broken
+    symlink is a legitimate config identity (``write_config_checked`` supports
+    writing through a not-yet-populated link), and a *direct* non-regular entry
+    must be stopped at rather than walked past: a plain-directory
+    ``.crossby.yml`` in a subproject is not a readable config, but walking past
+    it to an ancestor would silently load — and let an authoring command edit —
+    the *wrong* file. :func:`load_config` classifies each: the broken symlink
+    becomes an empty config rooted here; the non-regular entry is rejected.
+    Returns the entry path itself (not the — possibly nonexistent — resolved
+    target), so a caller combining this with ``write_config_checked`` writes
+    through a link.
 
-    :func:`load_config` stops at this same boundary — a broken symlink can't
-    be parsed, so it is surfaced as an *empty* config rooted at this directory
-    rather than being walked past to an ancestor. That keeps parse discovery
-    and root discovery aligned: a subdir run never resolves scenes from an
-    ancestor while rooting state/scan at the broken-symlink dir.
+    :func:`load_config` stops at this same boundary, so parse discovery and root
+    discovery stay aligned: a subdir run never resolves scenes from an ancestor
+    while rooting state/scan at the entry's own directory.
     """
     current = (start or Path.cwd()).resolve()
 
     while True:
         candidate = current / CONFIG_FILENAME
-        if candidate.is_file() or candidate.is_symlink():
+        # ``is_symlink()`` catches a broken/looping link (``exists()`` is False
+        # for both); ``exists()`` catches a regular file *and* a direct
+        # non-regular entry (directory, fifo). Together they stop at any entry.
+        if candidate.is_symlink() or candidate.exists():
             return candidate
         parent = current.parent
         if parent == current:
@@ -157,12 +164,23 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     if entry.is_file():
         return parse_config_file(entry)
 
-    # ``find_config_entry`` returns only file-or-symlink entries, so a non-file
-    # entry here is necessarily a symlink. Classify it precisely: a genuinely
-    # dangling link (target missing -> FileNotFoundError) is a legitimate
-    # not-yet-populated config identity surfaced as an empty config rooted here;
-    # anything else — a link to an existing non-regular target, a loop, an
-    # unreadable target — is rejected rather than masked as empty.
+    if not entry.is_symlink():
+        # A *direct* (non-symlink) non-regular entry that ``find_config_entry``
+        # stopped at: a plain directory (or fifo/socket) named ``.crossby.yml``.
+        # It is not a readable config and not a not-yet-populated identity — and
+        # walking past it was the very bug (silently loading/editing an ancestor
+        # config). Reject it here so callers exit cleanly instead.
+        kind = "directory" if entry.is_dir() else "non-regular file"
+        raise ConfigError(
+            f"Config {entry} is not a regular file (it is a {kind}); "
+            f"expected a regular file or a dangling symlink"
+        )
+
+    # A symlink entry. Classify it precisely: a genuinely dangling link (target
+    # missing -> FileNotFoundError) is a legitimate not-yet-populated config
+    # identity surfaced as an empty config rooted here; anything else — a link to
+    # an existing non-regular target, a loop, an unreadable target — is rejected
+    # rather than masked as empty.
     try:
         resolved = entry.resolve(strict=True)
     except FileNotFoundError:

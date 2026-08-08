@@ -561,3 +561,26 @@ class TestBrokenSymlinkBoundary:
 
         with pytest.raises(ConfigError, match="cannot be resolved"):
             load_config(child)
+
+    def test_direct_directory_config_is_rejected(self, tmp_path):
+        # A plain-directory .crossby.yml (not a symlink) is neither a file nor a
+        # symlink, so find_config_entry historically walked *past* it. It now
+        # stops at it and load_config rejects it — it is not a readable config.
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").mkdir()
+
+        with pytest.raises(ConfigError, match="not a regular file"):
+            load_config(child)
+
+    def test_direct_directory_does_not_walk_past_to_ancestor(self, tmp_path):
+        # The bug this closes: a direct-directory .crossby.yml in a subproject
+        # must not silently resolve the ancestor's real config (which would let a
+        # read use it and an authoring command edit it).
+        (tmp_path / ".crossby.yml").write_text("version: 1\nscenes:\n  foo: {}\n")
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").mkdir()
+
+        with pytest.raises(ConfigError, match="not a regular file"):
+            load_config(child)
