@@ -55,10 +55,11 @@ def init(
     target = project_root / ".crossby.yml"
 
     # ``init`` writes ``target`` directly (it never goes through ``load_config``,
-    # which now rejects such a config for the read/scene paths). A ``.crossby.yml``
-    # symlinked to an existing non-file target — or a loop — would otherwise crash
-    # later in ``write_config_checked``'s ``read_bytes()`` on the resolved target
-    # with an uncaught ``IsADirectoryError`` (or ``OSError``). Refuse cleanly here.
+    # which now rejects such a config for the read/scene paths). ``resolve_config_target``
+    # inside ``write_config_checked`` already refuses a ``.crossby.yml`` symlinked
+    # to an existing non-file target — or a loop — with a clean ``ConfigWriteError``;
+    # this pre-check refuses it earlier with a message tailored to ``init`` (name
+    # the symlink, tell the user to repoint it) before the wizard even runs.
     # A dangling symlink is fine: the write goes *through* to its not-yet-existing
     # target (``write_config_checked`` supports that).
     if target.is_symlink():
@@ -116,7 +117,12 @@ def init(
                 f"Wrote invalid config ({exc.original}); restored the previous one and aborted."
             )
         else:
-            console.error(f"Wrote invalid config ({exc.original}); removing and aborting.")
+            # restored=False spans two phases: a written-then-removed file, or a
+            # write refused before touching disk (e.g. a directory target). Word
+            # it phase-neutrally so it stays accurate either way.
+            console.error(
+                f"Config write failed ({exc.original}); no config was left in place; aborting."
+            )
         raise typer.Exit(1) from exc
 
     if backup is not None:

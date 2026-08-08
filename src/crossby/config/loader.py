@@ -134,14 +134,15 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
     Only a *genuinely dangling* symlink — whose target does not exist yet —
     gets that empty-config treatment. Any other non-file entry is rejected as a
     :class:`ConfigError`: a link to an existing non-regular target (e.g. a
-    directory) would otherwise silently yield an empty config on read and later
-    crash an authoring command deep inside ``write_config_checked`` with an
-    unhandled ``IsADirectoryError`` (its ``read_bytes()`` on the directory
-    target); a symlink loop or an unreadable target is likewise not a
-    not-yet-populated identity. (``exists()`` alone can't make this call — it
-    also returns ``False`` for symlink loops, over-long names, and permission
-    errors, masking them as dangling; ``resolve(strict=True)`` distinguishes a
-    truly missing target, which raises ``FileNotFoundError``, from those.)
+    directory) would otherwise silently yield an empty config on read, so a read
+    command would run against empty config and an authoring command would splice
+    into it (``write_config_checked`` now refuses such a target cleanly, but only
+    after this read path has already misclassified it); a symlink loop or an
+    unreadable target is likewise not a not-yet-populated identity. (``exists()``
+    alone can't make this call — it also returns ``False`` for symlink loops,
+    over-long names, and permission errors, masking them as dangling;
+    ``resolve(strict=True)`` distinguishes a truly missing target, which raises
+    ``FileNotFoundError``, from those.)
 
     Raises:
         ConfigError: the discovered ``.crossby.yml`` is a symlink to an existing

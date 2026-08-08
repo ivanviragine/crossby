@@ -192,9 +192,10 @@ class TestInitExistingFileGuard:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A .crossby.yml symlinked to an existing directory must be refused with
-        # a clean CLI error, not crash inside write_config_checked's read_bytes()
-        # on the directory target (IsADirectoryError). init bypasses load_config,
-        # so it validates the symlink target itself.
+        # a clean CLI error. write_config_checked would itself refuse it (a clean
+        # ConfigWriteError, no longer an uncaught IsADirectoryError), but init
+        # bypasses load_config and pre-checks the symlink target itself so the
+        # refusal comes early, with an init-tailored message, before the wizard.
         project = tmp_path / "project"
         project.mkdir()
         some_dir = tmp_path / "some_dir"

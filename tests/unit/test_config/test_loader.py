@@ -523,8 +523,9 @@ class TestBrokenSymlinkBoundary:
         # A .crossby.yml symlink whose target *exists* but is a directory is not
         # a readable config and not a dangling identity — it must not be masked
         # as an empty config (a read command would use empty config, and an
-        # authoring command would later blow up in write_config_checked's
-        # read_bytes() with IsADirectoryError). Reject it up front.
+        # authoring command would splice into it; write_config_checked would then
+        # refuse the target with a clean ConfigWriteError). Reject it up front on
+        # the read path so read commands don't run against empty config.
         target_dir = tmp_path / "somedir"
         target_dir.mkdir()
         child = tmp_path / "project"
@@ -549,8 +550,10 @@ class TestBrokenSymlinkBoundary:
 
     def test_symlink_loop_is_rejected_not_treated_as_dangling(self, tmp_path):
         # A symlink loop has exists() == False just like a dangling link, but it
-        # is not a not-yet-populated identity — it must be rejected, not masked
-        # as an empty config (which would later crash write_config_checked).
+        # is not a not-yet-populated identity — it must be rejected on the read
+        # path, not masked as an empty config (write_config_checked would itself
+        # refuse the loop with a clean ConfigWriteError, but only after a read
+        # command had already run against the empty config).
         child = tmp_path / "project"
         child.mkdir()
         (child / ".crossby.yml").symlink_to(child / "loop-other")
