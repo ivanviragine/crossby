@@ -134,6 +134,32 @@ class TestScenePassesContext:
         assert kwargs["scene"] is not None
         assert kwargs["scene"].name == "pr-review"
 
+    def test_subdir_launch_scene_context_roots_at_config_root(self, tmp_path: Path) -> None:
+        """The session-scoped ``SceneLaunchContext.project_root`` must be the
+        config root, not the invocation subdirectory — adapters (e.g. Claude)
+        read it back to build the disable set (``scene.project_root /
+        SKILLS_DIR[...]``), and that read has to match the inventory
+        ``resolve_scene`` used or the scene would silently narrow nothing.
+        """
+        _write_config(tmp_path)
+        sub = tmp_path / "packages" / "app"
+        sub.mkdir(parents=True)
+        adapter = _scene_adapter(tool_type=AIToolType.TERMINAL)
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(sub), "--tool", "claude", "--scene", "pr-review"]
+            )
+        assert result.exit_code == 0, result.output
+        _, kwargs = adapter.launch.call_args
+        assert kwargs["scene"].project_root == tmp_path.resolve()
+        assert not (sub / ".crossby").exists()
+        # The subprocess itself still runs in the invocation directory.
+        assert kwargs["working_dir"] == sub.resolve()
+
 
 class TestGuiNormalisation:
     def test_gui_tool_warns_and_drops_scene(self, tmp_path: Path) -> None:
@@ -206,6 +232,48 @@ class TestPersistentFallback:
         apply_mock.assert_called_once()
         _, kwargs = adapter.launch.call_args
         assert kwargs["scene"] is None
+
+    def test_subdir_launch_resolves_and_applies_against_config_root(self, tmp_path: Path) -> None:
+        """Run from a subdirectory: resolve/apply must root at the config's dir.
+
+        The persistent-fallback path (no session-scoped lever) is the one that
+        writes state, so it is the clearest way to prove *where* it wrote —
+        against the config root, never a shadow tree under the subdirectory,
+        while the subprocess itself still runs in the invocation directory.
+        """
+        from crossby.sync.readers import scan_project as real_scan_project
+
+        _write_config(tmp_path)
+        sub = tmp_path / "packages" / "app"
+        sub.mkdir(parents=True)
+        adapter = _scene_adapter(
+            tool_type=AIToolType.TERMINAL,
+            supports_scene_launch=False,
+            scene_ready=False,
+            display_name="Antigravity CLI",
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[]) as apply_mock,
+            patch("crossby.sync.readers.scan_project", wraps=real_scan_project) as scan_mock,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(sub), "--tool", "antigravity-cli", "--scene", "pr-review"],
+            )
+        assert result.exit_code == 0, result.output
+        apply_mock.assert_called_once()
+        applied_root = apply_mock.call_args[0][1]
+        assert applied_root == tmp_path.resolve()
+        scanned_root = scan_mock.call_args[0][0]
+        assert scanned_root == tmp_path.resolve()
+        # No shadow state/artifact tree written under the subdirectory.
+        assert not (sub / ".crossby").exists()
+        # The subprocess itself still runs in the invocation directory.
+        _, kwargs = adapter.launch.call_args
+        assert kwargs["working_dir"] == sub.resolve()
 
 
 class TestUnsupportedConcernWarning:

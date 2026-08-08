@@ -348,13 +348,15 @@ def launch(
     # persistent fallback / warn for GUI tools) before dispatch.
     scene_ctx = None
     if scene is not None and scene_cfg is not None:
+        from crossby.services.scene_resolution import scene_root as compute_scene_root
+
         scene_ctx = _prepare_scene_launch(
             scene_name=scene,
             scene_cfg=scene_cfg,
             resolved_tool=resolved_tool,
             adapter=adapter,
             caps=caps,
-            work_dir=work_dir,
+            scene_root=compute_scene_root(work_dir),
             config=config,
             allow_tools=profile_allow_tools,
         )
@@ -415,11 +417,24 @@ def _prepare_scene_launch(
     resolved_tool: str,
     adapter: AbstractAITool,
     caps: AIToolCapabilities,
-    work_dir: Path,
+    scene_root: Path,
     config: CrossbyConfig,
     allow_tools: list[str],
 ) -> SceneLaunchContext | None:
     """Resolve *scene_cfg* for one launch and pick how it applies to the tool.
+
+    Everything scene-related — scan, resolve, the persistent-fallback apply,
+    stale-artifact pruning, and the :class:`SceneLaunchContext` an adapter
+    builds session-scoped launch args from — is rooted at *scene_root*
+    (``scene_root(work_dir)``, the found config's parent), never the
+    invocation directory. The context's ``project_root`` in particular is not
+    just an artefact-write location: adapters also read it back (e.g.
+    Claude's ``skills_dir = scene.project_root / SKILLS_DIR[...]``) to build
+    the disable set, and that read must land on the same inventory
+    ``resolve_scene`` used, or a launch from a subdirectory would silently
+    stop narrowing anything. The caller keeps ``work_dir`` (the invocation
+    directory) entirely separate — it drives only the subprocess cwd and the
+    transcript path, never anything scene-related.
 
     Returns a :class:`SceneLaunchContext` when the tool can take the scene on the
     command line for the session. Returns ``None`` (after warning) when:
@@ -461,13 +476,13 @@ def _prepare_scene_launch(
 
     tool_id = AIToolID(resolved_tool)
     installed = AbstractAITool.detect_installed()
-    scan = scan_project(work_dir, installed)
-    resolved = resolve_scene(scene_cfg, scan, work_dir, tool_id=None)
+    scan = scan_project(scene_root, installed)
+    resolved = resolve_scene(scene_cfg, scan, scene_root, tool_id=None)
     for warning in resolved.warnings:
         console.warn(warning)
 
     # Clean up artefacts left by scenes since renamed or deleted (best-effort).
-    for pruned in prune_stale_artifacts(work_dir, set(config.scenes)):
+    for pruned in prune_stale_artifacts(scene_root, set(config.scenes)):
         console.detail(f"pruned stale scene artefact: {pruned}")
 
     if caps.tool_type == AIToolType.GUI:
@@ -482,8 +497,8 @@ def _prepare_scene_launch(
         return SceneLaunchContext(
             name=scene_name,
             resolved=resolved,
-            project_root=work_dir,
-            sync_data=build_sync_data(work_dir),
+            project_root=scene_root,
+            sync_data=build_sync_data(scene_root),
             allow_tools=tuple(allow_tools),
         )
 
@@ -500,7 +515,7 @@ def _prepare_scene_launch(
         f"{caps.display_name} {reason}; attempting persistent activation for scene "
         f"{scene_name!r} instead — results follow."
     )
-    results = apply_scene(resolved, work_dir, tools=[tool_id])
+    results = apply_scene(resolved, scene_root, tools=[tool_id])
     # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
     # lever for, e.g. deselected MCP servers that stay enabled). Benign skips
     # (already linked / already applied) stay quiet.

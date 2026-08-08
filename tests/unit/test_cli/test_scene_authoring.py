@@ -6,6 +6,10 @@ the non-TTY guard, ``--print``, and byte-preservation through the CLI.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -404,6 +408,90 @@ class TestWizard:
         assert skills["include"] == ["deploy-prod"]
         assert "deploy-prod" not in skills.get("exclude", [])
 
+    def test_wizard_scans_config_root_not_invocation_subdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``create`` run from a subdirectory must still see the root project's
+        skills/agents/servers — the wizard's universe is built from ``root``, not
+        the (empty) invocation subdirectory."""
+        root = _project(tmp_path)
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: True)
+        monkeypatch.setattr(
+            "crossby.ui.prompts.multi_select", lambda _t, items: [0] if items else []
+        )
+        monkeypatch.setattr("crossby.ui.prompts.select", lambda *a, **k: 0)
+        monkeypatch.setattr("crossby.ui.prompts.input_prompt", lambda *a, **k: "")
+
+        result = _run(["scene", "create", "wiztest"], sub)
+        assert result.exit_code == 0, result.output
+        scene = _scenes(root)["wiztest"]
+        # Only present at all if the universe had items to pick from — an empty
+        # (subdirectory-rooted) scan would skip every concern entirely.
+        assert "skills" in scene
+        assert not (sub / ".crossby.yml").exists()
+
+
+class TestCreatePrintPurity:
+    """``create --print`` must emit only valid YAML on stdout, even though the
+    interactive wizard runs first — the whole interactive phase is redirected
+    to stderr (issue #121, Part 3)."""
+
+    def _wire_prompts(
+        self, monkeypatch: pytest.MonkeyPatch, *, name_prompt: str | None = None
+    ) -> None:
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: True)
+        monkeypatch.setattr(
+            "crossby.ui.prompts.multi_select", lambda _t, items: [0] if items else []
+        )
+        monkeypatch.setattr("crossby.ui.prompts.select", lambda *a, **k: 0)
+
+        def _fake_input_prompt(prompt: str, *a: object, **k: object) -> str:
+            if prompt == "New scene name" and name_prompt is not None:
+                return name_prompt
+            return ""
+
+        monkeypatch.setattr("crossby.ui.prompts.input_prompt", _fake_input_prompt)
+
+    def test_print_interactive_stdout_is_pure_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _project(tmp_path)
+        self._wire_prompts(monkeypatch)
+
+        result = _run(["scene", "create", "wiztest", "--print"], root)
+
+        assert result.exit_code == 0, result.output
+        parsed = yaml.safe_load(result.stdout)
+        assert isinstance(parsed, dict)
+        assert "wiztest" in parsed
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == CONFIG
+        # confirm_defaults' kv review lines run before the (mocked) menu select,
+        # and must land on stderr, never interleaved into the YAML stdout.
+        assert "Skills include" in result.stderr
+        assert "Skills include" not in result.stdout
+
+    def test_print_with_omitted_name_still_emits_pure_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The name prompt runs *before* the wizard — it must be inside the
+        redirected phase too, or a piped stdout would see it leak first."""
+        root = _project(tmp_path)
+        self._wire_prompts(monkeypatch, name_prompt="prompted-name")
+
+        result = _run(["scene", "create", "--print"], root)
+
+        assert result.exit_code == 0, result.output
+        # No leaked prefix ahead of the rendered block — the parsed dict has
+        # exactly the one expected key, and the raw text starts with it.
+        parsed = yaml.safe_load(result.stdout)
+        assert parsed == {"prompted-name": parsed.get("prompted-name")}
+        assert result.stdout.lstrip().startswith("prompted-name:")
+        assert (root / ".crossby.yml").read_text(encoding="utf-8") == CONFIG
+        assert "Skills include" in result.stderr
+        assert "Skills include" not in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # path resolution + safety
@@ -437,6 +525,79 @@ class TestPathAndSafety:
         assert result.exit_code == 0, result.output
         assert "[abc]" in result.output
 
+    def test_create_from_subdir_with_broken_root_symlink_writes_through_it(
+        self, tmp_path: Path
+    ) -> None:
+        # A broken (dangling) .crossby.yml symlink at the root is a legitimate,
+        # not-yet-populated config identity (write_config_checked supports
+        # writing through it) — root discovery must not walk past it just
+        # because it isn't parseable yet, or a subdir run shadows it instead.
+        root = tmp_path / "project"
+        populate_project(root)
+        real = tmp_path / "real.crossby.yml"
+        (root / ".crossby.yml").symlink_to(real)
+        assert not real.exists()
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+
+        result = _run(["scene", "create", "wiztest", "--skill", "review-*"], sub)
+
+        assert result.exit_code == 0, result.output
+        target = root / ".crossby.yml"
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        assert real.exists()
+        assert "wiztest" in _scenes(root)
+        assert not (sub / ".crossby.yml").exists()
+
+    def test_create_from_subdir_prefers_broken_child_symlink_over_ancestor(
+        self, tmp_path: Path
+    ) -> None:
+        # With a dangling child .crossby.yml symlink AND a valid ancestor config,
+        # authoring must write THROUGH the child link, never splice into the
+        # ancestor: parse discovery now stops at the same broken-symlink boundary
+        # root discovery does, so scene create can't target the ancestor while
+        # scans/state root at the child.
+        ancestor_cfg = tmp_path / ".crossby.yml"
+        ancestor_cfg.write_text(CONFIG, encoding="utf-8")
+        root = tmp_path / "project"
+        populate_project(root)
+        real = tmp_path / "real.crossby.yml"
+        (root / ".crossby.yml").symlink_to(real)
+        assert not real.exists()
+        sub = root / "packages" / "app"
+        sub.mkdir(parents=True)
+
+        result = _run(["scene", "create", "wiztest", "--skill", "review-*"], sub)
+
+        assert result.exit_code == 0, result.output
+        target = root / ".crossby.yml"
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        assert real.exists()
+        assert "wiztest" in _scenes(root)
+        # The ancestor config was left untouched — no shadow write to it.
+        ancestor_scenes = yaml.safe_load(ancestor_cfg.read_text(encoding="utf-8"))["scenes"]
+        assert "wiztest" not in ancestor_scenes
+        assert not (sub / ".crossby.yml").exists()
+
+    def test_add_writes_through_symlinked_config(self, tmp_path: Path) -> None:
+        # Splice writes must go through the link's resolved target so the
+        # symlink itself survives (config/safe_write.py write-through fix).
+        root = tmp_path / "project"
+        populate_project(root)
+        real = tmp_path / "real.crossby.yml"
+        real.write_text(CONFIG, encoding="utf-8")
+        (root / ".crossby.yml").symlink_to(real)
+
+        result = _run(["scene", "add", "base", "--skill", "review-*"], root)
+
+        assert result.exit_code == 0, result.output
+        target = root / ".crossby.yml"
+        assert target.is_symlink()
+        assert target.resolve() == real.resolve()
+        assert "review-*" in _scenes(root)["base"]["skills"]["include"]
+
 
 # ---------------------------------------------------------------------------
 # rollback on a corrupt render
@@ -456,3 +617,70 @@ class TestRollback:
         result = _run(["scene", "create", "boom", "--skill", "review-*"], root)
         assert result.exit_code != 0
         assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# real pty smoke test — the only test that exercises actual questionary
+# rendering; monkeypatched prompts (above) render nothing, so they cannot
+# catch a prompt-toolkit stdout leak.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="pty not available on this platform")
+class TestCreatePrintPtySmoke:
+    def test_real_questionary_session_keeps_piped_stdout_pure(self, tmp_path: Path) -> None:
+        """stdin is a real pty (``is_tty()`` True); stdout is a plain pipe —
+        exactly ``crossby scene create --print > file.yml`` run from a real
+        terminal. Before the fix, questionary/prompt-toolkit would render its
+        menus straight into that pipe alongside the YAML.
+        """
+        (tmp_path / ".crossby.yml").write_text("version: 1\n", encoding="utf-8")
+
+        master_fd, slave_fd = os.openpty()
+        env = dict(os.environ)
+        env["PATH"] = ""  # no AI tool discoverable: fixed, minimal prompt sequence
+        env["COLUMNS"] = "80"
+        env["LINES"] = "24"
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from crossby.cli.main import cli_main; cli_main()",
+                "scene",
+                "create",
+                "ptytest",
+                "--print",
+                "--path",
+                str(tmp_path),
+            ],
+            stdin=slave_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        os.close(slave_fd)
+        try:
+            # Keystrokes for the fixed sequence with no installed tools and an
+            # empty project (no scenes/profiles): Enter skips the optional
+            # description prompt, then Enter again accepts the confirm menu's
+            # default "Proceed" choice.
+            deadline = time.monotonic() + 10
+            for _ in range(2):
+                time.sleep(0.3)
+                os.write(master_fd, b"\r")
+            stdout, stderr = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            pytest.fail(
+                f"crossby scene create --print timed out.\nstdout={stdout!r}\nstderr={stderr!r}"
+            )
+        finally:
+            os.close(master_fd)
+
+        assert proc.returncode == 0, stderr.decode("utf-8", errors="replace")
+        text = stdout.decode("utf-8", errors="replace")
+        parsed = yaml.safe_load(text)
+        assert isinstance(parsed, dict)
+        assert "ptytest" in parsed

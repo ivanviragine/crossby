@@ -56,9 +56,17 @@ def ensure_yaml_mapping(raw: Any) -> dict[str, Any] | None:
 
 
 def find_config_file(start: Path | None = None) -> Path | None:
-    """Walk up from start (or CWD) looking for .crossby.yml.
+    """Walk up from start (or CWD) looking for a *readable* .crossby.yml.
 
-    Returns the path to the config file, or None if not found.
+    Returns the path to the config file, or None if not found. A *broken*
+    (dangling) ``.crossby.yml`` symlink does not count — ``is_file()``
+    resolves through the link and requires the target to exist — so this walks
+    past one to a parent file (or None). This is a "is there a readable config
+    up-tree?" probe (e.g. the interactive menu's Init toggle). Parse discovery
+    (:func:`load_config`) and root resolution (:func:`find_config_entry`)
+    instead stop *at* a broken symlink so the two never diverge; callers that
+    need to know *where* the project's config identity lives, or to actually
+    load it, want those functions, not this one.
     """
     current = (start or Path.cwd()).resolve()
 
@@ -74,16 +82,107 @@ def find_config_file(start: Path | None = None) -> Path | None:
     return None
 
 
+def find_config_entry(start: Path | None = None) -> Path | None:
+    """Walk up from start (or CWD) looking for a ``.crossby.yml`` entry.
+
+    Like :func:`find_config_file`, but a broken symlink also counts as
+    found — ``write_config_checked`` (``config/safe_write.py``) supports
+    writing through a not-yet-populated symlink, so a broken
+    ``.crossby.yml`` symlink is a legitimate config identity that
+    root-resolution must not walk past. Returns the symlink path itself
+    (not the — possibly nonexistent — resolved target), so a caller
+    combining this with ``write_config_checked`` writes through the link.
+
+    :func:`load_config` stops at this same boundary — a broken symlink can't
+    be parsed, so it is surfaced as an *empty* config rooted at this directory
+    rather than being walked past to an ancestor. That keeps parse discovery
+    and root discovery aligned: a subdir run never resolves scenes from an
+    ancestor while rooting state/scan at the broken-symlink dir.
+    """
+    current = (start or Path.cwd()).resolve()
+
+    while True:
+        candidate = current / CONFIG_FILENAME
+        if candidate.is_file() or candidate.is_symlink():
+            return candidate
+        parent = current.parent
+        if parent == current:
+            break  # Reached filesystem root
+        current = parent
+
+    return None
+
+
 def load_config(start: Path | None = None) -> CrossbyConfig:
     """Find and parse the project config.
 
     Returns a CrossbyConfig with defaults if no config file exists.
+
+    Discovery stops at the SAME boundary as :func:`find_config_entry` (and thus
+    :func:`~crossby.services.scene_resolution.scene_root`): the nearest ancestor
+    holding a ``.crossby.yml`` entry. When that entry is a *broken* (dangling)
+    symlink it can't be parsed, but it is still a legitimate, not-yet-populated
+    config identity — so it is surfaced as an *empty* config rooted at that
+    directory rather than walking past it to an ancestor. That keeps parse
+    discovery from diverging from root discovery: without it a subdir run with a
+    broken-symlink config would resolve scenes from an ancestor config while
+    rooting scene state/scan at the broken-symlink dir (and an authoring command
+    would splice into the ancestor). The empty config's ``config_path`` points
+    at the link, so authoring writes *through* it (``write_config_checked``
+    supports a not-yet-populated symlink).
+
+    Only a *genuinely dangling* symlink — whose target does not exist yet —
+    gets that empty-config treatment. Any other non-file entry is rejected as a
+    :class:`ConfigError`: a link to an existing non-regular target (e.g. a
+    directory) would otherwise silently yield an empty config on read and later
+    crash an authoring command deep inside ``write_config_checked`` with an
+    unhandled ``IsADirectoryError`` (its ``read_bytes()`` on the directory
+    target); a symlink loop or an unreadable target is likewise not a
+    not-yet-populated identity. (``exists()`` alone can't make this call — it
+    also returns ``False`` for symlink loops, over-long names, and permission
+    errors, masking them as dangling; ``resolve(strict=True)`` distinguishes a
+    truly missing target, which raises ``FileNotFoundError``, from those.)
+
+    Raises:
+        ConfigError: the discovered ``.crossby.yml`` is a symlink to an existing
+            non-file target (a directory or other non-regular file), a symlink
+            loop, or an otherwise unresolvable target — or its contents fail to
+            parse (see :func:`parse_config_file`).
     """
-    config_path = find_config_file(start)
-    if config_path is None:
+    entry = find_config_entry(start)
+    if entry is None:
         return CrossbyConfig()
 
-    return parse_config_file(config_path)
+    if entry.is_file():
+        return parse_config_file(entry)
+
+    # ``find_config_entry`` returns only file-or-symlink entries, so a non-file
+    # entry here is necessarily a symlink. Classify it precisely: a genuinely
+    # dangling link (target missing -> FileNotFoundError) is a legitimate
+    # not-yet-populated config identity surfaced as an empty config rooted here;
+    # anything else — a link to an existing non-regular target, a loop, an
+    # unreadable target — is rejected rather than masked as empty.
+    try:
+        resolved = entry.resolve(strict=True)
+    except FileNotFoundError:
+        # A broken .crossby.yml symlink: a config identity we must not walk
+        # past, but cannot read. Treat it as an empty config rooted here.
+        return CrossbyConfig(
+            config_path=str(entry),
+            project_root=str(entry.parent),
+        )
+    except (OSError, RuntimeError) as exc:
+        # A symlink loop raises OSError(ELOOP) on Python 3.13+ but RuntimeError
+        # on 3.11/3.12; other errors (permission, over-long name) come through
+        # as OSError. All mean "not a resolvable config identity" -> reject.
+        raise ConfigError(f"Config {entry} is a symlink that cannot be resolved: {exc}") from exc
+
+    # Resolved, but ``is_file()`` was False above: an existing non-regular
+    # target (directory, socket, ...).
+    raise ConfigError(
+        f"Config {entry} is a symlink to a non-file target ({resolved}); "
+        f"expected a regular file or a dangling symlink"
+    )
 
 
 def parse_config_file(config_path: Path) -> CrossbyConfig:
