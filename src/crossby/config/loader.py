@@ -208,9 +208,22 @@ def load_config(start: Path | None = None) -> CrossbyConfig:
 
 
 def parse_config_file(config_path: Path) -> CrossbyConfig:
-    """Parse a .crossby.yml file into a CrossbyConfig."""
+    """Parse a .crossby.yml file into a CrossbyConfig.
+
+    Raises:
+        ConfigError: the file cannot be read (e.g. unreadable/permission-denied,
+            or non-UTF-8 bytes) or its contents are not valid YAML / a valid
+            config structure. ``load_config`` classifies the *entry* (symlink /
+            non-file) before calling this; here the entry is already a regular
+            file, so read failures are surfaced as ``ConfigError`` too rather
+            than leaking a raw ``OSError``.
+    """
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"Could not read config {config_path}: {e}") from e
+    try:
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ConfigError(f"Invalid YAML in {config_path}: {e}") from e
 

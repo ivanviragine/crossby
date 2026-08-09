@@ -1,5 +1,6 @@
 """Tests for .crossby.yml config loader."""
 
+import os
 import warnings
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from crossby.config.loader import (
     find_config_entry,
     find_config_file,
     load_config,
+    parse_config_file,
 )
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
@@ -584,3 +586,31 @@ class TestBrokenSymlinkBoundary:
 
         with pytest.raises(ConfigError, match="not a regular file"):
             load_config(child)
+
+
+class TestUnreadableRegularConfig:
+    """A regular-file .crossby.yml that ``load_config`` reaches (``is_file()``)
+    but ``parse_config_file`` cannot read is surfaced as a ``ConfigError`` rather
+    than leaking a raw ``OSError``/``UnicodeDecodeError``."""
+
+    def test_non_utf8_config_raises_config_error(self, tmp_path):
+        target = tmp_path / ".crossby.yml"
+        target.write_bytes(b"\xff\xfe not utf-8")
+
+        with pytest.raises(ConfigError, match="Could not read config"):
+            parse_config_file(target)
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses file permission bits",
+    )
+    def test_permission_denied_config_raises_config_error(self, tmp_path):
+        target = tmp_path / ".crossby.yml"
+        target.write_text("version: 1\n", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            with pytest.raises(ConfigError, match="Could not read config"):
+                load_config(tmp_path)
+        finally:
+            # Restore mode so pytest's tmp_path cleanup can remove the file.
+            target.chmod(0o644)
