@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,13 +22,29 @@ from crossby.handoff.models import (
     RawHandoff,
     SessionRef,
 )
-from crossby.handoff.truncate import approx_tokens, truncate_transcript
+from crossby.handoff.truncate import truncate_transcript, turn_tokens
 from crossby.models.ai import AIToolID
 
 logger = structlog.get_logger()
 
 DEFAULT_TOKEN_BUDGET = 32_000
 DEFAULT_TIMEOUT_SECONDS = 120
+
+# Byte ceiling for the assembled prompt on the argv delivery path. Linux caps a
+# *single* argv string at MAX_ARG_STRLEN = 131,072 bytes, independent of total
+# ARG_MAX, so we stay comfortably below that (UTF-8/margin) on POSIX — mirroring
+# cli/handoff.py's 4 KB launch-message cap. Windows CreateProcess instead caps the
+# *whole* command line at 32,767 chars, so 120 KB is unsafe there; use a
+# conservative value and steer Windows users toward a stdin-capable summarizer.
+# stdin delivery (Claude/Codex) bypasses this limit entirely.
+_MAX_PROMPT_BYTES = 30_000 if sys.platform.startswith("win") else 120_000
+
+# Shared, actionable guidance appended to the preflight and E2BIG errors — both
+# describe the same failure (assembled prompt over the argv byte ceiling).
+_ARGV_PROMPT_TOO_LARGE_HINT = (
+    "Use a stdin-capable summarizer (--summarizer-tool claude or codex), "
+    "lower --token-budget, or shorten the custom --prompt template."
+)
 
 _HANDOFF_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -92,10 +110,12 @@ class HandoffSummarizer:
         on_truncate: Callable[[int, int], None] | None = None,
     ) -> HandoffDocument:
         """Summarize ``transcript`` into a parsed :class:`HandoffDocument`."""
-        prepared = self._prepare(transcript, on_truncate)
-        prompt = self._build_prompt(prepared)
+        stdin_args = self.summarizer_tool.headless_prompt_stdin_args()
+        prepared, prompt = self._prepare_prompt(
+            transcript, uses_stdin=stdin_args is not None, on_truncate=on_truncate
+        )
         json_schema = _HANDOFF_JSON_SCHEMA if self._supports_json() else None
-        raw = self._invoke_tool(prompt, json_schema)
+        raw = self._invoke_tool(prompt, json_schema, stdin_args)
         payload = self._parse_output(raw)
         return self._build_document(payload, prepared.session_ref, source_tool, target_tool)
 
@@ -108,9 +128,11 @@ class HandoffSummarizer:
         on_truncate: Callable[[int, int], None] | None = None,
     ) -> RawHandoff:
         """Summarize ``transcript`` and return the tool's raw output unchanged."""
-        prepared = self._prepare(transcript, on_truncate)
-        prompt = self._build_prompt(prepared)
-        raw = self._invoke_tool(prompt, None)
+        stdin_args = self.summarizer_tool.headless_prompt_stdin_args()
+        prepared, prompt = self._prepare_prompt(
+            transcript, uses_stdin=stdin_args is not None, on_truncate=on_truncate
+        )
+        raw = self._invoke_tool(prompt, None, stdin_args)
         return RawHandoff(
             source_tool=source_tool,
             target_tool=target_tool,
@@ -120,16 +142,71 @@ class HandoffSummarizer:
             created_at=datetime.now(tz=UTC),
         )
 
-    def _prepare(
+    def _prepare_prompt(
         self,
         transcript: ConversationTranscript,
+        *,
+        uses_stdin: bool,
         on_truncate: Callable[[int, int], None] | None,
-    ) -> ConversationTranscript:
+    ) -> tuple[ConversationTranscript, str]:
+        """Truncate, assemble, and (for argv delivery) byte-fit the prompt.
+
+        Returns ``(final_transcript, prompt)``. On the argv path (``uses_stdin``
+        is ``False``) the assembled prompt is re-truncated turn-by-turn until it
+        fits ``_MAX_PROMPT_BYTES``; a prompt that still overflows — a lone
+        oversized turn or an oversized custom ``--prompt`` template, neither of
+        which a smaller budget can shrink — raises :class:`SummarizerParseError`
+        *before* any process is spawned. The stdin path skips the byte ceiling
+        entirely (the prompt never touches ``argv``).
+
+        ``on_truncate`` fires at most once, after *all* truncation is complete,
+        with ``(total, kept)`` turn counts — and is skipped when the source
+        transcript was already ``truncated``.
+        """
         self.ensure_installed()
         prepared = truncate_transcript(transcript, self.token_budget)
+        prompt = self._build_prompt(prepared)
+
+        if not uses_stdin:
+            prepared, prompt = self._fit_argv_bytes(prepared, prompt)
+            encoded_len = len(prompt.encode("utf-8"))
+            if encoded_len > _MAX_PROMPT_BYTES:
+                raise SummarizerParseError(
+                    f"Assembled summarizer prompt is {encoded_len} bytes, above the "
+                    f"{_MAX_PROMPT_BYTES}-byte argv ceiling after transcript truncation. "
+                    + _ARGV_PROMPT_TOO_LARGE_HINT
+                )
+
         if prepared.truncated and not transcript.truncated and on_truncate is not None:
             on_truncate(len(transcript.turns), len(prepared.turns))
-        return prepared
+        return prepared, prompt
+
+    def _fit_argv_bytes(
+        self,
+        transcript: ConversationTranscript,
+        prompt: str,
+    ) -> tuple[ConversationTranscript, str]:
+        """Drop the oldest kept turns until the argv prompt fits the byte ceiling.
+
+        Each iteration removes exactly one turn (the oldest kept, matching
+        ``truncate_transcript``'s keep-most-recent policy) and rebuilds the
+        prompt, so the kept-turn count strictly decreases and the loop always
+        terminates. At least one turn is always kept — a lone oversized turn is
+        handled by the preflight in :meth:`_prepare_prompt`, not here. The token
+        budget is deliberately *not* shrunk: a smaller budget need not remove
+        another turn (``truncate_transcript`` keeps ≥1 turn) and could rebuild
+        the same transcript forever.
+        """
+        turns = list(transcript.turns)
+        while len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES and len(turns) > 1:
+            turns = turns[1:]  # drop the oldest kept turn
+            transcript = ConversationTranscript(
+                session_ref=transcript.session_ref,
+                turns=turns,
+                truncated=True,
+            )
+            prompt = self._build_prompt(transcript)
+        return transcript, prompt
 
     def _supports_json(self) -> bool:
         return bool(self.summarizer_tool.structured_output_args(_HANDOFF_JSON_SCHEMA))
@@ -147,20 +224,46 @@ class HandoffSummarizer:
             lines.append("")
         return "\n".join(lines)
 
-    def _invoke_tool(self, prompt: str, json_schema: dict[str, Any] | None) -> str:
-        cmd = self.summarizer_tool.build_launch_command(
-            model=self.model,
-            prompt=prompt,
-            json_schema=json_schema,
-        )
+    def _invoke_tool(
+        self,
+        prompt: str,
+        json_schema: dict[str, Any] | None,
+        stdin_args: list[str] | None,
+    ) -> str:
+        """Run the summarizer with the already-fitted ``prompt``.
+
+        ``stdin_args`` is the value :meth:`AbstractAITool.headless_prompt_stdin_args`
+        returned for this tool (selected once up front, never re-queried here).
+        When non-``None`` the prompt is delivered through stdin — the command is
+        built with ``prompt=None`` and ``stdin_args`` appended after the
+        model/schema flags — so no argv byte ceiling applies. Otherwise the
+        prompt rides on ``argv`` (already fitted to ``_MAX_PROMPT_BYTES``).
+        """
+        if stdin_args is not None:
+            cmd = self.summarizer_tool.build_launch_command(
+                model=self.model,
+                prompt=None,
+                json_schema=json_schema,
+            )
+            cmd = [*cmd, *stdin_args]
+            stdin_input: str | None = prompt
+        else:
+            cmd = self.summarizer_tool.build_launch_command(
+                model=self.model,
+                prompt=prompt,
+                json_schema=json_schema,
+            )
+            stdin_input = None
         logger.info(
             "handoff.summarize.launch",
             tool=str(self.summarizer_tool.TOOL_ID),
             json_schema=bool(json_schema),
+            stdin=stdin_input is not None,
         )
         try:
             result = subprocess.run(
                 cmd,
+                input=stdin_input,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
@@ -171,6 +274,11 @@ class HandoffSummarizer:
                 f"Summarizer tool timed out after {self.timeout_seconds}s."
             ) from exc
         except OSError as exc:
+            if exc.errno == errno.E2BIG:
+                raise SummarizerParseError(
+                    "Summarizer command line was too long (argument list too long). "
+                    + _ARGV_PROMPT_TOO_LARGE_HINT
+                ) from exc
             raise SummarizerParseError(f"Summarizer tool failed to run: {exc}") from exc
         if result.returncode != 0:
             raise SummarizerParseError(
@@ -341,8 +449,13 @@ def _as_str_list(value: object) -> list[str]:
 
 
 def estimate_prompt_tokens(transcript: ConversationTranscript) -> int:
-    """Rough token cost of the full transcript (before truncation)."""
-    total = 0
-    for turn in transcript.turns:
-        total += approx_tokens(turn.content)
-    return total
+    """Rough token cost the truncation budget measures for ``transcript``.
+
+    Sums :func:`turn_tokens` per turn — content **plus** tool-call names and
+    argument strings — so the estimate matches exactly what
+    ``truncate_transcript`` counts when deciding whether to drop turns. This is
+    deliberately *not* the assembled prompt's byte size: the prompt template,
+    per-turn ``[role]`` headers, ISO timestamps, ``files:`` lines, and the
+    rendered/truncated tool-call representation all sit outside this figure.
+    """
+    return sum(turn_tokens(turn) for turn in transcript.turns)
