@@ -98,9 +98,13 @@ class TestEmitCodex:
         assert agent["developer_instructions"] == "Body.\n"
         assert agent["model"] == "gpt-5"
         assert agent["model_reasoning_effort"] == "high"
-        # The fragment registers the agent under [agents.<name>]
+        # The fragment is a global-registration suggestion for the standalone
+        # `crossby agents` emitter: it registers the agent under [agents.<name>]
+        # at the ~/.codex home path (distinct from the project-local path the
+        # sync writer uses, which discards this fragment). #88 §7.
         fragment = tomllib.loads(emission.config_fragment)
         assert "test" in fragment["agents"]
+        assert fragment["agents"]["test"]["path"] == "~/.codex/agents/test.toml"
 
     def test_collapses_tools_to_sandbox_mode(self) -> None:
         ir = _ir(tools=["read_file", "edit_file"])

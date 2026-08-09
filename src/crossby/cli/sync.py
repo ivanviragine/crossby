@@ -230,6 +230,7 @@ def sync(
     # loop above. The "no source anywhere" case still falls through to the
     # interactive wizard so the existing zero-config UX is preserved.
     if source_tool is not None:
+        skip_concerns = _missing_reader_concerns(source_tool, sync_concern)
         data = build_sync_data(
             project_root, from_tool=source_tool, include_user_scope=include_user_scope
         )
@@ -246,6 +247,7 @@ def sync(
             force=force,
             installed_tools=target_tools,
             include_user_scope=include_user_scope,
+            skip_concerns=skip_concerns,
         )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
@@ -742,6 +744,40 @@ def _display_validation(findings: list[ValidationFinding]) -> None:
     console.detail(f"  {ok_count} ok · {warn_count} warning · {error_count} error")
 
 
+def _missing_reader_concerns(
+    source_tool: AIToolID, sync_concern: SyncConcern | None
+) -> set[SyncConcern]:
+    """Warn for, and return, the concerns *source_tool* has no reader for.
+
+    A ``--from`` tool that lacks a reader for a concern must be **skipped
+    entirely**, not synced with an empty source — permissions from
+    codex/copilot/antigravity-cli is the live case today (hooks now cover all
+    five tools). Skipping matters beyond the message: an empty source is read by
+    the ownership diff in :func:`run_sync` as "source removed everything", which
+    would **revoke** previously-synced entries from the targets. Returning the
+    set lets the caller pass ``skip_concerns`` so those writers never run.
+
+    Surfaced at the CLI layer, not inside the reader, because
+    ``discover_permissions`` returns only ``list[str]`` and both sync paths route
+    through ``build_sync_data`` where a buried ``logger.warning`` would not
+    reliably reach the user. When ``sync_concern`` is ``None`` (all concerns),
+    every concern the source can't read is checked so the same protection applies
+    to a bare ``--from <tool>`` run.
+    """
+    from crossby.sync.base import SyncConcern
+    from crossby.sync.readers import reader_available
+
+    candidates = [sync_concern] if sync_concern is not None else list(SyncConcern)
+    missing = {c for c in candidates if not reader_available(source_tool, c)}
+    for concern in sorted(missing, key=lambda c: c.value):
+        console.warn(
+            f"{source_tool} has no reader for the '{concern}' concern — skipping "
+            f"it (crossby cannot read it from {source_tool}, so nothing is synced "
+            f"or revoked for it)."
+        )
+    return missing
+
+
 def _run_inspection(
     *,
     project_root: Path,
@@ -781,6 +817,8 @@ def _run_inspection(
         )
         raise typer.Exit(1)
 
+    skip_concerns = _missing_reader_concerns(source, sync_concern)
+
     installed_tools = AbstractAITool.detect_installed()
     if not installed_tools:
         console.error("No AI tools found in PATH.")
@@ -808,6 +846,7 @@ def _run_inspection(
         force=False,
         installed_tools=target_tools,
         include_user_scope=include_user_scope,
+        skip_concerns=skip_concerns,
     )
 
     summary = summarize_plan(results)

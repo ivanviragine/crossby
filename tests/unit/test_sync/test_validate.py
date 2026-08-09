@@ -246,6 +246,38 @@ class TestJsonConfigs:
         assert len(hook_errors) == 1
         assert "hooks.json" in str(hook_errors[0].path)
 
+    def test_invalid_codex_hooks_json(self, tmp_path: Path) -> None:
+        from crossby.sync.base import SyncConcern
+
+        path = tmp_path / ".codex" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        hook_errors = [
+            f
+            for f in findings
+            if f.level == "error" and f.concern == SyncConcern.HOOKS and f.tool_id == AIToolID.CODEX
+        ]
+        assert len(hook_errors) == 1
+        assert ".codex" in str(hook_errors[0].path)
+
+    def test_invalid_antigravity_cli_hooks_json(self, tmp_path: Path) -> None:
+        from crossby.sync.base import SyncConcern
+
+        path = tmp_path / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{ broken", encoding="utf-8")
+        findings = validate_json_configs(tmp_path)
+        hook_errors = [
+            f
+            for f in findings
+            if f.level == "error"
+            and f.concern == SyncConcern.HOOKS
+            and f.tool_id == AIToolID.ANTIGRAVITY_CLI
+        ]
+        assert len(hook_errors) == 1
+        assert ".agents" in str(hook_errors[0].path)
+
     def test_invalid_home_claude_json_surfaces_error_under_user_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

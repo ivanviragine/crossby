@@ -362,11 +362,15 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     agent.update(_extras_for(ir, "codex"))
     agent_toml = tomli_w.dumps(agent)
 
-    # Build the optional config fragment.  Today we only emit one when Codex
-    # source extras reference a registered role path — the agent file itself
-    # is the canonical content for everything else.  Always include the bare
-    # registration so users see the right shape; emitters that need richer
-    # fragments can extend this without touching the agent_toml path.
+    # Build the config fragment — a **global-registration suggestion** for the
+    # standalone ``crossby agents`` emitter (``cli/agents.py::_write_codex``),
+    # which prints/writes it for the user to merge into ``~/.codex/config.toml``.
+    # The home ``~/.codex/agents/`` path is deliberate and correct for that
+    # consumer; it is NOT the path project sync writes to (the sync writer
+    # discards this fragment and writes project-local ``.codex/agents/`` — see
+    # ``sync/agents.py::CodexAgentsWriter._render_for_target``). Always include
+    # the bare registration so users see the right shape; emitters that need
+    # richer fragments can extend this without touching the agent_toml path.
     suggested_filename = f"{ir.name}.toml"
     config_fragment = tomli_w.dumps(
         {

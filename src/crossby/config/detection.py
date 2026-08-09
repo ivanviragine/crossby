@@ -135,6 +135,22 @@ def _detect_hooks(tool_id: AIToolID, root: Path, items: list[DetectedConfig]) ->
             if isinstance(hooks, dict):
                 count = sum(len(v) for v in hooks.values() if isinstance(v, list))
 
+    elif tool_id == AIToolID.CODEX:
+        # Codex writes the Claude-shaped nested layout ({"hooks": {event: [...]}})
+        # — same shape as Claude, same reader (_read_codex_hooks).
+        hooks = _read_json_key(root / ".codex" / "hooks.json", "hooks")
+        if isinstance(hooks, dict):
+            count = sum(len(v) for v in hooks.values() if isinstance(v, list))
+
+    elif tool_id == AIToolID.ANTIGRAVITY_CLI:
+        # agy's file maps arbitrary container names to {event: [entries]}, so
+        # count the entry lists nested one level deeper (see _read_agy_hooks).
+        data = _read_json_file(root / ".agents" / "hooks.json")
+        if isinstance(data, dict):
+            for container in data.values():
+                if isinstance(container, dict):
+                    count += sum(len(v) for v in container.values() if isinstance(v, list))
+
     if count == 0:
         return
 
