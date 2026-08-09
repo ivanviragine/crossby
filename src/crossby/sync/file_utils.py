@@ -151,8 +151,13 @@ def mirror_tree(
     A symlink anywhere in the target tree — the root or any nested child — is
     **replaced, never followed**: following one would land writes (or a
     :func:`_sync_file_mode` chmod) on its destination, potentially outside the
-    mirror root. Symlinks in *source_dir* are treated as regular entries by
-    ``iterdir`` and mirrored by name, not dereferenced into the target.
+    mirror root. Symlinks in *source_dir*, by contrast, are **dereferenced**: a
+    symlinked file is copied by its bytes and a symlinked directory is recursed
+    into and mirrored as a real directory at the target — matching the
+    ``copytree(symlinks=False)`` this replaced, so a skill's support tree can't
+    silently lose scripts or assets that live behind a directory symlink. (A
+    broken source symlink resolves to neither a file nor a directory and is
+    skipped.)
 
     Returns True when any file was written, chmod'd, or removed.
     """
@@ -173,7 +178,11 @@ def mirror_tree(
         if dest.is_symlink():
             dest.unlink()
             changed = True
-        if child.is_dir() and not child.is_symlink():
+        # ``is_dir()``/``is_file()`` follow symlinks, so a symlinked *source*
+        # entry is dereferenced here — a directory is recursed into (mirrored as
+        # a real dir), a file copied by its bytes. The target symlink guard above
+        # still prevents writing *through* a link on the destination side.
+        if child.is_dir():
             changed |= clear_conflicting_type(dest, want_dir=True)
             if mirror_tree(child, dest):
                 changed = True

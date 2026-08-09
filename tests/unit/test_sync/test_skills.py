@@ -724,6 +724,35 @@ class TestTranslateStrategy:
         assert (target_sub / "run.sh").is_file()
         assert not (outside / "run.sh").exists()
 
+    def test_source_dir_symlink_in_support_dir_is_dereferenced(self, tmp_path: Path) -> None:
+        # A *source* support tree may hold a symlink to a directory (e.g.
+        # scripts/shared -> ../common). mirror_tree must dereference and copy it
+        # as a real directory — matching the old copytree(symlinks=False) — so a
+        # translated skill doesn't silently lose those scripts/assets.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        # Shared directory living outside scripts/, reached via a directory symlink.
+        shared = skill / "shared"
+        (shared / "nested").mkdir(parents=True)
+        (shared / "helper.sh").write_text("#!/bin/sh\necho shared\n", encoding="utf-8")
+        (shared / "nested" / "deep.txt").write_text("deep", encoding="utf-8")
+        os.symlink(shared, skill / "scripts" / "linked")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        target_linked = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "linked"
+        assert target_linked.is_dir()
+        assert not target_linked.is_symlink()  # dereferenced, not reproduced as a link
+        helper = (target_linked / "helper.sh").read_text(encoding="utf-8")
+        assert helper == "#!/bin/sh\necho shared\n"
+        assert (target_linked / "nested" / "deep.txt").read_text(encoding="utf-8") == "deep"
+
+        # Idempotent: an unchanged dereferenced tree reports skipped on re-sync.
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert second.action == "skipped"
+
     def test_stale_skill_dir_removed(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])
         self._make_skill_with_frontmatter(source, "keep")
