@@ -122,8 +122,9 @@ Sync writers live in `src/crossby/sync/<concern>.py` and subclass `AbstractSyncW
 3. Must be idempotent — re-running on unchanged state should return `action="skipped"` (with `file_path` set when the artifact is already in place; `file_path=None` means "nothing was synced for this concern", which the report renderer maps to `Not Added`).
 4. Must respect `dry_run` — compute the intended change but make no filesystem writes.
 5. On write conflicts, honor `force` (backup + overwrite) vs. raising.
+6. If it **overwrites an entire physical artifact** (rules/agents/skills), set `_owns_whole_file = True`. When two such writers share one target path (Codex and Antigravity CLI both own `AGENTS.md` and `.agents/skills/`), `run_sync` groups them by canonical path and lets a single deterministic winner — the first registered — write it; the rest report `skipped` with `message="covered by <winner>"`. **Merge writers** (permissions/MCP/hooks) that co-write a shared file by key (`.claude/settings.json`, `.codex/config.toml`) must leave `_owns_whole_file` at its default `False` so their `target_path()` returns `None` and they are never collapsed.
 
-Register the instance in `src/crossby/sync/__init__.py` alongside the other writers. `SyncRegistry` enforces uniqueness by `(tool_id, concern)`.
+Register the instance in `src/crossby/sync/__init__.py` alongside the other writers. `SyncRegistry` enforces uniqueness by `(tool_id, concern)`. Registration order is the documented ownership precedence for shared whole-file targets (Codex is registered before Antigravity CLI).
 
 ### Revocation and the ownership ledger
 
