@@ -222,7 +222,11 @@ def handoff(
     )
 
     def _warn_truncation(total: int, kept: int) -> None:
-        console.warn(f"Transcript truncated: kept {kept} of {total} turns to fit token budget.")
+        # Turns are dropped to fit the token budget or the argv byte ceiling, so
+        # use neutral wording rather than attributing it to the token budget.
+        console.warn(
+            f"Transcript truncated: kept {kept} of {total} turns to fit the summarizer size limit."
+        )
 
     from crossby.handoff.models import HandoffDocument, RawHandoff
 

@@ -386,13 +386,16 @@ def test_argv_preflight_single_oversized_turn_raises_before_spawn(monkeypatch) -
     run.assert_not_called()
     msg = str(exc_info.value)
     assert "argv" in msg
-    assert "--token-budget" in msg
+    # Preflight is the irreducible case: it must recommend stdin delivery and
+    # say lowering --token-budget will not help — never a raw errno.
+    assert "--summarizer-tool" in msg
+    assert "will not help" in msg
     assert "[Errno 7]" not in msg
 
 
 def test_argv_preflight_oversized_prompt_template_raises(monkeypatch) -> None:
     """A huge ``--prompt`` template a smaller budget can't shrink → preflight
-    raises even with a trivial transcript."""
+    raises even with a trivial transcript, recommending stdin over --token-budget."""
     monkeypatch.setattr(summarizer_mod, "_MAX_PROMPT_BYTES", 300)
     tool = _make_summarizer_tool()
     summarizer = HandoffSummarizer(tool, prompt_template="T" * 500, token_budget=10_000_000)
@@ -401,7 +404,7 @@ def test_argv_preflight_oversized_prompt_template_raises(monkeypatch) -> None:
     with (
         patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
         patch("crossby.handoff.summarizer.subprocess.run") as run,
-        pytest.raises(SummarizerParseError, match="--token-budget"),
+        pytest.raises(SummarizerParseError, match="--summarizer-tool"),
     ):
         summarizer.summarize_structured(
             transcript, source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX

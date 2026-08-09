@@ -39,11 +39,23 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # stdin delivery (Claude/Codex) bypasses this limit entirely.
 _MAX_PROMPT_BYTES = 30_000 if sys.platform.startswith("win") else 120_000
 
-# Shared, actionable guidance appended to the preflight and E2BIG errors — both
-# describe the same failure (assembled prompt over the argv byte ceiling).
-_ARGV_PROMPT_TOO_LARGE_HINT = (
-    "Use a stdin-capable summarizer (--summarizer-tool claude or codex), "
-    "lower --token-budget, or shorten the custom --prompt template."
+# Preflight hint: the assembled prompt is over the ceiling *after* re-truncation,
+# so it is irreducible by truncation — a lone oversized turn (truncation always
+# keeps ≥1) or an oversized custom --prompt template. Lowering --token-budget
+# cannot help either, so the hint says so and points at the fixes that do.
+_ARGV_PREFLIGHT_HINT = (
+    "Lowering --token-budget will not help — truncation always keeps at least one "
+    "turn and cannot shrink the --prompt template. Use a stdin-capable summarizer "
+    "(--summarizer-tool claude or codex), or shorten the oversized turn or custom "
+    "--prompt template."
+)
+
+# E2BIG hint: a defensive backstop for an argv overflow the preflight did not
+# anticipate; the cause is unknown, so a smaller budget (fewer turns) *may* help
+# alongside stdin delivery.
+_ARGV_E2BIG_HINT = (
+    "Use a stdin-capable summarizer (--summarizer-tool claude or codex), lower "
+    "--token-budget, or shorten the transcript."
 )
 
 _HANDOFF_JSON_SCHEMA: dict[str, Any] = {
@@ -174,7 +186,7 @@ class HandoffSummarizer:
                 raise SummarizerParseError(
                     f"Assembled summarizer prompt is {encoded_len} bytes, above the "
                     f"{_MAX_PROMPT_BYTES}-byte argv ceiling after transcript truncation. "
-                    + _ARGV_PROMPT_TOO_LARGE_HINT
+                    + _ARGV_PREFLIGHT_HINT
                 )
 
         if prepared.truncated and not transcript.truncated and on_truncate is not None:
@@ -214,9 +226,12 @@ class HandoffSummarizer:
     def _build_prompt(self, transcript: ConversationTranscript) -> str:
         lines = [self.prompt_template, ""]
         if transcript.truncated:
+            # Neutral wording: turns are dropped either to fit the token budget or
+            # to fit the argv byte ceiling (the re-truncation path), so don't
+            # attribute the drop specifically to the token budget.
             lines.append(
                 "Note: transcript was truncated — earlier turns were dropped to fit "
-                "the token budget. Rely on the last turns for current state.\n"
+                "the summarizer's size limit. Rely on the last turns for current state.\n"
             )
         lines.append("--- Transcript ---\n")
         for turn in transcript.turns:
@@ -277,7 +292,7 @@ class HandoffSummarizer:
             if exc.errno == errno.E2BIG:
                 raise SummarizerParseError(
                     "Summarizer command line was too long (argument list too long). "
-                    + _ARGV_PROMPT_TOO_LARGE_HINT
+                    + _ARGV_E2BIG_HINT
                 ) from exc
             raise SummarizerParseError(f"Summarizer tool failed to run: {exc}") from exc
         if result.returncode != 0:
