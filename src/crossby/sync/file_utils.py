@@ -113,6 +113,28 @@ def write_if_different(path: Path, content: bytes) -> bool:
     return True
 
 
+def _sync_file_mode(dest: Path, source: Path) -> bool:
+    """Copy *source*'s permission bits onto *dest* when they differ.
+
+    ``write_if_different`` writes through a temp file, so a fresh write lands
+    with the umask default and loses an executable bit the source carried —
+    which silently breaks ``scripts/`` mirrored under a skill. Re-applying the
+    source's ``st_mode`` permission bits (``& 0o777``) fixes that and is
+    idempotent: once matched, the next run makes no change.
+
+    Returns True when a ``chmod`` was applied.
+    """
+    try:
+        source_mode = source.stat().st_mode & 0o777
+        dest_mode = dest.stat().st_mode & 0o777
+    except OSError:
+        return False
+    if dest_mode != source_mode:
+        dest.chmod(source_mode)
+        return True
+    return False
+
+
 def mirror_tree(
     source_dir: Path, target_dir: Path, *, preserve: frozenset[str] = frozenset()
 ) -> bool:
@@ -122,17 +144,35 @@ def mirror_tree(
     untouched — no file is removed and rewritten just to arrive at the same
     bytes, so an interrupted sync can't leave the target empty. Paths that no
     longer exist under *source_dir* are removed; top-level names in *preserve*
-    (the crossby marker, typically) are never removed.
+    (the crossby marker, typically) are never removed. A file's permission bits
+    are propagated too (via :func:`_sync_file_mode`), so an executable
+    ``scripts/`` file stays runnable at the target.
 
-    Returns True when any file was written or removed.
+    A symlink anywhere in the target tree — the root or any nested child — is
+    **replaced, never followed**: following one would land writes (or a
+    :func:`_sync_file_mode` chmod) on its destination, potentially outside the
+    mirror root. Symlinks in *source_dir* are treated as regular entries by
+    ``iterdir`` and mirrored by name, not dereferenced into the target.
+
+    Returns True when any file was written, chmod'd, or removed.
     """
-    target_dir.mkdir(parents=True, exist_ok=True)
     changed = False
+    # Never mirror *through* a symlinked target root — replace it with a real
+    # directory so nothing lands at the symlink's destination.
+    if target_dir.is_symlink():
+        target_dir.unlink()
+        changed = True
+    target_dir.mkdir(parents=True, exist_ok=True)
     wanted: set[str] = set()
 
     for child in sorted(source_dir.iterdir()):
         wanted.add(child.name)
         dest = target_dir / child.name
+        # A symlinked target child is replaced, not written through — otherwise a
+        # nested symlink would redirect writes/chmods outside the mirror root.
+        if dest.is_symlink():
+            dest.unlink()
+            changed = True
         if child.is_dir() and not child.is_symlink():
             changed |= clear_conflicting_type(dest, want_dir=True)
             if mirror_tree(child, dest):
@@ -140,6 +180,8 @@ def mirror_tree(
         elif child.is_file():
             changed |= clear_conflicting_type(dest, want_dir=False)
             if write_if_different(dest, child.read_bytes()):
+                changed = True
+            if _sync_file_mode(dest, child):
                 changed = True
 
     for child in target_dir.iterdir():

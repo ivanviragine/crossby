@@ -349,12 +349,10 @@ def _translate_codex_agent(
     return emission.agent_toml, emission.config_fragment
 
 
-def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
-    """Copy one agent file to target, translating tool names.
+def _render_agent_file(source: Path, tool_id: str) -> str:
+    """Render one agent file's target content, translating tool names.
 
-    Returns True when the target was written or rewritten, False when the
-    on-disk content was already byte-identical to the rendered output
-    (idempotent re-run).
+    Verbatim copy when the frontmatter can't be parsed, to avoid data loss.
     """
     content = source.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(content)
@@ -362,18 +360,30 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str) -> bool:
         raw_tools = fm.get("tools")
         if isinstance(raw_tools, list):
             fm["tools"] = _translate_tools([str(t) for t in raw_tools], tool_id)
-        out = _render_frontmatter(fm, body)
-    else:
-        # Frontmatter could not be parsed — copy verbatim to avoid data loss
-        out = content
+        return _render_frontmatter(fm, body)
+    # Frontmatter could not be parsed — copy verbatim to avoid data loss
+    return content
+
+
+def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool = False) -> bool:
+    """Copy one agent file to target, translating tool names.
+
+    Returns True when the target was written or rewritten (or, under
+    ``dry_run``, *would* be), False when the on-disk content was already
+    byte-identical to the rendered output (idempotent re-run). Under
+    ``dry_run`` the comparison still runs but nothing is written, so callers
+    can count would-be writes honestly.
+    """
+    out = _render_agent_file(source, tool_id)
     if target.is_file():
         try:
             if target.read_text(encoding="utf-8") == out:
                 return False
         except OSError:
             pass
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(out, encoding="utf-8")
+    if not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(out, encoding="utf-8")
     return True
 
 
@@ -386,6 +396,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
     """Common sync logic for non-Copilot agent writers (directory-level symlinks)."""
 
     concern = SyncConcern.AGENTS
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel: str  # e.g. ".claude/agents"
     # False for targets with no subagents parser/emitter (e.g. Antigravity CLI) —
     # translate falls back to copy instead of reaching emitters.emit() with an
@@ -528,13 +539,31 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             # Fallback: copy. Mark the directory so the next sync recognizes
             # its own output and doesn't refuse it as "not crossby-managed".
             try:
-                if not dry_run:
-                    _copy_all_agents(source_dir, target_dir, str(self.tool_id))
-                    write_managed_marker(target_dir)
+                if dry_run:
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="created",
+                        file_path=target_dir,
+                        message="copy (symlink failed)",
+                    )
+                target_existed = target_dir.is_dir()
+                wrote = _copy_all_agents(source_dir, target_dir, str(self.tool_id))
+                write_managed_marker(target_dir)
+                if not wrote and target_existed:
+                    # A repeated copy-fallback run that changed nothing is an
+                    # honest skip, not a phantom "created".
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="skipped",
+                        file_path=target_dir,
+                        message="copy (symlink failed)",
+                    )
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
-                    action="created",
+                    action="updated" if target_existed else "created",
                     file_path=target_dir,
                     message="copy (symlink failed)",
                 )
@@ -724,15 +753,24 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: str) -> bool:
     """Copy all .md agent files from source to target, translating tool names.
 
-    Returns True when at least one file was written or rewritten, False
-    when every file was already up to date (idempotent re-run).
+    Removes managed ``*.md`` outputs whose source disappeared (stale cleanup),
+    matching the translate path's ``wanted``-set pattern, so a deleted source
+    agent stops living in copy-strategy targets. Returns True when any file was
+    written, rewritten, or removed, False when the target was already an exact
+    mirror of the source (idempotent re-run).
     """
     target_dir.mkdir(parents=True, exist_ok=True)
-    wrote_any = False
+    changed = False
+    wanted = {src.name for src in source_dir.glob("*.md")}
+    for existing in target_dir.glob("*.md"):
+        if existing.name not in wanted:
+            existing.unlink()
+            logger.info("agents.stale_removed", path=str(existing))
+            changed = True
     for src in source_dir.glob("*.md"):
         if _copy_agent_file(src, target_dir / src.name, tool_id):
-            wrote_any = True
-    return wrote_any
+            changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +826,7 @@ class CodexAgentsWriter(AbstractSyncWriter):
 
     tool_id = AIToolID.CODEX
     concern = SyncConcern.AGENTS
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel = ".codex/agents"
 
     def sync(
@@ -897,7 +936,26 @@ class CodexAgentsWriter(AbstractSyncWriter):
 
     def _translate_all(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
         sources = self._source_files(source_dir)
+        target_existed = target_dir.is_dir()
+
         if not sources:
+            # No sources left — but an existing target may still hold ``.toml``
+            # outputs from a previous run (deleting the *final* source agent must
+            # propagate, not leave a live orphan). Run stale cleanup here, before
+            # the early return, and report the removal as a real change.
+            stale = list(target_dir.glob("*.toml")) if target_existed else []
+            if stale:
+                if not dry_run:
+                    for existing in stale:
+                        existing.unlink()
+                        logger.info("agents.stale_removed", path=str(existing))
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="updated",
+                    file_path=target_dir,
+                    message="removed stale agents" + (" (dry-run)" if dry_run else ""),
+                )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -906,7 +964,6 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 message="no agents to translate",
             )
 
-        target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         wrote_any = False
         skipped_all = True
@@ -915,13 +972,19 @@ class CodexAgentsWriter(AbstractSyncWriter):
             target_dir.mkdir(parents=True, exist_ok=True)
             write_managed_marker(target_dir)
 
-        # Stale cleanup — remove .toml outputs whose source is gone.
-        if not dry_run and target_dir.is_dir():
+        # Stale cleanup — remove .toml outputs whose source is gone. A stale
+        # deletion is itself a change, so it clears ``skipped_all``: a delete-only
+        # run reports ``updated``, not ``skipped``. Detection runs under dry-run
+        # too (for honest reporting); only the unlink is gated on a real run.
+        if target_dir.is_dir():
             wanted = {f"{src.stem}.toml" for src in sources}
             for existing in target_dir.glob("*.toml"):
                 if existing.name not in wanted:
-                    existing.unlink()
-                    logger.info("agents.stale_removed", path=str(existing))
+                    if not dry_run:
+                        existing.unlink()
+                        logger.info("agents.stale_removed", path=str(existing))
+                    skipped_all = False
+                    wrote_any = True
 
         for src in sources:
             agent_toml, _config_fragment = self._render_for_target(src)
@@ -968,6 +1031,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
 
     tool_id = AIToolID.COPILOT
     concern = SyncConcern.AGENTS
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel = ".github/agents"
 
     def sync(
@@ -1191,13 +1255,20 @@ class CopilotAgentsWriter(AbstractSyncWriter):
 
         # Stale cleanup: remove managed *.agent.md outputs whose source is gone.
         # The .agent.md extension is crossby-specific; both symlinks and regular
-        # files (copy-fallback outputs) are treated as managed and eligible for removal.
-        if not dry_run and target_dir.is_dir():
+        # files (copy-fallback outputs) are treated as managed and eligible for
+        # removal. A removal is a real change, so a delete-only run reports a
+        # non-``skipped`` action rather than silently modifying the target.
+        # Detection runs under dry-run too (for an honest reported action); only
+        # the unlink is gated on a real run.
+        removed_any = False
+        if target_dir.is_dir():
             for link in list(target_dir.glob("*.agent.md")):
                 original_stem = link.name.removesuffix(".agent.md")
                 if original_stem not in source_stems:
-                    os.unlink(link)
-                    logger.info("agents.stale_removed", link=str(link))
+                    if not dry_run:
+                        os.unlink(link)
+                        logger.info("agents.stale_removed", link=str(link))
+                    removed_any = True
 
         # Create/update symlinks for each source file
         created_count = 0
@@ -1217,19 +1288,22 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                             "use --force to replace"
                         ),
                     )
-                elif link.exists() and not link.is_symlink():
-                    # Regular file at the link path — treat as a managed copy-fallback
-                    # output (.agent.md is crossby-specific) and keep it up to date.
-                    if not dry_run:
-                        _copy_agent_file(src, link, "copilot")
+                # Regular file at the link path — treat as a managed copy-fallback
+                # output (.agent.md is crossby-specific) and keep it up to date.
+                # Count a change only when the bytes actually differ, so an
+                # unchanged copy-fallback re-run reports ``skipped``.
+                elif (
+                    link.exists()
+                    and not link.is_symlink()
+                    and _copy_agent_file(src, link, "copilot", dry_run=dry_run)
+                ):
                     created_count += 1
             except OSError:
-                # Fallback: copy the file
-                if not dry_run:
-                    _copy_agent_file(src, link, "copilot")
+                # Fallback: copy the file (count only a real/needed write).
+                if _copy_agent_file(src, link, "copilot", dry_run=dry_run):
                     created_count += 1
 
-        if created_count == 0 and not dir_newly_created:
+        if created_count == 0 and not dir_newly_created and not removed_any:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1258,6 +1332,18 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         target_dir.mkdir(parents=True, exist_ok=True)
         write_managed_marker(target_dir)
         wrote_any = False
+        # Stale cleanup: managed *.agent.md outputs whose source .md is gone. A
+        # removal counts as a change so a deleted source agent stops living here
+        # and a delete-only run reports a non-``skipped`` action.
+        wanted = {f"{src.stem}.agent.md" for src in source_dir.glob("*.md")}
+        for existing in target_dir.glob("*.agent.md"):
+            if existing.name not in wanted:
+                if existing.is_symlink():
+                    os.unlink(existing)
+                else:
+                    existing.unlink()
+                logger.info("agents.stale_removed", path=str(existing))
+                wrote_any = True
         for src in source_dir.glob("*.md"):
             dest = target_dir / f"{src.stem}.agent.md"
             if _copy_agent_file(src, dest, "copilot"):

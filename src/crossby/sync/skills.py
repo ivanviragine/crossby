@@ -123,6 +123,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
     """
 
     concern = SyncConcern.SKILLS
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel: str
 
     def sync(
@@ -254,13 +255,31 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             # Mark the copy-fallback output so the next sync recognizes its own
             # work and doesn't refuse the dir as "not crossby-managed".
             try:
-                if not dry_run:
-                    _copy_skills_dir(source_dir, target_dir)
-                    write_managed_marker(target_dir)
+                if dry_run:
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="created",
+                        file_path=target_dir,
+                        message="copy (symlink failed)",
+                    )
+                target_existed = target_dir.is_dir()
+                wrote = _copy_skills_dir(source_dir, target_dir)
+                write_managed_marker(target_dir)
+                if not wrote and target_existed:
+                    # A repeated copy-fallback run that changed nothing is an
+                    # honest skip, not a phantom "created".
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="skipped",
+                        file_path=target_dir,
+                        message="copy (symlink failed)",
+                    )
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
-                    action="created",
+                    action="updated" if target_existed else "created",
                     file_path=target_dir,
                     message="copy (symlink failed)",
                 )
@@ -456,7 +475,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
             ):
                 # SKILL.md unchanged — but support dirs may still need a refresh.
-                _refresh_skill_support_dirs(skill_dir, target_skill)
+                # A support-dir change means this skill was not a no-op, so a
+                # re-sync that only touched (or should touch) scripts/references/
+                # assets is reported as ``updated`` rather than ``skipped``.
+                if _refresh_skill_support_dirs(skill_dir, target_skill):
+                    skipped_all = False
                 continue
 
             skipped_all = False
@@ -540,21 +563,43 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
 _SUPPORT_DIRS = ("scripts", "references", "assets")
 
 
-def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> None:
+def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> bool:
     """Mirror ``scripts/``, ``references/``, ``assets/`` from source to target.
 
-    Idempotent: replaces the target subdir if it exists. Missing source subdirs
-    are also removed from target so deleted support dirs propagate.
+    Compare-then-write via :func:`mirror_tree` instead of ``rmtree`` +
+    ``copytree``: an unchanged support tree is left completely untouched, so a
+    translate re-sync no longer rewrites those files on disk every run (and the
+    lack of churn is reported honestly by the returned flag). ``mirror_tree``
+    also preserves the executable bit, so ``scripts/`` stay runnable. A symlinked
+    target support dir is replaced outright, never followed. Missing source
+    subdirs are removed from the target so deleted support dirs propagate.
+
+    Returns True when any support file was written, chmod'd, or removed.
     """
+    changed = False
     for subdir in _SUPPORT_DIRS:
         source_sub = source_skill / subdir
         target_sub = target_skill / subdir
+        # Never write through a symlinked target — replace it outright so the
+        # mirror lands under the project root, not the symlink's destination.
+        if target_sub.is_symlink():
+            target_sub.unlink()
+            changed = True
         if source_sub.is_dir():
-            if target_sub.exists():
-                shutil.rmtree(target_sub)
-            shutil.copytree(str(source_sub), str(target_sub))
-        elif target_sub.exists():
+            # A target of the wrong type (a file where a dir belongs) would make
+            # mirror_tree's mkdir fail — clear it first.
+            if target_sub.exists() and not target_sub.is_dir():
+                target_sub.unlink()
+                changed = True
+            if mirror_tree(source_sub, target_sub):
+                changed = True
+        elif target_sub.is_dir():
             shutil.rmtree(target_sub)
+            changed = True
+        elif target_sub.exists():
+            target_sub.unlink()
+            changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -579,11 +624,15 @@ class CursorSkillsWriter(_BaseSkillsWriter):
 class CodexSkillsWriter(_BaseSkillsWriter):
     """Sync skills → .agents/skills/.
 
-    Codex and Antigravity CLI intentionally share this directory. Both
-    writers point at the same physical path, so `detect_skills_source()`'s
-    scan order (`config/skills.py:_SCAN_ORDER`) — not the writer — decides
-    which `AIToolID` a shared directory is attributed to when both are
-    installed.
+    Codex and Antigravity CLI intentionally share this directory. They are
+    **not** idempotent against each other under ``translate`` — each renders
+    target-specific ``SKILL.md`` content — so whichever ran second used to
+    churn the tree every sync. ``run_sync`` now groups writers by physical
+    target path and lets a single winner write ``.agents/skills/``;
+    registration order in ``sync/__init__.py`` (Codex before Antigravity CLI)
+    is the documented, stable ownership precedence. ``detect_skills_source()``'s
+    scan order (`config/skills.py:_SCAN_ORDER`) separately decides which
+    `AIToolID` a shared *source* directory is attributed to.
     """
 
     tool_id = AIToolID.CODEX
@@ -591,7 +640,12 @@ class CodexSkillsWriter(_BaseSkillsWriter):
 
 
 class AntigravityCLISkillsWriter(_BaseSkillsWriter):
-    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex."""
+    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex.
+
+    ``run_sync`` grouping resolves the shared path; Codex wins when both are
+    installed (registration order), and this writer runs standalone when Codex
+    is absent (e.g. ``--to antigravity-cli``).
+    """
 
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = SKILLS_DIR[AIToolID.ANTIGRAVITY_CLI]

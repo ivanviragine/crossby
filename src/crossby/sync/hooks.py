@@ -1327,7 +1327,9 @@ _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
 _CODEX_FEATURE_KEYS: tuple[str, ...] = ("hooks", "codex_hooks")
 
 
-def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> ManualFixNote | None:
+def _ensure_codex_hooks_feature_flag(
+    project_root: Path, *, dry_run: bool
+) -> tuple[bool, ManualFixNote | None]:
     """Enable the Codex hooks feature flags in ``.codex/config.toml`` (idempotent).
 
     Writes both ``[features].hooks`` (canonical) and ``[features].codex_hooks``
@@ -1339,10 +1341,15 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
     written so a project pinned to an older Codex is not silently left with
     inert hooks.
 
-    Returns ``None`` on success (or when both flags are already set / ``dry_run``);
-    returns :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is malformed
-    TOML and can't be updated automatically, so the caller can surface a
-    manual-fix note instead of silently leaving the hooks inert.
+    Returns ``(changed, note)``:
+
+    - ``changed`` is True when at least one feature key was missing — meaning the
+      file was written (non-dry-run) or *would* be written (dry-run). It is False
+      when both flags are already set or the file is malformed (nothing written).
+      The caller uses this so a ``skipped`` row can never hide a real flag write,
+      while self-heal still fires on an otherwise-unchanged re-sync.
+    - ``note`` is :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is
+      malformed TOML and can't be updated automatically, else ``None``.
     """
     import tomllib
 
@@ -1356,17 +1363,17 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
             original = path.read_text(encoding="utf-8")
             existing = tomllib.loads(original)
         except (tomllib.TOMLDecodeError, OSError, ValueError):
-            return _CODEX_FEATURES_FLAG_NOTE
+            return False, _CODEX_FEATURES_FLAG_NOTE
 
     features = existing.get("features")
     if not isinstance(features, dict):
         features = {}
     missing = [key for key in _CODEX_FEATURE_KEYS if features.get(key) is not True]
     if not missing:
-        return None  # already enabled — nothing to do
+        return False, None  # already enabled — nothing to do
 
     if dry_run:
-        return None
+        return True, None  # would write, but dry-run writes nothing
 
     for key in missing:
         features[key] = True
@@ -1388,8 +1395,8 @@ def _ensure_codex_hooks_feature_flag(project_root: Path, *, dry_run: bool) -> Ma
     try:
         atomic_write_text(path, new_text)
     except OSError:
-        return _CODEX_FEATURES_FLAG_NOTE
-    return None
+        return False, _CODEX_FEATURES_FLAG_NOTE
+    return True, None
 
 
 class CodexHooksWriter(AbstractSyncWriter):
@@ -1521,33 +1528,59 @@ class CodexHooksWriter(AbstractSyncWriter):
                 )
             )
 
-        if not added and not revoked and not kept:
+        # ``.codex/hooks.json`` is rewritten only when its contents actually
+        # changed (an entry was added, widened, or revoked) — never on an
+        # unchanged re-sync where ``kept`` is merely non-empty. This mirrors
+        # CopilotHooksWriter's ``changed = bool(added or revoked)`` gate.
+        hooks_changed = bool(added or revoked)
+
+        # Enable the feature flag so Codex actually loads these hooks. Runs
+        # whenever there are supported hooks — independent of ``hooks_changed`` —
+        # so a missing ``[features].hooks`` flag self-heals even on an otherwise
+        # unchanged re-sync. On success this is silent; if it can't be written a
+        # manual-fix note is surfaced. ``flag_changed`` reflects a real (or, in
+        # dry-run, a would-be) write to ``.codex/config.toml`` so a ``skipped``
+        # row can never hide a config write.
+        flag_changed = False
+        if kept:
+            flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
+                project_root, dry_run=dry_run
+            )
+            if flag_note is not None:
+                notes.append(flag_note)
+
+        config_path = project_root / ".codex" / "config.toml"
+        if not hooks_changed and not flag_changed:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action="skipped",
+                # Primary artifact is hooks.json; the row stays ``skipped`` and
+                # still surfaces any stable manual-fix notes.
                 file_path=path,
                 message=_message_with_notes(None, notes),
             )
 
-        # Enable the feature flag so Codex actually loads these hooks. On success
-        # this is silent; if it can't be written a manual-fix note is surfaced.
-        if kept:
-            flag_note = _ensure_codex_hooks_feature_flag(project_root, dry_run=dry_run)
-            if flag_note is not None:
-                notes.append(flag_note)
-
-        action: _HookAction = "created" if was_new else "updated"
-        if not dry_run:
+        if hooks_changed and not dry_run:
             existing["hooks"] = hooks_section
             write_json_file(path, existing)
+
+        action: _HookAction = "created" if was_new and hooks_changed else "updated"
+        # When hooks.json changed it is the primary artifact; when only the
+        # feature flag moved, report ``.codex/config.toml`` instead.
+        result_path = path if hooks_changed else config_path
+        base_message = _revoked_clause(revoked)
+        if hooks_changed and flag_changed:
+            # Both files moved — name the secondary artifact in the message.
+            flag_clause = "enabled hooks in .codex/config.toml"
+            base_message = f"{base_message}; {flag_clause}" if base_message else flag_clause
 
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
             action=action,
-            file_path=path,
-            message=_message_with_notes(_revoked_clause(revoked), notes),
+            file_path=result_path,
+            message=_message_with_notes(base_message, notes),
             added=added,
             revoked=revoked,
             created=tuple(created),

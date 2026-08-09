@@ -204,6 +204,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
     """Common sync logic for rules writers."""
 
     concern = SyncConcern.RULES
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel: str  # e.g. "CLAUDE.md"
 
     def sync(
@@ -360,10 +361,12 @@ class CopilotRulesWriter(_BaseRulesWriter):
 
 class CodexRulesWriter(_BaseRulesWriter):
     """Codex and Antigravity CLI intentionally share ``AGENTS.md`` as their
-    target — both tools read the same file by convention, so syncing both
-    is idempotent (whichever writer runs second sees the file already
-    up to date). If the two tools' instruction conventions ever diverge,
-    this shared target becomes a real constraint, not just duplication.
+    target. They are **not** idempotent against each other — each renders
+    target-specific content (its own manual-fix block), so whichever ran
+    second used to churn the file every sync. ``run_sync`` now groups writers
+    by physical target path and lets a single winner write ``AGENTS.md``;
+    registration order in ``sync/__init__.py`` (Codex before Antigravity CLI)
+    is the documented, stable ownership precedence.
     """
 
     tool_id = AIToolID.CODEX
@@ -371,7 +374,12 @@ class CodexRulesWriter(_BaseRulesWriter):
 
 
 class AntigravityCLIRulesWriter(_BaseRulesWriter):
-    """See :class:`CodexRulesWriter` — shares ``AGENTS.md`` with Codex."""
+    """See :class:`CodexRulesWriter` — shares ``AGENTS.md`` with Codex.
+
+    ``run_sync`` grouping resolves the shared path; Codex wins when both are
+    installed (registration order), and this writer runs standalone when Codex
+    is absent (e.g. ``--to antigravity-cli``).
+    """
 
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = "AGENTS.md"

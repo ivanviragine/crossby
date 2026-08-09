@@ -123,6 +123,35 @@ class AbstractSyncWriter(ABC):
     tool_id: AIToolID
     concern: SyncConcern
 
+    # Whole-file ownership opt-in. Only writers that *overwrite an entire
+    # physical artifact* (rules/agents/skills) set this to True; ``run_sync``
+    # then groups every writer sharing one target path and lets a single winner
+    # write it (see ``run_sync``). Merge-style writers (permissions, MCP, hooks)
+    # leave it False: they co-write shared files (``.claude/settings.json``,
+    # ``.codex/config.toml``) by key and must never be collapsed to one writer.
+    # The flag is an *explicit* opt-in — the grouping never keys off a stray
+    # ``_target_rel`` attribute, so a future merge writer that happens to define
+    # ``_target_rel`` is not grouped by accident.
+    _owns_whole_file: bool = False
+
+    def target_path(self, project_root: Path) -> Path | None:
+        """Physical whole-file artifact this writer overwrites, or ``None``.
+
+        Returns ``project_root / self._target_rel`` for whole-file overwrite
+        writers (those with ``_owns_whole_file = True`` and a ``_target_rel``);
+        ``None`` for merge writers and anything without a declared target.
+
+        This is the *display* path used for :attr:`SyncResult.file_path`.
+        ``run_sync`` derives the grouping key separately (canonicalising the
+        parent) so a symlinked project root never leaks into the reported path.
+        """
+        if not self._owns_whole_file:
+            return None
+        rel = getattr(self, "_target_rel", None)
+        if not isinstance(rel, str):
+            return None
+        return project_root / rel
+
     @abstractmethod
     def sync(
         self,

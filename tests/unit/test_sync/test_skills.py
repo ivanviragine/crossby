@@ -625,6 +625,105 @@ class TestTranslateStrategy:
         assert first.action == "created"
         assert second.action == "skipped"
 
+    def test_unchanged_support_dirs_report_skipped_and_dont_rewrite(self, tmp_path: Path) -> None:
+        # Issue #83 (D): a translate re-sync must NOT rewrite unchanged support
+        # dirs (scripts/, references/, assets/), and must report skipped.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_script = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "run.sh"
+        mtime = target_script.stat().st_mtime_ns
+
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert second.action == "skipped"
+        assert target_script.stat().st_mtime_ns == mtime  # not rewritten
+
+    def test_changed_support_file_reports_updated(self, tmp_path: Path) -> None:
+        # A support-file change (SKILL.md unchanged) must surface as updated, not
+        # skipped — the change flag is threaded through _refresh_skill_support_dirs.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        script = skill / "scripts" / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        script.write_text("#!/bin/sh\necho CHANGED\n", encoding="utf-8")
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "updated"
+        target_script = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "run.sh"
+        assert "CHANGED" in target_script.read_text(encoding="utf-8")
+
+    def test_executable_bit_preserved_on_translate(self, tmp_path: Path) -> None:
+        # mirror_tree must propagate the executable bit so scripts/ stay runnable
+        # (write_bytes would otherwise drop it).
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        script = skill / "scripts" / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        os.chmod(script, 0o755)
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        target_script = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "run.sh"
+        assert target_script.stat().st_mode & 0o111, "executable bit dropped on translate"
+
+    def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # A target support dir that is a symlink must be replaced, never written
+        # through (which would land files outside the project root).
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        # First sync establishes the managed target with a real scripts/ dir.
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_scripts = tmp_path / ".agents" / "skills" / "my-skill" / "scripts"
+        assert target_scripts.is_dir()
+
+        # Swap the target scripts/ for a symlink pointing outside the project.
+        shutil.rmtree(target_scripts)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(outside, target_scripts)
+
+        # Re-sync: the refresh replaces the symlink and mirrors into a real dir.
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        assert not target_scripts.is_symlink()
+        assert (target_scripts / "run.sh").is_file()
+        # The symlink target outside the project was not written into.
+        assert not (outside / "run.sh").exists()
+
+    def test_nested_symlink_in_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # mirror_tree must not follow a *nested* target symlink either — following
+        # it would land writes/chmods outside the mirror root.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts" / "sub").mkdir(parents=True)
+        (skill / "scripts" / "sub" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_sub = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "sub"
+        assert target_sub.is_dir()
+
+        # Swap the nested target dir for a symlink pointing outside the project.
+        shutil.rmtree(target_sub)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(outside, target_sub)
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        assert not target_sub.is_symlink()
+        assert (target_sub / "run.sh").is_file()
+        assert not (outside / "run.sh").exists()
+
     def test_stale_skill_dir_removed(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])
         self._make_skill_with_frontmatter(source, "keep")

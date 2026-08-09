@@ -182,6 +182,73 @@ class TestExpandedCopilotMarkers:
         assert AIToolID.COPILOT not in found
 
 
+class TestExpandedAntigravityCLIMarkers:
+    """agy markers cover only agy-*unique* surfaces; shared ones stay off it."""
+
+    def test_hooks_json_path_detected(self) -> None:
+        found = detect_tool_markers("Guards live in .agents/hooks.json")
+        assert AIToolID.ANTIGRAVITY_CLI in found
+
+    def test_mcp_config_path_detected(self) -> None:
+        found = detect_tool_markers("MCP servers go in .agents/mcp_config.json")
+        assert AIToolID.ANTIGRAVITY_CLI in found
+
+    def test_agents_dir_path_detected(self) -> None:
+        found = detect_tool_markers("Subagents live under .agents/agents/")
+        assert AIToolID.ANTIGRAVITY_CLI in found
+
+    def test_structured_decision_hook_detected(self) -> None:
+        # A structured agy hook payload — the JSON DECISION shape, not prose.
+        content = 'The hook returns {"decision": "ask"} to prompt the user.'
+        found = detect_tool_markers(content)
+        assert AIToolID.ANTIGRAVITY_CLI in found
+
+    def test_agy_decision_variants_detected(self) -> None:
+        # agy's PreToolUse allow/deny/ask and Stop continue are all agy-specific.
+        for value in ("allow", "deny", "ask", "continue"):
+            content = f'Return {{"decision": "{value}"}} from the guard.'
+            assert AIToolID.ANTIGRAVITY_CLI in detect_tool_markers(content), value
+
+    def test_decision_block_is_not_agy(self) -> None:
+        # `{"decision": "block"}` is the Claude/Codex Stop shape (BLOCK_DECISION),
+        # not agy — it must not be attributed to Antigravity CLI.
+        content = 'The Stop hook emits {"decision": "block"} to halt.'
+        assert AIToolID.ANTIGRAVITY_CLI not in detect_tool_markers(content)
+
+    def test_shared_skills_path_not_attributed_to_agy(self) -> None:
+        # `.agents/skills/` is shared with Codex and is a Codex marker; it must
+        # NOT be attributed to agy or the shared skills surface would misfire.
+        found = detect_tool_markers("Skill lives in .agents/skills/foo/SKILL.md")
+        assert AIToolID.CODEX in found
+        assert AIToolID.ANTIGRAVITY_CLI not in found
+
+    def test_non_hook_decision_word_not_attributed_to_agy(self) -> None:
+        # A bare mention of "decision" in prose is not the structured hook shape.
+        content = "Make a decision about the release before Friday."
+        assert AIToolID.ANTIGRAVITY_CLI not in detect_tool_markers(content)
+
+    def test_bare_agents_dir_not_attributed_to_agy(self) -> None:
+        # A bare `.agents/` prefix (no unique agy surface) must not attribute.
+        content = "Config lives somewhere under .agents/ generally."
+        assert AIToolID.ANTIGRAVITY_CLI not in detect_tool_markers(content)
+
+    def test_agy_content_is_foreign_for_non_agy_target(self) -> None:
+        # agy-authored rules content copied to a Claude target must be flagged.
+        # (Uses `.agents/mcp_config.json`, an agy-unique surface that doesn't
+        # also trip Claude's pre-existing `/hooks` marker.)
+        content = "Register servers in .agents/mcp_config.json before syncing."
+        assert is_neutral_for_target(content, AIToolID.CLAUDE) is False
+        foreign = foreign_markers(content, AIToolID.CLAUDE)
+        assert AIToolID.ANTIGRAVITY_CLI in foreign
+
+    def test_agy_content_neutral_for_agy_target(self) -> None:
+        content = "Register servers in .agents/mcp_config.json before syncing."
+        assert is_neutral_for_target(content, AIToolID.ANTIGRAVITY_CLI) is True
+
+    def test_no_agy_marker_in_plain_prose(self) -> None:
+        assert AIToolID.ANTIGRAVITY_CLI not in detect_tool_markers("Plain prose.")
+
+
 class TestNeutralStillNeutral:
     """Regression: expanded marker lists must not flag plain documentation."""
 

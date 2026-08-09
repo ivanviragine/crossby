@@ -496,6 +496,61 @@ class TestCopyStrategy:
         assert (target / "a.md").is_file()
 
 
+class TestCopyStaleCleanup:
+    """Issue #83: copy strategy must remove agents whose source was deleted and
+    report a delete-only run as a real change (not a phantom skip)."""
+
+    def test_deleting_a_source_agent_removes_it_from_copy_target(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["keep.md", "drop.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        target = tmp_path / ".claude" / "agents"
+        assert (target / "drop.md").is_file()
+
+        (source / "drop.md").unlink()
+        result = w.sync(data, tmp_path)
+
+        assert result.action == "updated"  # a stale removal is a change
+        assert not (target / "drop.md").exists()
+        assert (target / "keep.md").is_file()
+
+    def test_deleting_the_final_source_agent_removes_it(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["only.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        target = tmp_path / ".claude" / "agents"
+        assert (target / "only.md").is_file()
+
+        (source / "only.md").unlink()
+        result = w.sync(data, tmp_path)
+
+        assert result.action == "updated"
+        assert not (target / "only.md").exists()
+
+    def test_repeated_symlink_failure_runs_report_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under a persistent symlink failure the writer copies; a second/third
+        # unchanged run must report skipped, not a phantom "created".
+        _make_source(tmp_path, ["reviewer.md"])
+
+        def _boom(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("simulated symlink failure")
+
+        monkeypatch.setattr("crossby.sync.agents.create_symlink", _boom)
+
+        w = ClaudeAgentsWriter()
+        data = _data()  # symlink strategy → fails → copy fallback
+        first = w.sync(data, tmp_path)
+        second = w.sync(data, tmp_path)
+        third = w.sync(data, tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+        assert third.action == "skipped"
+
+
 # ---------------------------------------------------------------------------
 # Copilot writer (file-level symlinks)
 # ---------------------------------------------------------------------------
@@ -542,6 +597,45 @@ class TestCopilotAgentsWriter:
         target_dir = tmp_path / ".github" / "agents"
         assert not (target_dir / "old.agent.md").exists()
         assert (target_dir / "a.agent.md").is_symlink()
+
+    def test_symlink_delete_only_run_reports_non_skipped(self, tmp_path: Path) -> None:
+        # Removing a source agent with no other change must report a change, not
+        # skipped — a stale .agent.md was deleted from the target.
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data()
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+        result = w.sync(data, tmp_path)
+        assert result.action != "skipped"
+        assert not (tmp_path / ".github" / "agents" / "old.agent.md").exists()
+
+    def test_symlink_dry_run_reports_stale_removal_without_deleting(self, tmp_path: Path) -> None:
+        # A dry-run must report the would-be delete honestly (non-skipped) while
+        # leaving the stale file on disk.
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data()
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+
+        result = w.sync(data, tmp_path, dry_run=True)
+        assert result.action != "skipped"
+        # dry-run didn't actually remove the stale link (it's now dangling since
+        # its source was deleted, so check the link entry, not exists()).
+        assert (tmp_path / ".github" / "agents" / "old.agent.md").is_symlink()
+
+    def test_copy_delete_only_run_reports_updated(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+        result = w.sync(data, tmp_path)
+        assert result.action == "updated"
+        target_dir = tmp_path / ".github" / "agents"
+        assert not (target_dir / "old.agent.md").exists()
+        assert (target_dir / "a.agent.md").is_file()
 
     def test_missing_source_is_error(self, tmp_path: Path) -> None:
         w = CopilotAgentsWriter()
@@ -1066,9 +1160,27 @@ class TestCodexAgentsTranslate:
         (source / "drop.md").unlink()
 
         result = CodexAgentsWriter().sync(_data(), tmp_path)
-        assert result.action in {"created", "updated", "skipped"}
+        # A stale removal is a change: a delete-only run reports updated.
+        assert result.action == "updated"
         assert (tmp_path / ".codex" / "agents" / "keep.toml").is_file()
         assert not (tmp_path / ".codex" / "agents" / "drop.toml").exists()
+
+    def test_deleting_final_agent_removes_toml_and_reports_updated(self, tmp_path: Path) -> None:
+        # Issue #83 (D4): deleting the *last* source agent leaves an empty source,
+        # which used to early-return skipped and orphan the .toml. Stale cleanup
+        # must now run before that return.
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "only")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        toml_out = tmp_path / ".codex" / "agents" / "only.toml"
+        assert toml_out.is_file()
+
+        (source / "only.md").unlink()
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+
+        assert result.action == "updated"
+        assert not toml_out.exists()
 
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])
