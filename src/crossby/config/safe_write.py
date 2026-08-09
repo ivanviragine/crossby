@@ -28,18 +28,64 @@ if TYPE_CHECKING:
 
 
 class ConfigWriteError(Exception):
-    """Raised when a checked config write produced an unparseable file.
+    """Raised when a checked config write produced an unparseable file, or when
+    the write was refused before any filesystem change.
 
-    ``original`` is the parse (or write) exception that triggered the rollback;
-    ``restored`` is ``True`` when a previous file was put back byte-for-byte and
-    ``False`` when the freshly-written file was simply removed (there was no
-    prior file). Callers use ``restored`` to word their error message.
+    ``original`` is the exception that triggered the failure: for a produced-but-
+    unparseable file it is the parse (or write) exception that triggered the
+    rollback; for a pre-write refusal (a cyclic/unresolvable symlink or an
+    existing non-regular-file target) it is the resolution/validation exception
+    and no rollback occurred. ``restored`` is ``True`` when a previous file was
+    put back byte-for-byte and ``False`` in two cases: the freshly-written file
+    was simply removed (there was no prior file), or the write was refused before
+    touching disk. Callers use ``restored`` to word their error message, which
+    must stay phase-neutral because ``False`` no longer implies a file was ever
+    written.
     """
 
     def __init__(self, original: Exception, *, restored: bool) -> None:
         self.original: Exception = original
         self.restored: bool = restored
         super().__init__(str(original))
+
+
+def resolve_config_target(target: Path) -> Path:
+    """Resolve a (possibly symlinked) config *target* to the path to write.
+
+    A plain non-symlink path is returned as-is; a symlink is resolved so the
+    link survives a write-through. Refuses, before touching disk:
+      - a cyclic / unresolvable symlink (ELOOP on 3.13+, RuntimeError on
+        3.11-3.12) — writing through it would clobber the link with a file;
+      - an existing non-regular-file target, symlinked or direct (e.g. a
+        directory) — the backup read_bytes()/os.replace would raise mid-write.
+    A genuinely dangling symlink (target not created yet) and a not-yet-existing
+    plain path are both supported: the write creates the destination.
+
+    Raises:
+        ConfigWriteError: cyclic/unresolvable link, or an existing non-file
+            target; nothing on disk is touched (``restored`` is ``False``).
+    """
+    if target.is_symlink():
+        try:
+            resolved = target.resolve(strict=True)
+        except FileNotFoundError:
+            return target.resolve()  # dangling — intended write-through
+        except (OSError, RuntimeError) as exc:  # ELOOP (3.13+) / RuntimeError (3.11-12)
+            raise ConfigWriteError(exc, restored=False) from exc
+    else:
+        resolved = target
+    # A directory (or fifo/socket) at the destination would crash the backup
+    # read/atomic replace. A not-yet-existing target is fine — the write creates
+    # it (plain new config, or a --force overwrite of a regular file).
+    if resolved.exists() and not resolved.is_file():
+        raise ConfigWriteError(
+            OSError(
+                f"config target {target} resolves to a non-regular-file "
+                f"target {resolved}; refusing to overwrite"
+            ),
+            restored=False,
+        ) from None
+    return resolved
 
 
 def write_config_checked(
@@ -73,11 +119,23 @@ def write_config_checked(
     backup is taken, and on failure the newly created file is removed rather
     than restored, leaving the link exactly as broken as it started.
 
-    A symlink resolving outside the project root is followed intentionally,
-    not refused — a config split out into a dotfiles repo is a legitimate,
-    supported layout, and this write path has never containment-checked
-    (``atomic_write_text`` is called here without ``within=``); scene
-    artefact writes are the ones that stay containment-checked.
+    :func:`resolve_config_target` guards the resolution: a cyclic/unresolvable
+    symlink (which non-strict ``resolve()`` would leave *still a symlink*, so a
+    write-through would clobber the link with a regular file) and an existing
+    non-regular-file target — symlinked *or* direct, e.g. a directory — are
+    both refused up front with :class:`ConfigWriteError`, before any backup or
+    write, so the filesystem is left untouched.
+
+    Trust boundary: crossby treats the local ``.crossby.yml`` — and, by the same
+    trust, the destination of a symlink the user placed at that path — as
+    user-controlled config, the same trust already extended to *executing*
+    whatever that config specifies. A symlink resolving outside the project root
+    is therefore followed intentionally, not refused — a config split out into a
+    dotfiles repo is a legitimate, supported layout, and this write path has
+    never containment-checked (``atomic_write_text`` is called here without
+    ``within=``); scene artefact writes are the ones that stay
+    containment-checked. Hardening this path against untrusted/hostile
+    repositories is explicitly out of scope.
 
     Returns:
         On success, the retained backup path when *keep_backup* is set and a
@@ -87,14 +145,17 @@ def write_config_checked(
         project root.
 
     Raises:
-        ConfigWriteError: the rendered text did not parse or failed *validate*;
-            the filesystem is left exactly as it was before the call.
+        ConfigWriteError: the target was refused before any write (a cyclic/
+            unresolvable symlink or an existing non-regular-file target — see
+            :func:`resolve_config_target`), or the rendered text did not parse or
+            failed *validate*. In every case the filesystem is left exactly as it
+            was before the call.
     """
     from crossby.config.json_utils import atomic_write_text
     from crossby.config.loader import parse_config_file
     from crossby.sync.file_utils import backup_path
 
-    write_target = target.resolve() if target.is_symlink() else target
+    write_target = resolve_config_target(target)
 
     backup: Path | None = None
     if write_target.exists():

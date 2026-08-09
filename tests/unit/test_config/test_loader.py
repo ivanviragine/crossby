@@ -1,5 +1,6 @@
 """Tests for .crossby.yml config loader."""
 
+import os
 import warnings
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from crossby.config.loader import (
     find_config_entry,
     find_config_file,
     load_config,
+    parse_config_file,
 )
 from crossby.models.ai import AIToolID
 from crossby.models.config import CrossbyConfig
@@ -523,8 +525,9 @@ class TestBrokenSymlinkBoundary:
         # A .crossby.yml symlink whose target *exists* but is a directory is not
         # a readable config and not a dangling identity — it must not be masked
         # as an empty config (a read command would use empty config, and an
-        # authoring command would later blow up in write_config_checked's
-        # read_bytes() with IsADirectoryError). Reject it up front.
+        # authoring command would splice into it; write_config_checked would then
+        # refuse the target with a clean ConfigWriteError). Reject it up front on
+        # the read path so read commands don't run against empty config.
         target_dir = tmp_path / "somedir"
         target_dir.mkdir()
         child = tmp_path / "project"
@@ -549,8 +552,10 @@ class TestBrokenSymlinkBoundary:
 
     def test_symlink_loop_is_rejected_not_treated_as_dangling(self, tmp_path):
         # A symlink loop has exists() == False just like a dangling link, but it
-        # is not a not-yet-populated identity — it must be rejected, not masked
-        # as an empty config (which would later crash write_config_checked).
+        # is not a not-yet-populated identity — it must be rejected on the read
+        # path, not masked as an empty config (write_config_checked would itself
+        # refuse the loop with a clean ConfigWriteError, but only after a read
+        # command had already run against the empty config).
         child = tmp_path / "project"
         child.mkdir()
         (child / ".crossby.yml").symlink_to(child / "loop-other")
@@ -558,3 +563,54 @@ class TestBrokenSymlinkBoundary:
 
         with pytest.raises(ConfigError, match="cannot be resolved"):
             load_config(child)
+
+    def test_direct_directory_config_is_rejected(self, tmp_path):
+        # A plain-directory .crossby.yml (not a symlink) is neither a file nor a
+        # symlink, so find_config_entry historically walked *past* it. It now
+        # stops at it and load_config rejects it — it is not a readable config.
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").mkdir()
+
+        with pytest.raises(ConfigError, match="not a regular file"):
+            load_config(child)
+
+    def test_direct_directory_does_not_walk_past_to_ancestor(self, tmp_path):
+        # The bug this closes: a direct-directory .crossby.yml in a subproject
+        # must not silently resolve the ancestor's real config (which would let a
+        # read use it and an authoring command edit it).
+        (tmp_path / ".crossby.yml").write_text("version: 1\nscenes:\n  foo: {}\n")
+        child = tmp_path / "project"
+        child.mkdir()
+        (child / ".crossby.yml").mkdir()
+
+        with pytest.raises(ConfigError, match="not a regular file"):
+            load_config(child)
+
+
+class TestUnreadableRegularConfig:
+    """A regular-file .crossby.yml that ``load_config`` reaches (``is_file()``)
+    but ``parse_config_file`` cannot read is surfaced as a ``ConfigError`` rather
+    than leaking a raw ``OSError``/``UnicodeDecodeError``."""
+
+    def test_non_utf8_config_raises_config_error(self, tmp_path):
+        target = tmp_path / ".crossby.yml"
+        target.write_bytes(b"\xff\xfe not utf-8")
+
+        with pytest.raises(ConfigError, match="Could not read config"):
+            parse_config_file(target)
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses file permission bits",
+    )
+    def test_permission_denied_config_raises_config_error(self, tmp_path):
+        target = tmp_path / ".crossby.yml"
+        target.write_text("version: 1\n", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            with pytest.raises(ConfigError, match="Could not read config"):
+                load_config(tmp_path)
+        finally:
+            # Restore mode so pytest's tmp_path cleanup can remove the file.
+            target.chmod(0o644)

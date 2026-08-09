@@ -344,6 +344,63 @@ class TestInstallStarters:
         assert (root / ".crossby.yml").read_text(encoding="utf-8") == before
 
 
+class TestDirectDirectoryConfigTarget:
+    """A plain-directory ``.crossby.yml`` is neither a file nor a symlink.
+    ``find_config_entry`` now *stops* at it (rather than walking past to an
+    ancestor, which would silently load/edit the wrong config), and
+    ``load_config`` rejects it, so every authoring command exits cleanly via
+    ``_load_config_or_exit`` instead of crashing with a raw ``IsADirectoryError``
+    in ``read_bytes()``.
+    """
+
+    def test_create_refuses_directory_target(self, tmp_path: Path) -> None:
+        populate_project(tmp_path)
+        target = tmp_path / ".crossby.yml"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+
+        result = _run(["scene", "create", "foo", "--skill", "x"], tmp_path)
+
+        assert result.exit_code == 1, result.output
+        # Rich wraps the message across lines for long paths; normalise first.
+        assert "not a regular file" in " ".join(result.output.split())
+        # No crash, directory untouched.
+        assert "IsADirectoryError" not in result.output
+        assert target.is_dir()
+        assert list(target.iterdir()) == [target / "keep.txt"]
+
+    def test_install_starters_refuses_directory_target(self, tmp_path: Path) -> None:
+        populate_project(tmp_path)
+        target = tmp_path / ".crossby.yml"
+        target.mkdir()
+
+        result = _run(["scene", "install-starters"], tmp_path)
+
+        assert result.exit_code == 1, result.output
+        assert "not a regular file" in " ".join(result.output.split())
+        assert "IsADirectoryError" not in result.output
+        assert target.is_dir()
+
+    def test_create_does_not_walk_past_directory_to_ancestor(self, tmp_path: Path) -> None:
+        # The bug this closes: with an ancestor config, a subproject whose
+        # .crossby.yml is a directory silently loaded — and edited — the
+        # ancestor. Discovery must stop at the directory entry and reject it.
+        (tmp_path / ".crossby.yml").write_text(
+            "version: 1\nscenes:\n  ancestor-scene: {}\n", encoding="utf-8"
+        )
+        ancestor_before = (tmp_path / ".crossby.yml").read_text(encoding="utf-8")
+        child = tmp_path / "child"
+        child.mkdir()
+        (child / ".crossby.yml").mkdir()
+
+        result = _run(["scene", "create", "sneaky", "--skill", "x"], child)
+
+        assert result.exit_code == 1, result.output
+        assert "not a regular file" in " ".join(result.output.split())
+        # The ancestor config is untouched — never walked into.
+        assert (tmp_path / ".crossby.yml").read_text(encoding="utf-8") == ancestor_before
+
+
 # ---------------------------------------------------------------------------
 # wizard (interactive) — patched prompts
 # ---------------------------------------------------------------------------
