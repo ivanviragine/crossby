@@ -64,6 +64,29 @@ def _make_skill(directory: Path, name: str) -> Path:
     return skill_dir
 
 
+def test_managed_marker_symlink_is_not_trusted_and_replaced(tmp_path: Path) -> None:
+    # Issue #83: a symlinked .crossby-managed marker must not be trusted as an
+    # ownership signal, and writing the marker must replace the symlink rather
+    # than write through it to an arbitrary external file.
+    from crossby.sync.file_utils import (
+        MANAGED_MARKER_NAME,
+        has_managed_marker,
+        write_managed_marker,
+    )
+
+    d = tmp_path / "dir"
+    d.mkdir()
+    external = tmp_path / "external.txt"
+    external.write_text("SECRET", encoding="utf-8")
+    os.symlink(external, d / MANAGED_MARKER_NAME)
+
+    assert has_managed_marker(d) is False  # a symlinked marker is not trusted
+    write_managed_marker(d)  # must replace the symlink, not write through it
+    assert not (d / MANAGED_MARKER_NAME).is_symlink()
+    assert has_managed_marker(d) is True
+    assert external.read_text(encoding="utf-8") == "SECRET"  # external file untouched
+
+
 # ---------------------------------------------------------------------------
 # _is_managed_skills_dir
 # ---------------------------------------------------------------------------
@@ -738,6 +761,22 @@ class TestTranslateStrategy:
         CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)  # real translate
         result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
         assert result.action == "skipped"
+
+    def test_translate_dry_run_detects_symlinked_skill_dir(self, tmp_path: Path) -> None:
+        # Issue #83: when the per-skill target dir is a symlink, the real run
+        # replaces it — so a dry-run must NOT report skipped.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_skill = tmp_path / ".agents" / "skills" / "my-skill"
+        shutil.rmtree(target_skill)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("# outside\n", encoding="utf-8")
+        os.symlink(outside, target_skill)
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
+        assert result.action != "skipped"  # the real run would replace the symlink
 
     def test_symlinked_target_skill_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target *skill* dir that is itself a symlink must be replaced, never

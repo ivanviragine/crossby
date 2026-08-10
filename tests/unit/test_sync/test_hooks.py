@@ -1117,9 +1117,7 @@ class TestReadCursorHooksHardening:
         assert len(entries) == 1
         assert entries[0].tools == ["Write", "Bash"]
 
-    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(
-        self, tmp_path: Path
-    ) -> None:
+    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(self, tmp_path: Path) -> None:
         # A hand-authored unscoped preToolUse entry ("all tools") sharing a
         # command with a scoped duplicate must dominate — only the
         # beforeShellExecution fan-out mirror is allowed to yield to a scoped
@@ -1246,9 +1244,7 @@ class TestFailClosedRoundTrip:
             encoding="utf-8",
         )
 
-    def _write_cursor_fanout_pair(
-        self, root: Path, scoped_entry: dict, shell_entry: dict
-    ) -> None:
+    def _write_cursor_fanout_pair(self, root: Path, scoped_entry: dict, shell_entry: dict) -> None:
         path = root / ".cursor" / "hooks.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(

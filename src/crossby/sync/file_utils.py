@@ -270,8 +270,15 @@ def mirror_tree(
 
 
 def has_managed_marker(target_dir: Path) -> bool:
-    """Return True if ``target_dir`` carries the crossby ownership marker."""
-    return (target_dir / MANAGED_MARKER_NAME).is_file()
+    """Return True if ``target_dir`` carries the crossby ownership marker.
+
+    A *symlinked* marker does not count: trusting it would let a planted
+    ``.crossby-managed -> /some/external/file`` symlink mark a directory as
+    crossby-owned (so its contents get overwritten) and would make
+    :func:`write_managed_marker` write through the link.
+    """
+    marker = target_dir / MANAGED_MARKER_NAME
+    return marker.is_file() and not marker.is_symlink()
 
 
 def write_managed_marker(target_dir: Path) -> None:
@@ -281,10 +288,16 @@ def write_managed_marker(target_dir: Path) -> None:
     on every sync is a no-op for git. Callers should invoke this whenever a
     write-bearing sync (copy or translate) produces or refreshes content in
     ``target_dir``.
+
+    A pre-existing marker *symlink* is replaced outright, never written through —
+    otherwise the write would land at the link's destination, potentially an
+    arbitrary external file.
     """
     if not target_dir.is_dir():
         return
     marker = target_dir / MANAGED_MARKER_NAME
-    if marker.is_file() and marker.read_text(encoding="utf-8") == _MANAGED_MARKER_BODY:
+    if marker.is_symlink():
+        marker.unlink()
+    elif marker.is_file() and marker.read_text(encoding="utf-8") == _MANAGED_MARKER_BODY:
         return
     marker.write_text(_MANAGED_MARKER_BODY, encoding="utf-8")

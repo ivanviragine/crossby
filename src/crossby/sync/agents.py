@@ -1066,6 +1066,17 @@ class CodexAgentsWriter(AbstractSyncWriter):
         for src in sources:
             agent_toml, _config_fragment = self._render_for_target(src)
             dest = target_dir / f"{src.stem}.toml"
+            if dest.is_symlink():
+                # Replace a leaf symlink (e.g. from a prior symlink-strategy run)
+                # rather than reading/writing through it — its destination may be
+                # outside the project root. Unlink then write so the .toml isn't
+                # dropped.
+                skipped_all = False
+                wrote_any = True
+                if not dry_run:
+                    dest.unlink()
+                    dest.write_text(agent_toml, encoding="utf-8")
+                continue
             if dest.is_file():
                 try:
                     if (
@@ -1414,11 +1425,22 @@ class CopilotAgentsWriter(AbstractSyncWriter):
     def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
+        wanted = {f"{src.stem}.agent.md" for src in source_dir.glob("*.md")}
         if dry_run:
+            # Compare-only so an unchanged re-sync reports skipped, matching the
+            # real run below (not an unconditional created/updated).
+            would_write = False
+            if target_dir.is_dir():
+                would_write |= any(f.name not in wanted for f in target_dir.glob("*.agent.md"))
+            for src in source_dir.glob("*.md"):
+                if _copy_agent_file(
+                    src, target_dir / f"{src.stem}.agent.md", "copilot", dry_run=True
+                ):
+                    would_write = True
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_write and target_existed else action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
@@ -1427,8 +1449,8 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         wrote_any = False
         # Stale cleanup: managed *.agent.md outputs whose source .md is gone. A
         # removal counts as a change so a deleted source agent stops living here
-        # and a delete-only run reports a non-``skipped`` action.
-        wanted = {f"{src.stem}.agent.md" for src in source_dir.glob("*.md")}
+        # and a delete-only run reports a non-``skipped`` action. (``wanted`` was
+        # computed above, before the dry-run branch.)
         for existing in target_dir.glob("*.agent.md"):
             if existing.name not in wanted:
                 if existing.is_symlink():

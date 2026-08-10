@@ -450,9 +450,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
                 target_skill = target_dir / skill_dir.name
-                if _translate_skill_md_would_change(
-                    target_skill / "SKILL.md", rendered
-                ) or _refresh_skill_support_dirs(skill_dir, target_skill, dry_run=True):
+                # A symlinked skill *dir* is replaced by the real run, so it is a
+                # change even if SKILL.md content would match through the link.
+                if (
+                    target_skill.is_symlink()
+                    or _translate_skill_md_would_change(target_skill / "SKILL.md", rendered)
+                    or _refresh_skill_support_dirs(skill_dir, target_skill, dry_run=True)
+                ):
                     would_change = True
             for name, rendered in command_skills:
                 if has_manual_fix_block(rendered):

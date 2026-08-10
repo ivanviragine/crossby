@@ -733,6 +733,15 @@ class TestCopilotAgentsWriter:
         assert not (target_dir / "old.agent.md").exists()
         assert (target_dir / "a.agent.md").is_symlink()
 
+    def test_copy_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        # Issue #83: a Copilot copy dry-run on an unchanged target reports skipped,
+        # not a phantom "updated".
+        _make_source(tmp_path, ["a.md"])
+        w = CopilotAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)  # real copy establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
     def test_symlink_delete_only_run_reports_non_skipped(self, tmp_path: Path) -> None:
         # Removing a source agent with no other change must report a change, not
         # skipped — a stale .agent.md was deleted from the target. The target dir
@@ -1207,6 +1216,25 @@ class TestCodexAgentsTranslate:
         assert parsed["name"] == "release-lead"
         assert parsed["description"] == "A test agent."
         assert "Do work." in parsed["developer_instructions"]
+
+    def test_leaf_toml_symlink_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # Issue #83: a leaf <name>.toml that is a symlink must be replaced, not
+        # written through to a destination outside the project root.
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "a")
+        CodexAgentsWriter().sync(_data(), tmp_path)  # real translate
+        target_toml = tmp_path / ".codex" / "agents" / "a.toml"
+        target_toml.unlink()
+        outside = tmp_path / "outside.toml"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(outside, target_toml)
+
+        CodexAgentsWriter().sync(_data(), tmp_path)  # re-sync replaces the symlink
+
+        assert not target_toml.is_symlink()
+        assert target_toml.is_file()
+        assert "name" in target_toml.read_text(encoding="utf-8")  # real TOML written
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
 
     def test_old_dot_agents_path_is_not_touched(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])
