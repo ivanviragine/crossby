@@ -101,7 +101,7 @@ def _write_codex(emission: CodexEmission, output: Path | None) -> None:
         return
 
     stem = emission.suggested_filename.removesuffix(".toml")
-    if output.is_dir() or output.suffix == "":
+    if output.is_dir() or (not output.exists() and output.suffix == ""):
         agent_path = output / emission.suggested_filename
         fragment_path = output / f"{stem}.config-fragment.toml"
     else:
