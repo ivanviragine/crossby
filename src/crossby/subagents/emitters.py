@@ -278,10 +278,14 @@ def _codex_home() -> Path:
     Falls back to ``~/.codex``. Always returns an absolute, expanded path —
     ``config_file`` in Codex's config schema is typed ``AbsolutePathBuf``, and
     a literal ``~/...`` string is not absolute (``~`` has no meaning to Rust's
-    path types).
+    path types). ``$CODEX_HOME`` itself could be set to a relative value (e.g.
+    ``CODEX_HOME=my_codex_dir``), so ``expanduser()`` alone isn't enough —
+    ``resolve()`` anchors it to the current working directory.
     """
     codex_home = os.environ.get("CODEX_HOME")
-    return Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    if codex_home:
+        return Path(codex_home).expanduser().resolve()
+    return Path.home() / ".codex"
 
 
 def build_codex_config_fragment(name: str, config_file: str) -> str:

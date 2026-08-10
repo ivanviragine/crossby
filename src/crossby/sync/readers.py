@@ -373,7 +373,10 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     the target tool ever emits, silently rendering the guard inert (whereas an
     unscoped hook re-scopes to ``.*`` and still fires). A handler whose
     ``command`` is missing or not a non-empty ``str`` is skipped rather than
-    handed to Pydantic (data-type hardening).
+    handed to Pydantic (data-type hardening). A present-but-invalid ``matcher``
+    (wrong type or explicit ``null``) skips the whole entry instead — see
+    :func:`_matcher_is_malformed` — since silently falling through to
+    ``_matcher_tools``'s ``[]`` would broaden the hook to all tools.
     """
     data = _read_json(path)
     if not data:
@@ -388,6 +391,8 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
             continue
         for entry in entries:
             if not isinstance(entry, dict):
+                continue
+            if _matcher_is_malformed(entry):
                 continue
             tools = _matcher_tools(entry.get("matcher"))
             inner_hooks = entry.get("hooks", [])
@@ -553,6 +558,22 @@ def _merge_cursor_tool_scopes(
     return (a_tools or b_tools), False
 
 
+def _matcher_is_malformed(entry: dict[str, Any]) -> bool:
+    """True if ``entry["matcher"]`` is present but not a valid string.
+
+    Distinguishes a genuinely absent ``matcher`` key (fine — ``_matcher_tools``
+    maps it to unscoped ``[]``) from one that's present but wrongly typed or
+    explicitly ``null`` (``entry.get("matcher")`` returns ``None`` for both, so
+    membership must be checked directly). A present-but-invalid matcher is a
+    scoping intent crossby cannot recover — callers should skip the entry
+    rather than silently emit it unscoped, which would broaden the hook to all
+    tools. Shared by the Claude-shape (Claude/Codex) and Antigravity CLI
+    readers; Cursor's ``_cursor_entry_tools`` applies the same rule inline
+    since it also has a ``tools`` fallback to check.
+    """
+    return "matcher" in entry and not isinstance(entry["matcher"], str)
+
+
 def _matcher_tools(matcher: Any) -> list[str]:
     """Recover canonical tool names from a hook ``matcher`` regex.
 
@@ -687,7 +708,10 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
 
     Tool scope is recovered from the ``matcher`` via :func:`_matcher_tools`, so
     agy's native names (``write_to_file``/``run_command``/…) reverse cleanly to
-    canonical tools while a catch-all or exotic regex yields unscoped ``[]``.
+    canonical tools while a catch-all or exotic regex yields unscoped ``[]``. A
+    present-but-invalid ``matcher`` (wrong type or explicit ``null``) skips the
+    whole matcher-wrapped entry instead (see :func:`_matcher_is_malformed`),
+    rather than silently broadening it to all tools.
 
     Round-trip gaps (deliberate): the per-hook ``description`` is left empty
     because agy encodes no per-hook comment — only the lossy container *name*
@@ -716,6 +740,8 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
                     result.append(HookEntry(event=canonical_event, command=bare_command, tools=[]))
                     continue
                 # Matcher-wrapped entry: {"matcher", "hooks": [{"type","command"}]}.
+                if _matcher_is_malformed(entry):
+                    continue
                 inner_hooks = entry.get("hooks")
                 if not isinstance(inner_hooks, list):
                     continue

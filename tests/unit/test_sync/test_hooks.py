@@ -1153,6 +1153,65 @@ class TestReadCursorHooksHardening:
         assert entries[0].tools == []
 
 
+def _write_codex_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"hooks": {"PreToolUse": entries}}), encoding="utf-8")
+
+
+def _write_agy_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".agents" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"container": {"PreToolUse": entries}}),
+        encoding="utf-8",
+    )
+
+
+class TestReadClaudeShapeAndAgyHooksHardening:
+    """Claude/Codex (shared _read_claude_shape_hooks) and Antigravity CLI must
+    match Cursor's matcher hardening: a present-but-invalid matcher skips the
+    entry rather than silently broadening it to all tools."""
+
+    def test_codex_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_codex_hooks_raw(
+            tmp_path,
+            [
+                {"matcher": 123, "hooks": [{"type": "command", "command": "bad"}]},
+                {"matcher": "Write", "hooks": [{"type": "command", "command": "good"}]},
+            ],
+        )
+        commands = {e.command: e.tools for e in _read_codex_hooks(tmp_path)}
+        assert "bad" not in commands
+        assert commands["good"] == ["Write"]
+
+    def test_codex_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_codex_hooks_raw(
+            tmp_path,
+            [{"matcher": None, "hooks": [{"type": "command", "command": "bad"}]}],
+        )
+        assert _read_codex_hooks(tmp_path) == []
+
+    def test_agy_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_agy_hooks_raw(
+            tmp_path,
+            [
+                {"matcher": 123, "hooks": [{"type": "command", "command": "bad"}]},
+                {"matcher": "write_to_file", "hooks": [{"type": "command", "command": "good"}]},
+            ],
+        )
+        commands = {e.command for e in _read_agy_hooks(tmp_path)}
+        assert "bad" not in commands
+        assert "good" in commands
+
+    def test_agy_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_agy_hooks_raw(
+            tmp_path,
+            [{"matcher": None, "hooks": [{"type": "command", "command": "bad"}]}],
+        )
+        assert _read_agy_hooks(tmp_path) == []
+
+
 class TestReadCopilotHooksHardening:
     def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:
         _write_copilot_hooks_raw(
