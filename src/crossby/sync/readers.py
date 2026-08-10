@@ -20,7 +20,11 @@ from crossby.config.skills import SKILLS_DIR, count_skills
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync.base import SyncConcern, SyncData
-from crossby.sync.hooks import _ANTIGRAVITY_CLI_SUPPORTED_EVENTS, _PLAIN_ALTERNATION
+from crossby.sync.hooks import (
+    _ANTIGRAVITY_CLI_SUPPORTED_EVENTS,
+    _CURSOR_SHELL_EVENT,
+    _PLAIN_ALTERNATION,
+)
 
 logger = structlog.get_logger()
 
@@ -157,6 +161,13 @@ def suggest_skills_source(found: dict[AIToolID, str]) -> AIToolID | None:
 # ---------------------------------------------------------------------------
 # MCP reader
 # ---------------------------------------------------------------------------
+
+
+# Tools discover_mcp_servers (sync/mcp_discovery.py) actually scans a config
+# file for — kept in sync with its ``sources`` list plus the Codex TOML branch.
+_MCP_SOURCE_TOOLS: frozenset[AIToolID] = frozenset(
+    {AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.ANTIGRAVITY_CLI, AIToolID.CODEX}
+)
 
 
 def discover_mcp(
@@ -433,6 +444,12 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     dropped for every tool today — a bounded round-trip gap (#88 §5), since the
     writers never downgrade an existing timeout.
 
+    An unscoped entry only yields to a scoped duplicate when it came from the
+    ``beforeShellExecution`` key specifically — the one key the writer ever
+    fans a hook out to unscoped (see :func:`_merge_cursor_tool_scopes`). A
+    genuinely unscoped ``preToolUse`` entry (no matcher/tools) means "all
+    tools" and must never be narrowed by a same-command scoped duplicate.
+
     Data-type hardening: a ``command`` that is not a non-empty ``str`` is skipped
     (a non-``str`` also breaks the ``(event, command)`` dedupe key before it ever
     reaches Pydantic). An entry whose ``tools``/``matcher`` scope is *present but
@@ -448,10 +465,15 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     source = hooks_section if isinstance(hooks_section, dict) else data
 
     merged: dict[tuple[str, str], HookEntry] = {}
+    # Tracks, per key, whether the merged-so-far unscoped ([]) state (if any)
+    # is a genuine "all tools" declaration rather than a beforeShellExecution
+    # fan-out artifact — see _merge_cursor_tool_scopes.
+    real_unscoped: dict[tuple[str, str], bool] = {}
     for event_name, entries in source.items():
         if not isinstance(entries, list):
             continue
         canonical_event = _reverse_event_name(event_name)
+        is_fanout_event = event_name == _CURSOR_SHELL_EVENT
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -463,6 +485,7 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
                 # Scope was present but yielded no valid tool — skip rather than
                 # emit unscoped (which would broaden a scoped hook to all tools).
                 continue
+            entry_real_unscoped = not tools and not is_fanout_event
             fail_closed = entry.get("failClosed") is True
             key = (canonical_event, command)
             previous = merged.get(key)
@@ -473,32 +496,55 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
                     tools=tools,
                     fail_closed=fail_closed,
                 )
+                real_unscoped[key] = entry_real_unscoped
                 continue
             # The fan-out pair (and any same-file duplicate) collapses here.
-            # Two cases must both survive:
+            # Three cases must all survive:
             #   * The fan-out pair — one half is the unscoped `beforeShellExecution`
             #     mirror. Whichever half is read second must not erase the other's
-            #     tool scope, so a scoped side always beats an unscoped (`[]`) side
+            #     tool scope, so a scoped side always beats that artifact,
             #     regardless of JSON key order.
+            #   * A genuinely unscoped `preToolUse` entry (no matcher/tools) sharing
+            #     a command with a scoped duplicate — unscoped means "all tools", so
+            #     it must dominate rather than being silently narrowed to the
+            #     scoped duplicate's tool list.
             #   * Two genuinely-distinct scoped entries sharing the same
             #     `(event, command)` (a hand-authored `Write` guard and a `Shell`
             #     guard on the same command) — union their scopes so neither guard
             #     is silently dropped.
             # A `failClosed: true` from any duplicate wins so the flag is never
             # dropped by dedupe.
-            if tools and previous.tools:
-                merged_tools = list(dict.fromkeys([*previous.tools, *tools]))
-            elif tools and not previous.tools:
-                merged_tools = tools
-            else:
-                merged_tools = previous.tools
+            merged_tools, merged_real_unscoped = _merge_cursor_tool_scopes(
+                previous.tools, real_unscoped.get(key, False), tools, entry_real_unscoped
+            )
             merged[key] = HookEntry(
                 event=canonical_event,
                 command=command,
                 tools=merged_tools,
                 fail_closed=previous.fail_closed or fail_closed,
             )
+            real_unscoped[key] = merged_real_unscoped
     return list(merged.values())
+
+
+def _merge_cursor_tool_scopes(
+    a_tools: list[str], a_real_unscoped: bool, b_tools: list[str], b_real_unscoped: bool
+) -> tuple[list[str], bool]:
+    """Merge two same-``(event, command)`` Cursor tool scopes into one.
+
+    ``a``/``b`` are each either scoped (non-empty ``tools``) or unscoped
+    (``[]``) — and an unscoped side is flagged *real* when it did not come
+    from the ``beforeShellExecution`` fan-out mirror. A real-unscoped side
+    always wins (it means "all tools" and must not be narrowed); a
+    fan-out-artifact unscoped side always yields to a scoped duplicate,
+    order-independent either way. Two scoped sides union their tool lists.
+    Returns ``(merged_tools, merged_real_unscoped)``.
+    """
+    if a_real_unscoped or b_real_unscoped:
+        return [], True
+    if a_tools and b_tools:
+        return list(dict.fromkeys([*a_tools, *b_tools])), False
+    return (a_tools or b_tools), False
 
 
 def _matcher_tools(matcher: Any) -> list[str]:
@@ -670,26 +716,33 @@ _HOOK_READERS: dict[AIToolID, Any] = {
 }
 
 
-# Concern → tools whose configs a reader can extract that concern from. Only the
-# registry-gated concerns appear here: ``discover_permissions`` / ``discover_hooks``
-# return ``[]`` early when the source tool is absent from their reader map, so a
-# ``--from`` tool without a reader silently syncs nothing. Every other concern
-# reads via filesystem detection that is not keyed on a per-tool registry, so a
-# reader is always considered available for it.
+# Concern → tools whose configs a reader can extract that concern from. Every
+# concern that reads from a per-tool source mapping is gated here — a tool
+# absent from the mapping has no code path that could ever populate it (not
+# just "found nothing this run"), so a ``--from`` tool outside this set would
+# otherwise sync nothing with no explanation. PLUGINS is intentionally absent:
+# discover_plugins() has no per-tool ``--from`` dimension at all (see
+# scan_project's plugins comment), so there is no "unsupported tool" case to
+# gate.
 _READER_TOOLS: dict[SyncConcern, frozenset[AIToolID]] = {
     SyncConcern.PERMISSIONS: frozenset(_PERMISSION_READERS),
     SyncConcern.HOOKS: frozenset(_HOOK_READERS),
+    SyncConcern.RULES: frozenset(_INSTRUCTION_FILES),
+    SyncConcern.AGENTS: frozenset(_AGENT_DIRS),
+    SyncConcern.SKILLS: frozenset(SKILLS_DIR),
+    SyncConcern.MCP: _MCP_SOURCE_TOOLS,
 }
 
 
 def reader_available(tool: AIToolID, concern: SyncConcern) -> bool:
     """Report whether a reader can extract *concern* from *tool*'s configs.
 
-    Returns ``False`` only for a registry-gated concern (permissions, hooks)
-    whose reader map omits *tool* — the case where ``crossby sync <concern>
-    --from <tool>`` would otherwise sync nothing with no explanation. Callers use
-    this at the CLI layer to warn instead of failing silently. Every other
-    concern reads via filesystem detection and is always considered available.
+    Returns ``False`` for any registry-gated concern (permissions, hooks,
+    rules, agents, skills, MCP) whose source mapping omits *tool* — the case
+    where ``crossby sync <concern> --from <tool>`` would otherwise sync
+    nothing with no explanation. Callers use this at the CLI layer to warn
+    instead of failing silently. PLUGINS has no per-tool source mapping (it
+    doesn't take a ``--from`` tool), so it is always considered available.
     """
     tools = _READER_TOOLS.get(concern)
     return True if tools is None else tool in tools

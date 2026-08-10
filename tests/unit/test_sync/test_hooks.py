@@ -1078,6 +1078,41 @@ class TestReadCursorHooksHardening:
         assert len(entries) == 1
         assert entries[0].tools == ["Write", "Bash"]
 
+    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(
+        self, tmp_path: Path
+    ) -> None:
+        # A hand-authored unscoped preToolUse entry ("all tools") sharing a
+        # command with a scoped duplicate must dominate — only the
+        # beforeShellExecution fan-out mirror is allowed to yield to a scoped
+        # duplicate; a real unscoped declaration must never be silently
+        # narrowed.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard"},
+                {"command": "guard", "matcher": "Write"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == []
+
+    def test_genuinely_unscoped_duplicate_dominates_regardless_of_order(
+        self, tmp_path: Path
+    ) -> None:
+        # Same as above with the scoped entry listed first — the merge must
+        # not depend on which half of the duplicate pair is read first.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard", "matcher": "Write"},
+                {"command": "guard"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == []
+
 
 class TestReadCopilotHooksHardening:
     def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:
@@ -1113,6 +1148,21 @@ class TestFailClosedRoundTrip:
             encoding="utf-8",
         )
 
+    def _write_cursor_fanout_pair(
+        self, root: Path, scoped_entry: dict, shell_entry: dict
+    ) -> None:
+        path = root / ".cursor" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {"preToolUse": [scoped_entry], "beforeShellExecution": [shell_entry]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_read_single_fail_closed(self, tmp_path: Path) -> None:
         self._write_cursor_pair(
             tmp_path, [{"command": "guard", "matcher": "Write", "failClosed": True}]
@@ -1129,14 +1179,13 @@ class TestFailClosedRoundTrip:
         assert entries[0].fail_closed is False
 
     def test_local_dedupe_true_wins(self, tmp_path: Path) -> None:
-        # Same (event, command) twice within Cursor: the True must win, and the
-        # scoped half must not be erased by the unscoped one.
-        self._write_cursor_pair(
+        # The real fan-out shape: a scoped preToolUse half and its unscoped
+        # beforeShellExecution mirror. The True must win, and the scoped half
+        # must not be erased by the unscoped fan-out artifact.
+        self._write_cursor_fanout_pair(
             tmp_path,
-            [
-                {"command": "guard", "matcher": "Write", "failClosed": True},
-                {"command": "guard", "failClosed": False},
-            ],
+            {"command": "guard", "matcher": "Write", "failClosed": True},
+            {"command": "guard", "failClosed": False},
         )
         entries = _read_cursor_hooks(tmp_path)
         assert len(entries) == 1
@@ -1182,13 +1231,34 @@ class TestReaderAvailable:
         ):
             assert reader_available(tool, SyncConcern.HOOKS) is True
 
-    def test_non_registry_concern_always_available(self) -> None:
+    def test_rules_agents_skills_mcp_cover_only_their_source_tools(self) -> None:
         from crossby.sync.base import SyncConcern
 
-        # rules/agents/skills/mcp read via filesystem detection, not a per-tool
-        # registry, so a reader is always considered available for them.
+        # CODEX has a source mapping for all four (AGENTS.md, .codex/agents,
+        # .agents/skills, .codex/config.toml) — reader_available is True.
         assert reader_available(AIToolID.CODEX, SyncConcern.RULES) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.AGENTS) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.SKILLS) is True
         assert reader_available(AIToolID.CODEX, SyncConcern.MCP) is True
+
+        # VSCODE/OPENCODE/ANTIGRAVITY (distinct from ANTIGRAVITY_CLI) have no
+        # source mapping in detect_rules/detect_agents/detect_skills or
+        # discover_mcp_servers — no code path can ever populate them, so a
+        # `--from` sync must be flagged unavailable rather than silently
+        # producing nothing.
+        for tool in (AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY):
+            assert reader_available(tool, SyncConcern.RULES) is False
+            assert reader_available(tool, SyncConcern.AGENTS) is False
+            assert reader_available(tool, SyncConcern.SKILLS) is False
+            assert reader_available(tool, SyncConcern.MCP) is False
+
+    def test_plugins_has_no_per_tool_dimension_always_available(self) -> None:
+        from crossby.sync.base import SyncConcern
+
+        # discover_plugins() doesn't take a --from tool at all, so there is no
+        # "unsupported source tool" case to gate.
+        for tool in AIToolID:
+            assert reader_available(tool, SyncConcern.PLUGINS) is True
 
 
 # ---------------------------------------------------------------------------
