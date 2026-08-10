@@ -546,6 +546,26 @@ class TestCopyStrategy:
         assert (target / "a.md").is_file()
         assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
 
+    def test_copy_replaces_leaf_symlink_and_writes_file(self, tmp_path: Path) -> None:
+        # Issue #83: a leaf *.md symlink in a managed copy target must be replaced
+        # with a real *file* — unlinking without writing would drop the agent
+        # while reporting success. The symlink's outside destination is untouched.
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(os.path.relpath(outside, target), target / "a.md")
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        result = w.sync(data, tmp_path)
+        assert result.action != "error"
+        assert not (target / "a.md").is_symlink()
+        assert (target / "a.md").is_file()
+        assert (target / "a.md").stat().st_size > 0  # content written, not dropped
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
     def test_copy_all_agents_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
         # Issue #83: the dry-run copy path (backing the symlink-failure fallback)
         # must compare without writing, returning an honest would-change flag so

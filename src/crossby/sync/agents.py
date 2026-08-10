@@ -376,13 +376,13 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool 
     """
     out = _render_agent_file(source, tool_id)
     if target.is_symlink():
-        # Replace a leaf symlink outright rather than reading/writing through it
-        # — the link's destination may be outside the project root. This counts
-        # as a change (a real run swaps the link for a regular file).
+        # Replace a leaf symlink rather than reading/writing through it — the
+        # link's destination may be outside the project root. Unlink it and fall
+        # through to the write below (a real run swaps the link for a regular
+        # file); always counts as a change, so skip the unchanged-compare.
         if not dry_run:
             target.unlink()
-        return True
-    if target.is_file():
+    elif target.is_file():
         try:
             if target.read_text(encoding="utf-8") == out:
                 return False
