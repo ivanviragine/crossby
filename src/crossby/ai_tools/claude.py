@@ -197,6 +197,11 @@ class ClaudeAdapter(AbstractAITool):
     def structured_output_args(self, json_schema: dict[str, Any]) -> list[str]:
         return ["--output-format", "json", "--json-schema", json.dumps(json_schema)]
 
+    def headless_prompt_stdin_args(self) -> list[str] | None:
+        """Claude reads a headless prompt from stdin under ``--print`` with no
+        positional prompt (``--input-format`` "only works with ``--print``")."""
+        return ["--print"]
+
     def unwrap_structured_output(self, raw: str) -> str:
         """Unwrap Claude's ``--print --output-format json`` envelope.
 

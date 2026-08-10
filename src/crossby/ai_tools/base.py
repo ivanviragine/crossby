@@ -320,6 +320,27 @@ class AbstractAITool(ABC):
         """
         return raw
 
+    def headless_prompt_stdin_args(self) -> list[str] | None:
+        """CLI args that make this tool read its headless prompt from stdin.
+
+        Default: ``None`` — the tool has no confirmed stdin path, so callers
+        must deliver the prompt through ``argv`` via
+        :meth:`build_launch_command`'s ``prompt`` parameter.
+
+        When non-``None``, the contract for the caller is:
+
+        1. Build the command with ``prompt=None`` so the prompt is *not* placed
+           on ``argv``.
+        2. Append these args after the model / JSON-schema flags.
+        3. Feed the prompt to the process via ``subprocess.run(..., input=<prompt>)``.
+
+        This keeps the whole prompt out of ``argv``, so Linux's per-arg
+        ``MAX_ARG_STRLEN`` limit (131,072 bytes) cannot be hit regardless of
+        transcript size. Override only when a tool's stdin behaviour for its
+        headless prompt is documented and stable across CLI releases.
+        """
+        return None
+
     def effort_args(self, effort: EffortLevel) -> list[str]:
         """Get extra CLI args to set reasoning effort level.
 
