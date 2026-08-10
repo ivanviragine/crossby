@@ -722,6 +722,33 @@ class TestTranslateStrategy:
         second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
         assert second.action == "skipped"
 
+    def test_symlinked_target_skill_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # A target *skill* dir that is itself a symlink must be replaced, never
+        # written through: mkdir(exist_ok=True) silently succeeds on a
+        # symlink-to-dir without replacing it, so the direct SKILL.md write would
+        # escape the project root (.agents/skills/my-skill -> /outside).
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+
+        # First sync establishes the managed target skill dir with a real SKILL.md.
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_skill = tmp_path / ".agents" / "skills" / "my-skill"
+        assert (target_skill / "SKILL.md").is_file()
+
+        # Swap the target skill dir for a symlink pointing outside the project.
+        shutil.rmtree(target_skill)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(outside, target_skill)
+
+        # Re-sync: the symlink is replaced and SKILL.md is written into a real
+        # dir under the project, not through the link to `outside`.
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        assert not target_skill.is_symlink()
+        assert (target_skill / "SKILL.md").is_file()
+        assert not (outside / "SKILL.md").exists()
+
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written
         # through (which would land files outside the project root).

@@ -1244,6 +1244,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         self, source_dir: Path, target_dir: Path, *, dry_run: bool, force: bool
     ) -> SyncResult:
         """Create/update per-file .agent.md symlinks; clean up stale ones."""
+        target_existed = target_dir.is_dir()
         dir_newly_created = False
         if not dry_run and not target_dir.is_dir():
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -1311,10 +1312,14 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 file_path=target_dir,
                 message="already linked",
             )
+        # ``updated`` when the managed dir already existed (e.g. a delete-only
+        # run that removed stale ``.agent.md`` files but linked nothing new);
+        # ``created`` only when this run first materialised the dir. Reporting
+        # ``created`` for an in-place change misstates the CLI/report semantics.
         return SyncResult(
             tool_id=self.tool_id,
             concern=self.concern,
-            action="created",
+            action="created" if not target_existed else "updated",
             file_path=target_dir,
         )
 

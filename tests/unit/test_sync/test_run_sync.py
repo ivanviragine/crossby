@@ -52,8 +52,15 @@ def _make_whole_file_writer(
     concern: SyncConcern,
     target_rel: str,
     action: Literal["created", "updated", "skipped", "error"] = "created",
+    *,
+    emit_path: bool = True,
 ) -> AbstractSyncWriter:
-    """A whole-file overwrite writer (opts into target-path grouping)."""
+    """A whole-file overwrite writer (opts into target-path grouping).
+
+    ``emit_path=False`` returns a result with ``file_path=None`` — the shape a
+    winner produces when it wrote nothing (e.g. ``skipped`` with no source
+    configured), used to assert covered rows don't invent an artifact path.
+    """
 
     class _WF(AbstractSyncWriter):
         _owns_whole_file = True
@@ -77,7 +84,7 @@ def _make_whole_file_writer(
                 tool_id=self.tool_id,
                 concern=self.concern,
                 action=action,
-                file_path=project_root / self._target_rel,
+                file_path=(project_root / self._target_rel) if emit_path else None,
             )
 
     return _WF()
@@ -197,6 +204,31 @@ class TestRunSyncWholeFileGrouping:
         assert covered[0].tool_id == AIToolID.ANTIGRAVITY_CLI
         assert covered[0].message == "covered by codex"
         assert covered[0].file_path == tmp_path / "AGENTS.md"
+
+    def test_covered_row_mirrors_winner_absent_artifact(self, tmp_path: Path) -> None:
+        # When the winner produced no artifact (skipped with file_path=None,
+        # e.g. no source configured), the covered row must also carry
+        # file_path=None so the report classifies it as "Not Added" rather than
+        # "Added" — it must not fall back to its own static target_path().
+        w_codex = _make_whole_file_writer(
+            AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md", action="skipped", emit_path=False
+        )
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        rows = self._rules_rows(results)
+        winner = next(r for r in rows if r.tool_id == AIToolID.CODEX)
+        covered = next(r for r in rows if r.tool_id == AIToolID.ANTIGRAVITY_CLI)
+        assert winner.file_path is None
+        assert covered.action == "skipped"
+        assert covered.message == "covered by codex"
+        assert covered.file_path is None
 
     def test_no_two_grouped_writers_run_for_one_path(self, tmp_path: Path) -> None:
         w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.SKILLS, ".agents/skills")

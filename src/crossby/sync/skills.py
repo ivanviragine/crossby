@@ -457,6 +457,17 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         skipped_all = True
         for skill_dir in skill_dirs:
             target_skill = target_dir / skill_dir.name
+            # A symlinked target skill dir must be replaced, never written
+            # through: ``mkdir(exist_ok=True)`` silently succeeds on a
+            # symlink-to-a-directory (``is_dir()`` follows it) without replacing
+            # it, so the direct ``SKILL.md`` write below would land at the
+            # symlink's destination — outside the project root for
+            # ``.agents/skills/demo -> /outside``. Support dirs guard their own
+            # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
+            # is guarded here.
+            if target_skill.is_symlink():
+                target_skill.unlink()
+                skipped_all = False
             target_skill.mkdir(parents=True, exist_ok=True)
 
             source_skill_md = skill_dir / "SKILL.md"
@@ -488,6 +499,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
         for name, rendered in command_skills:
             target_skill = target_dir / name
+            # Same symlink guard as the translated-skill loop above — a
+            # symlinked target skill dir would redirect the SKILL.md write
+            # outside the project root.
+            if target_skill.is_symlink():
+                target_skill.unlink()
+                skipped_all = False
             target_skill.mkdir(parents=True, exist_ok=True)
             target_skill_md = target_skill / "SKILL.md"
             if target_skill_md.is_file() and (

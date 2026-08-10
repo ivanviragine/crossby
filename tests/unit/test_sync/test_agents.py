@@ -600,14 +600,16 @@ class TestCopilotAgentsWriter:
 
     def test_symlink_delete_only_run_reports_non_skipped(self, tmp_path: Path) -> None:
         # Removing a source agent with no other change must report a change, not
-        # skipped — a stale .agent.md was deleted from the target.
+        # skipped — a stale .agent.md was deleted from the target. The target dir
+        # already existed, so the action is ``updated`` (an in-place change), not
+        # ``created`` (which would misstate that the dir was first materialised).
         source = _make_source(tmp_path, ["a.md", "old.md"])
         w = CopilotAgentsWriter()
         data = _data()
         w.sync(data, tmp_path)
         (source / "old.md").unlink()
         result = w.sync(data, tmp_path)
-        assert result.action != "skipped"
+        assert result.action == "updated"
         assert not (tmp_path / ".github" / "agents" / "old.agent.md").exists()
 
     def test_symlink_dry_run_reports_stale_removal_without_deleting(self, tmp_path: Path) -> None:
@@ -726,7 +728,10 @@ class TestCopilotAgentsWriter:
         w = CopilotAgentsWriter()
         data = _data()
         result = w.sync(data, tmp_path)
-        assert result.action == "created"
+        # The managed dir already existed and content changed in place, so this
+        # is an in-place update, not a first-time creation (matches this test's
+        # name — the pre-fix code mislabeled it "created").
+        assert result.action == "updated"
         # Content should now match what _copy_agent_file produces from source
         assert (target_dir / "a.agent.md").read_text(encoding="utf-8") != "stale content"
 

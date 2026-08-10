@@ -176,6 +176,11 @@ def run_sync(
         writer_keys[id(w)] = key
         if key is not None and key not in group_winner:
             group_winner[key] = w
+    # The winner's actual result, recorded when it runs so covered rows can
+    # mirror the artifact path it produced (see below). The winner is the
+    # first group member in ``writers`` order, so it is always processed
+    # before any covered member of the same group.
+    group_winner_result: dict[Path, SyncResult] = {}
 
     # Ownership ledger — revocation is computed *here*, never inferred by a
     # writer. For each hooks/permissions/MCP writer we diff what crossby wrote
@@ -210,12 +215,19 @@ def run_sync(
         group_key = writer_keys[id(writer)]
         if group_key is not None and group_winner[group_key] is not writer:
             winner = group_winner[group_key]
+            # Mirror the winner's *produced* artifact path, not this writer's
+            # static ``target_path()``. When the winner wrote nothing (e.g. it
+            # returned ``skipped`` with ``file_path=None`` because no source was
+            # configured), the covered row must also carry ``None`` so the report
+            # classifies it as "Not Added" rather than "Added". The winner ran in
+            # an earlier iteration, so its result is already recorded.
+            winner_result = group_winner_result[group_key]
             results.append(
                 SyncResult(
                     tool_id=writer.tool_id,
                     concern=writer.concern,
                     action="skipped",
-                    file_path=writer.target_path(project_root),
+                    file_path=winner_result.file_path,
                     message=f"covered by {winner.tool_id}",
                 )
             )
@@ -257,6 +269,11 @@ def run_sync(
                 message=str(exc),
             )
         results.append(result)
+        # Record the winner's result so later covered rows in the same group can
+        # mirror its produced artifact path. Only a group winner reaches here (a
+        # non-winner is short-circuited above), so this never overwrites.
+        if group_key is not None:
+            group_winner_result[group_key] = result
 
         # Record intended new ownership, gated on writer success. New ownership =
         # what crossby still owns that is still in the source (previously-owned ∩
