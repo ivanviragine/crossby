@@ -56,11 +56,16 @@ def _argv_render_length(prompt: str) -> int:
     doubled, each quote is escaped), so the rendered length can exceed the raw
     byte count substantially. ``subprocess.list2cmdline`` implements the same
     quoting Python uses when it launches the process, so measuring a single
-    quoted element here matches what will actually be spawned. POSIX has no
-    such rendering step, so the raw UTF-8 byte count is exact.
+    quoted element here matches what will actually be spawned. The 32,767
+    limit itself is in UTF-16 code *units*, not Python ``str`` code points, so
+    non-BMP characters (most emoji) — encoded as a surrogate pair, 2 units —
+    would be undercounted by a factor of ~2 if we used ``len()`` directly;
+    encoding to UTF-16 and halving the byte count gives the exact unit count.
+    POSIX has no such rendering step, so the raw UTF-8 byte count is exact.
     """
     if sys.platform.startswith("win"):
-        return len(subprocess.list2cmdline([prompt]))
+        rendered = subprocess.list2cmdline([prompt])
+        return len(rendered.encode("utf-16-le")) // 2
     return len(prompt.encode("utf-8"))
 
 

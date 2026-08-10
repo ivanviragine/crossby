@@ -480,6 +480,51 @@ def test_argv_render_length_windows_uses_quoted_rendering(monkeypatch) -> None:
     assert rendered > len(prompt.encode("utf-8"))
 
 
+def test_argv_render_length_windows_counts_utf16_units_not_code_points(monkeypatch) -> None:
+    """Windows' 32,767-char ``CreateProcess`` limit is in UTF-16 code *units*,
+    not Python ``str`` code points. A non-BMP character (most emoji) is a
+    surrogate pair — 2 units — but a single Python code point, so counting
+    ``len()`` on the rendered string directly would undercount by ~2x for
+    emoji-heavy prompts."""
+    monkeypatch.setattr(summarizer_mod.sys, "platform", "win32")
+    prompt = "\U0001f600" * 50  # non-BMP emoji: 1 code point, 2 UTF-16 units each
+    rendered = subprocess.list2cmdline([prompt])
+    assert summarizer_mod._argv_render_length(prompt) == len(rendered.encode("utf-16-le")) // 2
+    assert summarizer_mod._argv_render_length(prompt) > len(rendered)
+
+
+def test_argv_windows_non_bmp_expansion_trips_preflight_under_code_point_ceiling(
+    monkeypatch,
+) -> None:
+    """A prompt whose rendered *code-point* length fits the ceiling can still
+    overflow the actual Windows command line once non-BMP emoji (surrogate
+    pairs) are counted in UTF-16 units, as ``CreateProcess`` does — the
+    preflight must catch that case too."""
+    monkeypatch.setattr(summarizer_mod.sys, "platform", "win32")
+    monkeypatch.setattr(summarizer_mod, "_MAX_PROMPT_BYTES", 400)
+    tool = _make_summarizer_tool()
+    summarizer = HandoffSummarizer(tool, prompt_template="T", token_budget=10_000_000)
+    content = "\U0001f600" * 250
+    transcript = ConversationTranscript(
+        session_ref=_ref(), turns=[ConversationTurn(role="user", content=content)]
+    )
+    prompt = summarizer._build_prompt(transcript)
+    rendered = subprocess.list2cmdline([prompt])
+    assert len(rendered) < summarizer_mod._MAX_PROMPT_BYTES  # code points fit
+    assert len(rendered.encode("utf-16-le")) // 2 > summarizer_mod._MAX_PROMPT_BYTES  # units don't
+
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
+        patch("crossby.handoff.summarizer.subprocess.run") as run,
+        pytest.raises(SummarizerParseError),
+    ):
+        summarizer.summarize_structured(
+            transcript, source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+        )
+
+    run.assert_not_called()
+
+
 def test_argv_windows_quoting_expansion_trips_preflight_under_raw_byte_ceiling(
     monkeypatch,
 ) -> None:
