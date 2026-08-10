@@ -588,6 +588,22 @@ class TestCopyStrategy:
             assert not any(outside.iterdir()), parent
             (tmp_path / parent).unlink()  # reset for the next writer
 
+    def test_copy_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        # Issue #83: a normal copy dry-run on an unchanged target reports skipped,
+        # not a phantom "updated".
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)  # real copy establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
+    def test_translate_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        w.sync(data, tmp_path)  # real translate establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
     def test_copy_all_agents_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
         # Issue #83: the dry-run copy path (backing the symlink-failure fallback)
         # must compare without writing, returning an honest would-change flag so

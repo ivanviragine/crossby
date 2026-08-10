@@ -87,7 +87,7 @@ def first_symlinked_ancestor(root: Path, target: Path) -> Path | None:
     return None
 
 
-def clear_conflicting_type(dest: Path, *, want_dir: bool) -> bool:
+def clear_conflicting_type(dest: Path, *, want_dir: bool, dry_run: bool = False) -> bool:
     """Remove *dest* when it exists as the opposite kind of thing.
 
     Without this, mirroring a source directory onto a target *file* raises
@@ -96,25 +96,30 @@ def clear_conflicting_type(dest: Path, *, want_dir: bool) -> bool:
     with a traceback instead of a graceful result. Symlinks are left alone;
     the callers decide what to do with those.
 
-    Returns True when something was removed.
+    Returns True when something was removed (or, under ``dry_run``, *would* be —
+    nothing is touched on disk). ``dry_run`` defaults False, so callers that omit
+    it keep the exact prior behavior.
     """
     if dest.is_symlink() or not dest.exists():
         return False
     if want_dir and not dest.is_dir():
-        dest.unlink()
+        if not dry_run:
+            dest.unlink()
         return True
     if not want_dir and dest.is_dir():
-        shutil.rmtree(dest)
+        if not dry_run:
+            shutil.rmtree(dest)
         return True
     return False
 
 
-def write_if_different(path: Path, content: bytes) -> bool:
+def write_if_different(path: Path, content: bytes, *, dry_run: bool = False) -> bool:
     """Write *content* to *path* only when it differs from what's there.
 
-    Returns True when the file was written. Keeping unchanged files untouched
-    is what lets writers report an honest ``skipped`` and keeps re-syncs out of
-    ``git status``.
+    Returns True when the file was written (or, under ``dry_run``, *would* be).
+    Keeping unchanged files untouched is what lets writers report an honest
+    ``skipped`` and keeps re-syncs out of ``git status``. ``dry_run`` defaults
+    False, so existing callers keep the exact prior behavior.
 
     The write itself goes through a temp file plus rename, so an interrupted
     sync leaves the previous content intact rather than a truncated file — the
@@ -126,6 +131,8 @@ def write_if_different(path: Path, content: bytes) -> bool:
             return False
     except OSError:
         pass
+    if dry_run:
+        return True
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".crossby-tmp")
     try:
@@ -137,7 +144,7 @@ def write_if_different(path: Path, content: bytes) -> bool:
     return True
 
 
-def _sync_mode(dest: Path, source: Path) -> bool:
+def _sync_mode(dest: Path, source: Path, *, dry_run: bool = False) -> bool:
     """Copy *source*'s permission bits onto *dest* when they differ.
 
     Applies to files *and* directories. ``write_if_different`` writes through a
@@ -162,13 +169,18 @@ def _sync_mode(dest: Path, source: Path) -> bool:
     except OSError:
         return False
     if dest_mode != source_mode:
-        dest.chmod(source_mode)
+        if not dry_run:
+            dest.chmod(source_mode)
         return True
     return False
 
 
 def mirror_tree(
-    source_dir: Path, target_dir: Path, *, preserve: frozenset[str] = frozenset()
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    preserve: frozenset[str] = frozenset(),
+    dry_run: bool = False,
 ) -> bool:
     """Mirror *source_dir* onto *target_dir*, writing only what differs.
 
@@ -192,15 +204,20 @@ def mirror_tree(
     broken source symlink resolves to neither a file nor a directory and is
     skipped.)
 
-    Returns True when any file was written, chmod'd, or removed.
+    Returns True when any file was written, chmod'd, or removed (or, under
+    ``dry_run``, *would* be — nothing is touched on disk). ``dry_run`` defaults
+    False, so every existing caller keeps the exact prior behavior; a dry-run
+    caller gets an honest would-change flag for reporting ``skipped``.
     """
     changed = False
     # Never mirror *through* a symlinked target root — replace it with a real
     # directory so nothing lands at the symlink's destination.
     if target_dir.is_symlink():
-        target_dir.unlink()
+        if not dry_run:
+            target_dir.unlink()
         changed = True
-    target_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        target_dir.mkdir(parents=True, exist_ok=True)
     wanted: set[str] = set()
 
     for child in sorted(source_dir.iterdir()):
@@ -209,38 +226,44 @@ def mirror_tree(
         # A symlinked target child is replaced, not written through — otherwise a
         # nested symlink would redirect writes/chmods outside the mirror root.
         if dest.is_symlink():
-            dest.unlink()
+            if not dry_run:
+                dest.unlink()
             changed = True
         # ``is_dir()``/``is_file()`` follow symlinks, so a symlinked *source*
         # entry is dereferenced here — a directory is recursed into (mirrored as
         # a real dir), a file copied by its bytes. The target symlink guard above
         # still prevents writing *through* a link on the destination side.
         if child.is_dir():
-            changed |= clear_conflicting_type(dest, want_dir=True)
-            if mirror_tree(child, dest):
+            changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
+            if mirror_tree(child, dest, dry_run=dry_run):
                 changed = True
         elif child.is_file():
-            changed |= clear_conflicting_type(dest, want_dir=False)
-            if write_if_different(dest, child.read_bytes()):
+            changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
+            if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
                 changed = True
-            if _sync_mode(dest, child):
+            if _sync_mode(dest, child, dry_run=dry_run):
                 changed = True
 
-    for child in target_dir.iterdir():
-        if child.name in wanted or child.name in preserve:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-        changed = True
+    # In a real run the ``mkdir`` above guarantees a real dir here; under dry-run
+    # the target may not exist (not created) or still be a symlink (not
+    # replaced), so guard before iterating — any escape was already counted above.
+    if target_dir.is_dir() and not target_dir.is_symlink():
+        for child in target_dir.iterdir():
+            if child.name in wanted or child.name in preserve:
+                continue
+            if not dry_run:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            changed = True
 
     # Mirror this directory's own permission bits last — the ``mkdir`` above
     # created it under the umask, which would otherwise widen a private ``0700``
     # tree or strip group access from a ``0770`` one. Deferred to here, after the
     # children are written, so a restrictive source mode can't lock out those
     # writes. Each recursive call syncs its own root, so nested dirs are covered.
-    if _sync_mode(target_dir, source_dir):
+    if _sync_mode(target_dir, source_dir, dry_run=dry_run):
         changed = True
 
     return changed

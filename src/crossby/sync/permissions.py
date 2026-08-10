@@ -187,6 +187,9 @@ class ClaudePermissionWriter(AbstractSyncWriter):
             )
 
         settings_path = project_root / ".claude" / "settings.json"
+        ancestor_err = self.contained_or_error(project_root, settings_path)
+        if ancestor_err is not None:
+            return ancestor_err
         written_action, error, created, revoked = self.write(
             project_root, patterns, revoke, dry_run=dry_run
         )
@@ -286,6 +289,11 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
         scope_root = project_root if self.scope == "project" else None
         config_path = _cursor_config_path(scope_root)
+        # No-op for global scope (config_path lands outside project_root, so
+        # first_symlinked_ancestor returns None).
+        ancestor_err = self.contained_or_error(project_root, config_path)
+        if ancestor_err is not None:
+            return ancestor_err
         written_action, error, created, revoked = self.write(
             scope_root, patterns, revoke, dry_run=dry_run
         )

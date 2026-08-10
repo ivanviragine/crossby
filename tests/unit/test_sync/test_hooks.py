@@ -1007,6 +1007,20 @@ class TestCodexHooksWriter:
         assert "PreToolUse" in data["hooks"]
         assert "PostToolUse" in data["hooks"]
 
+    def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
+        # Issue #83: a symlinked .codex parent must be refused before writing
+        # either .codex/hooks.json or the .codex/config.toml feature flag — both
+        # would otherwise escape the project root.
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        result = self.writer.sync(_cfg(GUARD_HOOK, _post_tool_use_hook()), tmp_path)
+        assert result.action == "error"
+        assert "symlinked directory" in (result.message or "")
+        assert not any(outside.iterdir())  # neither hooks.json nor config.toml written
+
     def test_drops_notification_event(self, tmp_path: Path) -> None:
         """Codex has no notification event; it should be dropped with a note."""
         result = self.writer.sync(_cfg(_notification_hook()), tmp_path)

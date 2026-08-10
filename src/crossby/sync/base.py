@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from crossby.models.ai import AIToolID
+from crossby.sync.file_utils import first_symlinked_ancestor
 
 if TYPE_CHECKING:
     from crossby.models.config import HookEntry, MCPServerConfig
@@ -151,6 +152,34 @@ class AbstractSyncWriter(ABC):
         if not isinstance(rel, str):
             return None
         return project_root / rel
+
+    def contained_or_error(self, project_root: Path, target: Path) -> SyncResult | None:
+        """Return an ``error`` result when a *parent* of *target* is a symlink.
+
+        ``mkdir(parents=True)`` and ``create_symlink`` follow a symlinked ancestor
+        (e.g. ``.agents -> /outside``), landing writes outside the project even
+        when the final target component is guarded. Every writer must call this
+        before creating or writing its target so no sync can escape the project
+        root through a symlinked tool directory.
+        """
+        bad = first_symlinked_ancestor(project_root, target)
+        if bad is None:
+            return None
+        try:
+            shown_bad = bad.relative_to(project_root)
+            shown_target: Path | str = target.relative_to(project_root)
+        except ValueError:
+            shown_bad, shown_target = bad, target
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action="error",
+            message=(
+                f"{shown_bad} is a symlinked directory on the path to "
+                f"{shown_target}; refusing to write through it (it may point "
+                "outside the project). Remove the symlink and re-run."
+            ),
+        )
 
     @abstractmethod
     def sync(

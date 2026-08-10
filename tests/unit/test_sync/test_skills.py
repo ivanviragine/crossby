@@ -19,8 +19,8 @@ from crossby.sync.skills import (
     CodexSkillsWriter,
     CopilotSkillsWriter,
     CursorSkillsWriter,
+    _copy_skills_dir,
     _is_managed_skills_dir,
-    _skills_dir_would_change,
     update_skills_gitignore,
 )
 
@@ -723,6 +723,22 @@ class TestTranslateStrategy:
         second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
         assert second.action == "skipped"
 
+    def test_copy_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        # Issue #83: a normal copy dry-run on an unchanged target reports skipped,
+        # not a phantom "updated".
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+        CodexSkillsWriter().sync(_data(strategy="copy"), tmp_path)  # real copy
+        result = CodexSkillsWriter().sync(_data(strategy="copy"), tmp_path, dry_run=True)
+        assert result.action == "skipped"
+
+    def test_translate_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)  # real translate
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
+        assert result.action == "skipped"
+
     def test_symlinked_target_skill_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target *skill* dir that is itself a symlink must be replaced, never
         # written through: mkdir(exist_ok=True) silently succeeds on a
@@ -809,24 +825,36 @@ class TestTranslateStrategy:
         # Nothing was written through the parent symlink to its destination.
         assert not any(outside.iterdir())
 
-    def test_skills_dir_would_change_compares_without_writing(self, tmp_path: Path) -> None:
-        # Issue #83: the dry-run copy fallback's read-only compare must detect an
-        # unchanged tree (→ skipped), a byte change, a missing target, and a stale
-        # skill dir — all without touching disk.
+    def test_copy_skills_dir_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
+        # Issue #83: _copy_skills_dir(dry_run=True) is a compare-only pass (same
+        # logic as the real copy, no drift) — it detects an unchanged tree
+        # (→ skipped), a byte change, a mode-only change, a stale skill dir, and a
+        # missing target, all without touching disk.
         source = _make_source(tmp_path, ["a", "b"])
         target = tmp_path / "target"
-        assert _skills_dir_would_change(source, target) is True  # target absent
-        # Materialise an exact copy → no change.
-        shutil.copytree(source, target)
-        assert _skills_dir_would_change(source, target) is False
-        # A byte change in a SKILL.md → change.
+        assert _copy_skills_dir(source, target, dry_run=True) is True  # target absent
+        assert not target.exists()  # nothing written in dry-run
+
+        # Real copy, then an unchanged dry-run reports no change.
+        assert _copy_skills_dir(source, target) is True
+        assert _copy_skills_dir(source, target, dry_run=True) is False
+
+        # A byte change in a SKILL.md → change (dry-run leaves it unwritten).
         (target / "a" / "SKILL.md").write_text("# a changed\n", encoding="utf-8")
-        assert _skills_dir_would_change(source, target) is True
-        # Restore, then add a stale skill dir in the target → change.
+        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert (target / "a" / "SKILL.md").read_text(encoding="utf-8") == "# a changed\n"
+
+        # A mode-only difference is detected (this was the reviewer's drift point).
         (target / "a" / "SKILL.md").write_text("# a\n", encoding="utf-8")
-        assert _skills_dir_would_change(source, target) is False
+        assert _copy_skills_dir(source, target, dry_run=True) is False
+        os.chmod(source / "a" / "SKILL.md", 0o600)
+        assert _copy_skills_dir(source, target, dry_run=True) is True
+        os.chmod(source / "a" / "SKILL.md", 0o644)
+
+        # A stale skill dir in the target → change.
         (target / "stale").mkdir()
-        assert _skills_dir_would_change(source, target) is True
+        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert (target / "stale").is_dir()  # not removed in dry-run
 
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written

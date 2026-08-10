@@ -17,7 +17,6 @@ from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncRes
 from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
-    first_symlinked_ancestor,
     has_managed_marker,
     is_same_path,
     write_managed_marker,
@@ -395,28 +394,19 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool 
     return True
 
 
-def _reject_symlinked_ancestor(
-    writer: AbstractSyncWriter, project_root: Path, target_dir: Path, target_rel: str
-) -> SyncResult | None:
-    """Return an ``error`` result when a *parent* of *target_dir* is a symlink.
+def _translate_target_would_change(target_file: Path, rendered: str) -> bool:
+    """True when a translate write would change *target_file*.
 
-    ``mkdir(parents=True)`` and ``create_symlink`` follow a symlinked ancestor
-    (e.g. ``.agents -> /outside``), landing writes outside the project even when
-    the final target component is guarded. Shared by all agent writers.
+    Mirrors the real translate write decision so a dry-run reports ``skipped``
+    honestly: a leaf symlink is always replaced; a missing or byte-different
+    target is (re)written; an identical regular file is left untouched.
     """
-    bad = first_symlinked_ancestor(project_root, target_dir)
-    if bad is None:
-        return None
-    return SyncResult(
-        tool_id=writer.tool_id,
-        concern=writer.concern,
-        action="error",
-        message=(
-            f"{bad.relative_to(project_root)} is a symlinked directory on the "
-            f"path to {target_rel}; refusing to write through it (it may point "
-            "outside the project). Remove the symlink and re-run."
-        ),
-    )
+    if target_file.is_symlink():
+        return True
+    try:
+        return not target_file.is_file() or target_file.read_text(encoding="utf-8") != rendered
+    except OSError:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +470,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         # Refuse a symlinked *ancestor* (any parent between the project root and
         # the target) for every strategy — the final target component is guarded
         # separately below.
-        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        ancestor_err = self.contained_or_error(project_root, target_dir)
         if ancestor_err is not None:
             return ancestor_err
 
@@ -671,10 +661,13 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
+            # Compare-only so an unchanged re-sync reports skipped, matching the
+            # real run below (not an unconditional created/updated).
+            would_write = _copy_all_agents(source_dir, target_dir, str(self.tool_id), dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_write and target_existed else action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
@@ -745,6 +738,8 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             from crossby.sync.manual_fix import has_manual_fix_block
 
             manual_fix_count = 0
+            would_change = False
+            wanted = {_target_name(src) for src in source_files}
             for src in source_files:
                 rendered = _translate_markdown_agent(
                     content=src.read_text(encoding="utf-8"),
@@ -754,6 +749,11 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 )
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
+                would_change |= _translate_target_would_change(
+                    target_dir / _target_name(src), rendered
+                )
+            if target_dir.is_dir():  # stale *.md whose source is gone
+                would_change |= any(f.name not in wanted for f in target_dir.glob("*.md"))
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -762,7 +762,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_change and target_existed else action,
                 file_path=target_dir,
                 message=message,
             )
@@ -935,7 +935,7 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 message="source and target resolve to the same path; nothing to do",
             )
 
-        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        ancestor_err = self.contained_or_error(project_root, target_dir)
         if ancestor_err is not None:
             return ancestor_err
 
@@ -1149,7 +1149,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 message="source and target resolve to the same path; nothing to do",
             )
 
-        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        ancestor_err = self.contained_or_error(project_root, target_dir)
         if ancestor_err is not None:
             return ancestor_err
 
@@ -1247,6 +1247,8 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             from crossby.sync.manual_fix import has_manual_fix_block
 
             manual_fix_count = 0
+            would_change = False
+            wanted = {_target_name(src) for src in source_files}
             for src in source_files:
                 rendered = _translate_markdown_agent(
                     content=src.read_text(encoding="utf-8"),
@@ -1256,6 +1258,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 )
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
+                would_change |= _translate_target_would_change(
+                    target_dir / _target_name(src), rendered
+                )
+            if target_dir.is_dir():  # stale *.agent.md whose source is gone
+                would_change |= any(f.name not in wanted for f in target_dir.glob("*.agent.md"))
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -1264,7 +1271,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_change and target_existed else action,
                 file_path=target_dir,
                 message=message,
             )

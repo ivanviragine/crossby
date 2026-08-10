@@ -244,6 +244,12 @@ class _BaseRulesWriter(AbstractSyncWriter):
                 message="source and target resolve to the same file",
             )
 
+        # Refuse a symlinked ancestor (e.g. .github -> /outside) — mkdir/write
+        # would follow it and land the instructions file outside the project.
+        ancestor_err = self.contained_or_error(project_root, target_path)
+        if ancestor_err is not None:
+            return ancestor_err
+
         # Decide effective strategy. Symlink is the configured default, but
         # we force a copy whenever the source mentions surfaces specific to a
         # tool other than ``self.tool_id`` — that way every target gets a

@@ -40,7 +40,6 @@ from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
     clear_conflicting_type,
-    first_symlinked_ancestor,
     has_managed_marker,
     is_same_path,
     mirror_tree,
@@ -173,22 +172,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             )
 
         # Refuse a symlinked *ancestor* (any parent between the project root and
-        # the target) for every strategy — mkdir(parents=True) and create_symlink
-        # both follow a link like ``.agents -> /outside`` and land writes outside
-        # the project. The final target component is guarded separately below.
-        bad_ancestor = first_symlinked_ancestor(project_root, target_dir)
-        if bad_ancestor is not None:
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="error",
-                message=(
-                    f"{bad_ancestor.relative_to(project_root)} is a symlinked "
-                    f"directory on the path to {self._target_rel}; refusing to "
-                    "write through it (it may point outside the project). "
-                    "Remove the symlink and re-run."
-                ),
-            )
+        # the target) for every strategy — the final target component is guarded
+        # separately below.
+        ancestor_err = self.contained_or_error(project_root, target_dir)
+        if ancestor_err is not None:
+            return ancestor_err
 
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
@@ -275,11 +263,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             # work and doesn't refuse the dir as "not crossby-managed".
             try:
                 if dry_run:
-                    # Compare-only (no writes) so the reported action matches what
-                    # the real copy fallback would do: skipped when nothing
-                    # differs, otherwise updated/created by target existence.
+                    # Compare-only via the SAME _copy_skills_dir logic (no writes),
+                    # so the reported action matches what the real copy fallback
+                    # would do — no drift on modes or dest symlinks.
                     target_existed = target_dir.is_dir()
-                    if target_existed and not _skills_dir_would_change(source_dir, target_dir):
+                    would_change = _copy_skills_dir(source_dir, target_dir, dry_run=True)
+                    if target_existed and not would_change:
                         return SyncResult(
                             tool_id=self.tool_id,
                             concern=self.concern,
@@ -360,10 +349,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
+            # Compare-only so an unchanged re-sync reports skipped, matching the
+            # real run below (not an unconditional created/updated).
+            would_write = _copy_skills_dir(source_dir, target_dir, dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_write and target_existed else action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
@@ -446,6 +438,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             from crossby.sync.manual_fix import has_manual_fix_block
 
             manual_fix_count = 0
+            would_change = False
+            wanted_names = {sd.name for sd in skill_dirs} | {n for n, _ in command_skills}
             for skill_dir in skill_dirs:
                 definition = parse_markdown_skill(
                     (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
@@ -455,9 +449,22 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 rendered = render_markdown_skill(translated)
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
-            for _name, rendered in command_skills:
+                target_skill = target_dir / skill_dir.name
+                if _translate_skill_md_would_change(
+                    target_skill / "SKILL.md", rendered
+                ) or _refresh_skill_support_dirs(skill_dir, target_skill, dry_run=True):
+                    would_change = True
+            for name, rendered in command_skills:
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
+                if _translate_skill_md_would_change(target_dir / name / "SKILL.md", rendered):
+                    would_change = True
+            if target_dir.is_dir():  # stale skill *dirs* whose source is gone
+                for child in target_dir.iterdir():
+                    if child.name in wanted_names or child.name == MANAGED_MARKER_NAME:
+                        continue
+                    if child.is_dir():
+                        would_change = True
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -466,7 +473,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_change and target_existed else action,
                 file_path=target_dir,
                 message=message,
             )
@@ -584,7 +591,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         )
 
 
-def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
+def _copy_skills_dir(source_dir: Path, target_dir: Path, *, dry_run: bool = False) -> bool:
     """Copy the skills tree from source to target (one subdir per skill).
 
     Compare-then-write, not ``rmtree`` + ``copytree``: the previous
@@ -597,9 +604,13 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
     unrelated top-level files (and the crossby marker) are left alone. Inside a
     skill directory crossby owns everything, so those are mirrored exactly.
 
-    Returns True when any file was written or removed.
+    Returns True when any file was written or removed (or, under ``dry_run``,
+    *would* be — nothing is touched on disk, so the dry-run copy fallback can
+    report an honest ``skipped`` using the SAME logic as the real run, no
+    drift). ``dry_run`` defaults False, so existing callers are unaffected.
     """
-    target_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        target_dir.mkdir(parents=True, exist_ok=True)
     changed = False
     source_names: set[str] = set()
 
@@ -607,67 +618,46 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
         source_names.add(child.name)
         dest = target_dir / child.name
         if child.is_dir() and not child.is_symlink():
-            changed |= clear_conflicting_type(dest, want_dir=True)
-            if mirror_tree(child, dest):
+            changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
+            if mirror_tree(child, dest, dry_run=dry_run):
                 changed = True
         elif child.is_file():
-            changed |= clear_conflicting_type(dest, want_dir=False)
-            if write_if_different(dest, child.read_bytes()):
+            changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
+            if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
                 changed = True
 
-    for child in target_dir.iterdir():
-        if child.name in source_names or child.name == MANAGED_MARKER_NAME:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-            logger.info("skills.stale_removed", path=str(child))
-            changed = True
+    if target_dir.is_dir():  # may not exist yet under dry-run
+        for child in target_dir.iterdir():
+            if child.name in source_names or child.name == MANAGED_MARKER_NAME:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                if not dry_run:
+                    shutil.rmtree(child)
+                    logger.info("skills.stale_removed", path=str(child))
+                changed = True
 
     return changed
 
 
-def _skills_dir_would_change(source_dir: Path, target_dir: Path, *, top_level: bool = True) -> bool:
-    """Read-only predicate mirroring :func:`_copy_skills_dir`'s write decision.
-
-    Lets the dry-run copy fallback report ``skipped`` when a re-copy would change
-    nothing, without touching disk. Compares by existence and bytes plus stale
-    detection (top level: only stale skill *dirs* count, matching
-    ``_copy_skills_dir``; nested: any stale entry, matching ``mirror_tree``). A
-    mode-only difference is not detected — acceptable for this rare
-    symlink-failure fallback (source of truth stays :func:`_copy_skills_dir`).
-    """
-    if not target_dir.exists():
-        return True  # the whole tree would be created
-    source_names: set[str] = set()
-    for child in sorted(source_dir.iterdir()):
-        source_names.add(child.name)
-        dest = target_dir / child.name
-        if child.is_dir():  # follows a source dir symlink, like mirror_tree
-            if _skills_dir_would_change(child, dest, top_level=False):
-                return True
-        elif child.is_file():
-            try:
-                if not dest.is_file() or dest.read_bytes() != child.read_bytes():
-                    return True
-            except OSError:
-                return True
-    for child in target_dir.iterdir():
-        if child.name in source_names:
-            continue
-        if top_level:
-            if child.name == MANAGED_MARKER_NAME:
-                continue
-            if child.is_dir() and not child.is_symlink():
-                return True  # stale skill dir would be removed
-        else:
-            return True  # inside a managed skill dir, any stale entry is removed
-    return False
+def _translate_skill_md_would_change(target_md: Path, rendered: str) -> bool:
+    """True when a translate write would change *target_md* (a leaf symlink is
+    replaced; a missing or byte-different SKILL.md is rewritten; an identical
+    regular file is left untouched). Mirrors ``_sync_translate``'s write decision
+    so a dry-run reports ``skipped`` honestly."""
+    if target_md.is_symlink():
+        return True
+    try:
+        return not target_md.is_file() or target_md.read_text(encoding="utf-8") != rendered
+    except OSError:
+        return True
 
 
 _SUPPORT_DIRS = ("scripts", "references", "assets")
 
 
-def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> bool:
+def _refresh_skill_support_dirs(
+    source_skill: Path, target_skill: Path, *, dry_run: bool = False
+) -> bool:
     """Mirror ``scripts/``, ``references/``, ``assets/`` from source to target.
 
     Compare-then-write via :func:`mirror_tree` instead of ``rmtree`` +
@@ -678,7 +668,9 @@ def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> bool:
     target support dir is replaced outright, never followed. Missing source
     subdirs are removed from the target so deleted support dirs propagate.
 
-    Returns True when any support file was written, chmod'd, or removed.
+    Returns True when any support file was written, chmod'd, or removed (or,
+    under ``dry_run``, *would* be — nothing is touched). ``dry_run`` defaults
+    False, so existing callers keep the exact prior behavior.
     """
     changed = False
     for subdir in _SUPPORT_DIRS:
@@ -687,21 +679,25 @@ def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> bool:
         # Never write through a symlinked target — replace it outright so the
         # mirror lands under the project root, not the symlink's destination.
         if target_sub.is_symlink():
-            target_sub.unlink()
+            if not dry_run:
+                target_sub.unlink()
             changed = True
         if source_sub.is_dir():
             # A target of the wrong type (a file where a dir belongs) would make
             # mirror_tree's mkdir fail — clear it first.
             if target_sub.exists() and not target_sub.is_dir():
-                target_sub.unlink()
+                if not dry_run:
+                    target_sub.unlink()
                 changed = True
-            if mirror_tree(source_sub, target_sub):
+            if mirror_tree(source_sub, target_sub, dry_run=dry_run):
                 changed = True
         elif target_sub.is_dir():
-            shutil.rmtree(target_sub)
+            if not dry_run:
+                shutil.rmtree(target_sub)
             changed = True
         elif target_sub.exists():
-            target_sub.unlink()
+            if not dry_run:
+                target_sub.unlink()
             changed = True
     return changed
 

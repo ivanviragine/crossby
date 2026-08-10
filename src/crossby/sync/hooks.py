@@ -439,6 +439,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".claude" / "settings.json"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -796,6 +799,9 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".cursor" / "hooks.json"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -954,6 +960,9 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".github" / "hooks" / "hooks.json"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -1183,6 +1192,9 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".agents" / "hooks.json"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -1435,6 +1447,9 @@ class CodexHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".codex" / "hooks.json"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
