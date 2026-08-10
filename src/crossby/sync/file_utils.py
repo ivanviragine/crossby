@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import stat
 from pathlib import Path
 
 # Marker file written into managed target directories (agents/skills) so
@@ -122,14 +123,19 @@ def _sync_mode(dest: Path, source: Path) -> bool:
     executable bit silently breaks ``scripts/`` mirrored under a skill, and a
     dropped directory mode either widens a private ``0700`` ``assets/`` tree to
     the umask default or strips required group access from a ``0770`` ``scripts/``
-    tree. Re-applying the source's ``st_mode`` permission bits (``& 0o777``)
-    fixes both and is idempotent: once matched, the next run makes no change.
+    tree. Re-applying the source's full permission mask (``stat.S_IMODE`` — the
+    12 low bits, so setgid/setuid/sticky survive alongside the ``rwx`` triples,
+    matching the ``copytree`` this replaced) fixes both and is idempotent: once
+    matched, the next run makes no change. Masking narrower (e.g. ``& 0o777``)
+    would both hide a special-bit-only difference during comparison and clear the
+    special bits on ``chmod`` — a source ``02770`` group-shared dir would land as
+    a plain ``0770`` at the target.
 
     Returns True when a ``chmod`` was applied.
     """
     try:
-        source_mode = source.stat().st_mode & 0o777
-        dest_mode = dest.stat().st_mode & 0o777
+        source_mode = stat.S_IMODE(source.stat().st_mode)
+        dest_mode = stat.S_IMODE(dest.stat().st_mode)
     except OSError:
         return False
     if dest_mode != source_mode:

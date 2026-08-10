@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Literal
 
@@ -690,6 +691,31 @@ class TestTranslateStrategy:
         assert target_assets.stat().st_mode & 0o777 == 0o750, "top-level dir mode dropped"
         assert (target_assets / "private").stat().st_mode & 0o777 == 0o700, (
             "nested private dir mode dropped"
+        )
+
+        # Idempotent: modes already match, so a re-sync chmods nothing → skipped.
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert second.action == "skipped"
+
+    def test_directory_setgid_bit_preserved_on_translate(self, tmp_path: Path) -> None:
+        # mirror_tree must propagate *special* permission bits (setgid/setuid/
+        # sticky), not just the rwx triples — masking to 0o777 would both hide a
+        # setgid-only difference during comparison (fresh mkdir target has no
+        # setgid) and strip it on chmod, regressing copytree's copystat behavior.
+        # A source 02770 group-shared scripts/ tree (setgid keeps files created
+        # by collaborators group-owned) must land as 02770 at the target.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(skill / "scripts", 0o2770)
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        target_scripts = tmp_path / ".agents" / "skills" / "my-skill" / "scripts"
+        assert target_scripts.stat().st_mode & stat.S_ISGID, "setgid bit dropped on dir"
+        assert stat.S_IMODE(target_scripts.stat().st_mode) == 0o2770, (
+            "special + rwx bits not fully preserved"
         )
 
         # Idempotent: modes already match, so a re-sync chmods nothing → skipped.
