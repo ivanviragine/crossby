@@ -35,7 +35,12 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\bpermissionmode\b", "Claude permissionMode setting"),
         (r"\bsubagent[s]?\b", "Claude subagents"),
         (r"\btodowrite\b", "Claude TodoWrite tool"),
-        (r"/hooks\b", "Claude /hooks slash command"),
+        # A standalone ``/hooks`` slash command, NOT a path segment. The negative
+        # lookbehind excludes a preceding path character so filesystem paths like
+        # ``.agents/hooks.json`` (an Antigravity CLI surface) or ``foo/hooks`` no
+        # longer collide with this marker — that collision made agy-authored
+        # ``.agents/hooks.json`` content read as foreign-to-agy and forced a copy.
+        (r"(?<![\w.])/hooks\b", "Claude /hooks slash command"),
     ),
     AIToolID.CODEX: (
         (r"\.codex/", "Codex config paths"),

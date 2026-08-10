@@ -216,8 +216,33 @@ def mirror_tree(
         if not dry_run:
             target_dir.unlink()
         changed = True
+    # Creating a previously-absent target directory is itself a change. An empty
+    # source dir (e.g. an empty ``scripts/``) with the same mode ``mkdir``
+    # produces writes no child and triggers no chmod below, so without counting
+    # the creation the first mirror — and the dry-run that reports what it would
+    # do — is misreported as ``skipped`` even though the real run mutates the
+    # tree. A symlinked target (replaced above) is likewise not a real dir here.
+    if not (target_dir.is_dir() and not target_dir.is_symlink()):
+        changed = True
     if not dry_run:
         target_dir.mkdir(parents=True, exist_ok=True)
+    # A read-only source mode (e.g. ``0555``) was propagated to the target on the
+    # first sync (the deferred ``_sync_mode`` below), so a later sync that must
+    # write a changed or newly-added child would fail to create its temp file
+    # inside the still-read-only dir (``PermissionError`` for a non-root owner).
+    # Temporarily grant owner-write for the duration of the mirror; the deferred
+    # ``_sync_mode`` restores the source mode. Snapshot the pre-relax mode so
+    # restoring *our own* relaxation isn't miscounted as a change on an otherwise
+    # idempotent re-sync.
+    relaxed_mode: int | None = None
+    if not dry_run and target_dir.is_dir() and not target_dir.is_symlink():
+        try:
+            existing_mode = stat.S_IMODE(target_dir.stat().st_mode)
+            if not existing_mode & stat.S_IWUSR:
+                target_dir.chmod(existing_mode | stat.S_IWUSR)
+                relaxed_mode = existing_mode
+        except OSError:
+            pass
     wanted: set[str] = set()
 
     for child in sorted(source_dir.iterdir()):
@@ -264,7 +289,19 @@ def mirror_tree(
     # children are written, so a restrictive source mode can't lock out those
     # writes. Each recursive call syncs its own root, so nested dirs are covered.
     if _sync_mode(target_dir, source_dir, dry_run=dry_run):
-        changed = True
+        # ``_sync_mode`` reports a change when it restores the temporary
+        # owner-write relax above back to the pre-relax mode, but that undoes our
+        # own change and is not a real diff — only count it when the source mode
+        # genuinely differs from what the target had before we relaxed it.
+        if relaxed_mode is None:
+            changed = True
+        else:
+            try:
+                source_mode = stat.S_IMODE(source_dir.stat().st_mode)
+            except OSError:
+                source_mode = None
+            if source_mode != relaxed_mode:
+                changed = True
 
     return changed
 

@@ -50,6 +50,18 @@ class TestDetectToolMarkers:
         found = detect_tool_markers("EXITPLANMODE")
         assert AIToolID.CLAUDE in found
 
+    def test_claude_hooks_slash_command(self) -> None:
+        # A standalone `/hooks` slash command is a Claude marker.
+        found = detect_tool_markers("Run /hooks to configure hooks.")
+        assert AIToolID.CLAUDE in found
+        assert "Claude /hooks slash command" in found[AIToolID.CLAUDE]
+
+    def test_hooks_path_segment_is_not_claude(self) -> None:
+        # A `/hooks` path *segment* (e.g. `.agents/hooks.json`, `foo/hooks`) is
+        # not the Claude slash command and must not attribute to Claude.
+        assert AIToolID.CLAUDE not in detect_tool_markers("See .agents/hooks.json for guards.")
+        assert AIToolID.CLAUDE not in detect_tool_markers("Scripts live in tools/hooks/.")
+
 
 class TestIsNeutralForTarget:
     def test_pure_neutral(self) -> None:
@@ -188,6 +200,15 @@ class TestExpandedAntigravityCLIMarkers:
     def test_hooks_json_path_detected(self) -> None:
         found = detect_tool_markers("Guards live in .agents/hooks.json")
         assert AIToolID.ANTIGRAVITY_CLI in found
+        # Regression: the `.agents/hooks.json` path segment must NOT also trip
+        # Claude's `/hooks` slash-command marker. When it did, agy-authored
+        # hooks content read as foreign-to-agy and forced a needless copy.
+        assert AIToolID.CLAUDE not in found
+
+    def test_hooks_json_is_neutral_for_agy_target(self) -> None:
+        # Corollary of the collision fix: `.agents/hooks.json` content is neutral
+        # for an agy target (no foreign Claude marker leaks in).
+        assert is_neutral_for_target("Guards live in .agents/hooks.json", AIToolID.ANTIGRAVITY_CLI)
 
     def test_mcp_config_path_detected(self) -> None:
         found = detect_tool_markers("MCP servers go in .agents/mcp_config.json")

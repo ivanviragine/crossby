@@ -461,7 +461,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             for name, rendered in command_skills:
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
-                if _translate_skill_md_would_change(target_dir / name / "SKILL.md", rendered):
+                target_command_skill = target_dir / name
+                # A symlinked command-skill *dir* is unlinked by the real loop
+                # below, so it is a change even when the linked SKILL.md would
+                # match — mirror the translated-skill guard above.
+                if target_command_skill.is_symlink() or _translate_skill_md_would_change(
+                    target_command_skill / "SKILL.md", rendered
+                ):
                     would_change = True
             if target_dir.is_dir():  # stale skill *dirs* whose source is gone
                 for child in target_dir.iterdir():

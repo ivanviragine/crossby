@@ -12,6 +12,7 @@ import pytest
 
 from crossby.models.ai import AIToolID
 from crossby.sync.base import SyncConcern, SyncData
+from crossby.sync.file_utils import mirror_tree
 from crossby.sync.skills import (
     _GITIGNORE_BLOCK_ID,
     AntigravityCLISkillsWriter,
@@ -571,6 +572,63 @@ class TestRunSyncSkills:
 # ---------------------------------------------------------------------------
 
 
+class TestMirrorTree:
+    """Direct unit coverage for ``mirror_tree`` change detection edge cases."""
+
+    def test_creating_empty_target_dir_counts_as_change(self, tmp_path: Path) -> None:
+        # Issue #83: an empty source dir with the same mode mkdir produces writes
+        # no child and needs no chmod, yet the real run still *creates* the target
+        # dir. Both the real run and the dry-run must report that as a change so a
+        # newly-added empty scripts/ (or --plan) isn't misreported as skipped.
+        source = tmp_path / "src"
+        source.mkdir()  # empty source dir
+        target = tmp_path / "dst"
+
+        assert mirror_tree(source, target, dry_run=True) is True  # would create it
+        assert not target.exists()  # dry-run touched nothing
+
+        assert mirror_tree(source, target) is True  # created the empty dir
+        assert target.is_dir()
+
+        # Now that it exists and matches, a re-sync is a genuine no-op.
+        assert mirror_tree(source, target) is False
+        assert mirror_tree(source, target, dry_run=True) is False
+
+    def test_read_only_target_dir_is_updatable(self, tmp_path: Path) -> None:
+        # Issue #83: a preserved read-only source mode (0555) is applied to the
+        # target on the first sync; a later sync that must write a changed child
+        # into that still-read-only dir would raise PermissionError when creating
+        # the temp file. mirror_tree must temporarily grant owner-write, then
+        # restore the source mode — and an unchanged re-sync must stay skipped.
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "run.sh").write_text("v1", encoding="utf-8")
+        os.chmod(source, 0o555)  # read-only source dir
+        target = tmp_path / "dst"
+
+        assert mirror_tree(source, target) is True
+        assert stat.S_IMODE(target.stat().st_mode) == 0o555
+        assert (target / "run.sh").read_text(encoding="utf-8") == "v1"
+
+        # An unchanged re-sync of the read-only dir reports no change (no churn).
+        assert mirror_tree(source, target) is False
+        assert stat.S_IMODE(target.stat().st_mode) == 0o555
+
+        # Change source content (relax the source to edit, then restore 0555).
+        os.chmod(source, 0o755)
+        (source / "run.sh").write_text("v2", encoding="utf-8")
+        os.chmod(source, 0o555)
+
+        # The update must not raise PermissionError writing into the 0555 target.
+        assert mirror_tree(source, target) is True
+        assert (target / "run.sh").read_text(encoding="utf-8") == "v2"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o555  # mode restored
+
+        # Restore writable modes so pytest's tmp_path teardown can remove them.
+        os.chmod(source, 0o755)
+        os.chmod(target, 0o755)
+
+
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
 
@@ -682,6 +740,27 @@ class TestTranslateStrategy:
         assert result.action == "updated"
         target_script = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "run.sh"
         assert "CHANGED" in target_script.read_text(encoding="utf-8")
+
+    def test_added_empty_support_dir_reports_change(self, tmp_path: Path) -> None:
+        # Issue #83: adding an empty support dir (e.g. scripts/) mutates the tree
+        # on a real run (mkdir), so the dry-run/--plan must not report skipped and
+        # the real run must report updated — creating the dir is a change.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        assert CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path).action == "created"
+
+        # Add an EMPTY scripts/ dir to the source after the first sync.
+        (skill / "scripts").mkdir()
+
+        plan = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
+        assert plan.action != "skipped"  # --plan must not hide the pending mkdir
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action == "updated"
+        assert (tmp_path / ".agents" / "skills" / "my-skill" / "scripts").is_dir()
+
+        # Now that it exists, a further re-sync is an honest no-op.
+        assert CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path).action == "skipped"
 
     def test_executable_bit_preserved_on_translate(self, tmp_path: Path) -> None:
         # mirror_tree must propagate the executable bit so scripts/ stay runnable
@@ -1103,6 +1182,27 @@ class TestTranslateClaudeSlashCommands:
         second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
         assert first.action == "created"
         assert second.action == "skipped"
+
+    def test_command_skill_dry_run_detects_symlinked_dir(self, tmp_path: Path) -> None:
+        # Issue #83: when a *command*-skill target dir is a symlink, the real run
+        # unlinks it (skipped_all = False) — so a dry-run must NOT report skipped,
+        # even when the linked SKILL.md matches the rendered content byte-for-byte.
+        # Mirrors the translated-skill dir-symlink guard.
+        _make_source(tmp_path, [])
+        cmd = tmp_path / ".claude" / "commands" / "review.md"
+        cmd.parent.mkdir(parents=True)
+        cmd.write_text("Body.", encoding="utf-8")
+
+        # Real sync writes the rendered command skill; move it aside and symlink
+        # the target to it so the linked SKILL.md matches byte-for-byte.
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_cmd = tmp_path / ".agents" / "skills" / "claude-command-review"
+        outside = tmp_path / "outside"
+        shutil.move(str(target_cmd), str(outside))
+        os.symlink(outside, target_cmd)
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
+        assert result.action != "skipped"  # the real run would unlink the symlink
 
     def test_stale_command_skill_removed(self, tmp_path: Path) -> None:
         _make_source(tmp_path, [])

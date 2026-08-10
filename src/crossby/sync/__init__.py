@@ -177,7 +177,18 @@ def run_sync(
         tp = writer.target_path(project_root)
         if tp is None:
             return None
-        return tp.parent.resolve() / tp.name
+        # Canonicalising the parent can fail — ``Path.resolve()`` raises
+        # ``RuntimeError`` on a symlink loop in the parent chain (documented
+        # behaviour on Python < 3.13), and other resolution failures surface as
+        # ``OSError``. This runs *before* the per-writer try/except below, so an
+        # unguarded failure here would abort the whole ``run_sync`` instead of
+        # leaving the bad target to the writer's own containment guard (which
+        # reports an ``error`` row and lets the other writers proceed). Fall back
+        # to the un-resolved path so identical literal targets still collide.
+        try:
+            return tp.parent.resolve() / tp.name
+        except (OSError, RuntimeError):
+            return tp
 
     writer_keys: dict[int, Path | None] = {}
     group_winner: dict[Path, AbstractSyncWriter] = {}
