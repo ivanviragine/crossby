@@ -112,6 +112,7 @@ def run_sync(
     installed_tools: list[AIToolID] | None = None,
     registry: SyncRegistry | None = None,
     include_user_scope: bool = False,
+    skip_concerns: frozenset[SyncConcern] | set[SyncConcern] | None = None,
 ) -> list[SyncResult]:
     """Run all matching sync writers, collecting results.
 
@@ -132,12 +133,21 @@ def run_sync(
         registry: Custom registry (defaults to the global ``_registry``).
         include_user_scope: Whether to include user-scope ``~/.claude.json``
             in MCP discovery and validation.
+        skip_concerns: Concerns whose writers must not run at all. Used by the
+            single-source ``--from`` paths to drop a concern the source tool has
+            no reader for: an empty source there is *unknown*, not *emptied*, so
+            letting the ownership diff run would revoke previously-synced entries
+            from targets. Distinct from ``concern`` (which selects one to run) —
+            this excludes.
 
     Returns:
         List of SyncResult, one per writer that ran.
     """
     reg = registry or _registry
     writers = reg.get_writers(tool_id=tool_id, concern=concern)
+
+    if skip_concerns:
+        writers = [w for w in writers if w.concern not in skip_concerns]
 
     # When no specific tool is requested, restrict to installed (or provided) tools.
     if tool_id is None:

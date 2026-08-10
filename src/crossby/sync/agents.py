@@ -996,9 +996,13 @@ class CodexAgentsWriter(AbstractSyncWriter):
 
         Per-file source-tool inference: ``.toml`` is Codex (round-trip),
         anything else is parsed as Claude markdown via subagents.api. The
-        config_fragment is the ``[agents.<name>]`` block PR #46's Codex
-        emitter produces — used by :meth:`_write_codex_config_fragment` to
-        register the agent globally in ``~/.codex/config.toml``.
+        second tuple element is the ``[agents.<name>]`` config fragment the
+        Codex emitter produces to register the agent globally under
+        ``~/.codex``; this sync writer intentionally **discards** it (see
+        ``_translate_all``, where it is bound to ``_config_fragment``).
+        Project-synced agents live under the project's ``.codex/agents/`` and
+        need no global registration — the fragment is only meaningful to the
+        standalone ``crossby agents`` emitter (``cli/agents.py::_write_codex``).
         """
         from_tool = "codex" if source.suffix == ".toml" else _infer_source_tool(source.parent)
         return _translate_codex_agent(

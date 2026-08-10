@@ -1217,6 +1217,30 @@ class TestCodexAgentsTranslate:
             "old codex path .agents/ must not be created — that's the skills root"
         )
 
+    def test_sync_discards_global_registration_fragment(self, tmp_path: Path) -> None:
+        """Project sync writes only the project-local agent TOML.
+
+        The emitter's ``config_fragment`` — a ``[agents.<name>]`` block pointing
+        at ``~/.codex`` — is a global-registration suggestion for the standalone
+        ``crossby agents`` emitter and is intentionally discarded here. #88 §7.
+        """
+        import tomllib
+
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "release-lead")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+
+        out = tmp_path / ".codex" / "agents" / "release-lead.toml"
+        text = out.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        # No [agents.<name>] registration block and no home path leaked in.
+        assert "agents" not in parsed
+        assert "~/.codex" not in text
+        # No config.toml / config-fragment artefact is written by sync.
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+        assert list(tmp_path.rglob("*config-fragment*")) == []
+
     def test_translates_permission_mode_to_sandbox(self, tmp_path: Path) -> None:
         import tomllib
 

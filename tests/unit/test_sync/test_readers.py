@@ -309,3 +309,28 @@ class TestDiscoverMCPConflicts:
 
         assert "a" in servers
         assert [e for e in logs if e.get("event") == "mcp.conflict"] == []
+
+    def test_from_tool_returns_that_tools_own_definition_despite_conflict(
+        self, tmp_path: Path
+    ) -> None:
+        # Claude and Codex both define "ctx". An unscoped scan resolves the
+        # conflict in Claude's favor (first-seen), but --from codex must still
+        # return Codex's own definition, not silently drop it because another
+        # tool's definition won the global conflict.
+        claude_path = tmp_path / ".claude" / "settings.json"
+        claude_path.parent.mkdir()
+        claude_path.write_text(
+            json.dumps({"mcpServers": {"ctx": {"command": "npx", "args": ["claude-ctx"]}}}),
+            encoding="utf-8",
+        )
+        codex_path = tmp_path / ".codex" / "config.toml"
+        codex_path.parent.mkdir()
+        codex_path.write_text(
+            '[mcp_servers.ctx]\ncommand = "npx"\nargs = ["codex-ctx"]\n',
+            encoding="utf-8",
+        )
+
+        servers = discover_mcp(tmp_path, from_tool=AIToolID.CODEX)
+
+        assert "ctx" in servers
+        assert servers["ctx"].args == ["codex-ctx"]

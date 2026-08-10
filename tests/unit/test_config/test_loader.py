@@ -154,6 +154,48 @@ class TestLoadConfig:
         with pytest.raises(ConfigError, match=r"'models\.claude' must be a mapping"):
             load_config(tmp_path)
 
+    def test_per_tier_effort_round_trips_through_loader(self, tmp_path):
+        """The four ``*_effort`` keys must survive the loader, not be dropped.
+
+        Tests that construct ``ComplexityModelMapping(...)`` directly mask this —
+        the break was in ``_build_config``, so exercise the loader path.
+        """
+        data = {
+            "version": 1,
+            "models": {
+                "claude": {
+                    "complex": "claude-sonnet-4.6",
+                    "easy_effort": "low",
+                    "complex_effort": "high",
+                    "very_complex_effort": "xhigh",
+                },
+            },
+        }
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(data))
+        config = load_config(tmp_path)
+        mapping = config.models["claude"]
+        assert mapping.easy_effort == "low"
+        assert mapping.complex_effort == "high"
+        assert mapping.very_complex_effort == "xhigh"
+        assert mapping.medium_effort is None
+        # …and it reaches get_complexity_effort, which resolve_effort step 4 reads.
+        assert config.get_complexity_effort("claude", "complex") == "high"
+        assert config.get_complexity_effort("claude", "medium") is None
+
+    def test_unknown_effort_string_raises(self, tmp_path):
+        (tmp_path / ".crossby.yml").write_text("models:\n  claude:\n    complex_effort: turbo\n")
+        with pytest.raises(ConfigError, match=r"'models\.claude\.complex_effort'.*Valid levels"):
+            load_config(tmp_path)
+
+    def test_non_string_effort_raises(self, tmp_path):
+        # A YAML list is unhashable — EffortLevel(value) raises TypeError, which
+        # must also be caught and surfaced as a ConfigError.
+        (tmp_path / ".crossby.yml").write_text(
+            "models:\n  claude:\n    complex_effort:\n      - high\n"
+        )
+        with pytest.raises(ConfigError, match=r"'models\.claude\.complex_effort'"):
+            load_config(tmp_path)
+
     def test_ai_as_list_raises(self, tmp_path):
         (tmp_path / ".crossby.yml").write_text("ai:\n  - bad\n")
         with pytest.raises(ConfigError):

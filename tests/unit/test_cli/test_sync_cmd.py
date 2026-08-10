@@ -472,6 +472,159 @@ class TestPlanAndDoctor:
         assert "readiness:" in result.output
 
 
+class TestMissingReaderMessage:
+    """A ``--from`` tool with no reader for the requested concern must warn
+    rather than silently sync nothing (permissions from codex/copilot/agy)."""
+
+    @pytest.mark.parametrize("source", ["codex", "copilot", "antigravity-cli"])
+    def test_direct_sync_permissions_no_reader_warns(self, tmp_path: Path, source: str) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor", "codex", "copilot", "antigravity-cli"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "permissions",
+                    "--from",
+                    source,
+                    "--to",
+                    "cursor",
+                    "--path",
+                    str(tmp_path),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "no reader for" in result.output
+        assert "permissions" in result.output
+
+    def test_plan_permissions_no_reader_warns(self, tmp_path: Path) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["codex", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "permissions",
+                    "--plan",
+                    "--from",
+                    "codex",
+                    "--path",
+                    str(tmp_path),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "no reader for" in result.output
+
+    def test_hooks_from_codex_does_not_warn(self, tmp_path: Path) -> None:
+        # Hooks cover all five tools, so codex must NOT trigger the message.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["codex", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "hooks",
+                    "--from",
+                    "codex",
+                    "--to",
+                    "cursor",
+                    "--path",
+                    str(tmp_path),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "no reader for" not in result.output
+
+    def test_no_reader_does_not_revoke_existing_permissions(
+        self, project_with_claude_perms: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A no-reader source must SKIP the concern, not revoke it.
+
+        Regression for the review P1: an empty source is read by the ownership
+        diff as "source removed everything", so a plain warn-and-continue would
+        delete permissions crossby previously synced to the target. Skipping the
+        concern (skip_concerns) leaves the ledger and the target untouched.
+        """
+        monkeypatch.chdir(project_with_claude_perms)
+        cursor_config = project_with_claude_perms / ".cursor" / "cli.json"
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor", "codex"],
+            )
+            # 1) Seed: sync claude permissions → cursor, recording ownership.
+            first = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "permissions",
+                    "--from",
+                    "claude",
+                    "--to",
+                    "cursor",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+            assert first.exit_code == 0, first.output
+            allow = json.loads(cursor_config.read_text())["permissions"]["allow"]
+            assert "Shell(myapp:*)" in allow
+
+            # 2) Now sync permissions from codex (no reader): must warn and skip,
+            #    NOT revoke the previously-synced permission.
+            second = runner.invoke(
+                app,
+                [
+                    "sync",
+                    "permissions",
+                    "--from",
+                    "codex",
+                    "--to",
+                    "cursor",
+                    "--path",
+                    str(project_with_claude_perms),
+                ],
+            )
+            assert second.exit_code == 0, second.output
+            assert "no reader for" in second.output
+
+        # The previously-synced permission survives — nothing was revoked.
+        allow_after = json.loads(cursor_config.read_text())["permissions"]["allow"]
+        assert "Shell(myapp:*)" in allow_after
+
+
+class TestDoctorSurfacesMalformedHooks:
+    """``--doctor`` reports invalid JSON in the hooks files crossby writes,
+    including the newly-registered ``.codex`` / ``.agents`` locations."""
+
+    @pytest.mark.parametrize("rel", [".codex/hooks.json", ".agents/hooks.json"])
+    def test_doctor_reports_malformed_hooks(self, tmp_path: Path, rel: str) -> None:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True)
+        path.write_text("{ broken", encoding="utf-8")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                lambda: ["claude", "cursor"],
+            )
+            result = runner.invoke(
+                app,
+                ["sync", "--doctor", "--from", "claude", "--path", str(tmp_path)],
+            )
+        assert result.exit_code == 1, result.output
+        assert "hooks.json" in result.output
+        assert "invalid JSON" in result.output
+
+
 class TestStrategyAndReportFormatValidation:
     """``--strategy`` and ``--report-format`` reject unknown values."""
 

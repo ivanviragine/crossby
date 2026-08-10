@@ -675,3 +675,56 @@ class TestAcceptEditsAutoFlags:
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("accept_edits") is True
         assert kwargs.get("auto") is True
+
+
+class TestComplexityEffort:
+    """`--complexity <tier>` honours the configured per-tier effort end-to-end.
+
+    Guards #88 §4 — both breaks at once: the loader must parse ``*_effort`` keys
+    AND ``cli/launch.py`` must forward ``complexity`` to ``resolve_effort``.
+    Exercises the loader path (a real ``.crossby.yml``), not a hand-built mapping.
+    """
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    def _run(self, tmp_path: Path, config_yaml: str, *flags: str) -> Any:
+        (tmp_path / ".crossby.yml").write_text(config_yaml)
+        adapter = _mock_adapter()
+        adapter.capabilities.return_value = MagicMock(
+            display_name="Claude Code",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_plan_mode=True,
+            supports_effort=True,
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            return runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude", *flags])
+
+    _CONFIG = "version: 1\nmodels:\n  claude:\n    complex_effort: high\n"
+
+    def test_per_tier_effort_applied_with_complexity(self, tmp_path: Path) -> None:
+        result = self._run(tmp_path, self._CONFIG, "--complexity", "complex")
+        assert result.exit_code == 0, result.output
+        assert "Effort" in result.output
+        assert "high" in result.output
+
+    def test_no_effort_without_complexity(self, tmp_path: Path) -> None:
+        # Step 4 is gated on complexity — omitting it leaves effort unresolved.
+        result = self._run(tmp_path, self._CONFIG)
+        assert result.exit_code == 0, result.output
+        assert "Effort" not in result.output

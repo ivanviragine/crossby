@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
 
+import pytest
 import yaml
 
 from crossby.subagents.emitters import (
@@ -98,9 +100,44 @@ class TestEmitCodex:
         assert agent["developer_instructions"] == "Body.\n"
         assert agent["model"] == "gpt-5"
         assert agent["model_reasoning_effort"] == "high"
-        # The fragment registers the agent under [agents.<name>]
+        # The fragment is a global-registration suggestion for the standalone
+        # `crossby agents` emitter: it registers the agent under [agents.<name>]
+        # at the ~/.codex home path (distinct from the project-local path the
+        # sync writer uses, which discards this fragment). #88 §7.
         fragment = tomllib.loads(emission.config_fragment)
         assert "test" in fragment["agents"]
+        # Codex registers a role's config layer under `config_file`, not `path`.
+        # It must be a real absolute path, not a literal `~/...` string — Codex's
+        # config_file is typed AbsolutePathBuf, which `~` does not satisfy.
+        expected = str(Path.home() / ".codex" / "agents" / "test.toml")
+        assert fragment["agents"]["test"]["config_file"] == expected
+
+    def test_config_file_honors_codex_home_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Codex itself resolves its config dir from $CODEX_HOME when set,
+        # falling back to ~/.codex — the suggested config_file must match.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        ir = _ir()
+        emission, _ = emit_codex(ir)
+        fragment = tomllib.loads(emission.config_fragment)
+        expected = str(tmp_path / "agents" / "test.toml")
+        assert fragment["agents"]["test"]["config_file"] == expected
+
+    def test_config_file_absolute_even_with_relative_codex_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # $CODEX_HOME could itself be set to a relative value — the
+        # suggested config_file must still resolve to an absolute path
+        # (Codex's config_file is typed AbsolutePathBuf).
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CODEX_HOME", "relative_codex_dir")
+        ir = _ir()
+        emission, _ = emit_codex(ir)
+        fragment = tomllib.loads(emission.config_fragment)
+        config_file = fragment["agents"]["test"]["config_file"]
+        assert Path(config_file).is_absolute()
+        assert config_file == str(tmp_path / "relative_codex_dir" / "agents" / "test.toml")
 
     def test_collapses_tools_to_sandbox_mode(self) -> None:
         ir = _ir(tools=["read_file", "edit_file"])

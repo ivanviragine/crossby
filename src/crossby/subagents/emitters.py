@@ -10,7 +10,9 @@ forcing all emitters to return tuples.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import tomli_w
@@ -28,9 +30,9 @@ class CodexEmission:
     """Output of the Codex emitter — agent file plus a config.toml fragment.
 
     ``config_fragment`` is a TOML string suitable for merging into
-    ``~/.codex/config.toml`` under an ``[agents.<name>]`` table.  It will be
-    empty when the IR carries no fields that need global registration; in
-    that case writing only ``agent_toml`` is sufficient.
+    ``~/.codex/config.toml`` under an ``[agents.<name>]`` table.  It always
+    contains the bare ``config_file`` registration that points at
+    ``agent_toml`` — :func:`emit_codex` never emits it empty.
     """
 
     agent_toml: str
@@ -270,6 +272,32 @@ def emit_copilot(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 # ---------------------------------------------------------------------------
 
 
+def _codex_home() -> Path:
+    """Resolve Codex's config directory, honoring ``$CODEX_HOME`` like Codex itself.
+
+    Falls back to ``~/.codex``. Always returns an absolute, expanded path —
+    ``config_file`` in Codex's config schema is typed ``AbsolutePathBuf``, and
+    a literal ``~/...`` string is not absolute (``~`` has no meaning to Rust's
+    path types). ``$CODEX_HOME`` itself could be set to a relative value (e.g.
+    ``CODEX_HOME=my_codex_dir``), so ``expanduser()`` alone isn't enough —
+    ``resolve()`` anchors it to the current working directory.
+    """
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser().resolve()
+    return Path.home() / ".codex"
+
+
+def build_codex_config_fragment(name: str, config_file: str) -> str:
+    """Build the ``[agents.<name>]`` registration fragment pointing at ``config_file``.
+
+    Shared by :func:`emit_codex` (default ``~/.codex/agents/`` suggestion) and
+    ``cli/agents.py::_write_codex`` (rebuilds it with the actual path chosen
+    via ``--output``) so both stay in sync on the fragment's shape.
+    """
+    return tomli_w.dumps({"agents": {name: {"config_file": config_file}}})
+
+
 def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     """Emit a Codex agent file plus a config.toml registration fragment.
 
@@ -362,16 +390,26 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     agent.update(_extras_for(ir, "codex"))
     agent_toml = tomli_w.dumps(agent)
 
-    # Build the optional config fragment.  Today we only emit one when Codex
-    # source extras reference a registered role path — the agent file itself
-    # is the canonical content for everything else.  Always include the bare
-    # registration so users see the right shape; emitters that need richer
-    # fragments can extend this without touching the agent_toml path.
+    # Build the config fragment — a **global-registration suggestion** for the
+    # standalone ``crossby agents`` emitter (``cli/agents.py::_write_codex``),
+    # which prints/writes it for the user to merge into ``~/.codex/config.toml``.
+    # The home ``~/.codex/agents/`` location is deliberate and correct for that
+    # consumer; it is NOT the path project sync writes to (the sync writer
+    # discards this fragment and writes project-local ``.codex/agents/`` — see
+    # ``sync/agents.py::CodexAgentsWriter._render_for_target``). Always include
+    # the bare registration so users see the right shape; emitters that need
+    # richer fragments can extend this without touching the agent_toml path.
+    #
+    # Codex registers a role's config layer under ``agents.<name>.config_file``
+    # (a string path) — see the Codex config reference. A ``path`` key is not
+    # recognized, so it would be silently ignored on merge. ``config_file`` is
+    # typed ``AbsolutePathBuf``: a literal ``~/...`` string is not absolute (``~``
+    # has no meaning to Rust's path types) and a known Codex bug currently
+    # rejects the relative fallback outright (openai/codex#19257), so this must
+    # be a real resolved absolute path, not a tilde string.
     suggested_filename = f"{ir.name}.toml"
-    config_fragment = tomli_w.dumps(
-        {
-            "agents": {ir.name: {"path": f"~/.codex/agents/{suggested_filename}"}},
-        }
+    config_fragment = build_codex_config_fragment(
+        ir.name, str(_codex_home() / "agents" / suggested_filename)
     )
 
     return (

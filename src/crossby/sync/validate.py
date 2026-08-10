@@ -503,11 +503,17 @@ _JSON_CONFIGS: dict[AIToolID, list[tuple[Path, SyncConcern]]] = {
         (Path(".cursor") / "mcp.json", SyncConcern.MCP),
         (Path(".cursor") / "hooks.json", SyncConcern.HOOKS),
     ],
-    AIToolID.ANTIGRAVITY_CLI: [(Path(".agents") / "mcp_config.json", SyncConcern.MCP)],
+    AIToolID.ANTIGRAVITY_CLI: [
+        (Path(".agents") / "mcp_config.json", SyncConcern.MCP),
+        (Path(".agents") / "hooks.json", SyncConcern.HOOKS),
+    ],
     AIToolID.COPILOT: [
         (Path(".vscode") / "mcp.json", SyncConcern.MCP),
         (Path(".github") / "hooks" / "hooks.json", SyncConcern.HOOKS),
     ],
+    # Codex writes hooks to .codex/hooks.json; its MCP servers live in
+    # .codex/config.toml (TOML, checked by the MCP PATH walker, not here).
+    AIToolID.CODEX: [(Path(".codex") / "hooks.json", SyncConcern.HOOKS)],
 }
 
 

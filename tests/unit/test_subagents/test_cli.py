@@ -76,6 +76,28 @@ def test_codex_output_creates_two_files(tmp_path: Path) -> None:
     assert fragment_file.is_file()
     fragment = tomllib.loads(fragment_file.read_text(encoding="utf-8"))
     assert "researcher" in fragment["agents"]
+    # The fragment must point at the file actually written, not the
+    # ~/.codex/agents/ default — otherwise merging it registers a path
+    # that was never created.
+    assert fragment["agents"]["researcher"]["config_file"] == str(agent_file.resolve())
+
+
+def test_codex_output_to_existing_extensionless_file(tmp_path: Path) -> None:
+    # An existing extensionless output path must be treated as the target
+    # file, not misclassified as a directory (Path.suffix == "" alone isn't
+    # enough — an existing file with no suffix is still a file).
+    src = _write_input(tmp_path)
+    out = tmp_path / "researcher_agent"
+    out.write_text("placeholder", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["agents", "convert", str(src), "--from", "claude", "--to", "codex", "--output", str(out)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert out.is_file()
+    assert "developer_instructions" in out.read_text(encoding="utf-8")
+    fragment_file = out.with_suffix(".config-fragment.toml")
+    assert fragment_file.is_file()
 
 
 def test_unknown_source_tool_errors(tmp_path: Path) -> None:
