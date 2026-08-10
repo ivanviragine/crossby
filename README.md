@@ -230,6 +230,16 @@ ai:
   default_model: claude-sonnet-4.6
   effort: medium
 
+models:                           # per-tool, per-complexity-tier overrides
+  claude:
+    easy: claude-haiku-4.5        # `crossby launch --complexity easy`
+    complex: claude-sonnet-4.6    # `crossby launch --complexity complex`
+    complex_effort: high          # …and raise effort to `high` for that tier
+    very_complex_effort: xhigh
+  codex:
+    complex: gpt-5.4
+    complex_effort: xhigh
+
 profiles:
   ccyolo:                         # → crossby launch ccyolo
     tool: claude
@@ -272,6 +282,8 @@ handoff_defaults:                 # fed into `crossby handoff`
 ```
 
 Profiles are just named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile. The autonomy fields (`accept_edits`, `auto`, `yolo`) also work under `ai:` as global or per-command defaults.
+
+The `models:` section maps a tool + complexity tier to a model id. Each tier (`easy` / `medium` / `complex` / `very_complex`) also takes an optional `<tier>_effort` override — the reasoning effort applied when you launch with that `--complexity`. So `crossby launch --tool claude --complexity complex` picks up both `models.claude.complex` and `models.claude.complex_effort`. Effort resolution order is `--effort` flag → `CROSSBY_EFFORT` env → per-command `ai.<command>.effort` → per-tier `<tier>_effort` → global `ai.effort`. Values must be one of `low` / `medium` / `high` / `xhigh` / `max`; an unknown value is rejected at load with a clear error.
 
 `sync_defaults` and `handoff_defaults` feed the interactive prompts for those commands — CLI flags still win, and you always get the "Proceed / Change X" review before anything runs. `crossby sync` does **not** require this file — it reads directly from each tool's standard paths.
 

@@ -19,8 +19,12 @@ from crossby.config.skills import _SCAN_ORDER as _SKILLS_SCAN_ORDER
 from crossby.config.skills import SKILLS_DIR, count_skills
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
-from crossby.sync.base import SyncData
-from crossby.sync.hooks import _ANTIGRAVITY_CLI_SUPPORTED_EVENTS, _PLAIN_ALTERNATION
+from crossby.sync.base import SyncConcern, SyncData
+from crossby.sync.hooks import (
+    _ANTIGRAVITY_CLI_SUPPORTED_EVENTS,
+    _CURSOR_SHELL_EVENT,
+    _PLAIN_ALTERNATION,
+)
 
 logger = structlog.get_logger()
 
@@ -159,6 +163,13 @@ def suggest_skills_source(found: dict[AIToolID, str]) -> AIToolID | None:
 # ---------------------------------------------------------------------------
 
 
+# Tools discover_mcp_servers (sync/mcp_discovery.py) actually scans a config
+# file for — kept in sync with its ``sources`` list plus the Codex TOML branch.
+_MCP_SOURCE_TOOLS: frozenset[AIToolID] = frozenset(
+    {AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.ANTIGRAVITY_CLI, AIToolID.CODEX}
+)
+
+
 def discover_mcp(
     project_root: Path,
     from_tool: AIToolID | None = None,
@@ -167,15 +178,23 @@ def discover_mcp(
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
-    Uses the existing ``mcp_discovery`` module to scan all tool configs.
-    When *from_tool* is set, only that tool's config is scanned. User-scope
+    Uses the existing ``mcp_discovery`` module to scan tool configs. When
+    *from_tool* is set, only that tool's source(s) are scanned — passed
+    through to :func:`discover_mcp_servers` so conflict resolution never
+    crosses tool boundaries; filtering the globally-resolved result by tool
+    *after* the scan would silently drop a tool's own server whenever another
+    tool defined the same name earlier in the (unscoped) scan order. User-scope
     ``~/.claude.json`` is only read when *include_user_scope* is set.
 
     Returns server name → MCPServerConfig (validated).
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
-    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
+    discovery = discover_mcp_servers(
+        project_root,
+        include_user_scope=include_user_scope,
+        from_tool=str(from_tool) if from_tool is not None else None,
+    )
     for name, kept_from, ignored_from in discovery.conflicts:
         logger.warning(
             "mcp.conflict",
@@ -189,8 +208,6 @@ def discover_mcp(
         )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
-        if from_tool is not None and discovered.source_tool != str(from_tool):
-            continue
         try:
             servers[name] = MCPServerConfig(**discovered.data)
         except Exception:
@@ -356,7 +373,10 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     the target tool ever emits, silently rendering the guard inert (whereas an
     unscoped hook re-scopes to ``.*`` and still fires). A handler whose
     ``command`` is missing or not a non-empty ``str`` is skipped rather than
-    handed to Pydantic (data-type hardening).
+    handed to Pydantic (data-type hardening). A present-but-invalid ``matcher``
+    (wrong type or explicit ``null``) skips the whole entry instead — see
+    :func:`_matcher_is_malformed` — since silently falling through to
+    ``_matcher_tools``'s ``[]`` would broaden the hook to all tools.
     """
     data = _read_json(path)
     if not data:
@@ -371,6 +391,8 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
             continue
         for entry in entries:
             if not isinstance(entry, dict):
+                continue
+            if _matcher_is_malformed(entry):
                 continue
             tools = _matcher_tools(entry.get("matcher"))
             inner_hooks = entry.get("hooks", [])
@@ -420,13 +442,31 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     ``CursorHooksWriter`` fans a shell-scoped pre-tool hook out to. Entries are
     deduped by ``(event, command)`` so the fanned-out pair collapses back into
     the single :class:`HookEntry` it came from instead of reappearing as a
-    spurious second hook on every read → write cycle.
+    spurious second hook on every read → write cycle. When two duplicates carry
+    *distinct* non-empty scopes (a hand-authored ``Write`` guard and a ``Shell``
+    guard on the same command), their tool lists are unioned so neither guard is
+    dropped; an unscoped (``[]``) side loses to a scoped one so the fan-out
+    mirror never erases its partner's scope.
 
-    Note that ``fail_closed`` and ``timeout`` are deliberately not read back
-    here; the readers drop both for every tool today (see ``_read_copilot_hooks``
-    too). That is a known round-trip gap tracked in #88 §5, not an oversight of
-    this function — the writers are upgrade-safe and never downgrade an existing
-    ``failClosed``, which bounds the impact.
+    ``failClosed`` is read back (bool-typed only, else ``False``) onto
+    ``HookEntry.fail_closed``; a ``True`` from either half of a same-``(event,
+    command)`` duplicate wins, so the flag survives the local dedupe here (and
+    then the cross-tool merge in :func:`discover_hooks`). ``timeout`` is still
+    dropped for every tool today — a bounded round-trip gap (#88 §5), since the
+    writers never downgrade an existing timeout.
+
+    An unscoped entry only yields to a scoped duplicate when it came from the
+    ``beforeShellExecution`` key specifically — the one key the writer ever
+    fans a hook out to unscoped (see :func:`_merge_cursor_tool_scopes`). A
+    genuinely unscoped ``preToolUse`` entry (no matcher/tools) means "all
+    tools" and must never be narrowed by a same-command scoped duplicate.
+
+    Data-type hardening: a ``command`` that is not a non-empty ``str`` is skipped
+    (a non-``str`` also breaks the ``(event, command)`` dedupe key before it ever
+    reaches Pydantic). An entry whose ``tools``/``matcher`` scope is *present but
+    yields no valid tool* is skipped rather than emitted unscoped — an empty
+    ``HookEntry.tools`` means "all tools", so silently broadening a scoped guard
+    to everything is worse than dropping it (see :func:`_cursor_entry_tools`).
     """
     data = _read_json(project_root / ".cursor" / "hooks.json")
     if not data:
@@ -436,27 +476,102 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     source = hooks_section if isinstance(hooks_section, dict) else data
 
     merged: dict[tuple[str, str], HookEntry] = {}
+    # Tracks, per key, whether the merged-so-far unscoped ([]) state (if any)
+    # is a genuine "all tools" declaration rather than a beforeShellExecution
+    # fan-out artifact — see _merge_cursor_tool_scopes.
+    real_unscoped: dict[tuple[str, str], bool] = {}
     for event_name, entries in source.items():
         if not isinstance(entries, list):
             continue
         canonical_event = _reverse_event_name(event_name)
+        is_fanout_event = event_name == _CURSOR_SHELL_EVENT
         for entry in entries:
-            if not isinstance(entry, dict) or "command" not in entry:
+            if not isinstance(entry, dict):
                 continue
-            command = entry["command"]
-            key = (canonical_event, command)
+            command = entry.get("command")
+            if not isinstance(command, str) or not command:
+                continue
             tools = _cursor_entry_tools(entry)
+            if tools is None:
+                # Scope was present but yielded no valid tool — skip rather than
+                # emit unscoped (which would broaden a scoped hook to all tools).
+                continue
+            entry_real_unscoped = not tools and not is_fanout_event
+            fail_closed = entry.get("failClosed") is True
+            key = (canonical_event, command)
             previous = merged.get(key)
             if previous is None:
-                merged[key] = HookEntry(event=canonical_event, command=command, tools=tools)
+                merged[key] = HookEntry(
+                    event=canonical_event,
+                    command=command,
+                    tools=tools,
+                    fail_closed=fail_closed,
+                )
+                real_unscoped[key] = entry_real_unscoped
                 continue
-            # The fan-out pair collapses here. The `beforeShellExecution` half is
-            # written unscoped, so whichever half is read second must not erase
-            # the other's tool scope — keep the scoped one regardless of the key
-            # order the JSON happened to be in.
-            if tools and not previous.tools:
-                merged[key] = HookEntry(event=canonical_event, command=command, tools=tools)
+            # The fan-out pair (and any same-file duplicate) collapses here.
+            # Three cases must all survive:
+            #   * The fan-out pair — one half is the unscoped `beforeShellExecution`
+            #     mirror. Whichever half is read second must not erase the other's
+            #     tool scope, so a scoped side always beats that artifact,
+            #     regardless of JSON key order.
+            #   * A genuinely unscoped `preToolUse` entry (no matcher/tools) sharing
+            #     a command with a scoped duplicate — unscoped means "all tools", so
+            #     it must dominate rather than being silently narrowed to the
+            #     scoped duplicate's tool list.
+            #   * Two genuinely-distinct scoped entries sharing the same
+            #     `(event, command)` (a hand-authored `Write` guard and a `Shell`
+            #     guard on the same command) — union their scopes so neither guard
+            #     is silently dropped.
+            # A `failClosed: true` from any duplicate wins so the flag is never
+            # dropped by dedupe.
+            merged_tools, merged_real_unscoped = _merge_cursor_tool_scopes(
+                previous.tools, real_unscoped.get(key, False), tools, entry_real_unscoped
+            )
+            merged[key] = HookEntry(
+                event=canonical_event,
+                command=command,
+                tools=merged_tools,
+                fail_closed=previous.fail_closed or fail_closed,
+            )
+            real_unscoped[key] = merged_real_unscoped
     return list(merged.values())
+
+
+def _merge_cursor_tool_scopes(
+    a_tools: list[str], a_real_unscoped: bool, b_tools: list[str], b_real_unscoped: bool
+) -> tuple[list[str], bool]:
+    """Merge two same-``(event, command)`` Cursor tool scopes into one.
+
+    ``a``/``b`` are each either scoped (non-empty ``tools``) or unscoped
+    (``[]``) — and an unscoped side is flagged *real* when it did not come
+    from the ``beforeShellExecution`` fan-out mirror. A real-unscoped side
+    always wins (it means "all tools" and must not be narrowed); a
+    fan-out-artifact unscoped side always yields to a scoped duplicate,
+    order-independent either way. Two scoped sides union their tool lists.
+    Returns ``(merged_tools, merged_real_unscoped)``.
+    """
+    if a_real_unscoped or b_real_unscoped:
+        return [], True
+    if a_tools and b_tools:
+        return list(dict.fromkeys([*a_tools, *b_tools])), False
+    return (a_tools or b_tools), False
+
+
+def _matcher_is_malformed(entry: dict[str, Any]) -> bool:
+    """True if ``entry["matcher"]`` is present but not a valid string.
+
+    Distinguishes a genuinely absent ``matcher`` key (fine — ``_matcher_tools``
+    maps it to unscoped ``[]``) from one that's present but wrongly typed or
+    explicitly ``null`` (``entry.get("matcher")`` returns ``None`` for both, so
+    membership must be checked directly). A present-but-invalid matcher is a
+    scoping intent crossby cannot recover — callers should skip the entry
+    rather than silently emit it unscoped, which would broaden the hook to all
+    tools. Shared by the Claude-shape (Claude/Codex) and Antigravity CLI
+    readers; Cursor's ``_cursor_entry_tools`` applies the same rule inline
+    since it also has a ``tools`` fallback to check.
+    """
+    return "matcher" in entry and not isinstance(entry["matcher"], str)
 
 
 def _matcher_tools(matcher: Any) -> list[str]:
@@ -479,7 +594,7 @@ def _matcher_tools(matcher: Any) -> list[str]:
     return []
 
 
-def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
+def _cursor_entry_tools(entry: dict[str, Any]) -> list[str] | None:
     """Recover canonical tool names from a Cursor entry's scope.
 
     Prefers the ``matcher`` regex Cursor actually uses (alternation of tool
@@ -491,20 +606,59 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str]:
     is split (via :func:`_matcher_tools`). A hand-authored matcher like
     ``Write.*`` or ``(Write|Shell)`` would otherwise yield fragments (``(Write``,
     ``Shell)``) that become ``HookEntry.tools`` and get unioned straight back
-    into the matcher on the next write, corrupting ``.cursor/hooks.json``.
-    Anything fancier is treated as unscoped instead.
+    into the matcher on the next write, corrupting ``.cursor/hooks.json``. Such
+    an unrepresentable matcher maps to unscoped ``[]`` (the paired
+    ``_widen_matcher`` guard preserves the original matcher on re-sync), so a
+    matcher never skips the entry.
+
+    Returns ``None`` (a skip sentinel) when a ``tools`` array is *present but
+    yields no valid string tool* — a wrongly-typed list like ``[1, 2]`` was a
+    scoping intent, and emitting it as unscoped ``[]`` would silently broaden the
+    hook to **all** tools. The caller drops such an entry instead. A mix of valid
+    and invalid entries keeps the valid ones (scope preserved). A genuinely
+    absent scope, or an explicit empty ``tools: []``, maps to ``[]`` (unscoped).
+
+    Also returns ``None`` when ``matcher`` is *present but not a string* —
+    including an explicit ``matcher: null``, not just a wrongly-typed value
+    like ``matcher: 123``. ``entry.get("matcher")`` returns ``None`` for both
+    a genuinely absent key and an explicit ``null``, so membership (``"matcher"
+    in entry``) is checked directly rather than trusting ``.get()``'s default.
+    Without this, ``_matcher_tools`` would silently treat the non-str input the
+    same as "no plain alternation found" (``[]``), falling through to the
+    absent-scope case and emitting the entry as unscoped — broadening the hook
+    to all tools instead of dropping it. The same applies to an explicit
+    ``tools: null`` below.
     """
-    from_matcher = _matcher_tools(entry.get("matcher"))
-    if from_matcher:
-        return from_matcher
-    tools_raw = entry.get("tools")
-    if isinstance(tools_raw, list):
-        return [_reverse_tool_name(t) for t in tools_raw]
-    return []
+    if "matcher" in entry:
+        matcher = entry["matcher"]
+        if not isinstance(matcher, str):
+            return None
+        from_matcher = _matcher_tools(matcher)
+        if from_matcher:
+            return from_matcher
+    if "tools" not in entry:
+        return []
+    tools_raw = entry["tools"]
+    if tools_raw is None:
+        return None
+    if not isinstance(tools_raw, list):
+        # A present-but-malformed scope (e.g. ``tools: "Write"``) — skip.
+        return None
+    if not tools_raw:
+        return []
+    valid = [_reverse_tool_name(t) for t in tools_raw if isinstance(t, str) and t]
+    return valid if valid else None
 
 
 def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
-    """Read hooks from .github/hooks/hooks.json."""
+    """Read hooks from .github/hooks/hooks.json.
+
+    Data-type hardening: a handler whose ``bash`` is not a non-empty ``str`` is
+    skipped rather than handed to Pydantic (which rejects it with a
+    ``ValidationError`` rather than coercing), and a non-``str`` ``comment`` is
+    coerced to ``""`` so a wrongly-typed sibling field can't crash the read. A
+    Copilot hook has no per-tool scope, so ``tools`` is always ``[]``.
+    """
     data = _read_json(project_root / ".github" / "hooks" / "hooks.json")
     if not data:
         return []
@@ -520,14 +674,17 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
             if not isinstance(entry, dict):
                 continue
             command = entry.get("bash")
-            if not command:
+            if not isinstance(command, str) or not command:
                 continue
+            comment = entry.get("comment", "")
+            if not isinstance(comment, str):
+                comment = ""
             result.append(
                 HookEntry(
                     event=canonical_event,
                     command=command,
                     tools=[],
-                    description=entry.get("comment", ""),
+                    description=comment,
                 )
             )
     return result
@@ -551,7 +708,10 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
 
     Tool scope is recovered from the ``matcher`` via :func:`_matcher_tools`, so
     agy's native names (``write_to_file``/``run_command``/…) reverse cleanly to
-    canonical tools while a catch-all or exotic regex yields unscoped ``[]``.
+    canonical tools while a catch-all or exotic regex yields unscoped ``[]``. A
+    present-but-invalid ``matcher`` (wrong type or explicit ``null``) skips the
+    whole matcher-wrapped entry instead (see :func:`_matcher_is_malformed`),
+    rather than silently broadening it to all tools.
 
     Round-trip gaps (deliberate): the per-hook ``description`` is left empty
     because agy encodes no per-hook comment — only the lossy container *name*
@@ -580,6 +740,8 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
                     result.append(HookEntry(event=canonical_event, command=bare_command, tools=[]))
                     continue
                 # Matcher-wrapped entry: {"matcher", "hooks": [{"type","command"}]}.
+                if _matcher_is_malformed(entry):
+                    continue
                 inner_hooks = entry.get("hooks")
                 if not isinstance(inner_hooks, list):
                     continue
@@ -603,11 +765,46 @@ _HOOK_READERS: dict[AIToolID, Any] = {
 }
 
 
+# Concern → tools whose configs a reader can extract that concern from. Every
+# concern that reads from a per-tool source mapping is gated here — a tool
+# absent from the mapping has no code path that could ever populate it (not
+# just "found nothing this run"), so a ``--from`` tool outside this set would
+# otherwise sync nothing with no explanation. PLUGINS is intentionally absent:
+# discover_plugins() has no per-tool ``--from`` dimension at all (see
+# scan_project's plugins comment), so there is no "unsupported tool" case to
+# gate.
+_READER_TOOLS: dict[SyncConcern, frozenset[AIToolID]] = {
+    SyncConcern.PERMISSIONS: frozenset(_PERMISSION_READERS),
+    SyncConcern.HOOKS: frozenset(_HOOK_READERS),
+    SyncConcern.RULES: frozenset(_INSTRUCTION_FILES),
+    SyncConcern.AGENTS: frozenset(_AGENT_DIRS),
+    SyncConcern.SKILLS: frozenset(SKILLS_DIR),
+    SyncConcern.MCP: _MCP_SOURCE_TOOLS,
+}
+
+
+def reader_available(tool: AIToolID, concern: SyncConcern) -> bool:
+    """Report whether a reader can extract *concern* from *tool*'s configs.
+
+    Returns ``False`` for any registry-gated concern (permissions, hooks,
+    rules, agents, skills, MCP) whose source mapping omits *tool* — the case
+    where ``crossby sync <concern> --from <tool>`` would otherwise sync
+    nothing with no explanation. Callers use this at the CLI layer to warn
+    instead of failing silently. PLUGINS has no per-tool source mapping (it
+    doesn't take a ``--from`` tool), so it is always considered available.
+    """
+    tools = _READER_TOOLS.get(concern)
+    return True if tools is None else tool in tools
+
+
 def discover_hooks(project_root: Path, from_tool: AIToolID | None = None) -> list[HookEntry]:
     """Read hooks from tool configs.
 
     When the same ``(event, command)`` is defined by multiple tools, tool
     scopes are unioned — an empty ``tools`` list means "all tools" and wins.
+    ``fail_closed`` is ORed across the duplicates so a ``True`` on any side
+    survives the cross-tool merge (mirroring the local dedupe each reader runs
+    first); the guard is never silently downgraded to fail-open.
     """
     if from_tool is not None and from_tool not in _HOOK_READERS:
         return []
@@ -633,6 +830,7 @@ def discover_hooks(project_root: Path, from_tool: AIToolID | None = None) -> lis
                 command=existing.command,
                 tools=unioned,
                 description=existing.description or hook.description,
+                fail_closed=existing.fail_closed or hook.fail_closed,
             )
     return list(merged.values())
 

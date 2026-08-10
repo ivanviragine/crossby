@@ -6,9 +6,6 @@ import typer
 
 from crossby.ui.console import console
 
-# Tool format translators
-_TRANSLATORS: dict[str, dict[str, object]] = {}
-
 
 def _get_to_canonical(tool: str) -> object:
     """Get the function that converts a tool-specific pattern to canonical."""

@@ -297,6 +297,18 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
             medium=mapping_raw.get("medium"),
             complex=mapping_raw.get("complex"),
             very_complex=mapping_raw.get("very_complex"),
+            easy_effort=_parse_effort_value(
+                mapping_raw.get("easy_effort"), tool_name, "easy_effort"
+            ),
+            medium_effort=_parse_effort_value(
+                mapping_raw.get("medium_effort"), tool_name, "medium_effort"
+            ),
+            complex_effort=_parse_effort_value(
+                mapping_raw.get("complex_effort"), tool_name, "complex_effort"
+            ),
+            very_complex_effort=_parse_effort_value(
+                mapping_raw.get("very_complex_effort"), tool_name, "very_complex_effort"
+            ),
         )
 
     # Parse profiles section
@@ -418,6 +430,31 @@ def _parse_handoff_defaults(raw: Any) -> HandoffDefaults:
                 f"{defaults.prompt_preset!r}. Valid presets: {valid}."
             )
     return defaults
+
+
+def _parse_effort_value(value: Any, tool_name: str, tier_key: str) -> str | None:
+    """Validate a per-tier effort override against :class:`EffortLevel` at load.
+
+    Returns ``None`` when *value* is absent. Raises :class:`ConfigError` for an
+    unknown string **or** a non-string value (e.g. a YAML list/number) — mirroring
+    the ``prompt_preset`` validation in :func:`_parse_handoff_defaults`. Catching
+    both ``TypeError`` and ``ValueError`` covers bad types (unhashable/list) and
+    bad strings, so a malformed value fails at load rather than silently reaching
+    the resolver and being dropped there.
+    """
+    if value is None:
+        return None
+    # Imported lazily (like PRESETS in _parse_handoff_defaults) to keep the
+    # loader ↔ models import graph acyclic.
+    from crossby.models.ai import EffortLevel
+
+    try:
+        return str(EffortLevel(value))
+    except (TypeError, ValueError) as exc:
+        valid = ", ".join(level.value for level in EffortLevel)
+        raise ConfigError(
+            f"Invalid 'models.{tool_name}.{tier_key}': {value!r}. Valid levels: {valid}."
+        ) from exc
 
 
 def _parse_command_config(raw: dict[str, Any]) -> CommandConfig:

@@ -21,8 +21,10 @@ from crossby.sync.hooks import (
 from crossby.sync.readers import (
     _read_agy_hooks,
     _read_codex_hooks,
+    _read_copilot_hooks,
     _read_cursor_hooks,
     discover_hooks,
+    reader_available,
 )
 
 # ---------------------------------------------------------------------------
@@ -104,9 +106,13 @@ class TestTranslateTools:
             "grep_search",
         ]
 
-    def test_copilot_name_lowercasing(self) -> None:
+    def test_copilot_has_no_tool_map_entry(self) -> None:
+        """CopilotHooksWriter drops the ``tools`` scope and emits a manual-fix
+        note instead of calling ``_translate_tools``, so ``_TOOL_NAME_MAP`` has
+        no Copilot entry — the translator is an identity passthrough for it.
+        """
         result = _translate_tools(["Edit", "Write", "Bash"], AIToolID.COPILOT)
-        assert result == ["edit", "write", "shell"]
+        assert result == ["Edit", "Write", "Bash"]
 
     def test_claude_no_translation(self) -> None:
         assert _translate_tools(["Edit", "Bash"], AIToolID.CLAUDE) == ["Edit", "Bash"]
@@ -972,6 +978,385 @@ class TestDiscoverHooksUnion:
         hooks = discover_hooks(tmp_path)
 
         assert len(hooks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Reader data-type hardening — malformed JSON must skip, not crash
+# ---------------------------------------------------------------------------
+
+
+def _write_cursor_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".cursor" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"version": 1, "hooks": {"preToolUse": entries}}),
+        encoding="utf-8",
+    )
+
+
+def _write_copilot_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".github" / "hooks" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"version": 1, "hooks": {"preToolUse": entries}}),
+        encoding="utf-8",
+    )
+
+
+class TestReadCursorHooksHardening:
+    """HookEntry is lax but not coercive, so the reader must isinstance-filter."""
+
+    def test_list_command_is_skipped(self, tmp_path: Path) -> None:
+        # A non-str command is unhashable for the (event, command) dedupe key
+        # AND rejected by HookEntry — skip it before either fails.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": ["a", "b"], "matcher": "Write"},
+                {"command": "ok", "matcher": "Write"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert [e.command for e in entries] == ["ok"]
+
+    def test_all_invalid_tools_scope_skips_entry(self, tmp_path: Path) -> None:
+        # tools=[1, 2] was a scoping intent; emitting it as unscoped [] would
+        # broaden the hook to ALL tools, so the whole entry is dropped instead.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "tools": [1, 2]},
+                {"command": "good", "tools": ["write"]},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
+    def test_mixed_valid_invalid_tools_keeps_valid(self, tmp_path: Path) -> None:
+        _write_cursor_hooks_raw(tmp_path, [{"command": "guard", "tools": [1, "write", 3]}])
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert by_command["guard"] == ["Write"]
+
+    def test_absent_scope_maps_to_all_tools(self, tmp_path: Path) -> None:
+        # No matcher and no tools key → genuinely unscoped [] (all tools).
+        _write_cursor_hooks_raw(tmp_path, [{"command": "guard"}])
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == []
+
+    def test_empty_tools_list_maps_to_all_tools(self, tmp_path: Path) -> None:
+        # An explicit empty list carries no scoping intent → unscoped.
+        _write_cursor_hooks_raw(tmp_path, [{"command": "guard", "tools": []}])
+        entries = _read_cursor_hooks(tmp_path)
+        assert entries[0].tools == []
+
+    def test_non_list_tools_scope_skips_entry(self, tmp_path: Path) -> None:
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "tools": "Write"},
+                {"command": "good", "matcher": "Write"},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
+    def test_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        # A wrongly-typed matcher (e.g. matcher: 123) was a scoping intent —
+        # _matcher_tools silently treats any non-str input as "no plain
+        # alternation" ([]), which would otherwise fall through to the
+        # absent-scope case and broaden the hook to all tools. Skip instead.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "matcher": 123},
+                {"command": "good", "matcher": "Write"},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
+    def test_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        # matcher: null is present-but-invalid, distinct from a genuinely
+        # absent key — entry.get("matcher") returns None for both, so this
+        # must be caught via "matcher" in entry, not a None check.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "matcher": None},
+                {"command": "good", "matcher": "Write"},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
+    def test_explicit_null_tools_skips_entry(self, tmp_path: Path) -> None:
+        # tools: null is present-but-invalid, distinct from a genuinely
+        # absent key (which maps to unscoped [], see
+        # test_absent_scope_maps_to_all_tools).
+        _write_cursor_hooks_raw(tmp_path, [{"command": "bad", "tools": None}])
+        entries = _read_cursor_hooks(tmp_path)
+        assert entries == []
+
+    def test_distinct_scopes_for_same_command_are_unioned(self, tmp_path: Path) -> None:
+        # Two hand-authored guards on the same command, scoped to different tools,
+        # must not collapse to one — the local dedupe unions their scopes so
+        # neither guard is silently dropped. (`Shell` maps back to `Bash`.)
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard", "matcher": "Write"},
+                {"command": "guard", "matcher": "Shell"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == ["Write", "Bash"]
+
+    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(
+        self, tmp_path: Path
+    ) -> None:
+        # A hand-authored unscoped preToolUse entry ("all tools") sharing a
+        # command with a scoped duplicate must dominate — only the
+        # beforeShellExecution fan-out mirror is allowed to yield to a scoped
+        # duplicate; a real unscoped declaration must never be silently
+        # narrowed.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard"},
+                {"command": "guard", "matcher": "Write"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == []
+
+    def test_genuinely_unscoped_duplicate_dominates_regardless_of_order(
+        self, tmp_path: Path
+    ) -> None:
+        # Same as above with the scoped entry listed first — the merge must
+        # not depend on which half of the duplicate pair is read first.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard", "matcher": "Write"},
+                {"command": "guard"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == []
+
+
+def _write_codex_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"hooks": {"PreToolUse": entries}}), encoding="utf-8")
+
+
+def _write_agy_hooks_raw(root: Path, entries: list[dict]) -> None:
+    path = root / ".agents" / "hooks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"container": {"PreToolUse": entries}}),
+        encoding="utf-8",
+    )
+
+
+class TestReadClaudeShapeAndAgyHooksHardening:
+    """Claude/Codex (shared _read_claude_shape_hooks) and Antigravity CLI must
+    match Cursor's matcher hardening: a present-but-invalid matcher skips the
+    entry rather than silently broadening it to all tools."""
+
+    def test_codex_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_codex_hooks_raw(
+            tmp_path,
+            [
+                {"matcher": 123, "hooks": [{"type": "command", "command": "bad"}]},
+                {"matcher": "Write", "hooks": [{"type": "command", "command": "good"}]},
+            ],
+        )
+        commands = {e.command: e.tools for e in _read_codex_hooks(tmp_path)}
+        assert "bad" not in commands
+        assert commands["good"] == ["Write"]
+
+    def test_codex_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_codex_hooks_raw(
+            tmp_path,
+            [{"matcher": None, "hooks": [{"type": "command", "command": "bad"}]}],
+        )
+        assert _read_codex_hooks(tmp_path) == []
+
+    def test_agy_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_agy_hooks_raw(
+            tmp_path,
+            [
+                {"matcher": 123, "hooks": [{"type": "command", "command": "bad"}]},
+                {"matcher": "write_to_file", "hooks": [{"type": "command", "command": "good"}]},
+            ],
+        )
+        commands = {e.command for e in _read_agy_hooks(tmp_path)}
+        assert "bad" not in commands
+        assert "good" in commands
+
+    def test_agy_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        _write_agy_hooks_raw(
+            tmp_path,
+            [{"matcher": None, "hooks": [{"type": "command", "command": "bad"}]}],
+        )
+        assert _read_agy_hooks(tmp_path) == []
+
+
+class TestReadCopilotHooksHardening:
+    def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:
+        _write_copilot_hooks_raw(
+            tmp_path,
+            [
+                {"bash": ["a", "b"], "comment": "bad"},
+                {"bash": 5, "comment": "also bad"},
+                {"bash": "echo ok", "comment": "good"},
+            ],
+        )
+        entries = _read_copilot_hooks(tmp_path)
+        assert [e.command for e in entries] == ["echo ok"]
+
+    def test_non_string_comment_coerced_to_empty(self, tmp_path: Path) -> None:
+        _write_copilot_hooks_raw(tmp_path, [{"bash": "echo hi", "comment": {"nested": True}}])
+        entries = _read_copilot_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].description == ""
+
+
+# ---------------------------------------------------------------------------
+# fail_closed round-trip — survives local dedupe AND cross-tool merge
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedRoundTrip:
+    def _write_cursor_pair(self, root: Path, entries: list[dict]) -> None:
+        path = root / ".cursor" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": 1, "hooks": {"preToolUse": entries}}),
+            encoding="utf-8",
+        )
+
+    def _write_cursor_fanout_pair(
+        self, root: Path, scoped_entry: dict, shell_entry: dict
+    ) -> None:
+        path = root / ".cursor" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {"preToolUse": [scoped_entry], "beforeShellExecution": [shell_entry]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_read_single_fail_closed(self, tmp_path: Path) -> None:
+        self._write_cursor_pair(
+            tmp_path, [{"command": "guard", "matcher": "Write", "failClosed": True}]
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert entries[0].fail_closed is True
+
+    def test_non_bool_fail_closed_defaults_false(self, tmp_path: Path) -> None:
+        # A malformed (non-bool) failClosed must not reach HookEntry as-is.
+        self._write_cursor_pair(
+            tmp_path, [{"command": "guard", "matcher": "Write", "failClosed": "yes"}]
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert entries[0].fail_closed is False
+
+    def test_local_dedupe_true_wins(self, tmp_path: Path) -> None:
+        # The real fan-out shape: a scoped preToolUse half and its unscoped
+        # beforeShellExecution mirror. The True must win, and the scoped half
+        # must not be erased by the unscoped fan-out artifact.
+        self._write_cursor_fanout_pair(
+            tmp_path,
+            {"command": "guard", "matcher": "Write", "failClosed": True},
+            {"command": "guard", "failClosed": False},
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].fail_closed is True
+        assert entries[0].tools == ["Write"]
+
+    def test_cross_tool_merge_true_wins(self, tmp_path: Path) -> None:
+        # Cursor sets failClosed: true; Claude defines the same (event, command)
+        # with no such flag. The True must survive the cross-tool merge.
+        self._write_cursor_pair(
+            tmp_path, [{"command": "python3 guard.py", "matcher": "Write", "failClosed": True}]
+        )
+        _write_claude_hook(tmp_path, "python3 guard.py", "Write")
+        hooks = discover_hooks(tmp_path)
+        assert len(hooks) == 1
+        assert hooks[0].fail_closed is True
+
+
+# ---------------------------------------------------------------------------
+# reader_available — CLI-layer missing-reader diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestReaderAvailable:
+    def test_permissions_covers_claude_and_cursor_only(self) -> None:
+        from crossby.sync.base import SyncConcern
+
+        assert reader_available(AIToolID.CLAUDE, SyncConcern.PERMISSIONS) is True
+        assert reader_available(AIToolID.CURSOR, SyncConcern.PERMISSIONS) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.PERMISSIONS) is False
+        assert reader_available(AIToolID.COPILOT, SyncConcern.PERMISSIONS) is False
+        assert reader_available(AIToolID.ANTIGRAVITY_CLI, SyncConcern.PERMISSIONS) is False
+
+    def test_hooks_covers_all_five_tools(self) -> None:
+        from crossby.sync.base import SyncConcern
+
+        for tool in (
+            AIToolID.CLAUDE,
+            AIToolID.CURSOR,
+            AIToolID.COPILOT,
+            AIToolID.CODEX,
+            AIToolID.ANTIGRAVITY_CLI,
+        ):
+            assert reader_available(tool, SyncConcern.HOOKS) is True
+
+    def test_rules_agents_skills_mcp_cover_only_their_source_tools(self) -> None:
+        from crossby.sync.base import SyncConcern
+
+        # CODEX has a source mapping for all four (AGENTS.md, .codex/agents,
+        # .agents/skills, .codex/config.toml) — reader_available is True.
+        assert reader_available(AIToolID.CODEX, SyncConcern.RULES) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.AGENTS) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.SKILLS) is True
+        assert reader_available(AIToolID.CODEX, SyncConcern.MCP) is True
+
+        # VSCODE/OPENCODE/ANTIGRAVITY (distinct from ANTIGRAVITY_CLI) have no
+        # source mapping in detect_rules/detect_agents/detect_skills or
+        # discover_mcp_servers — no code path can ever populate them, so a
+        # `--from` sync must be flagged unavailable rather than silently
+        # producing nothing.
+        for tool in (AIToolID.VSCODE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY):
+            assert reader_available(tool, SyncConcern.RULES) is False
+            assert reader_available(tool, SyncConcern.AGENTS) is False
+            assert reader_available(tool, SyncConcern.SKILLS) is False
+            assert reader_available(tool, SyncConcern.MCP) is False
+
+    def test_plugins_has_no_per_tool_dimension_always_available(self) -> None:
+        from crossby.sync.base import SyncConcern
+
+        # discover_plugins() doesn't take a --from tool at all, so there is no
+        # "unsupported source tool" case to gate.
+        for tool in AIToolID:
+            assert reader_available(tool, SyncConcern.PLUGINS) is True
 
 
 # ---------------------------------------------------------------------------

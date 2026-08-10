@@ -85,7 +85,10 @@ _TOOL_NAME_MAP: dict[AIToolID, dict[str, str]] = {
     # Cursor has no `Edit` tool — editing collapses into `Write` (this mirrors
     # cursor-agent's own Claude-config importer, which maps Edit → Write).
     AIToolID.CURSOR: {"Bash": "Shell", "Edit": "Write", "MultiEdit": "Write"},
-    AIToolID.COPILOT: {"Edit": "edit", "Write": "write", "Bash": "shell"},
+    # No Copilot entry: CopilotHooksWriter drops the `tools` scope and emits a
+    # manual-fix note instead of calling _translate_tools, so a Copilot mapping
+    # here would never be read. _translate_tools is only called for Cursor and
+    # Antigravity CLI.
     # agy's native tool-call names, live-captured from `toolCall.name` on a
     # running agy v1.1.9. Without this map a canonical guard registered against
     # `Write|Edit` compiles to a matcher that matches none of agy's real tool

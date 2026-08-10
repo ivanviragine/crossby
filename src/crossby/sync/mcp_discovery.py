@@ -97,9 +97,9 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def discover_mcp_servers(
-    project_root: Path, *, include_user_scope: bool = False
+    project_root: Path, *, include_user_scope: bool = False, from_tool: str | None = None
 ) -> DiscoveryResult:
-    """Scan all tool config files for MCP server definitions.
+    """Scan tool config files for MCP server definitions.
 
     Scans:
     - .mcp.json → mcpServers (Claude's project-scope file, e.g. ``claude mcp
@@ -120,6 +120,15 @@ def discover_mcp_servers(
     first-seen-wins merge below prefers the project-scoped definition when
     the same server name appears in more than one Claude source.
 
+    When *from_tool* is set, only that tool's source(s) are scanned — conflict
+    resolution never crosses tool boundaries, so a server name that exists in
+    both Claude's and Codex's configs still yields Codex's own definition for
+    ``from_tool="codex"`` instead of losing to whichever tool the unscoped scan
+    order happened to see first. Without this, a caller that scans everything
+    and *then* filters by tool (the naive approach) would silently drop a
+    tool's own server whenever another tool defined the same name earlier in
+    the scan order.
+
     Returns:
         DiscoveryResult with merged servers (first-seen wins) and conflicts.
     """
@@ -136,6 +145,8 @@ def discover_mcp_servers(
         ("copilot", project_root / ".vscode" / "mcp.json", "servers", "project"),
         ("antigravity-cli", project_root / ".agents" / "mcp_config.json", "mcpServers", "project"),
     ]
+    if from_tool is not None:
+        sources = [s for s in sources if s[0] == from_tool]
 
     for tool, path, key, scope in sources:
         section = _read_json_section(path, key)
@@ -163,7 +174,7 @@ def discover_mcp_servers(
 
     # Codex TOML
     codex_path = project_root / ".codex" / "config.toml"
-    if codex_path.exists():
+    if (from_tool is None or from_tool == "codex") and codex_path.exists():
         toml_section = _read_codex_mcp(codex_path)
         if toml_section is not None:
             for name, entry in toml_section.items():

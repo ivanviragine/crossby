@@ -18,7 +18,7 @@ from crossby.subagents.api import (
     emit,
     parse,
 )
-from crossby.subagents.emitters import CodexEmission
+from crossby.subagents.emitters import CodexEmission, build_codex_config_fragment
 from crossby.subagents.ir import (
     ConversionWarning,
     SubagentIR,
@@ -32,6 +32,7 @@ __all__ = [
     "ConversionWarning",
     "SubagentIR",
     "WarningSeverity",
+    "build_codex_config_fragment",
     "convert",
     "emit",
     "parse",

@@ -236,6 +236,7 @@ def launch(
             config,
             command or "default",
             tool=resolved_tool,
+            complexity=complexity,
             strict=effort is not None,
         )
         resolved_yolo = resolve_yolo(

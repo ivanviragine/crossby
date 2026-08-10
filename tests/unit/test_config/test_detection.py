@@ -101,6 +101,47 @@ class TestDetectHooks:
         hooks = [i for i in items if i.config_type == "hooks"]
         assert len(hooks) == 0
 
+    def test_detects_codex_hooks(self, tmp_path: Path) -> None:
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        # Codex writes the Claude-shaped nested layout to .codex/hooks.json.
+        settings = {
+            "hooks": {
+                "PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "g"}]}],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "s"}]}],
+            }
+        }
+        (codex_dir / "hooks.json").write_text(json.dumps(settings))
+
+        items = detect_source_configs(AIToolID.CODEX, tmp_path)
+        hooks = [i for i in items if i.config_type == "hooks"]
+        assert len(hooks) == 1
+        assert hooks[0].portable is True
+        assert "2 hooks" in hooks[0].detail
+
+    def test_detects_antigravity_cli_hooks(self, tmp_path: Path) -> None:
+        agents_dir = tmp_path / ".agents"
+        agents_dir.mkdir()
+        # agy's file maps container names to {event: [entries]}.
+        data = {
+            "guard": {
+                "PreToolUse": [
+                    {"matcher": "write_to_file", "hooks": [{"type": "command", "command": "g"}]}
+                ]
+            },
+            "done": {"Stop": [{"type": "command", "command": "s"}]},
+        }
+        (agents_dir / "hooks.json").write_text(json.dumps(data))
+
+        items = detect_source_configs(AIToolID.ANTIGRAVITY_CLI, tmp_path)
+        hooks = [i for i in items if i.config_type == "hooks"]
+        assert len(hooks) == 1
+        assert "2 hooks" in hooks[0].detail
+
+    def test_no_codex_hooks_returns_empty(self, tmp_path: Path) -> None:
+        items = detect_source_configs(AIToolID.CODEX, tmp_path)
+        assert [i for i in items if i.config_type == "hooks"] == []
+
 
 class TestDetectMcpServers:
     def test_detects_claude_mcp_servers(self, tmp_path: Path) -> None:
