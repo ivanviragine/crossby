@@ -230,27 +230,50 @@ class HandoffSummarizer:
     ) -> tuple[ConversationTranscript, str]:
         """Drop the oldest kept turns until the argv prompt fits the argv ceiling.
 
-        Each iteration removes exactly one turn (the oldest kept, matching
-        ``truncate_transcript``'s keep-most-recent policy) and rebuilds the
-        prompt, so the kept-turn count strictly decreases and the loop always
-        terminates. At least one turn is always kept — a lone oversized turn is
-        handled by the preflight in :meth:`_prepare_prompt`, not here. The token
-        budget is deliberately *not* shrunk: a smaller budget need not remove
-        another turn (``truncate_transcript`` keeps ≥1 turn) and could rebuild
-        the same transcript forever. Fit is judged by :func:`_argv_render_length`,
-        which is the Windows-quoted rendered length on Windows (not the raw byte
+        Finds the drop count by binary search rather than dropping one turn at a
+        time: rendered prompt length is monotonically non-increasing as more
+        oldest turns are dropped (every turn contributes a non-negative amount
+        of rendered text — see :meth:`_build_prompt`), so bisecting on the drop
+        count is valid and rebuilds the prompt O(log n) times instead of O(n),
+        matching ``truncate_transcript``'s keep-most-recent policy. At least one
+        turn is always kept — a lone oversized turn is handled by the preflight
+        in :meth:`_prepare_prompt`, not here. The token budget is deliberately
+        *not* shrunk: a smaller budget need not remove another turn
+        (``truncate_transcript`` keeps ≥1 turn) and could rebuild the same
+        transcript forever. Fit is judged by :func:`_argv_render_length`, which
+        is the Windows-quoted rendered length on Windows (not the raw byte
         count) and the raw UTF-8 byte count elsewhere.
         """
         turns = list(transcript.turns)
-        while _argv_render_length(prompt) > _MAX_PROMPT_BYTES and len(turns) > 1:
-            turns = turns[1:]  # drop the oldest kept turn
-            transcript = ConversationTranscript(
+        if _argv_render_length(prompt) <= _MAX_PROMPT_BYTES or len(turns) <= 1:
+            return transcript, prompt
+
+        def build(drop: int) -> tuple[ConversationTranscript, str]:
+            kept = turns[drop:]
+            t = ConversationTranscript(
                 session_ref=transcript.session_ref,
-                turns=turns,
+                turns=kept,
                 truncated=True,
             )
-            prompt = self._build_prompt(transcript)
-        return transcript, prompt
+            return t, self._build_prompt(t)
+
+        # Binary search for the smallest drop count that fits. `hi` (dropping
+        # down to exactly one turn) is the most it will ever drop, mirroring
+        # the old loop's stopping condition of `len(turns) > 1`.
+        lo, hi = 0, len(turns) - 1
+        best_transcript, best_prompt = build(hi)
+        if _argv_render_length(best_prompt) > _MAX_PROMPT_BYTES:
+            return best_transcript, best_prompt
+
+        while lo < hi:
+            mid = (lo + hi) // 2
+            mid_transcript, mid_prompt = build(mid)
+            if _argv_render_length(mid_prompt) <= _MAX_PROMPT_BYTES:
+                hi = mid
+                best_transcript, best_prompt = mid_transcript, mid_prompt
+            else:
+                lo = mid + 1
+        return best_transcript, best_prompt
 
     def _supports_json(self) -> bool:
         return bool(self.summarizer_tool.structured_output_args(_HANDOFF_JSON_SCHEMA))
