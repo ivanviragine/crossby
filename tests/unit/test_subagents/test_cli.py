@@ -76,6 +76,10 @@ def test_codex_output_creates_two_files(tmp_path: Path) -> None:
     assert fragment_file.is_file()
     fragment = tomllib.loads(fragment_file.read_text(encoding="utf-8"))
     assert "researcher" in fragment["agents"]
+    # The fragment must point at the file actually written, not the
+    # ~/.codex/agents/ default — otherwise merging it registers a path
+    # that was never created.
+    assert fragment["agents"]["researcher"]["config_file"] == str(agent_file.resolve())
 
 
 def test_unknown_source_tool_errors(tmp_path: Path) -> None:

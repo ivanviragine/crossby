@@ -270,6 +270,16 @@ def emit_copilot(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 # ---------------------------------------------------------------------------
 
 
+def build_codex_config_fragment(name: str, config_file: str) -> str:
+    """Build the ``[agents.<name>]`` registration fragment pointing at ``config_file``.
+
+    Shared by :func:`emit_codex` (default ``~/.codex/agents/`` suggestion) and
+    ``cli/agents.py::_write_codex`` (rebuilds it with the actual path chosen
+    via ``--output``) so both stay in sync on the fragment's shape.
+    """
+    return tomli_w.dumps({"agents": {name: {"config_file": config_file}}})
+
+
 def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     """Emit a Codex agent file plus a config.toml registration fragment.
 
@@ -376,10 +386,8 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     # (a string path) — see the Codex config reference. A ``path`` key is not
     # recognized, so it would be silently ignored on merge.
     suggested_filename = f"{ir.name}.toml"
-    config_fragment = tomli_w.dumps(
-        {
-            "agents": {ir.name: {"config_file": f"~/.codex/agents/{suggested_filename}"}},
-        }
+    config_fragment = build_codex_config_fragment(
+        ir.name, f"~/.codex/agents/{suggested_filename}"
     )
 
     return (

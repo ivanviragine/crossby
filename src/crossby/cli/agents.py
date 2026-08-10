@@ -21,6 +21,7 @@ from crossby.subagents import (
     CodexEmission,
     ConversionWarning,
     WarningSeverity,
+    build_codex_config_fragment,
 )
 from crossby.subagents import convert as _convert
 from crossby.ui.console import console
@@ -99,9 +100,9 @@ def _write_codex(emission: CodexEmission, output: Path | None) -> None:
         console.raw(emission.config_fragment)
         return
 
+    stem = emission.suggested_filename.removesuffix(".toml")
     if output.is_dir() or output.suffix == "":
         agent_path = output / emission.suggested_filename
-        stem = emission.suggested_filename.removesuffix(".toml")
         fragment_path = output / f"{stem}.config-fragment.toml"
     else:
         agent_path = output
@@ -109,7 +110,11 @@ def _write_codex(emission: CodexEmission, output: Path | None) -> None:
 
     agent_path.parent.mkdir(parents=True, exist_ok=True)
     agent_path.write_text(emission.agent_toml, encoding="utf-8")
-    fragment_path.write_text(emission.config_fragment, encoding="utf-8")
+    # Rewrite the fragment's config_file to the path actually written above —
+    # emission.config_fragment defaults to ~/.codex/agents/, which would
+    # register a file that was never created when --output points elsewhere.
+    config_fragment = build_codex_config_fragment(stem, str(agent_path.resolve()))
+    fragment_path.write_text(config_fragment, encoding="utf-8")
     console.success(f"Wrote {agent_path}")
     console.success(f"Wrote {fragment_path} (merge into ~/.codex/config.toml)")
 
