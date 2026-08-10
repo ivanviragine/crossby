@@ -178,15 +178,23 @@ def discover_mcp(
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
-    Uses the existing ``mcp_discovery`` module to scan all tool configs.
-    When *from_tool* is set, only that tool's config is scanned. User-scope
+    Uses the existing ``mcp_discovery`` module to scan tool configs. When
+    *from_tool* is set, only that tool's source(s) are scanned — passed
+    through to :func:`discover_mcp_servers` so conflict resolution never
+    crosses tool boundaries; filtering the globally-resolved result by tool
+    *after* the scan would silently drop a tool's own server whenever another
+    tool defined the same name earlier in the (unscoped) scan order. User-scope
     ``~/.claude.json`` is only read when *include_user_scope* is set.
 
     Returns server name → MCPServerConfig (validated).
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
-    discovery = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
+    discovery = discover_mcp_servers(
+        project_root,
+        include_user_scope=include_user_scope,
+        from_tool=str(from_tool) if from_tool is not None else None,
+    )
     for name, kept_from, ignored_from in discovery.conflicts:
         logger.warning(
             "mcp.conflict",
@@ -200,8 +208,6 @@ def discover_mcp(
         )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
-        if from_tool is not None and discovered.source_tool != str(from_tool):
-            continue
         try:
             servers[name] = MCPServerConfig(**discovered.data)
         except Exception:
@@ -591,22 +597,29 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str] | None:
     and invalid entries keeps the valid ones (scope preserved). A genuinely
     absent scope, or an explicit empty ``tools: []``, maps to ``[]`` (unscoped).
 
-    Also returns ``None`` when ``matcher`` is *present but not a string*
-    (e.g. ``matcher: 123``) — ``_matcher_tools`` silently treats any non-str
-    input the same as "no plain alternation found" (``[]``), so without this
-    check a malformed matcher would fall through to the absent-scope case and
-    get emitted as unscoped, broadening the hook to all tools instead of
-    being dropped.
+    Also returns ``None`` when ``matcher`` is *present but not a string* —
+    including an explicit ``matcher: null``, not just a wrongly-typed value
+    like ``matcher: 123``. ``entry.get("matcher")`` returns ``None`` for both
+    a genuinely absent key and an explicit ``null``, so membership (``"matcher"
+    in entry``) is checked directly rather than trusting ``.get()``'s default.
+    Without this, ``_matcher_tools`` would silently treat the non-str input the
+    same as "no plain alternation found" (``[]``), falling through to the
+    absent-scope case and emitting the entry as unscoped — broadening the hook
+    to all tools instead of dropping it. The same applies to an explicit
+    ``tools: null`` below.
     """
-    matcher = entry.get("matcher")
-    if matcher is not None and not isinstance(matcher, str):
-        return None
-    from_matcher = _matcher_tools(matcher)
-    if from_matcher:
-        return from_matcher
-    tools_raw = entry.get("tools")
-    if tools_raw is None:
+    if "matcher" in entry:
+        matcher = entry["matcher"]
+        if not isinstance(matcher, str):
+            return None
+        from_matcher = _matcher_tools(matcher)
+        if from_matcher:
+            return from_matcher
+    if "tools" not in entry:
         return []
+    tools_raw = entry["tools"]
+    if tools_raw is None:
+        return None
     if not isinstance(tools_raw, list):
         # A present-but-malformed scope (e.g. ``tools: "Write"``) — skip.
         return None

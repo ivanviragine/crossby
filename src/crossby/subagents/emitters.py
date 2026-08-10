@@ -10,7 +10,9 @@ forcing all emitters to return tuples.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import tomli_w
@@ -270,6 +272,18 @@ def emit_copilot(ir: SubagentIR) -> tuple[str, list[ConversionWarning]]:
 # ---------------------------------------------------------------------------
 
 
+def _codex_home() -> Path:
+    """Resolve Codex's config directory, honoring ``$CODEX_HOME`` like Codex itself.
+
+    Falls back to ``~/.codex``. Always returns an absolute, expanded path —
+    ``config_file`` in Codex's config schema is typed ``AbsolutePathBuf``, and
+    a literal ``~/...`` string is not absolute (``~`` has no meaning to Rust's
+    path types).
+    """
+    codex_home = os.environ.get("CODEX_HOME")
+    return Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+
+
 def build_codex_config_fragment(name: str, config_file: str) -> str:
     """Build the ``[agents.<name>]`` registration fragment pointing at ``config_file``.
 
@@ -375,7 +389,7 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     # Build the config fragment — a **global-registration suggestion** for the
     # standalone ``crossby agents`` emitter (``cli/agents.py::_write_codex``),
     # which prints/writes it for the user to merge into ``~/.codex/config.toml``.
-    # The home ``~/.codex/agents/`` path is deliberate and correct for that
+    # The home ``~/.codex/agents/`` location is deliberate and correct for that
     # consumer; it is NOT the path project sync writes to (the sync writer
     # discards this fragment and writes project-local ``.codex/agents/`` — see
     # ``sync/agents.py::CodexAgentsWriter._render_for_target``). Always include
@@ -384,10 +398,14 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     #
     # Codex registers a role's config layer under ``agents.<name>.config_file``
     # (a string path) — see the Codex config reference. A ``path`` key is not
-    # recognized, so it would be silently ignored on merge.
+    # recognized, so it would be silently ignored on merge. ``config_file`` is
+    # typed ``AbsolutePathBuf``: a literal ``~/...`` string is not absolute (``~``
+    # has no meaning to Rust's path types) and a known Codex bug currently
+    # rejects the relative fallback outright (openai/codex#19257), so this must
+    # be a real resolved absolute path, not a tilde string.
     suggested_filename = f"{ir.name}.toml"
     config_fragment = build_codex_config_fragment(
-        ir.name, f"~/.codex/agents/{suggested_filename}"
+        ir.name, str(_codex_home() / "agents" / suggested_filename)
     )
 
     return (

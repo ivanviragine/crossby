@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
 
+import pytest
 import yaml
 
 from crossby.subagents.emitters import (
@@ -105,7 +107,22 @@ class TestEmitCodex:
         fragment = tomllib.loads(emission.config_fragment)
         assert "test" in fragment["agents"]
         # Codex registers a role's config layer under `config_file`, not `path`.
-        assert fragment["agents"]["test"]["config_file"] == "~/.codex/agents/test.toml"
+        # It must be a real absolute path, not a literal `~/...` string — Codex's
+        # config_file is typed AbsolutePathBuf, which `~` does not satisfy.
+        expected = str(Path.home() / ".codex" / "agents" / "test.toml")
+        assert fragment["agents"]["test"]["config_file"] == expected
+
+    def test_config_file_honors_codex_home_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Codex itself resolves its config dir from $CODEX_HOME when set,
+        # falling back to ~/.codex — the suggested config_file must match.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        ir = _ir()
+        emission, _ = emit_codex(ir)
+        fragment = tomllib.loads(emission.config_fragment)
+        expected = str(tmp_path / "agents" / "test.toml")
+        assert fragment["agents"]["test"]["config_file"] == expected
 
     def test_collapses_tools_to_sandbox_mode(self) -> None:
         ir = _ir(tools=["read_file", "edit_file"])

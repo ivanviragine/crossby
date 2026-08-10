@@ -1079,6 +1079,29 @@ class TestReadCursorHooksHardening:
         assert "bad" not in by_command
         assert by_command["good"] == ["Write"]
 
+    def test_explicit_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        # matcher: null is present-but-invalid, distinct from a genuinely
+        # absent key — entry.get("matcher") returns None for both, so this
+        # must be caught via "matcher" in entry, not a None check.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "matcher": None},
+                {"command": "good", "matcher": "Write"},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
+    def test_explicit_null_tools_skips_entry(self, tmp_path: Path) -> None:
+        # tools: null is present-but-invalid, distinct from a genuinely
+        # absent key (which maps to unscoped [], see
+        # test_absent_scope_maps_to_all_tools).
+        _write_cursor_hooks_raw(tmp_path, [{"command": "bad", "tools": None}])
+        entries = _read_cursor_hooks(tmp_path)
+        assert entries == []
+
     def test_distinct_scopes_for_same_command_are_unioned(self, tmp_path: Path) -> None:
         # Two hand-authored guards on the same command, scoped to different tools,
         # must not collapse to one — the local dedupe unions their scopes so
