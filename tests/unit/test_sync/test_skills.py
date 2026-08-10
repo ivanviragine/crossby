@@ -673,6 +673,29 @@ class TestTranslateStrategy:
         target_script = tmp_path / ".agents" / "skills" / "my-skill" / "scripts" / "run.sh"
         assert target_script.stat().st_mode & 0o111, "executable bit dropped on translate"
 
+    def test_directory_mode_preserved_on_translate(self, tmp_path: Path) -> None:
+        # mirror_tree must propagate *directory* permission bits, not just file
+        # bits — mkdir creates support dirs under the umask, which would widen a
+        # private 0700 tree or drop group access from a 0750 one. Nested dirs too.
+        source = _make_source(tmp_path, [])
+        skill = self._make_skill_with_frontmatter(source, "my-skill")
+        (skill / "assets" / "private").mkdir(parents=True)
+        (skill / "assets" / "private" / "secret.txt").write_text("shh", encoding="utf-8")
+        os.chmod(skill / "assets", 0o750)
+        os.chmod(skill / "assets" / "private", 0o700)
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        target_assets = tmp_path / ".agents" / "skills" / "my-skill" / "assets"
+        assert target_assets.stat().st_mode & 0o777 == 0o750, "top-level dir mode dropped"
+        assert (target_assets / "private").stat().st_mode & 0o777 == 0o700, (
+            "nested private dir mode dropped"
+        )
+
+        # Idempotent: modes already match, so a re-sync chmods nothing → skipped.
+        second = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert second.action == "skipped"
+
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written
         # through (which would land files outside the project root).

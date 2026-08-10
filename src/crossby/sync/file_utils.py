@@ -113,14 +113,17 @@ def write_if_different(path: Path, content: bytes) -> bool:
     return True
 
 
-def _sync_file_mode(dest: Path, source: Path) -> bool:
+def _sync_mode(dest: Path, source: Path) -> bool:
     """Copy *source*'s permission bits onto *dest* when they differ.
 
-    ``write_if_different`` writes through a temp file, so a fresh write lands
-    with the umask default and loses an executable bit the source carried —
-    which silently breaks ``scripts/`` mirrored under a skill. Re-applying the
-    source's ``st_mode`` permission bits (``& 0o777``) fixes that and is
-    idempotent: once matched, the next run makes no change.
+    Applies to files *and* directories. ``write_if_different`` writes through a
+    temp file and ``mkdir`` creates directories, so a fresh target lands with the
+    umask default and loses any non-default bits the source carried — a dropped
+    executable bit silently breaks ``scripts/`` mirrored under a skill, and a
+    dropped directory mode either widens a private ``0700`` ``assets/`` tree to
+    the umask default or strips required group access from a ``0770`` ``scripts/``
+    tree. Re-applying the source's ``st_mode`` permission bits (``& 0o777``)
+    fixes both and is idempotent: once matched, the next run makes no change.
 
     Returns True when a ``chmod`` was applied.
     """
@@ -144,13 +147,14 @@ def mirror_tree(
     untouched — no file is removed and rewritten just to arrive at the same
     bytes, so an interrupted sync can't leave the target empty. Paths that no
     longer exist under *source_dir* are removed; top-level names in *preserve*
-    (the crossby marker, typically) are never removed. A file's permission bits
-    are propagated too (via :func:`_sync_file_mode`), so an executable
-    ``scripts/`` file stays runnable at the target.
+    (the crossby marker, typically) are never removed. Permission bits are
+    propagated too (via :func:`_sync_mode`) — for files *and* for every mirrored
+    directory — so an executable ``scripts/`` file stays runnable and a private
+    ``0700`` ``assets/`` tree isn't widened to the umask default at the target.
 
     A symlink anywhere in the target tree — the root or any nested child — is
     **replaced, never followed**: following one would land writes (or a
-    :func:`_sync_file_mode` chmod) on its destination, potentially outside the
+    :func:`_sync_mode` chmod) on its destination, potentially outside the
     mirror root. Symlinks in *source_dir*, by contrast, are **dereferenced**: a
     symlinked file is copied by its bytes and a symlinked directory is recursed
     into and mirrored as a real directory at the target — matching the
@@ -190,7 +194,7 @@ def mirror_tree(
             changed |= clear_conflicting_type(dest, want_dir=False)
             if write_if_different(dest, child.read_bytes()):
                 changed = True
-            if _sync_file_mode(dest, child):
+            if _sync_mode(dest, child):
                 changed = True
 
     for child in target_dir.iterdir():
@@ -200,6 +204,14 @@ def mirror_tree(
             shutil.rmtree(child)
         else:
             child.unlink()
+        changed = True
+
+    # Mirror this directory's own permission bits last — the ``mkdir`` above
+    # created it under the umask, which would otherwise widen a private ``0700``
+    # tree or strip group access from a ``0770`` one. Deferred to here, after the
+    # children are written, so a restrictive source mode can't lock out those
+    # writes. Each recursive call syncs its own root, so nested dirs are covered.
+    if _sync_mode(target_dir, source_dir):
         changed = True
 
     return changed
