@@ -445,6 +445,7 @@ Available on each adapter for programmatic use:
 | ----------------- | ---------------------------------------- | ------------------- | ---------------- | ------------ | ------------------ | --------------- |
 | Trusted dirs      | `--add-dir`                              | `--add-dir`         | `--add-dir`      | `--add-dir`  | —                  | —               |
 | Structured output | `--output-format json --json-schema …`   | —                   | —                | —            | —                  | —               |
+| Headless prompt via stdin | `--print`                        | —                   | —                | `exec`       | —                  | —               |
 | Model format      | dashed (`claude-haiku-4-5`)              | dotted (`claude-haiku-4.5`) | as-is     | as-is        | `provider/model`   | as-is           |
 
 ## Commit Conventions

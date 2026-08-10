@@ -8,6 +8,7 @@ resolution, and the Typer CLI itself all run for real.
 
 from __future__ import annotations
 
+import errno
 import shutil
 import subprocess
 from pathlib import Path
@@ -166,6 +167,94 @@ def test_handoff_rejects_unsupported_source() -> None:
     result = runner.invoke(app, ["handoff", "--from", "antigravity-cli", "--to", "claude"])
     assert result.exit_code == 1
     assert "antigravity cli" in result.output.lower()
+
+
+def test_handoff_rejects_non_headless_summarizer_tool(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A GUI / non-headless ``--summarizer-tool`` is rejected up front with a
+    friendly error, before any subprocess is launched."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    launched: dict[str, object] = {}
+    fake_run = _make_unified_subprocess_run(launched)
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from",
+                "claude",
+                "--to",
+                "codex",
+                "--path",
+                str(project_root),
+                "--summarizer-tool",
+                "vscode",
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "headless" in result.output.lower()
+    # No subprocess (summarizer or launch) was ever spawned.
+    assert "cmd" not in launched
+
+
+def test_handoff_e2big_surfaces_friendly_error(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A mapped ``E2BIG`` from the summarizer surfaces as the friendly
+    ``Summarizer failed: ...`` line naming ``--token-budget``, not a raw errno."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    def _run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if cmd and cmd[0] == "claude":
+            raise OSError(errno.E2BIG, "Argument list too long")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    runner = CliRunner()
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=_run),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "handoff",
+                "--from",
+                "claude",
+                "--to",
+                "codex",
+                "--path",
+                str(project_root),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "Summarizer failed" in result.output
+    assert "--token-budget" in result.output
+    assert "[Errno 7]" not in result.output
 
 
 def test_handoff_errors_when_session_id_not_found(

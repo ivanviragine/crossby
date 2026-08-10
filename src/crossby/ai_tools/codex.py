@@ -84,6 +84,11 @@ class CodexAdapter(AbstractAITool):
         """Codex accepts the initial message as a positional argument."""
         return [prompt]
 
+    def headless_prompt_stdin_args(self) -> list[str] | None:
+        """``codex exec`` reads instructions from stdin when no positional prompt
+        is passed (a piped stdin is otherwise appended as a ``<stdin>`` block)."""
+        return ["exec"]
+
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Codex uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]

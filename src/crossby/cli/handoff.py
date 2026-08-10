@@ -200,6 +200,21 @@ def handoff(
     else:
         summarizer_id = source_id
     summarizer_adapter = AbstractAITool.get(summarizer_id)
+    # A GUI / non-headless tool has no non-interactive prompt mode, so
+    # build_launch_command silently drops the prompt and the pass would fail
+    # obscurely. Reject it up front and name the headless-capable set.
+    if not summarizer_adapter.capabilities().supports_headless:
+        headless_tools = sorted(
+            str(tid)
+            for tid in AbstractAITool.available_tools()
+            if AbstractAITool.get(tid).capabilities().supports_headless
+        )
+        console.error(
+            f"{summarizer_id} cannot run a headless summarization pass (no "
+            f"non-interactive prompt mode). Choose a headless-capable "
+            f"--summarizer-tool: {', '.join(headless_tools)}."
+        )
+        raise typer.Exit(1)
     summarizer = HandoffSummarizer(
         summarizer_adapter,
         prompt_template=prompt_template,
@@ -207,7 +222,11 @@ def handoff(
     )
 
     def _warn_truncation(total: int, kept: int) -> None:
-        console.warn(f"Transcript truncated: kept {kept} of {total} turns to fit token budget.")
+        # Turns are dropped to fit the token budget or the argv byte ceiling, so
+        # use neutral wording rather than attributing it to the token budget.
+        console.warn(
+            f"Transcript truncated: kept {kept} of {total} turns to fit the summarizer size limit."
+        )
 
     from crossby.handoff.models import HandoffDocument, RawHandoff
 
