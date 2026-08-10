@@ -37,7 +37,32 @@ DEFAULT_TIMEOUT_SECONDS = 120
 # *whole* command line at 32,767 chars, so 120 KB is unsafe there; use a
 # conservative value and steer Windows users toward a stdin-capable summarizer.
 # stdin delivery (Claude/Codex) bypasses this limit entirely.
+#
+# On Windows the ceiling is compared against the *rendered* (quoted/escaped)
+# length, not the raw byte count: CreateProcess quoting can expand embedded
+# quotes and backslashes well past the source length (see
+# ``_argv_render_length``), so a raw byte count under the ceiling does not
+# guarantee the rendered command line is too. POSIX argv is passed to
+# ``execve`` directly with no such rendering, so raw UTF-8 bytes are exact there.
 _MAX_PROMPT_BYTES = 30_000 if sys.platform.startswith("win") else 120_000
+
+
+def _argv_render_length(prompt: str) -> int:
+    """Length of ``prompt`` as it actually lands on the process command line.
+
+    On Windows, ``CreateProcess`` receives one quoted/escaped string built
+    from all argv elements — embedded quotes and backslashes in ``prompt``
+    expand under that quoting (each backslash immediately before a quote is
+    doubled, each quote is escaped), so the rendered length can exceed the raw
+    byte count substantially. ``subprocess.list2cmdline`` implements the same
+    quoting Python uses when it launches the process, so measuring a single
+    quoted element here matches what will actually be spawned. POSIX has no
+    such rendering step, so the raw UTF-8 byte count is exact.
+    """
+    if sys.platform.startswith("win"):
+        return len(subprocess.list2cmdline([prompt]))
+    return len(prompt.encode("utf-8"))
+
 
 # Preflight hint: the assembled prompt is over the ceiling *after* re-truncation,
 # so it is irreducible by truncation — a lone oversized turn (truncation always
@@ -181,11 +206,11 @@ class HandoffSummarizer:
 
         if not uses_stdin:
             prepared, prompt = self._fit_argv_bytes(prepared, prompt)
-            encoded_len = len(prompt.encode("utf-8"))
-            if encoded_len > _MAX_PROMPT_BYTES:
+            rendered_len = _argv_render_length(prompt)
+            if rendered_len > _MAX_PROMPT_BYTES:
                 raise SummarizerParseError(
-                    f"Assembled summarizer prompt is {encoded_len} bytes, above the "
-                    f"{_MAX_PROMPT_BYTES}-byte argv ceiling after transcript truncation. "
+                    f"Assembled summarizer prompt is {rendered_len} (rendered) against the "
+                    f"{_MAX_PROMPT_BYTES} argv ceiling after transcript truncation. "
                     + _ARGV_PREFLIGHT_HINT
                 )
 
@@ -198,7 +223,7 @@ class HandoffSummarizer:
         transcript: ConversationTranscript,
         prompt: str,
     ) -> tuple[ConversationTranscript, str]:
-        """Drop the oldest kept turns until the argv prompt fits the byte ceiling.
+        """Drop the oldest kept turns until the argv prompt fits the argv ceiling.
 
         Each iteration removes exactly one turn (the oldest kept, matching
         ``truncate_transcript``'s keep-most-recent policy) and rebuilds the
@@ -207,10 +232,12 @@ class HandoffSummarizer:
         handled by the preflight in :meth:`_prepare_prompt`, not here. The token
         budget is deliberately *not* shrunk: a smaller budget need not remove
         another turn (``truncate_transcript`` keeps ≥1 turn) and could rebuild
-        the same transcript forever.
+        the same transcript forever. Fit is judged by :func:`_argv_render_length`,
+        which is the Windows-quoted rendered length on Windows (not the raw byte
+        count) and the raw UTF-8 byte count elsewhere.
         """
         turns = list(transcript.turns)
-        while len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES and len(turns) > 1:
+        while _argv_render_length(prompt) > _MAX_PROMPT_BYTES and len(turns) > 1:
             turns = turns[1:]  # drop the oldest kept turn
             transcript = ConversationTranscript(
                 session_ref=transcript.session_ref,

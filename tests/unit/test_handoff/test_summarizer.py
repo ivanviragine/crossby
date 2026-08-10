@@ -461,6 +461,57 @@ def test_argv_utf8_uses_byte_length_not_char_count(monkeypatch) -> None:
     run.assert_not_called()
 
 
+def test_argv_render_length_posix_uses_raw_utf8_bytes(monkeypatch) -> None:
+    """On POSIX, argv is passed straight to ``execve`` with no command-line
+    rendering, so the render-length helper is just the raw UTF-8 byte count."""
+    monkeypatch.setattr(summarizer_mod.sys, "platform", "darwin")
+    prompt = 'héllo \\" world'
+    assert summarizer_mod._argv_render_length(prompt) == len(prompt.encode("utf-8"))
+
+
+def test_argv_render_length_windows_uses_quoted_rendering(monkeypatch) -> None:
+    """On Windows, the helper measures the ``CreateProcess``-quoted rendering
+    (via ``list2cmdline``), not the raw byte count — embedded quotes and
+    backslashes expand under that quoting."""
+    monkeypatch.setattr(summarizer_mod.sys, "platform", "win32")
+    prompt = '\\"' * 50  # backslash-quote pairs double in length when quoted
+    rendered = summarizer_mod._argv_render_length(prompt)
+    assert rendered == len(subprocess.list2cmdline([prompt]))
+    assert rendered > len(prompt.encode("utf-8"))
+
+
+def test_argv_windows_quoting_expansion_trips_preflight_under_raw_byte_ceiling(
+    monkeypatch,
+) -> None:
+    """A prompt whose raw UTF-8 byte count fits the ceiling can still overflow
+    the actual Windows command line once ``CreateProcess`` quoting expands its
+    embedded backslash-quote pairs — the preflight must catch that case using
+    the rendered length, not the raw byte count."""
+    monkeypatch.setattr(summarizer_mod.sys, "platform", "win32")
+    monkeypatch.setattr(summarizer_mod, "_MAX_PROMPT_BYTES", 400)
+    tool = _make_summarizer_tool()
+    summarizer = HandoffSummarizer(tool, prompt_template="T", token_budget=10_000_000)
+    content = '\\"' * 140
+    transcript = ConversationTranscript(
+        session_ref=_ref(), turns=[ConversationTurn(role="user", content=content)]
+    )
+    prompt = summarizer._build_prompt(transcript)
+    assert len(prompt.encode("utf-8")) < summarizer_mod._MAX_PROMPT_BYTES  # raw bytes fit
+    rendered = len(subprocess.list2cmdline([prompt]))
+    assert rendered > summarizer_mod._MAX_PROMPT_BYTES  # but the quoted command line doesn't
+
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
+        patch("crossby.handoff.summarizer.subprocess.run") as run,
+        pytest.raises(SummarizerParseError),
+    ):
+        summarizer.summarize_structured(
+            transcript, source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
+        )
+
+    run.assert_not_called()
+
+
 def test_stdin_delivery_pipes_prompt_and_skips_argv_ceiling(monkeypatch) -> None:
     """A stdin-enabled tool feeds the full prompt via ``input=`` and appends its
     stdin args last; the prompt is absent from argv and never re-truncated."""
