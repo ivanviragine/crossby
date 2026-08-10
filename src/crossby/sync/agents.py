@@ -375,6 +375,13 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool 
     can count would-be writes honestly.
     """
     out = _render_agent_file(source, tool_id)
+    if target.is_symlink():
+        # Replace a leaf symlink outright rather than reading/writing through it
+        # — the link's destination may be outside the project root. This counts
+        # as a change (a real run swaps the link for a regular file).
+        if not dry_run:
+            target.unlink()
+        return True
     if target.is_file():
         try:
             if target.read_text(encoding="utf-8") == out:
@@ -445,10 +452,13 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 message="source and target resolve to the same path; nothing to do",
             )
 
-        # For copy strategy, explicitly guard against following a symlinked target
-        # directory — copies would land in the symlink's destination, potentially
-        # outside the project root.
-        if data.agents_strategy == "copy" and target_dir.is_symlink():
+        # For write-in-place strategies (copy *and* translate) guard against
+        # following a symlinked target directory — mkdir(exist_ok=True) succeeds
+        # on a symlink-to-dir without replacing it, so subsequent writes would
+        # land in the symlink's destination, potentially outside the project
+        # root. (The ``symlink`` strategy legitimately (re)creates the link, so
+        # it is handled by ``create_symlink`` below, not here.)
+        if data.agents_strategy in ("copy", "translate") and target_dir.is_symlink():
             if not force:
                 return SyncResult(
                     tool_id=self.tool_id,
@@ -456,7 +466,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                     action="error",
                     message=(
                         f"{self._target_rel} is a symlinked directory. "
-                        "Refusing to copy agents into a symlink target. "
+                        "Refusing to write agents into a symlink target. "
                         "Remove the symlink or re-run with --force to replace it."
                     ),
                 )
@@ -540,12 +550,28 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             # its own output and doesn't refuse it as "not crossby-managed".
             try:
                 if dry_run:
+                    # Compare-only (no writes) so the reported action matches
+                    # what the real copy fallback would do: skipped when nothing
+                    # differs, otherwise updated/created by target existence —
+                    # not an unconditional "created".
+                    target_existed = target_dir.is_dir()
+                    would_write = _copy_all_agents(
+                        source_dir, target_dir, str(self.tool_id), dry_run=True
+                    )
+                    if not would_write and target_existed:
+                        return SyncResult(
+                            tool_id=self.tool_id,
+                            concern=self.concern,
+                            action="skipped",
+                            file_path=target_dir,
+                            message="copy (symlink failed, dry-run)",
+                        )
                     return SyncResult(
                         tool_id=self.tool_id,
                         concern=self.concern,
-                        action="created",
+                        action="updated" if target_existed else "created",
                         file_path=target_dir,
-                        message="copy (symlink failed)",
+                        message="copy (symlink failed, dry-run)",
                     )
                 target_existed = target_dir.is_dir()
                 wrote = _copy_all_agents(source_dir, target_dir, str(self.tool_id))
@@ -728,6 +754,11 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 source_path=src,
             )
             target_file = target_dir / _target_name(src)
+            if target_file.is_symlink():
+                # Replace a leaf symlink (e.g. from a prior symlink-strategy run)
+                # rather than reading/writing through it — its destination may be
+                # outside the project root. Mirrors the Copilot translate guard.
+                target_file.unlink()
             if target_file.is_file() and target_file.read_text(encoding="utf-8") == rendered:
                 continue
             target_file.write_text(rendered, encoding="utf-8")
@@ -750,25 +781,31 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         )
 
 
-def _copy_all_agents(source_dir: Path, target_dir: Path, tool_id: str) -> bool:
+def _copy_all_agents(
+    source_dir: Path, target_dir: Path, tool_id: str, *, dry_run: bool = False
+) -> bool:
     """Copy all .md agent files from source to target, translating tool names.
 
     Removes managed ``*.md`` outputs whose source disappeared (stale cleanup),
     matching the translate path's ``wanted``-set pattern, so a deleted source
     agent stops living in copy-strategy targets. Returns True when any file was
     written, rewritten, or removed, False when the target was already an exact
-    mirror of the source (idempotent re-run).
+    mirror of the source (idempotent re-run). Under ``dry_run`` the comparison
+    still runs but nothing is written or removed, so callers get an honest
+    would-change flag.
     """
-    target_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        target_dir.mkdir(parents=True, exist_ok=True)
     changed = False
     wanted = {src.name for src in source_dir.glob("*.md")}
     for existing in target_dir.glob("*.md"):
         if existing.name not in wanted:
-            existing.unlink()
-            logger.info("agents.stale_removed", path=str(existing))
+            if not dry_run:
+                existing.unlink()
+                logger.info("agents.stale_removed", path=str(existing))
             changed = True
     for src in source_dir.glob("*.md"):
-        if _copy_agent_file(src, target_dir / src.name, tool_id):
+        if _copy_agent_file(src, target_dir / src.name, tool_id, dry_run=dry_run):
             changed = True
     return changed
 

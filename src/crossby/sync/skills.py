@@ -256,12 +256,17 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             # work and doesn't refuse the dir as "not crossby-managed".
             try:
                 if dry_run:
+                    # Report created-vs-updated by whether the target exists,
+                    # rather than always "created". (A fully-unchanged tree isn't
+                    # distinguished as "skipped" here — that would need a
+                    # dry-run-aware mirror pass; this is a rare symlink-failure
+                    # fallback and the real run below reports skipped correctly.)
                     return SyncResult(
                         tool_id=self.tool_id,
                         concern=self.concern,
-                        action="created",
+                        action="updated" if target_dir.is_dir() else "created",
                         file_path=target_dir,
-                        message="copy (symlink failed)",
+                        message="copy (symlink failed, dry-run)",
                     )
                 target_existed = target_dir.is_dir()
                 wrote = _copy_skills_dir(source_dir, target_dir)
@@ -449,10 +454,18 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
-                if child.is_dir() and child.name not in wanted_names:
+                if child.name in wanted_names or not child.is_dir():
+                    # Only stale *directories* are cleaned (unchanged scope);
+                    # ``is_dir()`` follows symlinks, so a dir symlink lands here.
+                    continue
+                if child.is_symlink():
+                    # A stale directory symlink: ``rmtree`` raises on a symlink
+                    # ("Cannot call rmtree on a symbolic link"), so unlink it.
+                    child.unlink()
+                else:
                     shutil.rmtree(child)
-                    logger.info("skills.stale_removed", path=str(child))
-                    removed_any = True
+                logger.info("skills.stale_removed", path=str(child))
+                removed_any = True
 
         skipped_all = True
         for skill_dir in skill_dirs:
@@ -472,6 +485,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
             source_skill_md = skill_dir / "SKILL.md"
             target_skill_md = target_skill / "SKILL.md"
+            # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
+            # replaced, not read/written through — write_text/read_text follow it
+            # to the link's destination, which may be outside the project root.
+            if target_skill_md.is_symlink():
+                target_skill_md.unlink()
+                skipped_all = False
             definition = parse_markdown_skill(
                 source_skill_md.read_text(encoding="utf-8"),
                 fallback_name=skill_dir.name,
@@ -507,6 +526,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 skipped_all = False
             target_skill.mkdir(parents=True, exist_ok=True)
             target_skill_md = target_skill / "SKILL.md"
+            # Same leaf-symlink guard as the translated-skill loop above.
+            if target_skill_md.is_symlink():
+                target_skill_md.unlink()
+                skipped_all = False
             if target_skill_md.is_file() and (
                 hashlib.sha256(
                     target_skill_md.read_text(encoding="utf-8").encode("utf-8")

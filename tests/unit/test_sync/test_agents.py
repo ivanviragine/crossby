@@ -495,6 +495,83 @@ class TestCopyStrategy:
         assert not target.is_symlink()
         assert (target / "a.md").is_file()
 
+    def test_translate_errors_on_symlinked_target_without_force(self, tmp_path: Path) -> None:
+        """Issue #83: translate strategy also refuses a symlinked target dir —
+        mkdir(exist_ok=True) would follow it and write agents outside the project."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
+        assert "--force" in (result.message or "")
+        # Not written through to the symlink's destination.
+        assert not (other / "a.md").exists()
+
+    def test_translate_replaces_symlinked_target_with_force(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path, force=True)
+        assert result.action != "error"
+        assert not target.is_symlink()
+        assert (target / "a.md").is_file()
+        assert not (other / "a.md").exists()
+
+    def test_translate_replaces_leaf_md_symlink_not_followed(self, tmp_path: Path) -> None:
+        """Issue #83: a leaf *.md that is a symlink (e.g. from a prior symlink run)
+        must be replaced, not written through to a destination outside the project."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(os.path.relpath(outside, target), target / "a.md")
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path)
+        assert result.action != "error"
+        assert not (target / "a.md").is_symlink()
+        assert (target / "a.md").is_file()
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
+    def test_copy_all_agents_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
+        # Issue #83: the dry-run copy path (backing the symlink-failure fallback)
+        # must compare without writing, returning an honest would-change flag so
+        # the fallback reports skipped/updated instead of an unconditional
+        # "created".
+        from crossby.sync.agents import _copy_all_agents
+
+        source = _make_source(tmp_path, ["reviewer.md"])
+        target = tmp_path / ".claude" / "agents"
+
+        # Fresh target: dry-run reports a change but writes nothing.
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is True
+        assert not target.exists()
+
+        # Materialise, then an unchanged dry-run reports no change (→ skipped).
+        assert _copy_all_agents(source, target, "claude") is True
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is False
+
+        # A changed source is detected in dry-run without touching disk.
+        (source / "reviewer.md").write_text(
+            "---\nname: reviewer\ndescription: CHANGED\n---\nNew body.\n", encoding="utf-8"
+        )
+        before = (target / "reviewer.md").read_text(encoding="utf-8")
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is True
+        assert (target / "reviewer.md").read_text(encoding="utf-8") == before  # unwritten
+
 
 class TestCopyStaleCleanup:
     """Issue #83: copy strategy must remove agents whose source was deleted and

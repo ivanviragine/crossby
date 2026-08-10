@@ -749,6 +749,49 @@ class TestTranslateStrategy:
         assert (target_skill / "SKILL.md").is_file()
         assert not (outside / "SKILL.md").exists()
 
+    def test_leaf_skill_md_symlink_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # A *leaf* SKILL.md symlink inside an otherwise real managed skill dir
+        # must be replaced, never written through: write_text follows the link to
+        # its destination, which may be outside the project root.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "my-skill")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_md = tmp_path / ".agents" / "skills" / "my-skill" / "SKILL.md"
+        assert target_md.is_file()
+
+        # Replace SKILL.md with a symlink pointing outside the project.
+        target_md.unlink()
+        outside = tmp_path / "outside.md"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(outside, target_md)
+
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+
+        assert not target_md.is_symlink()
+        assert target_md.is_file()
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
+    def test_stale_skill_dir_symlink_is_unlinked_not_rmtree(self, tmp_path: Path) -> None:
+        # A stale skill dir that is a *symlink* must be unlinked during cleanup —
+        # shutil.rmtree() raises on a symlink ("Cannot call rmtree on a symbolic
+        # link"), which would abort the whole translate sync.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "keep")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_dir = tmp_path / ".agents" / "skills"
+
+        # A stale skill dir (no matching source) that is a directory symlink.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keepme.txt").write_text("keep", encoding="utf-8")
+        os.symlink(outside, target_dir / "stale")
+
+        # Must not raise; the stale symlink is unlinked, its destination left intact.
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action != "error"
+        assert not (target_dir / "stale").exists()  # symlink removed
+        assert (outside / "keepme.txt").is_file()  # destination untouched
+
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written
         # through (which would land files outside the project root).
