@@ -590,8 +590,18 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str] | None:
     hook to **all** tools. The caller drops such an entry instead. A mix of valid
     and invalid entries keeps the valid ones (scope preserved). A genuinely
     absent scope, or an explicit empty ``tools: []``, maps to ``[]`` (unscoped).
+
+    Also returns ``None`` when ``matcher`` is *present but not a string*
+    (e.g. ``matcher: 123``) — ``_matcher_tools`` silently treats any non-str
+    input the same as "no plain alternation found" (``[]``), so without this
+    check a malformed matcher would fall through to the absent-scope case and
+    get emitted as unscoped, broadening the hook to all tools instead of
+    being dropped.
     """
-    from_matcher = _matcher_tools(entry.get("matcher"))
+    matcher = entry.get("matcher")
+    if matcher is not None and not isinstance(matcher, str):
+        return None
+    from_matcher = _matcher_tools(matcher)
     if from_matcher:
         return from_matcher
     tools_raw = entry.get("tools")

@@ -1063,6 +1063,22 @@ class TestReadCursorHooksHardening:
         assert "bad" not in by_command
         assert by_command["good"] == ["Write"]
 
+    def test_non_string_matcher_skips_entry(self, tmp_path: Path) -> None:
+        # A wrongly-typed matcher (e.g. matcher: 123) was a scoping intent —
+        # _matcher_tools silently treats any non-str input as "no plain
+        # alternation" ([]), which would otherwise fall through to the
+        # absent-scope case and broaden the hook to all tools. Skip instead.
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "bad", "matcher": 123},
+                {"command": "good", "matcher": "Write"},
+            ],
+        )
+        by_command = {e.command: e.tools for e in _read_cursor_hooks(tmp_path)}
+        assert "bad" not in by_command
+        assert by_command["good"] == ["Write"]
+
     def test_distinct_scopes_for_same_command_are_unioned(self, tmp_path: Path) -> None:
         # Two hand-authored guards on the same command, scoped to different tools,
         # must not collapse to one — the local dedupe unions their scopes so
