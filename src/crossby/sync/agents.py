@@ -17,6 +17,7 @@ from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncRes
 from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
+    first_symlinked_ancestor,
     has_managed_marker,
     is_same_path,
     write_managed_marker,
@@ -394,6 +395,30 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool 
     return True
 
 
+def _reject_symlinked_ancestor(
+    writer: AbstractSyncWriter, project_root: Path, target_dir: Path, target_rel: str
+) -> SyncResult | None:
+    """Return an ``error`` result when a *parent* of *target_dir* is a symlink.
+
+    ``mkdir(parents=True)`` and ``create_symlink`` follow a symlinked ancestor
+    (e.g. ``.agents -> /outside``), landing writes outside the project even when
+    the final target component is guarded. Shared by all agent writers.
+    """
+    bad = first_symlinked_ancestor(project_root, target_dir)
+    if bad is None:
+        return None
+    return SyncResult(
+        tool_id=writer.tool_id,
+        concern=writer.concern,
+        action="error",
+        message=(
+            f"{bad.relative_to(project_root)} is a symlinked directory on the "
+            f"path to {target_rel}; refusing to write through it (it may point "
+            "outside the project). Remove the symlink and re-run."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Base writer
 # ---------------------------------------------------------------------------
@@ -451,6 +476,13 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 action="skipped",
                 message="source and target resolve to the same path; nothing to do",
             )
+
+        # Refuse a symlinked *ancestor* (any parent between the project root and
+        # the target) for every strategy — the final target component is guarded
+        # separately below.
+        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        if ancestor_err is not None:
+            return ancestor_err
 
         # For write-in-place strategies (copy *and* translate) guard against
         # following a symlinked target directory — mkdir(exist_ok=True) succeeds
@@ -903,6 +935,10 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 message="source and target resolve to the same path; nothing to do",
             )
 
+        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        if ancestor_err is not None:
+            return ancestor_err
+
         if target_dir.is_symlink():
             if not force:
                 return SyncResult(
@@ -1112,6 +1148,10 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 action="skipped",
                 message="source and target resolve to the same path; nothing to do",
             )
+
+        ancestor_err = _reject_symlinked_ancestor(self, project_root, target_dir, self._target_rel)
+        if ancestor_err is not None:
+            return ancestor_err
 
         # If the target exists as a symlink, error by default to avoid writing into the
         # symlink target (which may be outside the project). With --force, replace the

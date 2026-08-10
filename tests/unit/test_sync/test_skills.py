@@ -20,6 +20,7 @@ from crossby.sync.skills import (
     CopilotSkillsWriter,
     CursorSkillsWriter,
     _is_managed_skills_dir,
+    _skills_dir_would_change,
     update_skills_gitignore,
 )
 
@@ -791,6 +792,41 @@ class TestTranslateStrategy:
         assert result.action != "error"
         assert not (target_dir / "stale").exists()  # symlink removed
         assert (outside / "keepme.txt").is_file()  # destination untouched
+
+    def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
+        # Issue #83: a symlinked *parent* (.agents -> outside) must be refused for
+        # every strategy — mkdir(parents=True)/create_symlink would follow it and
+        # write skills outside the project root.
+        _make_source(tmp_path, ["my-skill"])
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".agents")
+        w = CodexSkillsWriter()
+        for strategy in ("symlink", "copy", "translate"):
+            result = w.sync(_data(strategy=strategy), tmp_path)
+            assert result.action == "error", strategy
+            assert "symlinked directory" in (result.message or ""), strategy
+        # Nothing was written through the parent symlink to its destination.
+        assert not any(outside.iterdir())
+
+    def test_skills_dir_would_change_compares_without_writing(self, tmp_path: Path) -> None:
+        # Issue #83: the dry-run copy fallback's read-only compare must detect an
+        # unchanged tree (→ skipped), a byte change, a missing target, and a stale
+        # skill dir — all without touching disk.
+        source = _make_source(tmp_path, ["a", "b"])
+        target = tmp_path / "target"
+        assert _skills_dir_would_change(source, target) is True  # target absent
+        # Materialise an exact copy → no change.
+        shutil.copytree(source, target)
+        assert _skills_dir_would_change(source, target) is False
+        # A byte change in a SKILL.md → change.
+        (target / "a" / "SKILL.md").write_text("# a changed\n", encoding="utf-8")
+        assert _skills_dir_would_change(source, target) is True
+        # Restore, then add a stale skill dir in the target → change.
+        (target / "a" / "SKILL.md").write_text("# a\n", encoding="utf-8")
+        assert _skills_dir_would_change(source, target) is False
+        (target / "stale").mkdir()
+        assert _skills_dir_would_change(source, target) is True
 
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written

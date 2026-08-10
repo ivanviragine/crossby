@@ -64,6 +64,29 @@ def is_same_path(source: Path, target: Path) -> bool:
     return False
 
 
+def first_symlinked_ancestor(root: Path, target: Path) -> Path | None:
+    """Return the first symlinked directory between *root* and *target*, or None.
+
+    Both endpoints are excluded: *root* is trusted (the project root) and
+    *target*'s own final component is the caller's existing final-target guard.
+    Every directory *between* them is checked because ``mkdir(parents=True)`` and
+    :func:`crossby.config.linker.create_symlink` follow a symlinked *parent* — a
+    link like ``.agents -> /outside`` lands writes outside *root* even when the
+    final target component is itself guarded. Callers refuse the sync when this
+    returns a path.
+    """
+    try:
+        rel = target.relative_to(root)
+    except ValueError:
+        return None
+    current = root
+    for part in rel.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def clear_conflicting_type(dest: Path, *, want_dir: bool) -> bool:
     """Remove *dest* when it exists as the opposite kind of thing.
 

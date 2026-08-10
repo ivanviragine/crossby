@@ -40,6 +40,7 @@ from crossby.sync.file_utils import (
     MANAGED_MARKER_NAME,
     backup_path,
     clear_conflicting_type,
+    first_symlinked_ancestor,
     has_managed_marker,
     is_same_path,
     mirror_tree,
@@ -171,6 +172,24 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 message="source and target resolve to the same path; nothing to do",
             )
 
+        # Refuse a symlinked *ancestor* (any parent between the project root and
+        # the target) for every strategy — mkdir(parents=True) and create_symlink
+        # both follow a link like ``.agents -> /outside`` and land writes outside
+        # the project. The final target component is guarded separately below.
+        bad_ancestor = first_symlinked_ancestor(project_root, target_dir)
+        if bad_ancestor is not None:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=(
+                    f"{bad_ancestor.relative_to(project_root)} is a symlinked "
+                    f"directory on the path to {self._target_rel}; refusing to "
+                    "write through it (it may point outside the project). "
+                    "Remove the symlink and re-run."
+                ),
+            )
+
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
         # outside the project.
@@ -256,15 +275,22 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             # work and doesn't refuse the dir as "not crossby-managed".
             try:
                 if dry_run:
-                    # Report created-vs-updated by whether the target exists,
-                    # rather than always "created". (A fully-unchanged tree isn't
-                    # distinguished as "skipped" here — that would need a
-                    # dry-run-aware mirror pass; this is a rare symlink-failure
-                    # fallback and the real run below reports skipped correctly.)
+                    # Compare-only (no writes) so the reported action matches what
+                    # the real copy fallback would do: skipped when nothing
+                    # differs, otherwise updated/created by target existence.
+                    target_existed = target_dir.is_dir()
+                    if target_existed and not _skills_dir_would_change(source_dir, target_dir):
+                        return SyncResult(
+                            tool_id=self.tool_id,
+                            concern=self.concern,
+                            action="skipped",
+                            file_path=target_dir,
+                            message="copy (symlink failed, dry-run)",
+                        )
                     return SyncResult(
                         tool_id=self.tool_id,
                         concern=self.concern,
-                        action="updated" if target_dir.is_dir() else "created",
+                        action="updated" if target_existed else "created",
                         file_path=target_dir,
                         message="copy (symlink failed, dry-run)",
                     )
@@ -598,6 +624,44 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
             changed = True
 
     return changed
+
+
+def _skills_dir_would_change(source_dir: Path, target_dir: Path, *, top_level: bool = True) -> bool:
+    """Read-only predicate mirroring :func:`_copy_skills_dir`'s write decision.
+
+    Lets the dry-run copy fallback report ``skipped`` when a re-copy would change
+    nothing, without touching disk. Compares by existence and bytes plus stale
+    detection (top level: only stale skill *dirs* count, matching
+    ``_copy_skills_dir``; nested: any stale entry, matching ``mirror_tree``). A
+    mode-only difference is not detected — acceptable for this rare
+    symlink-failure fallback (source of truth stays :func:`_copy_skills_dir`).
+    """
+    if not target_dir.exists():
+        return True  # the whole tree would be created
+    source_names: set[str] = set()
+    for child in sorted(source_dir.iterdir()):
+        source_names.add(child.name)
+        dest = target_dir / child.name
+        if child.is_dir():  # follows a source dir symlink, like mirror_tree
+            if _skills_dir_would_change(child, dest, top_level=False):
+                return True
+        elif child.is_file():
+            try:
+                if not dest.is_file() or dest.read_bytes() != child.read_bytes():
+                    return True
+            except OSError:
+                return True
+    for child in target_dir.iterdir():
+        if child.name in source_names:
+            continue
+        if top_level:
+            if child.name == MANAGED_MARKER_NAME:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                return True  # stale skill dir would be removed
+        else:
+            return True  # inside a managed skill dir, any stale entry is removed
+    return False
 
 
 _SUPPORT_DIRS = ("scripts", "references", "assets")

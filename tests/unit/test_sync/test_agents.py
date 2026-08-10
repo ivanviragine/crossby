@@ -566,6 +566,28 @@ class TestCopyStrategy:
         assert (target / "a.md").stat().st_size > 0  # content written, not dropped
         assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
 
+    def test_symlinked_ancestor_dir_is_refused_all_writers(self, tmp_path: Path) -> None:
+        # Issue #83: every agent writer refuses a symlinked *parent* dir
+        # (.claude/.github/.codex -> outside) for every strategy —
+        # mkdir(parents=True)/create_symlink would follow it and escape the root.
+        _make_source(tmp_path, ["a.md"])
+        cases = [
+            (ClaudeAgentsWriter(), ".claude"),
+            (CopilotAgentsWriter(), ".github"),
+            (CodexAgentsWriter(), ".codex"),
+        ]
+        for w, parent in cases:
+            outside = tmp_path / f"outside{parent}"
+            outside.mkdir()
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / parent)
+            for strategy in ("symlink", "copy", "translate"):
+                result = w.sync(_data(strategy=strategy), tmp_path)
+                assert result.action == "error", f"{parent}/{strategy}"
+                assert "symlinked directory" in (result.message or ""), f"{parent}/{strategy}"
+            # Nothing was written through the parent symlink to its destination.
+            assert not any(outside.iterdir()), parent
+            (tmp_path / parent).unlink()  # reset for the next writer
+
     def test_copy_all_agents_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
         # Issue #83: the dry-run copy path (backing the symlink-failure fallback)
         # must compare without writing, returning an honest would-change flag so
