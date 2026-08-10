@@ -1063,6 +1063,21 @@ class TestReadCursorHooksHardening:
         assert "bad" not in by_command
         assert by_command["good"] == ["Write"]
 
+    def test_distinct_scopes_for_same_command_are_unioned(self, tmp_path: Path) -> None:
+        # Two hand-authored guards on the same command, scoped to different tools,
+        # must not collapse to one — the local dedupe unions their scopes so
+        # neither guard is silently dropped. (`Shell` maps back to `Bash`.)
+        _write_cursor_hooks_raw(
+            tmp_path,
+            [
+                {"command": "guard", "matcher": "Write"},
+                {"command": "guard", "matcher": "Shell"},
+            ],
+        )
+        entries = _read_cursor_hooks(tmp_path)
+        assert len(entries) == 1
+        assert entries[0].tools == ["Write", "Bash"]
+
 
 class TestReadCopilotHooksHardening:
     def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:

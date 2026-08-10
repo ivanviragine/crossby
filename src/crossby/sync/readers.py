@@ -420,7 +420,11 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     ``CursorHooksWriter`` fans a shell-scoped pre-tool hook out to. Entries are
     deduped by ``(event, command)`` so the fanned-out pair collapses back into
     the single :class:`HookEntry` it came from instead of reappearing as a
-    spurious second hook on every read → write cycle.
+    spurious second hook on every read → write cycle. When two duplicates carry
+    *distinct* non-empty scopes (a hand-authored ``Write`` guard and a ``Shell``
+    guard on the same command), their tool lists are unioned so neither guard is
+    dropped; an unscoped (``[]``) side loses to a scoped one so the fan-out
+    mirror never erases its partner's scope.
 
     ``failClosed`` is read back (bool-typed only, else ``False``) onto
     ``HookEntry.fail_closed``; a ``True`` from either half of a same-``(event,
@@ -470,12 +474,24 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
                     fail_closed=fail_closed,
                 )
                 continue
-            # The fan-out pair (and any same-file duplicate) collapses here. The
-            # `beforeShellExecution` half is written unscoped, so whichever half
-            # is read second must not erase the other's tool scope — keep the
-            # scoped one regardless of JSON key order. A `failClosed: true` from
-            # any duplicate wins so the flag is never dropped by dedupe.
-            merged_tools = tools if (tools and not previous.tools) else previous.tools
+            # The fan-out pair (and any same-file duplicate) collapses here.
+            # Two cases must both survive:
+            #   * The fan-out pair — one half is the unscoped `beforeShellExecution`
+            #     mirror. Whichever half is read second must not erase the other's
+            #     tool scope, so a scoped side always beats an unscoped (`[]`) side
+            #     regardless of JSON key order.
+            #   * Two genuinely-distinct scoped entries sharing the same
+            #     `(event, command)` (a hand-authored `Write` guard and a `Shell`
+            #     guard on the same command) — union their scopes so neither guard
+            #     is silently dropped.
+            # A `failClosed: true` from any duplicate wins so the flag is never
+            # dropped by dedupe.
+            if tools and previous.tools:
+                merged_tools = list(dict.fromkeys([*previous.tools, *tools]))
+            elif tools and not previous.tools:
+                merged_tools = tools
+            else:
+                merged_tools = previous.tools
             merged[key] = HookEntry(
                 event=canonical_event,
                 command=command,

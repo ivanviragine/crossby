@@ -104,7 +104,8 @@ class TestEmitCodex:
         # sync writer uses, which discards this fragment). #88 §7.
         fragment = tomllib.loads(emission.config_fragment)
         assert "test" in fragment["agents"]
-        assert fragment["agents"]["test"]["path"] == "~/.codex/agents/test.toml"
+        # Codex registers a role's config layer under `config_file`, not `path`.
+        assert fragment["agents"]["test"]["config_file"] == "~/.codex/agents/test.toml"
 
     def test_collapses_tools_to_sandbox_mode(self) -> None:
         ir = _ir(tools=["read_file", "edit_file"])

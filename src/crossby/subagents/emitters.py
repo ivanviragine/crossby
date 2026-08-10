@@ -28,9 +28,9 @@ class CodexEmission:
     """Output of the Codex emitter — agent file plus a config.toml fragment.
 
     ``config_fragment`` is a TOML string suitable for merging into
-    ``~/.codex/config.toml`` under an ``[agents.<name>]`` table.  It will be
-    empty when the IR carries no fields that need global registration; in
-    that case writing only ``agent_toml`` is sufficient.
+    ``~/.codex/config.toml`` under an ``[agents.<name>]`` table.  It always
+    contains the bare ``config_file`` registration that points at
+    ``agent_toml`` — :func:`emit_codex` never emits it empty.
     """
 
     agent_toml: str
@@ -371,10 +371,14 @@ def emit_codex(ir: SubagentIR) -> tuple[CodexEmission, list[ConversionWarning]]:
     # ``sync/agents.py::CodexAgentsWriter._render_for_target``). Always include
     # the bare registration so users see the right shape; emitters that need
     # richer fragments can extend this without touching the agent_toml path.
+    #
+    # Codex registers a role's config layer under ``agents.<name>.config_file``
+    # (a string path) — see the Codex config reference. A ``path`` key is not
+    # recognized, so it would be silently ignored on merge.
     suggested_filename = f"{ir.name}.toml"
     config_fragment = tomli_w.dumps(
         {
-            "agents": {ir.name: {"path": f"~/.codex/agents/{suggested_filename}"}},
+            "agents": {ir.name: {"config_file": f"~/.codex/agents/{suggested_filename}"}},
         }
     )
 
