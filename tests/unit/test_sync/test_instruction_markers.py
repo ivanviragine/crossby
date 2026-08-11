@@ -72,6 +72,8 @@ class TestDetectToolMarkers:
             "Open C:/hooks/config.json on Windows.",  # drive path (:)
             "Edit /hooks/config.json at the root.",  # absolute path (trailing /)
             "Point to /hooks.example.com there.",  # bare domain (trailing .word)
+            "Windows path C:/hooks\\config.json here.",  # backslash continuation
+            "Config at /hooks-config.json is stale.",  # hyphen continuation
         ):
             assert AIToolID.CLAUDE not in detect_tool_markers(text), text
 

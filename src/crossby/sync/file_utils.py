@@ -289,20 +289,29 @@ def mirror_tree(
     # tree or strip group access from a ``0770`` one. Deferred to here, after the
     # children are written, so a restrictive source mode can't lock out those
     # writes. Each recursive call syncs its own root, so nested dirs are covered.
-    if _sync_mode(target_dir, source_dir, dry_run=dry_run):
-        # ``_sync_mode`` reports a change when it restores the temporary
-        # owner-write relax above back to the pre-relax mode, but that undoes our
-        # own change and is not a real diff — only count it when the source mode
-        # genuinely differs from what the target had before we relaxed it.
-        if relaxed_mode is None:
-            changed = True
-        else:
-            try:
-                source_mode = stat.S_IMODE(source_dir.stat().st_mode)
-            except OSError:
-                source_mode = None
-            if source_mode != relaxed_mode:
-                changed = True
+    #
+    # The change flag is computed from the mode the target had *before* any
+    # temporary owner-write relax above (``relaxed_mode``) versus the source —
+    # NOT from ``_sync_mode``'s post-relax comparison. When the relax happens to
+    # land the target on the source mode (e.g. a ``0555`` target under a ``0755``
+    # source), ``_sync_mode`` sees no diff and would report ``skipped`` even
+    # though the mode really changed; comparing the pre-relax baseline avoids
+    # both that miss and counting a relax we merely restore. ``_sync_mode`` still
+    # runs for its side effect (applying / restoring the source mode).
+    try:
+        source_mode = stat.S_IMODE(source_dir.stat().st_mode)
+    except OSError:
+        source_mode = None
+    if relaxed_mode is not None:
+        baseline_mode: int | None = relaxed_mode
+    else:
+        try:
+            baseline_mode = stat.S_IMODE(target_dir.stat().st_mode)
+        except OSError:
+            baseline_mode = None
+    _sync_mode(target_dir, source_dir, dry_run=dry_run)
+    if source_mode is not None and baseline_mode is not None and baseline_mode != source_mode:
+        changed = True
 
     return changed
 

@@ -648,6 +648,29 @@ class TestMirrorTree:
 
         os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
 
+    def test_dir_mode_change_under_relax_counts_as_change(self, tmp_path: Path) -> None:
+        # A dir-mode-only change must be reported even when the temporary
+        # owner-write relax happens to land the target on the source mode: a 0555
+        # target under a 0755 source is relaxed to 0755, so _sync_mode sees no
+        # diff — the change must be detected from the pre-relax baseline, not that
+        # post-relax view, or the run reports skipped despite a real chmod.
+        source = tmp_path / "src"
+        source.mkdir()  # default (umask) mode, e.g. 0755
+        (source / "run.sh").write_text("v1", encoding="utf-8")
+        target = tmp_path / "dst"
+        assert mirror_tree(source, target) is True  # initial create
+
+        # Clamp only the *target dir* mode to 0555 (read-only); content unchanged.
+        os.chmod(target, 0o555)
+
+        # The re-sync restores the target dir to the source mode (0755) — a real
+        # change, so it must report True, not a phantom skipped.
+        assert mirror_tree(source, target) is True
+        assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
+
+        # Idempotent now that modes match.
+        assert mirror_tree(source, target) is False
+
 
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
