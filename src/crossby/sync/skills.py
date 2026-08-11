@@ -640,7 +640,21 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path, *, dry_run: bool = Fals
         for child in target_dir.iterdir():
             if child.name in source_names or child.name == MANAGED_MARKER_NAME:
                 continue
-            if child.is_dir() and not child.is_symlink():
+            if child.is_symlink():
+                # A stale skill-dir symlink (live directory link) or a broken
+                # link — remove it, matching the translate path's cleanup. A live
+                # *directory* symlink fails ``not is_symlink()`` and a broken one
+                # fails ``is_dir()``, so without this both slip through and the
+                # copy returns ``skipped`` while a stale link lingers. ``rmtree``
+                # raises on a symlink, so unlink it. A symlink to a real *file* is
+                # left alone — only stale skill directories are cleaned.
+                if child.is_file():
+                    continue
+                if not dry_run:
+                    child.unlink()
+                    logger.info("skills.stale_removed", path=str(child))
+                changed = True
+            elif child.is_dir():
                 if not dry_run:
                     shutil.rmtree(child)
                     logger.info("skills.stale_removed", path=str(child))

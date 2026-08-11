@@ -226,20 +226,21 @@ def mirror_tree(
         changed = True
     if not dry_run:
         target_dir.mkdir(parents=True, exist_ok=True)
-    # A read-only source mode (e.g. ``0555``) was propagated to the target on the
-    # first sync (the deferred ``_sync_mode`` below), so a later sync that must
-    # write a changed or newly-added child would fail to create its temp file
-    # inside the still-read-only dir (``PermissionError`` for a non-root owner).
-    # Temporarily grant owner-write for the duration of the mirror; the deferred
-    # ``_sync_mode`` restores the source mode. Snapshot the pre-relax mode so
-    # restoring *our own* relaxation isn't miscounted as a change on an otherwise
-    # idempotent re-sync.
+    # A restrictive source mode (e.g. ``0555``, ``0600``, ``0400``) was propagated
+    # to the target on the first sync (the deferred ``_sync_mode`` below), so a
+    # later sync that must write a changed or newly-added child would fail to
+    # create its temp file inside it (``PermissionError`` for a non-root owner).
+    # Creating a directory entry needs owner *write AND execute* — write alone is
+    # insufficient (``0600`` still can't be traversed) — so grant the full owner
+    # ``rwx`` triple for the duration of the mirror; the deferred ``_sync_mode``
+    # restores the source mode. Snapshot the pre-relax mode so restoring *our own*
+    # relaxation isn't miscounted as a change on an otherwise idempotent re-sync.
     relaxed_mode: int | None = None
     if not dry_run and target_dir.is_dir() and not target_dir.is_symlink():
         try:
             existing_mode = stat.S_IMODE(target_dir.stat().st_mode)
-            if not existing_mode & stat.S_IWUSR:
-                target_dir.chmod(existing_mode | stat.S_IWUSR)
+            if existing_mode & stat.S_IRWXU != stat.S_IRWXU:
+                target_dir.chmod(existing_mode | stat.S_IRWXU)
                 relaxed_mode = existing_mode
         except OSError:
             pass

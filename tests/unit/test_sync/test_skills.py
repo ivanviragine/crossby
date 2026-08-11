@@ -628,6 +628,26 @@ class TestMirrorTree:
         os.chmod(source, 0o755)
         os.chmod(target, 0o755)
 
+    def test_no_execute_target_dir_is_updatable(self, tmp_path: Path) -> None:
+        # Creating a directory entry needs owner write AND execute — granting only
+        # owner-write leaves a 0400/0600 target un-traversable, so the temp-file
+        # write still raises PermissionError. mirror_tree grants the full owner
+        # rwx triple for the mirror, then restores the source mode.
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "run.sh").write_text("v1", encoding="utf-8")
+        target = tmp_path / "dst"
+        assert mirror_tree(source, target) is True
+
+        # Change source content, then clamp the target to r-- (no write, no exec).
+        (source / "run.sh").write_text("v2", encoding="utf-8")
+        os.chmod(target, 0o400)
+
+        assert mirror_tree(source, target) is True  # must not raise PermissionError
+        assert (target / "run.sh").read_text(encoding="utf-8") == "v2"
+
+        os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
+
 
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
@@ -973,6 +993,37 @@ class TestTranslateStrategy:
         (target / "stale").mkdir()
         assert _copy_skills_dir(source, target, dry_run=True) is True
         assert (target / "stale").is_dir()  # not removed in dry-run
+
+    def test_copy_skills_dir_removes_stale_symlinks(self, tmp_path: Path) -> None:
+        # Issue #83: a stale skill-dir symlink — live (points to a dir) or broken
+        # — must be removed by the copy path (matching translate), not left behind
+        # while the copy returns skipped. A live dir symlink fails
+        # `not is_symlink()`; a broken one fails `is_dir()`; both previously slipped
+        # through. A symlink to a real file is left alone (not a stale skill dir).
+        source = _make_source(tmp_path, ["a"])
+        target = tmp_path / "target"
+        assert _copy_skills_dir(source, target) is True
+        assert _copy_skills_dir(source, target) is False  # unchanged → no-op
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("# outside\n", encoding="utf-8")
+        live = target / "stale-live"
+        os.symlink(outside, live)  # live directory symlink
+        broken = target / "stale-broken"
+        os.symlink(tmp_path / "does-not-exist", broken)  # broken symlink
+
+        # dry-run reports the pending removals, touching nothing.
+        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert live.is_symlink() and broken.is_symlink()
+
+        # real run unlinks both stale symlinks (no rmtree crash on a link).
+        assert _copy_skills_dir(source, target) is True
+        assert not live.is_symlink()
+        assert not broken.is_symlink()
+        # The real skill survives, and the live link's destination is not deleted.
+        assert (target / "a" / "SKILL.md").is_file()
+        assert (outside / "SKILL.md").is_file()
 
     def test_symlinked_target_support_dir_is_replaced_not_followed(self, tmp_path: Path) -> None:
         # A target support dir that is a symlink must be replaced, never written
