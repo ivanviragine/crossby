@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import stat
 from pathlib import Path
@@ -233,8 +234,10 @@ def mirror_tree(
     # Creating a directory entry needs owner *write AND execute* — write alone is
     # insufficient (``0600`` still can't be traversed) — so grant the full owner
     # ``rwx`` triple for the duration of the mirror; the deferred ``_sync_mode``
-    # restores the source mode. Snapshot the pre-relax mode so restoring *our own*
-    # relaxation isn't miscounted as a change on an otherwise idempotent re-sync.
+    # restores the source mode (and the ``except`` below restores the pre-relax
+    # mode if the mirror raises before that point). Snapshot the pre-relax mode so
+    # restoring *our own* relaxation isn't miscounted as a change on an otherwise
+    # idempotent re-sync.
     relaxed_mode: int | None = None
     if not dry_run and target_dir.is_dir() and not target_dir.is_symlink():
         try:
@@ -246,72 +249,90 @@ def mirror_tree(
             pass
     wanted: set[str] = set()
 
-    for child in sorted(source_dir.iterdir()):
-        wanted.add(child.name)
-        dest = target_dir / child.name
-        # A symlinked target child is replaced, not written through — otherwise a
-        # nested symlink would redirect writes/chmods outside the mirror root.
-        if dest.is_symlink():
-            if not dry_run:
-                dest.unlink()
-            changed = True
-        # ``is_dir()``/``is_file()`` follow symlinks, so a symlinked *source*
-        # entry is dereferenced here — a directory is recursed into (mirrored as
-        # a real dir), a file copied by its bytes. The target symlink guard above
-        # still prevents writing *through* a link on the destination side.
-        if child.is_dir():
-            changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
-            if mirror_tree(child, dest, dry_run=dry_run):
-                changed = True
-        elif child.is_file():
-            changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
-            if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
-                changed = True
-            if _sync_mode(dest, child, dry_run=dry_run):
-                changed = True
-
-    # In a real run the ``mkdir`` above guarantees a real dir here; under dry-run
-    # the target may not exist (not created) or still be a symlink (not
-    # replaced), so guard before iterating — any escape was already counted above.
-    if target_dir.is_dir() and not target_dir.is_symlink():
-        for child in target_dir.iterdir():
-            if child.name in wanted or child.name in preserve:
-                continue
-            if not dry_run:
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-            changed = True
-
-    # Mirror this directory's own permission bits last — the ``mkdir`` above
-    # created it under the umask, which would otherwise widen a private ``0700``
-    # tree or strip group access from a ``0770`` one. Deferred to here, after the
-    # children are written, so a restrictive source mode can't lock out those
-    # writes. Each recursive call syncs its own root, so nested dirs are covered.
-    #
-    # The change flag is computed from the mode the target had *before* any
-    # temporary owner-write relax above (``relaxed_mode``) versus the source —
-    # NOT from ``_sync_mode``'s post-relax comparison. When the relax happens to
-    # land the target on the source mode (e.g. a ``0555`` target under a ``0755``
-    # source), ``_sync_mode`` sees no diff and would report ``skipped`` even
-    # though the mode really changed; comparing the pre-relax baseline avoids
-    # both that miss and counting a relax we merely restore. ``_sync_mode`` still
-    # runs for its side effect (applying / restoring the source mode).
+    # Everything below runs under the temporary owner-write relax above. On the
+    # success path the deferred ``_sync_mode`` restores the source mode, but a
+    # failure mid-mirror (disk full, an unreadable child, a source removed
+    # concurrently) exits before that call — leaving a restrictive directory
+    # owner-writable despite the sync erroring. Restore the pre-relax mode in the
+    # ``except`` so a failed sync never widens the directory it touched. Each
+    # recursive call restores its own relaxed root the same way before re-raising.
     try:
-        source_mode = stat.S_IMODE(source_dir.stat().st_mode)
-    except OSError:
-        source_mode = None
-    if relaxed_mode is not None:
-        baseline_mode: int | None = relaxed_mode
-    else:
+        for child in sorted(source_dir.iterdir()):
+            wanted.add(child.name)
+            dest = target_dir / child.name
+            # A symlinked target child is replaced, not written through — otherwise
+            # a nested symlink would redirect writes/chmods outside the mirror root.
+            if dest.is_symlink():
+                if not dry_run:
+                    dest.unlink()
+                changed = True
+            # ``is_dir()``/``is_file()`` follow symlinks, so a symlinked *source*
+            # entry is dereferenced here — a directory is recursed into (mirrored
+            # as a real dir), a file copied by its bytes. The target symlink guard
+            # above still prevents writing *through* a link on the destination side.
+            if child.is_dir():
+                changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
+                if mirror_tree(child, dest, dry_run=dry_run):
+                    changed = True
+            elif child.is_file():
+                changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
+                if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
+                    changed = True
+                if _sync_mode(dest, child, dry_run=dry_run):
+                    changed = True
+
+        # In a real run the ``mkdir`` above guarantees a real dir here; under
+        # dry-run the target may not exist (not created) or still be a symlink (not
+        # replaced), so guard before iterating — any escape was already counted.
+        if target_dir.is_dir() and not target_dir.is_symlink():
+            for child in target_dir.iterdir():
+                if child.name in wanted or child.name in preserve:
+                    continue
+                if not dry_run:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                changed = True
+
+        # Mirror this directory's own permission bits last — the ``mkdir`` above
+        # created it under the umask, which would otherwise widen a private
+        # ``0700`` tree or strip group access from a ``0770`` one. Deferred to
+        # here, after the children are written, so a restrictive source mode can't
+        # lock out those writes. Each recursive call syncs its own root, so nested
+        # dirs are covered.
+        #
+        # The change flag is computed from the mode the target had *before* any
+        # temporary owner-write relax above (``relaxed_mode``) versus the source —
+        # NOT from ``_sync_mode``'s post-relax comparison. When the relax happens
+        # to land the target on the source mode (e.g. a ``0555`` target under a
+        # ``0755`` source), ``_sync_mode`` sees no diff and would report
+        # ``skipped`` even though the mode really changed; comparing the pre-relax
+        # baseline avoids both that miss and counting a relax we merely restore.
+        # ``_sync_mode`` still runs for its side effect (applying / restoring the
+        # source mode).
         try:
-            baseline_mode = stat.S_IMODE(target_dir.stat().st_mode)
+            source_mode = stat.S_IMODE(source_dir.stat().st_mode)
         except OSError:
-            baseline_mode = None
-    _sync_mode(target_dir, source_dir, dry_run=dry_run)
-    if source_mode is not None and baseline_mode is not None and baseline_mode != source_mode:
-        changed = True
+            source_mode = None
+        if relaxed_mode is not None:
+            baseline_mode: int | None = relaxed_mode
+        else:
+            try:
+                baseline_mode = stat.S_IMODE(target_dir.stat().st_mode)
+            except OSError:
+                baseline_mode = None
+        _sync_mode(target_dir, source_dir, dry_run=dry_run)
+        if source_mode is not None and baseline_mode is not None and baseline_mode != source_mode:
+            changed = True
+    except BaseException:
+        # Undo our owner-write relax so an errored sync leaves the directory no
+        # wider than we found it. Restoring to the pre-relax target mode (not the
+        # source mode) is the conservative "leave it as we found it" choice.
+        if relaxed_mode is not None:
+            with contextlib.suppress(OSError):
+                target_dir.chmod(relaxed_mode)
+        raise
 
     return changed
 

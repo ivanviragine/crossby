@@ -671,6 +671,39 @@ class TestMirrorTree:
         # Idempotent now that modes match.
         assert mirror_tree(source, target) is False
 
+    def test_failed_mirror_restores_relaxed_dir_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A restrictive target dir is temporarily relaxed to owner-rwx so a child
+        # can be written; the deferred _sync_mode restores the source mode on the
+        # success path. But a failure mid-mirror (disk full, unreadable child,
+        # source removed concurrently) exits before that restore — the except must
+        # put the mode back so an errored sync never leaves the dir owner-writable.
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "run.sh").write_text("v1", encoding="utf-8")
+        target = tmp_path / "dst"
+        assert mirror_tree(source, target) is True  # initial create
+
+        # Change source content so the next mirror must write, and clamp the target
+        # dir to 0555 (read+exec, no write) so mirror_tree relaxes it to 0755.
+        (source / "run.sh").write_text("v2", encoding="utf-8")
+        os.chmod(target, 0o555)
+
+        def _boom(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("simulated disk-full")
+
+        monkeypatch.setattr("crossby.sync.file_utils.write_if_different", _boom)
+
+        with pytest.raises(OSError, match="simulated disk-full"):
+            mirror_tree(source, target)
+
+        # Despite the failure, the relaxed dir must be restored to its pre-relax
+        # mode (0555) — not left at the owner-writable 0755 it was relaxed to.
+        assert stat.S_IMODE(target.stat().st_mode) == 0o555
+
+        os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
+
 
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
