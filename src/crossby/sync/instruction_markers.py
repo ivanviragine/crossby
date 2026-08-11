@@ -36,14 +36,17 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\bsubagent[s]?\b", "Claude subagents"),
         (r"\btodowrite\b", "Claude TodoWrite tool"),
         # A standalone ``/hooks`` slash command, NOT a path/URL segment. The
-        # negative lookbehind excludes a preceding path character — word chars,
-        # ``.``, ``/``, ``:``, ``\`` and ``-`` — so filesystem paths and URLs like
-        # ``.agents/hooks.json`` (an Antigravity CLI surface), ``foo/hooks``,
-        # ``https://hooks.example.com`` and ``C:/hooks/config.json`` no longer
-        # collide with this marker. The ``.agents/hooks.json`` collision was the
-        # concrete bug: it made agy-authored hooks content read as foreign-to-agy
-        # and forced a needless copy.
-        (r"(?<![\w./:\\-])/hooks\b", "Claude /hooks slash command"),
+        # negative lookbehind excludes a *preceding* path character (word chars,
+        # ``.``, ``/``, ``:``, ``\``, ``-``) and the lookaheads exclude a *trailing*
+        # path continuation — a following ``/`` (``/hooks/config.json``) or a
+        # ``.`` glued to a word (``/hooks.example.com``, ``/hooks.json``) — while
+        # still allowing a sentence-ending ``/hooks.`` and ``/hooks,``. So paths
+        # and URLs like ``.agents/hooks.json`` (an Antigravity CLI surface),
+        # ``foo/hooks``, ``https://hooks.example.com`` and ``C:/hooks/config.json``
+        # no longer collide. The ``.agents/hooks.json`` collision was the concrete
+        # bug: it made agy-authored hooks content read as foreign-to-agy and
+        # forced a needless copy.
+        (r"(?<![\w./:\\-])/hooks\b(?!/)(?!\.\w)", "Claude /hooks slash command"),
     ),
     AIToolID.CODEX: (
         (r"\.codex/", "Codex config paths"),

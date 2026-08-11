@@ -51,19 +51,27 @@ class TestDetectToolMarkers:
         assert AIToolID.CLAUDE in found
 
     def test_claude_hooks_slash_command(self) -> None:
-        # A standalone `/hooks` slash command is a Claude marker.
-        found = detect_tool_markers("Run /hooks to configure hooks.")
-        assert AIToolID.CLAUDE in found
-        assert "Claude /hooks slash command" in found[AIToolID.CLAUDE]
+        # A standalone `/hooks` slash command is a Claude marker, including when
+        # it ends a sentence or is followed by a comma.
+        for text in (
+            "Run /hooks to configure.",
+            "Configure it with /hooks.",  # sentence-ending period
+            "See /hooks, then save.",  # comma
+        ):
+            found = detect_tool_markers(text)
+            assert AIToolID.CLAUDE in found, text
+            assert "Claude /hooks slash command" in found[AIToolID.CLAUDE]
 
     def test_hooks_path_segment_is_not_claude(self) -> None:
-        # A `/hooks` path *segment* or URL (not the standalone slash command)
-        # must not attribute to Claude.
+        # A `/hooks` path segment, URL, or absolute path (not the standalone
+        # slash command) must not attribute to Claude.
         for text in (
             "See .agents/hooks.json for guards.",  # relative path
             "Scripts live in tools/hooks/.",  # path segment
             "Fetch https://hooks.example.com/api for webhooks.",  # URL (// and :)
             "Open C:/hooks/config.json on Windows.",  # drive path (:)
+            "Edit /hooks/config.json at the root.",  # absolute path (trailing /)
+            "Point to /hooks.example.com there.",  # bare domain (trailing .word)
         ):
             assert AIToolID.CLAUDE not in detect_tool_markers(text), text
 

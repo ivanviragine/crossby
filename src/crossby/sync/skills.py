@@ -473,7 +473,14 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 for child in target_dir.iterdir():
                     if child.name in wanted_names or child.name == MANAGED_MARKER_NAME:
                         continue
-                    if child.is_dir():
+                    # Mirror the real stale-cleanup predicate: a real dir, a live
+                    # dir-symlink, or a broken symlink is removed; a real file or
+                    # a file-symlink is left. A broken symlink fails is_dir(), so
+                    # check is_symlink() first or the dry-run misreports skipped.
+                    if child.is_symlink():
+                        if not child.is_file():
+                            would_change = True
+                    elif child.is_dir():
                         would_change = True
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"

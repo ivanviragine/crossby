@@ -964,6 +964,22 @@ class TestTranslateStrategy:
         assert result.action != "skipped"  # a stale removal is a change
         assert not broken.is_symlink()  # dangling link removed
 
+    def test_translate_dry_run_detects_broken_stale_symlink(self, tmp_path: Path) -> None:
+        # The dry-run stale detector must count a broken stale symlink the real
+        # run would remove — otherwise --plan reports skipped while the real sync
+        # unlinks it. Mirrors the real cleanup predicate (is_symlink before is_dir).
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "keep")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_dir = tmp_path / ".agents" / "skills"
+
+        broken = target_dir / "stale-broken"
+        os.symlink(tmp_path / "does-not-exist", broken)
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path, dry_run=True)
+        assert result.action != "skipped"  # the real run would remove the link
+        assert broken.is_symlink()  # dry-run touched nothing
+
     def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
         # Issue #83: a symlinked *parent* (.agents -> outside) must be refused for
         # every strategy — mkdir(parents=True)/create_symlink would follow it and
