@@ -35,12 +35,15 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\bpermissionmode\b", "Claude permissionMode setting"),
         (r"\bsubagent[s]?\b", "Claude subagents"),
         (r"\btodowrite\b", "Claude TodoWrite tool"),
-        # A standalone ``/hooks`` slash command, NOT a path segment. The negative
-        # lookbehind excludes a preceding path character so filesystem paths like
-        # ``.agents/hooks.json`` (an Antigravity CLI surface) or ``foo/hooks`` no
-        # longer collide with this marker — that collision made agy-authored
-        # ``.agents/hooks.json`` content read as foreign-to-agy and forced a copy.
-        (r"(?<![\w.])/hooks\b", "Claude /hooks slash command"),
+        # A standalone ``/hooks`` slash command, NOT a path/URL segment. The
+        # negative lookbehind excludes a preceding path character — word chars,
+        # ``.``, ``/``, ``:``, ``\`` and ``-`` — so filesystem paths and URLs like
+        # ``.agents/hooks.json`` (an Antigravity CLI surface), ``foo/hooks``,
+        # ``https://hooks.example.com`` and ``C:/hooks/config.json`` no longer
+        # collide with this marker. The ``.agents/hooks.json`` collision was the
+        # concrete bug: it made agy-authored hooks content read as foreign-to-agy
+        # and forced a needless copy.
+        (r"(?<![\w./:\\-])/hooks\b", "Claude /hooks slash command"),
     ),
     AIToolID.CODEX: (
         (r"\.codex/", "Codex config paths"),

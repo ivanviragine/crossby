@@ -57,10 +57,15 @@ class TestDetectToolMarkers:
         assert "Claude /hooks slash command" in found[AIToolID.CLAUDE]
 
     def test_hooks_path_segment_is_not_claude(self) -> None:
-        # A `/hooks` path *segment* (e.g. `.agents/hooks.json`, `foo/hooks`) is
-        # not the Claude slash command and must not attribute to Claude.
-        assert AIToolID.CLAUDE not in detect_tool_markers("See .agents/hooks.json for guards.")
-        assert AIToolID.CLAUDE not in detect_tool_markers("Scripts live in tools/hooks/.")
+        # A `/hooks` path *segment* or URL (not the standalone slash command)
+        # must not attribute to Claude.
+        for text in (
+            "See .agents/hooks.json for guards.",  # relative path
+            "Scripts live in tools/hooks/.",  # path segment
+            "Fetch https://hooks.example.com/api for webhooks.",  # URL (// and :)
+            "Open C:/hooks/config.json on Windows.",  # drive path (:)
+        ):
+            assert AIToolID.CLAUDE not in detect_tool_markers(text), text
 
 
 class TestIsNeutralForTarget:

@@ -947,6 +947,23 @@ class TestTranslateStrategy:
         assert not (target_dir / "stale").exists()  # symlink removed
         assert (outside / "keepme.txt").is_file()  # destination untouched
 
+    def test_stale_broken_skill_symlink_is_removed(self, tmp_path: Path) -> None:
+        # A *broken* stale skill symlink (source skill deleted, link dangling)
+        # must also be removed — it fails is_dir(), so it previously lingered and
+        # the run reported skipped despite a stale link remaining.
+        source = _make_source(tmp_path, [])
+        self._make_skill_with_frontmatter(source, "keep")
+        CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        target_dir = tmp_path / ".agents" / "skills"
+
+        broken = target_dir / "stale-broken"
+        os.symlink(tmp_path / "does-not-exist", broken)  # dangling link
+
+        result = CodexSkillsWriter().sync(_data(strategy="translate"), tmp_path)
+        assert result.action != "error"
+        assert result.action != "skipped"  # a stale removal is a change
+        assert not broken.is_symlink()  # dangling link removed
+
     def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
         # Issue #83: a symlinked *parent* (.agents -> outside) must be refused for
         # every strategy — mkdir(parents=True)/create_symlink would follow it and

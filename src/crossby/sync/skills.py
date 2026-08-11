@@ -493,20 +493,25 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
             name for name, _ in command_skills
         }
-        # Stale cleanup
+        # Stale cleanup — only stale skill *directories* are removed; unrelated
+        # top-level files are left alone.
         removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
-                if child.name in wanted_names or not child.is_dir():
-                    # Only stale *directories* are cleaned (unchanged scope);
-                    # ``is_dir()`` follows symlinks, so a dir symlink lands here.
+                if child.name in wanted_names:
                     continue
                 if child.is_symlink():
-                    # A stale directory symlink: ``rmtree`` raises on a symlink
-                    # ("Cannot call rmtree on a symbolic link"), so unlink it.
+                    # A stale skill-dir symlink — live (points to a dir) or broken
+                    # (its source skill was deleted). ``rmtree`` raises on a
+                    # symlink and a broken link fails ``is_dir()``, so unlink it
+                    # here. A symlink to a real *file* is left alone.
+                    if child.is_file():
+                        continue
                     child.unlink()
-                else:
+                elif child.is_dir():
                     shutil.rmtree(child)
+                else:
+                    continue  # a real file — out of scope
                 logger.info("skills.stale_removed", path=str(child))
                 removed_any = True
 
