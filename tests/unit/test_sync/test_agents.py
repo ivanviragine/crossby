@@ -495,6 +495,196 @@ class TestCopyStrategy:
         assert not target.is_symlink()
         assert (target / "a.md").is_file()
 
+    def test_translate_errors_on_symlinked_target_without_force(self, tmp_path: Path) -> None:
+        """Issue #83: translate strategy also refuses a symlinked target dir —
+        mkdir(exist_ok=True) would follow it and write agents outside the project."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
+        assert "--force" in (result.message or "")
+        # Not written through to the symlink's destination.
+        assert not (other / "a.md").exists()
+
+    def test_translate_replaces_symlinked_target_with_force(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.parent.mkdir(parents=True)
+        other = tmp_path / "other"
+        other.mkdir()
+        os.symlink(os.path.relpath(other, target.parent), target)
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path, force=True)
+        assert result.action != "error"
+        assert not target.is_symlink()
+        assert (target / "a.md").is_file()
+        assert not (other / "a.md").exists()
+
+    def test_translate_replaces_leaf_md_symlink_not_followed(self, tmp_path: Path) -> None:
+        """Issue #83: a leaf *.md that is a symlink (e.g. from a prior symlink run)
+        must be replaced, not written through to a destination outside the project."""
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(os.path.relpath(outside, target), target / "a.md")
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        result = w.sync(data, tmp_path)
+        assert result.action != "error"
+        assert not (target / "a.md").is_symlink()
+        assert (target / "a.md").is_file()
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
+    def test_copy_replaces_leaf_symlink_and_writes_file(self, tmp_path: Path) -> None:
+        # Issue #83: a leaf *.md symlink in a managed copy target must be replaced
+        # with a real *file* — unlinking without writing would drop the agent
+        # while reporting success. The symlink's outside destination is untouched.
+        _make_source(tmp_path, ["a.md"])
+        target = tmp_path / ".claude" / "agents"
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(os.path.relpath(outside, target), target / "a.md")
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        result = w.sync(data, tmp_path)
+        assert result.action != "error"
+        assert not (target / "a.md").is_symlink()
+        assert (target / "a.md").is_file()
+        assert (target / "a.md").stat().st_size > 0  # content written, not dropped
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
+    def test_symlinked_ancestor_dir_is_refused_all_writers(self, tmp_path: Path) -> None:
+        # Issue #83: every agent writer refuses a symlinked *parent* dir
+        # (.claude/.github/.codex -> outside) for every strategy —
+        # mkdir(parents=True)/create_symlink would follow it and escape the root.
+        _make_source(tmp_path, ["a.md"])
+        cases = [
+            (ClaudeAgentsWriter(), ".claude"),
+            (CopilotAgentsWriter(), ".github"),
+            (CodexAgentsWriter(), ".codex"),
+        ]
+        for w, parent in cases:
+            outside = tmp_path / f"outside{parent}"
+            outside.mkdir()
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / parent)
+            for strategy in ("symlink", "copy", "translate"):
+                result = w.sync(_data(strategy=strategy), tmp_path)
+                assert result.action == "error", f"{parent}/{strategy}"
+                assert "symlinked directory" in (result.message or ""), f"{parent}/{strategy}"
+            # Nothing was written through the parent symlink to its destination.
+            assert not any(outside.iterdir()), parent
+            (tmp_path / parent).unlink()  # reset for the next writer
+
+    def test_copy_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        # Issue #83: a normal copy dry-run on an unchanged target reports skipped,
+        # not a phantom "updated".
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)  # real copy establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
+    def test_translate_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        _make_source(tmp_path, ["a.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="translate")
+        w.sync(data, tmp_path)  # real translate establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
+    def test_copy_all_agents_dry_run_compares_without_writing(self, tmp_path: Path) -> None:
+        # Issue #83: the dry-run copy path (backing the symlink-failure fallback)
+        # must compare without writing, returning an honest would-change flag so
+        # the fallback reports skipped/updated instead of an unconditional
+        # "created".
+        from crossby.sync.agents import _copy_all_agents
+
+        source = _make_source(tmp_path, ["reviewer.md"])
+        target = tmp_path / ".claude" / "agents"
+
+        # Fresh target: dry-run reports a change but writes nothing.
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is True
+        assert not target.exists()
+
+        # Materialise, then an unchanged dry-run reports no change (→ skipped).
+        assert _copy_all_agents(source, target, "claude") is True
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is False
+
+        # A changed source is detected in dry-run without touching disk.
+        (source / "reviewer.md").write_text(
+            "---\nname: reviewer\ndescription: CHANGED\n---\nNew body.\n", encoding="utf-8"
+        )
+        before = (target / "reviewer.md").read_text(encoding="utf-8")
+        assert _copy_all_agents(source, target, "claude", dry_run=True) is True
+        assert (target / "reviewer.md").read_text(encoding="utf-8") == before  # unwritten
+
+
+class TestCopyStaleCleanup:
+    """Issue #83: copy strategy must remove agents whose source was deleted and
+    report a delete-only run as a real change (not a phantom skip)."""
+
+    def test_deleting_a_source_agent_removes_it_from_copy_target(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["keep.md", "drop.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        target = tmp_path / ".claude" / "agents"
+        assert (target / "drop.md").is_file()
+
+        (source / "drop.md").unlink()
+        result = w.sync(data, tmp_path)
+
+        assert result.action == "updated"  # a stale removal is a change
+        assert not (target / "drop.md").exists()
+        assert (target / "keep.md").is_file()
+
+    def test_deleting_the_final_source_agent_removes_it(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["only.md"])
+        w = ClaudeAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        target = tmp_path / ".claude" / "agents"
+        assert (target / "only.md").is_file()
+
+        (source / "only.md").unlink()
+        result = w.sync(data, tmp_path)
+
+        assert result.action == "updated"
+        assert not (target / "only.md").exists()
+
+    def test_repeated_symlink_failure_runs_report_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Under a persistent symlink failure the writer copies; a second/third
+        # unchanged run must report skipped, not a phantom "created".
+        _make_source(tmp_path, ["reviewer.md"])
+
+        def _boom(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("simulated symlink failure")
+
+        monkeypatch.setattr("crossby.sync.agents.create_symlink", _boom)
+
+        w = ClaudeAgentsWriter()
+        data = _data()  # symlink strategy → fails → copy fallback
+        first = w.sync(data, tmp_path)
+        second = w.sync(data, tmp_path)
+        third = w.sync(data, tmp_path)
+        assert first.action == "created"
+        assert second.action == "skipped"
+        assert third.action == "skipped"
+
 
 # ---------------------------------------------------------------------------
 # Copilot writer (file-level symlinks)
@@ -542,6 +732,56 @@ class TestCopilotAgentsWriter:
         target_dir = tmp_path / ".github" / "agents"
         assert not (target_dir / "old.agent.md").exists()
         assert (target_dir / "a.agent.md").is_symlink()
+
+    def test_copy_dry_run_reports_skipped_when_unchanged(self, tmp_path: Path) -> None:
+        # Issue #83: a Copilot copy dry-run on an unchanged target reports skipped,
+        # not a phantom "updated".
+        _make_source(tmp_path, ["a.md"])
+        w = CopilotAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)  # real copy establishes the target
+        assert w.sync(data, tmp_path, dry_run=True).action == "skipped"
+
+    def test_symlink_delete_only_run_reports_non_skipped(self, tmp_path: Path) -> None:
+        # Removing a source agent with no other change must report a change, not
+        # skipped — a stale .agent.md was deleted from the target. The target dir
+        # already existed, so the action is ``updated`` (an in-place change), not
+        # ``created`` (which would misstate that the dir was first materialised).
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data()
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+        result = w.sync(data, tmp_path)
+        assert result.action == "updated"
+        assert not (tmp_path / ".github" / "agents" / "old.agent.md").exists()
+
+    def test_symlink_dry_run_reports_stale_removal_without_deleting(self, tmp_path: Path) -> None:
+        # A dry-run must report the would-be delete honestly (non-skipped) while
+        # leaving the stale file on disk.
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data()
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+
+        result = w.sync(data, tmp_path, dry_run=True)
+        assert result.action != "skipped"
+        # dry-run didn't actually remove the stale link (it's now dangling since
+        # its source was deleted, so check the link entry, not exists()).
+        assert (tmp_path / ".github" / "agents" / "old.agent.md").is_symlink()
+
+    def test_copy_delete_only_run_reports_updated(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path, ["a.md", "old.md"])
+        w = CopilotAgentsWriter()
+        data = _data(strategy="copy")
+        w.sync(data, tmp_path)
+        (source / "old.md").unlink()
+        result = w.sync(data, tmp_path)
+        assert result.action == "updated"
+        target_dir = tmp_path / ".github" / "agents"
+        assert not (target_dir / "old.agent.md").exists()
+        assert (target_dir / "a.agent.md").is_file()
 
     def test_missing_source_is_error(self, tmp_path: Path) -> None:
         w = CopilotAgentsWriter()
@@ -632,7 +872,10 @@ class TestCopilotAgentsWriter:
         w = CopilotAgentsWriter()
         data = _data()
         result = w.sync(data, tmp_path)
-        assert result.action == "created"
+        # The managed dir already existed and content changed in place, so this
+        # is an in-place update, not a first-time creation (matches this test's
+        # name — the pre-fix code mislabeled it "created").
+        assert result.action == "updated"
         # Content should now match what _copy_agent_file produces from source
         assert (target_dir / "a.agent.md").read_text(encoding="utf-8") != "stale content"
 
@@ -974,6 +1217,25 @@ class TestCodexAgentsTranslate:
         assert parsed["description"] == "A test agent."
         assert "Do work." in parsed["developer_instructions"]
 
+    def test_leaf_toml_symlink_is_replaced_not_followed(self, tmp_path: Path) -> None:
+        # Issue #83: a leaf <name>.toml that is a symlink must be replaced, not
+        # written through to a destination outside the project root.
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "a")
+        CodexAgentsWriter().sync(_data(), tmp_path)  # real translate
+        target_toml = tmp_path / ".codex" / "agents" / "a.toml"
+        target_toml.unlink()
+        outside = tmp_path / "outside.toml"
+        outside.write_text("SHOULD NOT BE OVERWRITTEN", encoding="utf-8")
+        os.symlink(outside, target_toml)
+
+        CodexAgentsWriter().sync(_data(), tmp_path)  # re-sync replaces the symlink
+
+        assert not target_toml.is_symlink()
+        assert target_toml.is_file()
+        assert "name" in target_toml.read_text(encoding="utf-8")  # real TOML written
+        assert outside.read_text(encoding="utf-8") == "SHOULD NOT BE OVERWRITTEN"
+
     def test_old_dot_agents_path_is_not_touched(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])
         self._claude_agent(source, "x")
@@ -1090,9 +1352,27 @@ class TestCodexAgentsTranslate:
         (source / "drop.md").unlink()
 
         result = CodexAgentsWriter().sync(_data(), tmp_path)
-        assert result.action in {"created", "updated", "skipped"}
+        # A stale removal is a change: a delete-only run reports updated.
+        assert result.action == "updated"
         assert (tmp_path / ".codex" / "agents" / "keep.toml").is_file()
         assert not (tmp_path / ".codex" / "agents" / "drop.toml").exists()
+
+    def test_deleting_final_agent_removes_toml_and_reports_updated(self, tmp_path: Path) -> None:
+        # Issue #83 (D4): deleting the *last* source agent leaves an empty source,
+        # which used to early-return skipped and orphan the .toml. Stale cleanup
+        # must now run before that return.
+        source = _make_source(tmp_path, [])
+        self._claude_agent(source, "only")
+
+        CodexAgentsWriter().sync(_data(), tmp_path)
+        toml_out = tmp_path / ".codex" / "agents" / "only.toml"
+        assert toml_out.is_file()
+
+        (source / "only.md").unlink()
+        result = CodexAgentsWriter().sync(_data(), tmp_path)
+
+        assert result.action == "updated"
+        assert not toml_out.exists()
 
     def test_dry_run_writes_nothing(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path, [])

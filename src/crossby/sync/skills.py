@@ -123,6 +123,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
     """
 
     concern = SyncConcern.SKILLS
+    _owns_whole_file = True  # whole-file overwrite → grouped by target path
     _target_rel: str
 
     def sync(
@@ -169,6 +170,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 action="skipped",
                 message="source and target resolve to the same path; nothing to do",
             )
+
+        # Refuse a symlinked *ancestor* (any parent between the project root and
+        # the target) for every strategy — the final target component is guarded
+        # separately below.
+        ancestor_err = self.contained_or_error(project_root, target_dir)
+        if ancestor_err is not None:
+            return ancestor_err
 
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
@@ -254,13 +262,44 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             # Mark the copy-fallback output so the next sync recognizes its own
             # work and doesn't refuse the dir as "not crossby-managed".
             try:
-                if not dry_run:
-                    _copy_skills_dir(source_dir, target_dir)
-                    write_managed_marker(target_dir)
+                if dry_run:
+                    # Compare-only via the SAME _copy_skills_dir logic (no writes),
+                    # so the reported action matches what the real copy fallback
+                    # would do — no drift on modes or dest symlinks.
+                    target_existed = target_dir.is_dir()
+                    would_change = _copy_skills_dir(source_dir, target_dir, dry_run=True)
+                    if target_existed and not would_change:
+                        return SyncResult(
+                            tool_id=self.tool_id,
+                            concern=self.concern,
+                            action="skipped",
+                            file_path=target_dir,
+                            message="copy (symlink failed, dry-run)",
+                        )
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="updated" if target_existed else "created",
+                        file_path=target_dir,
+                        message="copy (symlink failed, dry-run)",
+                    )
+                target_existed = target_dir.is_dir()
+                wrote = _copy_skills_dir(source_dir, target_dir)
+                write_managed_marker(target_dir)
+                if not wrote and target_existed:
+                    # A repeated copy-fallback run that changed nothing is an
+                    # honest skip, not a phantom "created".
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="skipped",
+                        file_path=target_dir,
+                        message="copy (symlink failed)",
+                    )
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
-                    action="created",
+                    action="updated" if target_existed else "created",
                     file_path=target_dir,
                     message="copy (symlink failed)",
                 )
@@ -310,10 +349,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
+            # Compare-only so an unchanged re-sync reports skipped, matching the
+            # real run below (not an unconditional created/updated).
+            would_write = _copy_skills_dir(source_dir, target_dir, dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_write and target_existed else action,
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
@@ -396,6 +438,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             from crossby.sync.manual_fix import has_manual_fix_block
 
             manual_fix_count = 0
+            would_change = False
+            wanted_names = {sd.name for sd in skill_dirs} | {n for n, _ in command_skills}
             for skill_dir in skill_dirs:
                 definition = parse_markdown_skill(
                     (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
@@ -405,9 +449,39 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 rendered = render_markdown_skill(translated)
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
-            for _name, rendered in command_skills:
+                target_skill = target_dir / skill_dir.name
+                # A symlinked skill *dir* is replaced by the real run, so it is a
+                # change even if SKILL.md content would match through the link.
+                if (
+                    target_skill.is_symlink()
+                    or _translate_skill_md_would_change(target_skill / "SKILL.md", rendered)
+                    or _refresh_skill_support_dirs(skill_dir, target_skill, dry_run=True)
+                ):
+                    would_change = True
+            for name, rendered in command_skills:
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
+                target_command_skill = target_dir / name
+                # A symlinked command-skill *dir* is unlinked by the real loop
+                # below, so it is a change even when the linked SKILL.md would
+                # match — mirror the translated-skill guard above.
+                if target_command_skill.is_symlink() or _translate_skill_md_would_change(
+                    target_command_skill / "SKILL.md", rendered
+                ):
+                    would_change = True
+            if target_dir.is_dir():  # stale skill *dirs* whose source is gone
+                for child in target_dir.iterdir():
+                    if child.name in wanted_names or child.name == MANAGED_MARKER_NAME:
+                        continue
+                    # Mirror the real stale-cleanup predicate: a real dir, a live
+                    # dir-symlink, or a broken symlink is removed; a real file or
+                    # a file-symlink is left. A broken symlink fails is_dir(), so
+                    # check is_symlink() first or the dry-run misreports skipped.
+                    if child.is_symlink():
+                        if not child.is_file():
+                            would_change = True
+                    elif child.is_dir():
+                        would_change = True
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -416,7 +490,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action=action,
+                action="skipped" if not would_change and target_existed else action,
                 file_path=target_dir,
                 message=message,
             )
@@ -426,22 +500,52 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
             name for name, _ in command_skills
         }
-        # Stale cleanup
+        # Stale cleanup — only stale skill *directories* are removed; unrelated
+        # top-level files are left alone.
         removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
-                if child.is_dir() and child.name not in wanted_names:
+                if child.name in wanted_names:
+                    continue
+                if child.is_symlink():
+                    # A stale skill-dir symlink — live (points to a dir) or broken
+                    # (its source skill was deleted). ``rmtree`` raises on a
+                    # symlink and a broken link fails ``is_dir()``, so unlink it
+                    # here. A symlink to a real *file* is left alone.
+                    if child.is_file():
+                        continue
+                    child.unlink()
+                elif child.is_dir():
                     shutil.rmtree(child)
-                    logger.info("skills.stale_removed", path=str(child))
-                    removed_any = True
+                else:
+                    continue  # a real file — out of scope
+                logger.info("skills.stale_removed", path=str(child))
+                removed_any = True
 
         skipped_all = True
         for skill_dir in skill_dirs:
             target_skill = target_dir / skill_dir.name
+            # A symlinked target skill dir must be replaced, never written
+            # through: ``mkdir(exist_ok=True)`` silently succeeds on a
+            # symlink-to-a-directory (``is_dir()`` follows it) without replacing
+            # it, so the direct ``SKILL.md`` write below would land at the
+            # symlink's destination — outside the project root for
+            # ``.agents/skills/demo -> /outside``. Support dirs guard their own
+            # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
+            # is guarded here.
+            if target_skill.is_symlink():
+                target_skill.unlink()
+                skipped_all = False
             target_skill.mkdir(parents=True, exist_ok=True)
 
             source_skill_md = skill_dir / "SKILL.md"
             target_skill_md = target_skill / "SKILL.md"
+            # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
+            # replaced, not read/written through — write_text/read_text follow it
+            # to the link's destination, which may be outside the project root.
+            if target_skill_md.is_symlink():
+                target_skill_md.unlink()
+                skipped_all = False
             definition = parse_markdown_skill(
                 source_skill_md.read_text(encoding="utf-8"),
                 fallback_name=skill_dir.name,
@@ -456,7 +560,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
             ):
                 # SKILL.md unchanged — but support dirs may still need a refresh.
-                _refresh_skill_support_dirs(skill_dir, target_skill)
+                # A support-dir change means this skill was not a no-op, so a
+                # re-sync that only touched (or should touch) scripts/references/
+                # assets is reported as ``updated`` rather than ``skipped``.
+                if _refresh_skill_support_dirs(skill_dir, target_skill):
+                    skipped_all = False
                 continue
 
             skipped_all = False
@@ -465,8 +573,18 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
         for name, rendered in command_skills:
             target_skill = target_dir / name
+            # Same symlink guard as the translated-skill loop above — a
+            # symlinked target skill dir would redirect the SKILL.md write
+            # outside the project root.
+            if target_skill.is_symlink():
+                target_skill.unlink()
+                skipped_all = False
             target_skill.mkdir(parents=True, exist_ok=True)
             target_skill_md = target_skill / "SKILL.md"
+            # Same leaf-symlink guard as the translated-skill loop above.
+            if target_skill_md.is_symlink():
+                target_skill_md.unlink()
+                skipped_all = False
             if target_skill_md.is_file() and (
                 hashlib.sha256(
                     target_skill_md.read_text(encoding="utf-8").encode("utf-8")
@@ -495,7 +613,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         )
 
 
-def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
+def _copy_skills_dir(source_dir: Path, target_dir: Path, *, dry_run: bool = False) -> bool:
     """Copy the skills tree from source to target (one subdir per skill).
 
     Compare-then-write, not ``rmtree`` + ``copytree``: the previous
@@ -508,9 +626,13 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
     unrelated top-level files (and the crossby marker) are left alone. Inside a
     skill directory crossby owns everything, so those are mirrored exactly.
 
-    Returns True when any file was written or removed.
+    Returns True when any file was written or removed (or, under ``dry_run``,
+    *would* be — nothing is touched on disk, so the dry-run copy fallback can
+    report an honest ``skipped`` using the SAME logic as the real run, no
+    drift). ``dry_run`` defaults False, so existing callers are unaffected.
     """
-    target_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        target_dir.mkdir(parents=True, exist_ok=True)
     changed = False
     source_names: set[str] = set()
 
@@ -518,43 +640,102 @@ def _copy_skills_dir(source_dir: Path, target_dir: Path) -> bool:
         source_names.add(child.name)
         dest = target_dir / child.name
         if child.is_dir() and not child.is_symlink():
-            changed |= clear_conflicting_type(dest, want_dir=True)
-            if mirror_tree(child, dest):
+            changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
+            if mirror_tree(child, dest, dry_run=dry_run):
                 changed = True
         elif child.is_file():
-            changed |= clear_conflicting_type(dest, want_dir=False)
-            if write_if_different(dest, child.read_bytes()):
+            changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
+            if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
                 changed = True
 
-    for child in target_dir.iterdir():
-        if child.name in source_names or child.name == MANAGED_MARKER_NAME:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-            logger.info("skills.stale_removed", path=str(child))
-            changed = True
+    if target_dir.is_dir():  # may not exist yet under dry-run
+        for child in target_dir.iterdir():
+            if child.name in source_names or child.name == MANAGED_MARKER_NAME:
+                continue
+            if child.is_symlink():
+                # A stale skill-dir symlink (live directory link) or a broken
+                # link — remove it, matching the translate path's cleanup. A live
+                # *directory* symlink fails ``not is_symlink()`` and a broken one
+                # fails ``is_dir()``, so without this both slip through and the
+                # copy returns ``skipped`` while a stale link lingers. ``rmtree``
+                # raises on a symlink, so unlink it. A symlink to a real *file* is
+                # left alone — only stale skill directories are cleaned.
+                if child.is_file():
+                    continue
+                if not dry_run:
+                    child.unlink()
+                    logger.info("skills.stale_removed", path=str(child))
+                changed = True
+            elif child.is_dir():
+                if not dry_run:
+                    shutil.rmtree(child)
+                    logger.info("skills.stale_removed", path=str(child))
+                changed = True
 
     return changed
+
+
+def _translate_skill_md_would_change(target_md: Path, rendered: str) -> bool:
+    """True when a translate write would change *target_md* (a leaf symlink is
+    replaced; a missing or byte-different SKILL.md is rewritten; an identical
+    regular file is left untouched). Mirrors ``_sync_translate``'s write decision
+    so a dry-run reports ``skipped`` honestly."""
+    if target_md.is_symlink():
+        return True
+    try:
+        return not target_md.is_file() or target_md.read_text(encoding="utf-8") != rendered
+    except OSError:
+        return True
 
 
 _SUPPORT_DIRS = ("scripts", "references", "assets")
 
 
-def _refresh_skill_support_dirs(source_skill: Path, target_skill: Path) -> None:
+def _refresh_skill_support_dirs(
+    source_skill: Path, target_skill: Path, *, dry_run: bool = False
+) -> bool:
     """Mirror ``scripts/``, ``references/``, ``assets/`` from source to target.
 
-    Idempotent: replaces the target subdir if it exists. Missing source subdirs
-    are also removed from target so deleted support dirs propagate.
+    Compare-then-write via :func:`mirror_tree` instead of ``rmtree`` +
+    ``copytree``: an unchanged support tree is left completely untouched, so a
+    translate re-sync no longer rewrites those files on disk every run (and the
+    lack of churn is reported honestly by the returned flag). ``mirror_tree``
+    also preserves the executable bit, so ``scripts/`` stay runnable. A symlinked
+    target support dir is replaced outright, never followed. Missing source
+    subdirs are removed from the target so deleted support dirs propagate.
+
+    Returns True when any support file was written, chmod'd, or removed (or,
+    under ``dry_run``, *would* be — nothing is touched). ``dry_run`` defaults
+    False, so existing callers keep the exact prior behavior.
     """
+    changed = False
     for subdir in _SUPPORT_DIRS:
         source_sub = source_skill / subdir
         target_sub = target_skill / subdir
+        # Never write through a symlinked target — replace it outright so the
+        # mirror lands under the project root, not the symlink's destination.
+        if target_sub.is_symlink():
+            if not dry_run:
+                target_sub.unlink()
+            changed = True
         if source_sub.is_dir():
-            if target_sub.exists():
+            # A target of the wrong type (a file where a dir belongs) would make
+            # mirror_tree's mkdir fail — clear it first.
+            if target_sub.exists() and not target_sub.is_dir():
+                if not dry_run:
+                    target_sub.unlink()
+                changed = True
+            if mirror_tree(source_sub, target_sub, dry_run=dry_run):
+                changed = True
+        elif target_sub.is_dir():
+            if not dry_run:
                 shutil.rmtree(target_sub)
-            shutil.copytree(str(source_sub), str(target_sub))
+            changed = True
         elif target_sub.exists():
-            shutil.rmtree(target_sub)
+            if not dry_run:
+                target_sub.unlink()
+            changed = True
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -579,11 +760,15 @@ class CursorSkillsWriter(_BaseSkillsWriter):
 class CodexSkillsWriter(_BaseSkillsWriter):
     """Sync skills → .agents/skills/.
 
-    Codex and Antigravity CLI intentionally share this directory. Both
-    writers point at the same physical path, so `detect_skills_source()`'s
-    scan order (`config/skills.py:_SCAN_ORDER`) — not the writer — decides
-    which `AIToolID` a shared directory is attributed to when both are
-    installed.
+    Codex and Antigravity CLI intentionally share this directory. They are
+    **not** idempotent against each other under ``translate`` — each renders
+    target-specific ``SKILL.md`` content — so whichever ran second used to
+    churn the tree every sync. ``run_sync`` now groups writers by physical
+    target path and lets a single winner write ``.agents/skills/``;
+    registration order in ``sync/__init__.py`` (Codex before Antigravity CLI)
+    is the documented, stable ownership precedence. ``detect_skills_source()``'s
+    scan order (`config/skills.py:_SCAN_ORDER`) separately decides which
+    `AIToolID` a shared *source* directory is attributed to.
     """
 
     tool_id = AIToolID.CODEX
@@ -591,7 +776,12 @@ class CodexSkillsWriter(_BaseSkillsWriter):
 
 
 class AntigravityCLISkillsWriter(_BaseSkillsWriter):
-    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex."""
+    """See :class:`CodexSkillsWriter` — shares `.agents/skills/` with Codex.
+
+    ``run_sync`` grouping resolves the shared path; Codex wins when both are
+    installed (registration order), and this writer runs standalone when Codex
+    is absent (e.g. ``--to antigravity-cli``).
+    """
 
     tool_id = AIToolID.ANTIGRAVITY_CLI
     _target_rel = SKILLS_DIR[AIToolID.ANTIGRAVITY_CLI]

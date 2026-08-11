@@ -47,6 +47,49 @@ def _make_writer(
     return _W()
 
 
+def _make_whole_file_writer(
+    tool_id: AIToolID,
+    concern: SyncConcern,
+    target_rel: str,
+    action: Literal["created", "updated", "skipped", "error"] = "created",
+    *,
+    emit_path: bool = True,
+) -> AbstractSyncWriter:
+    """A whole-file overwrite writer (opts into target-path grouping).
+
+    ``emit_path=False`` returns a result with ``file_path=None`` — the shape a
+    winner produces when it wrote nothing (e.g. ``skipped`` with no source
+    configured), used to assert covered rows don't invent an artifact path.
+    """
+
+    class _WF(AbstractSyncWriter):
+        _owns_whole_file = True
+
+        def __init__(self) -> None:
+            self.tool_id = tool_id
+            self.concern = concern
+            self._target_rel = target_rel
+            self.calls: list[bool] = []
+
+        def sync(
+            self,
+            data: SyncData,
+            project_root: Path,
+            *,
+            dry_run: bool = False,
+            force: bool = False,
+        ) -> SyncResult:
+            self.calls.append(dry_run)
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action=action,
+                file_path=(project_root / self._target_rel) if emit_path else None,
+            )
+
+    return _WF()
+
+
 def _registry_with(*writers: AbstractSyncWriter) -> SyncRegistry:
     reg = SyncRegistry()
     for w in writers:
@@ -129,6 +172,176 @@ class TestRunSyncFiltering:
             registry=reg,
         )
         assert len(results) == 1
+
+
+class TestRunSyncWholeFileGrouping:
+    """run_sync collapses whole-file writers that share one physical target."""
+
+    def _rules_rows(self, results: list[SyncResult]) -> list[SyncResult]:
+        return [r for r in results if r.concern == SyncConcern.RULES]
+
+    def test_shared_target_collapses_to_first_registered_winner(self, tmp_path: Path) -> None:
+        # Codex registered before Antigravity CLI → Codex is the deterministic
+        # winner; agy is emitted covered-by without running its .sync().
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md")
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+
+        assert w_codex.calls == [False]  # type: ignore[attr-defined]  # winner ran
+        assert w_agy.calls == []  # type: ignore[attr-defined]  # covered — never ran
+        rows = self._rules_rows(results)
+        ran = [r for r in rows if r.action != "skipped"]
+        covered = [r for r in rows if r.action == "skipped"]
+        assert [r.tool_id for r in ran] == [AIToolID.CODEX]
+        assert len(covered) == 1
+        assert covered[0].tool_id == AIToolID.ANTIGRAVITY_CLI
+        assert covered[0].message == "covered by codex"
+        assert covered[0].file_path == tmp_path / "AGENTS.md"
+
+    def test_covered_row_mirrors_winner_absent_artifact(self, tmp_path: Path) -> None:
+        # When the winner produced no artifact (skipped with file_path=None,
+        # e.g. no source configured), the covered row must also carry
+        # file_path=None so the report classifies it as "Not Added" rather than
+        # "Added" — it must not fall back to its own static target_path().
+        w_codex = _make_whole_file_writer(
+            AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md", action="skipped", emit_path=False
+        )
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        rows = self._rules_rows(results)
+        winner = next(r for r in rows if r.tool_id == AIToolID.CODEX)
+        covered = next(r for r in rows if r.tool_id == AIToolID.ANTIGRAVITY_CLI)
+        assert winner.file_path is None
+        assert covered.action == "skipped"
+        assert covered.message == "covered by codex"
+        assert covered.file_path is None
+
+    def test_no_two_grouped_writers_run_for_one_path(self, tmp_path: Path) -> None:
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.SKILLS, ".agents/skills")
+        w_agy = _make_whole_file_writer(
+            AIToolID.ANTIGRAVITY_CLI, SyncConcern.SKILLS, ".agents/skills"
+        )
+        reg = _registry_with(w_codex, w_agy)
+
+        run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        # Exactly one of the two writers sharing the path actually ran.
+        ran = [w for w in (w_codex, w_agy) if w.calls]  # type: ignore[attr-defined]
+        assert len(ran) == 1
+
+    def test_covered_row_keeps_original_position_when_interleaved(self, tmp_path: Path) -> None:
+        # A non-group writer sits BETWEEN the two group members. The covered row
+        # must stay in its original slot (last), not be hoisted next to the winner.
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md")
+        w_mid = _make_writer(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_mid, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.CLAUDE, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        order = [
+            (r.tool_id, r.concern, r.action)
+            for r in results
+            if r.concern in {SyncConcern.RULES, SyncConcern.PERMISSIONS}
+        ]
+        assert order == [
+            (AIToolID.CODEX, SyncConcern.RULES, "created"),
+            (AIToolID.CLAUDE, SyncConcern.PERMISSIONS, "created"),
+            (AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "skipped"),
+        ]
+
+    def test_grouping_applies_under_dry_run(self, tmp_path: Path) -> None:
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md")
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            dry_run=True,
+            registry=reg,
+        )
+        assert w_codex.calls == [True]  # type: ignore[attr-defined]  # winner ran in dry-run
+        assert w_agy.calls == []  # type: ignore[attr-defined]
+        covered = [r for r in self._rules_rows(results) if r.action == "skipped"]
+        assert len(covered) == 1
+        assert covered[0].message == "covered by codex"
+
+    def test_single_member_group_runs_when_codex_absent(self, tmp_path: Path) -> None:
+        # agy-only install: the installed-tools filter removes Codex first, so agy
+        # is the sole member of the AGENTS.md group and syncs normally.
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md")
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        assert w_codex.calls == []  # type: ignore[attr-defined]  # filtered out
+        assert w_agy.calls == [False]  # type: ignore[attr-defined]  # ran as sole member
+        rows = self._rules_rows(results)
+        assert len(rows) == 1
+        assert rows[0].tool_id == AIToolID.ANTIGRAVITY_CLI
+        assert rows[0].action != "skipped"
+
+    def test_tool_filter_to_agy_runs_agy_alone(self, tmp_path: Path) -> None:
+        # `--to antigravity-cli` → tool_id filter runs first; Codex is not in the
+        # group, so agy syncs AGENTS.md.
+        w_codex = _make_whole_file_writer(AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md")
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        run_sync(SyncData(), tmp_path, tool_id=AIToolID.ANTIGRAVITY_CLI, registry=reg)
+        assert w_codex.calls == []  # type: ignore[attr-defined]
+        assert w_agy.calls == [False]  # type: ignore[attr-defined]
+
+    def test_winner_error_surfaces_and_still_covers_rest(self, tmp_path: Path) -> None:
+        # No error-fallthrough: a winner whose sync returns error surfaces that
+        # row, and the covered member is still emitted skipped (not promoted/run).
+        w_codex = _make_whole_file_writer(
+            AIToolID.CODEX, SyncConcern.RULES, "AGENTS.md", action="error"
+        )
+        w_agy = _make_whole_file_writer(AIToolID.ANTIGRAVITY_CLI, SyncConcern.RULES, "AGENTS.md")
+        reg = _registry_with(w_codex, w_agy)
+
+        results = run_sync(
+            SyncData(),
+            tmp_path,
+            installed_tools=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            registry=reg,
+        )
+        rows = self._rules_rows(results)
+        assert any(r.tool_id == AIToolID.CODEX and r.action == "error" for r in rows)
+        covered = [r for r in rows if r.tool_id == AIToolID.ANTIGRAVITY_CLI]
+        assert len(covered) == 1
+        assert covered[0].action == "skipped"
+        assert w_agy.calls == []  # type: ignore[attr-defined]  # never promoted
 
 
 class TestRunSyncContinueOnError:

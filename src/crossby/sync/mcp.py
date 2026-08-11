@@ -175,6 +175,9 @@ class _JsonMCPWriter(AbstractSyncWriter):
     ) -> SyncResult:
         dirname, filename = self._config_path_parts
         path = project_root / dirname / filename
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         enabled, _disabled = _split_servers(data.mcp_servers)
         updates = {name: self._to_entry(s) for name, s in enabled.items()}
         # Only ledger-owned names may be removed (``data.mcp_remove``), so a
@@ -283,6 +286,13 @@ class ClaudeMCPWriter(_JsonMCPWriter):
     ) -> SyncResult:
         mcp_path = project_root / ".mcp.json"
         settings_path = project_root / ".claude" / "settings.json"
+        # Both artifacts (.mcp.json at the root has no ancestor to check;
+        # .claude/settings.json does) — refuse a symlinked ancestor before either
+        # write escapes the project.
+        for candidate in (mcp_path, settings_path):
+            ancestor_err = self.contained_or_error(project_root, candidate)
+            if ancestor_err is not None:
+                return ancestor_err
         enabled, _disabled = _split_servers(data.mcp_servers)
         updates = {name: self._to_entry(s) for name, s in enabled.items()}
         # Only ledger-owned names may be removed / de-approved.
@@ -400,6 +410,9 @@ class CodexMCPWriter(AbstractSyncWriter):
         force: bool = False,
     ) -> SyncResult:
         path = project_root / ".codex" / "config.toml"
+        ancestor_err = self.contained_or_error(project_root, path)
+        if ancestor_err is not None:
+            return ancestor_err
         enabled, _disabled = _split_servers(data.mcp_servers)
         # Only ledger-owned names may be removed (``data.mcp_remove``).
         action, message, written, created, removed = self._write_toml(

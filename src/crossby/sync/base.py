@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from crossby.models.ai import AIToolID
+from crossby.sync.file_utils import first_symlinked_ancestor
 
 if TYPE_CHECKING:
     from crossby.models.config import HookEntry, MCPServerConfig
@@ -122,6 +123,63 @@ class AbstractSyncWriter(ABC):
 
     tool_id: AIToolID
     concern: SyncConcern
+
+    # Whole-file ownership opt-in. Only writers that *overwrite an entire
+    # physical artifact* (rules/agents/skills) set this to True; ``run_sync``
+    # then groups every writer sharing one target path and lets a single winner
+    # write it (see ``run_sync``). Merge-style writers (permissions, MCP, hooks)
+    # leave it False: they co-write shared files (``.claude/settings.json``,
+    # ``.codex/config.toml``) by key and must never be collapsed to one writer.
+    # The flag is an *explicit* opt-in — the grouping never keys off a stray
+    # ``_target_rel`` attribute, so a future merge writer that happens to define
+    # ``_target_rel`` is not grouped by accident.
+    _owns_whole_file: bool = False
+
+    def target_path(self, project_root: Path) -> Path | None:
+        """Physical whole-file artifact this writer overwrites, or ``None``.
+
+        Returns ``project_root / self._target_rel`` for whole-file overwrite
+        writers (those with ``_owns_whole_file = True`` and a ``_target_rel``);
+        ``None`` for merge writers and anything without a declared target.
+
+        This is the *display* path used for :attr:`SyncResult.file_path`.
+        ``run_sync`` derives the grouping key separately (canonicalising the
+        parent) so a symlinked project root never leaks into the reported path.
+        """
+        if not self._owns_whole_file:
+            return None
+        rel = getattr(self, "_target_rel", None)
+        if not isinstance(rel, str):
+            return None
+        return project_root / rel
+
+    def contained_or_error(self, project_root: Path, target: Path) -> SyncResult | None:
+        """Return an ``error`` result when a *parent* of *target* is a symlink.
+
+        ``mkdir(parents=True)`` and ``create_symlink`` follow a symlinked ancestor
+        (e.g. ``.agents -> /outside``), landing writes outside the project even
+        when the final target component is guarded. Every writer must call this
+        before creating or writing its target so no sync can escape the project
+        root through a symlinked tool directory.
+        """
+        bad = first_symlinked_ancestor(project_root, target)
+        if bad is None:
+            return None
+        try:
+            shown_bad = bad.relative_to(project_root)
+            shown_target: Path | str = target.relative_to(project_root)
+        except ValueError:
+            shown_bad, shown_target = bad, target
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action="error",
+            message=(
+                f"{shown_bad} is a symlinked directory on the path to "
+                f"{shown_target}; refusing to write through it (it may point "
+                "outside the project). Remove the symlink and re-run."
+            ),
+        )
 
     @abstractmethod
     def sync(

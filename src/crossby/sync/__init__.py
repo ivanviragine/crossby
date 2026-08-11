@@ -17,7 +17,13 @@ from crossby.sync.agents import (
     CursorAgentsWriter,
     update_agents_gitignore,
 )
-from crossby.sync.base import SyncConcern, SyncData, SyncRegistry, SyncResult
+from crossby.sync.base import (
+    AbstractSyncWriter,
+    SyncConcern,
+    SyncData,
+    SyncRegistry,
+    SyncResult,
+)
 from crossby.sync.hooks import (
     AntigravityCLIHooksWriter,
     ClaudeHooksWriter,
@@ -152,6 +158,51 @@ def run_sync(
 
         writers = [w for w in writers if w.tool_id in installed_tools]
 
+    # Group whole-file *overwrite* writers by their physical target path so a
+    # collision (Codex + Antigravity CLI both own ``AGENTS.md`` /
+    # ``.agents/skills/``) collapses to a single deterministic winner instead of
+    # churning the file on every run and letting registry iteration order decide
+    # the final bytes. Only writers that opt in via ``target_path`` (rules/
+    # agents/skills) are grouped; merge writers (permissions/MCP/hooks) return
+    # ``None`` and are never collapsed — they co-write shared files by key.
+    #
+    # The grouping key canonicalises the *parent* (mirroring
+    # ``file_utils.is_same_path``) without following a target symlink, so
+    # identical ``_target_rel`` strings always collide even when the project
+    # root is reached through a symlink; the displayed ``file_path`` stays the
+    # plain ``project_root / rel``. The winner is the first group member in the
+    # original ``writers`` sequence — i.e. registration order in this module —
+    # which is the documented ownership precedence (Codex before Antigravity CLI).
+    def _grouping_key(writer: AbstractSyncWriter) -> Path | None:
+        tp = writer.target_path(project_root)
+        if tp is None:
+            return None
+        # Canonicalising the parent can fail — ``Path.resolve()`` raises
+        # ``RuntimeError`` on a symlink loop in the parent chain (documented
+        # behaviour on Python < 3.13), and other resolution failures surface as
+        # ``OSError``. This runs *before* the per-writer try/except below, so an
+        # unguarded failure here would abort the whole ``run_sync`` instead of
+        # leaving the bad target to the writer's own containment guard (which
+        # reports an ``error`` row and lets the other writers proceed). Fall back
+        # to the un-resolved path so identical literal targets still collide.
+        try:
+            return tp.parent.resolve() / tp.name
+        except (OSError, RuntimeError):
+            return tp
+
+    writer_keys: dict[int, Path | None] = {}
+    group_winner: dict[Path, AbstractSyncWriter] = {}
+    for w in writers:
+        key = _grouping_key(w)
+        writer_keys[id(w)] = key
+        if key is not None and key not in group_winner:
+            group_winner[key] = w
+    # The winner's actual result, recorded when it runs so covered rows can
+    # mirror the artifact path it produced (see below). The winner is the
+    # first group member in ``writers`` order, so it is always processed
+    # before any covered member of the same group.
+    group_winner_result: dict[Path, SyncResult] = {}
+
     # Ownership ledger — revocation is computed *here*, never inferred by a
     # writer. For each hooks/permissions/MCP writer we diff what crossby wrote
     # last time (the ledger) against the current sync data and hand the writer an
@@ -174,6 +225,41 @@ def run_sync(
     rules_writers_ran = False
     skills_writers_ran = False
     for writer in writers:
+        # Covered-by short-circuit: a non-winner of a whole-file target group is
+        # emitted as ``skipped "covered by <winner>"`` in its ORIGINAL position
+        # without running ``.sync()``. Iterating the original sequence (rather
+        # than reordering winners-first) keeps covered rows where a custom or
+        # interleaved registry placed them. Grouping applies identically under
+        # ``dry_run`` — the winner computes its dry-run result, the rest are
+        # covered. Covered rows carry no ``created`` identities, so the ownership
+        # ledger is unaffected.
+        group_key = writer_keys[id(writer)]
+        if group_key is not None and group_winner[group_key] is not writer:
+            winner = group_winner[group_key]
+            # Mirror the winner's *produced* artifact path, not this writer's
+            # static ``target_path()``. When the winner wrote nothing (e.g. it
+            # returned ``skipped`` with ``file_path=None`` because no source was
+            # configured), the covered row must also carry ``None`` so the report
+            # classifies it as "Not Added" rather than "Added". The winner ran in
+            # an earlier iteration, so its result is already recorded.
+            winner_result = group_winner_result[group_key]
+            results.append(
+                SyncResult(
+                    tool_id=writer.tool_id,
+                    concern=writer.concern,
+                    action="skipped",
+                    file_path=winner_result.file_path,
+                    message=f"covered by {winner.tool_id}",
+                )
+            )
+            if writer.concern == SyncConcern.AGENTS:
+                agents_writers_ran = True
+            elif writer.concern == SyncConcern.RULES:
+                rules_writers_ran = True
+            elif writer.concern == SyncConcern.SKILLS:
+                skills_writers_ran = True
+            continue
+
         writer_data = data
         hooks_owned: frozenset[tuple[str, str]] = frozenset()
         perms_owned: frozenset[str] = frozenset()
@@ -204,6 +290,11 @@ def run_sync(
                 message=str(exc),
             )
         results.append(result)
+        # Record the winner's result so later covered rows in the same group can
+        # mirror its produced artifact path. Only a group winner reaches here (a
+        # non-winner is short-circuited above), so this never overwrites.
+        if group_key is not None:
+            group_winner_result[group_key] = result
 
         # Record intended new ownership, gated on writer success. New ownership =
         # what crossby still owns that is still in the source (previously-owned ∩

@@ -495,6 +495,19 @@ class TestAntigravityCLIMCPWriter:
 class TestCodexMCPWriter:
     writer = CodexMCPWriter()
 
+    def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
+        # Issue #83: a symlinked .codex parent is refused — the config.toml write
+        # would otherwise escape the project root.
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
+        assert result.action == "error"
+        assert "symlinked directory" in (result.message or "")
+        assert not any(outside.iterdir())  # nothing written through the symlink
+
     def test_creates_new_toml_file(self, tmp_path: Path) -> None:
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
         assert result.action == "created"

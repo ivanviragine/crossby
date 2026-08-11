@@ -314,12 +314,19 @@ class TestCodexConfigPreservation:
         path.parent.mkdir(parents=True)
         path.write_text(_HAND_WRITTEN_CONFIG, encoding="utf-8")
 
-        assert _ensure_codex_hooks_feature_flag(tmp_path, dry_run=False) is None
+        # The flag was missing, so the helper writes it and reports (changed, note)
+        # = (True, None): a real write, no manual-fix note.
+        changed, note = _ensure_codex_hooks_feature_flag(tmp_path, dry_run=False)
+        assert changed is True
+        assert note is None
 
         text = path.read_text(encoding="utf-8")
         assert "# Sandbox policy: keep this strict." in text
         assert "# Profiles I actually use." in text
         assert tomllib.loads(text)["features"]["codex_hooks"] is True
+
+        # Idempotent re-run: both flags already set → (False, None), no rewrite.
+        assert _ensure_codex_hooks_feature_flag(tmp_path, dry_run=False) == (False, None)
 
     def test_existing_server_is_replaced_not_duplicated(self, tmp_path: Path) -> None:
         path = tmp_path / ".codex" / "config.toml"

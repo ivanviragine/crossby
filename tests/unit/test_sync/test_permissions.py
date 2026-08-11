@@ -23,6 +23,20 @@ def _make_data(patterns: list[str] | None = None) -> SyncData:
     return SyncData(allowed_commands=patterns or [])
 
 
+def test_permissions_symlinked_ancestor_dir_is_refused(tmp_path: Path) -> None:
+    # Issue #83: a symlinked .claude parent is refused — the settings.json write
+    # would otherwise escape the project root.
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".claude")
+    result = ClaudePermissionWriter().sync(_make_data(["npm:*"]), tmp_path)
+    assert result.action == "error"
+    assert "symlinked directory" in (result.message or "")
+    assert not any(outside.iterdir())  # nothing written through the symlink
+
+
 @pytest.fixture(autouse=True)
 def _patch_cursor_global(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect the Cursor global config path to a temp directory."""

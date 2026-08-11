@@ -115,6 +115,97 @@ class TestSyncResult:
         assert r.message == "test"
 
 
+class TestTargetPath:
+    """Whole-file ownership opt-in used by run_sync's target grouping."""
+
+    def test_default_writer_returns_none(self, tmp_path: Path) -> None:
+        # A writer that never opted in (default ``_owns_whole_file = False``).
+        w = _FakeWriter(AIToolID.CLAUDE, SyncConcern.PERMISSIONS)
+        assert w.target_path(tmp_path) is None
+
+    def test_rules_writer_returns_display_path(self, tmp_path: Path) -> None:
+        from crossby.sync.rules import CodexRulesWriter
+
+        assert CodexRulesWriter().target_path(tmp_path) == tmp_path / "AGENTS.md"
+
+    def test_rules_writers_share_agents_md(self, tmp_path: Path) -> None:
+        from crossby.sync.rules import AntigravityCLIRulesWriter, CodexRulesWriter
+
+        assert (
+            CodexRulesWriter().target_path(tmp_path)
+            == AntigravityCLIRulesWriter().target_path(tmp_path)
+            == tmp_path / "AGENTS.md"
+        )
+
+    def test_skills_writers_share_agents_skills(self, tmp_path: Path) -> None:
+        from crossby.sync.skills import AntigravityCLISkillsWriter, CodexSkillsWriter
+
+        assert (
+            CodexSkillsWriter().target_path(tmp_path)
+            == AntigravityCLISkillsWriter().target_path(tmp_path)
+            == tmp_path / ".agents" / "skills"
+        )
+
+    def test_agents_writers_have_distinct_paths(self, tmp_path: Path) -> None:
+        from crossby.sync.agents import (
+            AntigravityCLIAgentsWriter,
+            ClaudeAgentsWriter,
+            CodexAgentsWriter,
+            CopilotAgentsWriter,
+            CursorAgentsWriter,
+        )
+
+        paths = [
+            w().target_path(tmp_path)
+            for w in (
+                ClaudeAgentsWriter,
+                CursorAgentsWriter,
+                CopilotAgentsWriter,
+                CodexAgentsWriter,
+                AntigravityCLIAgentsWriter,
+            )
+        ]
+        assert all(p is not None for p in paths)
+        assert len(set(paths)) == len(paths)  # no accidental collisions
+
+    def test_merge_writers_return_none(self, tmp_path: Path) -> None:
+        # Merge writers co-write shared files (.claude/settings.json,
+        # .codex/config.toml) by key — they must NEVER be grouped, so every one
+        # returns None regardless of any _target_rel it may carry internally.
+        from crossby.sync.hooks import (
+            AntigravityCLIHooksWriter,
+            ClaudeHooksWriter,
+            CodexHooksWriter,
+            CopilotHooksWriter,
+            CursorHooksWriter,
+        )
+        from crossby.sync.mcp import (
+            AntigravityCLIMCPWriter,
+            ClaudeMCPWriter,
+            CodexMCPWriter,
+            CopilotMCPWriter,
+            CursorMCPWriter,
+        )
+        from crossby.sync.permissions import ClaudePermissionWriter, CursorPermissionWriter
+
+        merge_writers = [
+            ClaudePermissionWriter(),
+            CursorPermissionWriter(scope="project"),
+            ClaudeMCPWriter(),
+            CursorMCPWriter(),
+            CopilotMCPWriter(),
+            CodexMCPWriter(),
+            AntigravityCLIMCPWriter(),
+            ClaudeHooksWriter(),
+            CursorHooksWriter(),
+            CopilotHooksWriter(),
+            CodexHooksWriter(),
+            AntigravityCLIHooksWriter(),
+        ]
+        for w in merge_writers:
+            assert w.target_path(tmp_path) is None, f"{type(w).__name__} must not be grouped"
+
+
 class TestAbstractSyncWriter:
     def test_abstract_method_required(self) -> None:
         """Cannot instantiate AbstractSyncWriter without implementing sync()."""

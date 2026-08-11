@@ -42,6 +42,21 @@ def data() -> SyncData:
     return _make_data()
 
 
+class TestRulesAncestorSymlink:
+    def test_symlinked_ancestor_dir_is_refused(self, project: Path) -> None:
+        # Issue #83: a symlinked parent (.github -> outside) is refused for every
+        # strategy — mkdir/write/create_symlink would follow it and escape the
+        # project, writing copilot-instructions.md outside the root.
+        outside = project / "outside"
+        outside.mkdir()
+        os.symlink(os.path.relpath(outside, project), project / ".github")
+        for strategy in ("symlink", "copy"):
+            result = CopilotRulesWriter().sync(_make_data(strategy=strategy), project)
+            assert result.action == "error", strategy
+            assert "symlinked directory" in (result.message or ""), strategy
+        assert not any(outside.iterdir())  # nothing written through the symlink
+
+
 class TestSymlinkCreation:
     def test_creates_symlinks_for_all_targets(self, project: Path, data: SyncData):
         from crossby.sync import run_sync

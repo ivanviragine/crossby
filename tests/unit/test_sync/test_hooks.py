@@ -1117,9 +1117,7 @@ class TestReadCursorHooksHardening:
         assert len(entries) == 1
         assert entries[0].tools == ["Write", "Bash"]
 
-    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(
-        self, tmp_path: Path
-    ) -> None:
+    def test_genuinely_unscoped_duplicate_is_not_narrowed_by_scoped(self, tmp_path: Path) -> None:
         # A hand-authored unscoped preToolUse entry ("all tools") sharing a
         # command with a scoped duplicate must dominate — only the
         # beforeShellExecution fan-out mirror is allowed to yield to a scoped
@@ -1246,9 +1244,7 @@ class TestFailClosedRoundTrip:
             encoding="utf-8",
         )
 
-    def _write_cursor_fanout_pair(
-        self, root: Path, scoped_entry: dict, shell_entry: dict
-    ) -> None:
+    def _write_cursor_fanout_pair(self, root: Path, scoped_entry: dict, shell_entry: dict) -> None:
         path = root / ".cursor" / "hooks.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -1392,6 +1388,20 @@ class TestCodexHooksWriter:
         assert "PreToolUse" in data["hooks"]
         assert "PostToolUse" in data["hooks"]
 
+    def test_symlinked_ancestor_dir_is_refused(self, tmp_path: Path) -> None:
+        # Issue #83: a symlinked .codex parent must be refused before writing
+        # either .codex/hooks.json or the .codex/config.toml feature flag — both
+        # would otherwise escape the project root.
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        result = self.writer.sync(_cfg(GUARD_HOOK, _post_tool_use_hook()), tmp_path)
+        assert result.action == "error"
+        assert "symlinked directory" in (result.message or "")
+        assert not any(outside.iterdir())  # neither hooks.json nor config.toml written
+
     def test_drops_notification_event(self, tmp_path: Path) -> None:
         """Codex has no notification event; it should be dropped with a note."""
         result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
@@ -1532,6 +1542,57 @@ class TestCodexHooksWriter:
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         entry = data["hooks"]["PreToolUse"][0]
         assert entry["matcher"] == "Edit|Write"
+
+    def test_first_sync_reports_both_artifacts(self, tmp_path: Path) -> None:
+        # Both hooks.json and config.toml are written on a fresh sync; the row's
+        # file_path is the primary (hooks.json) and the message names the flag file.
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        assert result.action == "created"
+        assert result.file_path == tmp_path / ".codex" / "hooks.json"
+        assert result.message is not None
+        assert ".codex/config.toml" in result.message
+
+    def test_second_sync_skipped_and_touches_neither_file(self, tmp_path: Path) -> None:
+        # Issue #83: with hooks present, an unchanged re-sync must be a true no-op —
+        # neither .codex/hooks.json nor .codex/config.toml is rewritten. Before the
+        # fix, `kept` being truthy forced an unconditional hooks.json rewrite.
+        cfg = _cfg(GUARD_HOOK)
+        assert self.writer.sync(cfg, tmp_path).action == "created"
+
+        hooks_json = tmp_path / ".codex" / "hooks.json"
+        config_toml = tmp_path / ".codex" / "config.toml"
+        assert hooks_json.is_file()
+        assert config_toml.is_file()
+        h_mtime, h_bytes = hooks_json.stat().st_mtime_ns, hooks_json.read_bytes()
+        c_mtime, c_bytes = config_toml.stat().st_mtime_ns, config_toml.read_bytes()
+
+        result = self.writer.sync(cfg, tmp_path)
+        assert result.action == "skipped"
+        assert hooks_json.stat().st_mtime_ns == h_mtime
+        assert config_toml.stat().st_mtime_ns == c_mtime
+        assert hooks_json.read_bytes() == h_bytes
+        assert config_toml.read_bytes() == c_bytes
+
+    def test_flag_only_self_heal_reports_config_toml_not_hooks(self, tmp_path: Path) -> None:
+        # If the feature flag is lost (older config or a manual edit) while
+        # hooks.json is still correct, the re-sync self-heals the flag. That write
+        # must be reflected (non-skipped) and reported against config.toml, and it
+        # must NOT rewrite the unchanged hooks.json.
+        import tomllib
+
+        cfg = _cfg(GUARD_HOOK)
+        self.writer.sync(cfg, tmp_path)
+        hooks_json = tmp_path / ".codex" / "hooks.json"
+        config_toml = tmp_path / ".codex" / "config.toml"
+        config_toml.write_text("model = 'gpt-5'\n", encoding="utf-8")  # drop the flag
+        h_mtime = hooks_json.stat().st_mtime_ns
+
+        result = self.writer.sync(cfg, tmp_path)
+        assert result.action != "skipped"
+        assert result.file_path == config_toml
+        assert hooks_json.stat().st_mtime_ns == h_mtime  # hooks.json untouched
+        parsed = tomllib.loads(config_toml.read_text(encoding="utf-8"))
+        assert parsed["features"]["hooks"] is True
 
 
 # ---------------------------------------------------------------------------

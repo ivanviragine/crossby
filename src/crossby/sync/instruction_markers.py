@@ -35,7 +35,19 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\bpermissionmode\b", "Claude permissionMode setting"),
         (r"\bsubagent[s]?\b", "Claude subagents"),
         (r"\btodowrite\b", "Claude TodoWrite tool"),
-        (r"/hooks\b", "Claude /hooks slash command"),
+        # A standalone ``/hooks`` slash command, NOT a path/URL segment. The
+        # negative lookbehind excludes a *preceding* path character (word chars,
+        # ``.``, ``/``, ``:``, ``\``, ``-``); the lookaheads exclude a *trailing*
+        # path continuation — a following ``/``, ``\`` or ``-``
+        # (``/hooks/config.json``, ``/hooks\config``, ``/hooks-config``) or a
+        # ``.`` glued to a word (``/hooks.example.com``, ``/hooks.json``) — while
+        # still allowing a sentence-ending ``/hooks.``, ``/hooks,`` or ``/hooks;``.
+        # So paths and URLs like ``.agents/hooks.json`` (an Antigravity CLI
+        # surface), ``foo/hooks``, ``https://hooks.example.com`` and
+        # ``C:/hooks/config.json`` no longer collide. The ``.agents/hooks.json``
+        # collision was the concrete bug: it made agy-authored hooks content read
+        # as foreign-to-agy and forced a needless copy.
+        (r"(?<![\w./:\\-])/hooks\b(?![/\\-])(?!\.\w)", "Claude /hooks slash command"),
     ),
     AIToolID.CODEX: (
         (r"\.codex/", "Codex config paths"),
@@ -67,6 +79,22 @@ _MARKERS: Mapping[AIToolID, tuple[tuple[str, str], ...]] = {
         (r"\.github/skills/", "Copilot .github/skills paths"),
         (r"\.github/hooks/", "Copilot .github/hooks paths"),
         (r"\.vscode/mcp\.json\b", "Copilot .vscode/mcp.json"),
+    ),
+    # Only agy's *unique* surfaces. ``.agents/skills/`` is deliberately absent —
+    # it is shared with Codex and already a Codex marker, so attributing it to
+    # agy would misclassify shared skills content. A bare ``.agents/`` is also
+    # avoided (it prefixes shared surfaces). The DECISION-hook pattern is the
+    # *structured* JSON form agy hooks emit, not a bare ``decision`` word, so
+    # prose that merely mentions a decision never matches. Its values are agy's
+    # PreToolUse ``allow|deny|ask`` and Stop ``continue`` (see
+    # ``models.ai.HookOutputDialect``); ``block`` is deliberately EXCLUDED — that
+    # is the Claude/Codex Stop shape (``BLOCK_DECISION``), not agy, so matching it
+    # would misattribute their content to agy.
+    AIToolID.ANTIGRAVITY_CLI: (
+        (r"\.agents/hooks\.json", "Antigravity CLI hooks file"),
+        (r"\.agents/mcp_config\.json", "Antigravity CLI MCP config"),
+        (r"\.agents/agents/", "Antigravity CLI agents paths"),
+        (r'"decision"\s*:\s*"(?:allow|deny|ask|continue)"', "Antigravity CLI DECISION hook"),
     ),
 }
 
