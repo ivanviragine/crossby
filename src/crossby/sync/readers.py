@@ -713,6 +713,14 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
     whole matcher-wrapped entry instead (see :func:`_matcher_is_malformed`),
     rather than silently broadening it to all tools.
 
+    Because this is the only hooks reader that classifies entries *by shape*
+    (bare ``Stop`` vs. matcher-wrapped tool events), the bare-handler branch
+    fires only for a genuinely bare entry — no ``matcher``/``hooks`` key. A
+    bare-shape entry carrying a stray ``matcher``/``hooks`` key (malformed, or a
+    valid matcher misplaced onto a top-level ``command``) is routed to the
+    matcher-wrapped path so the same guards apply, rather than being emitted
+    unscoped via the bare branch.
+
     Round-trip gaps (deliberate): the per-hook ``description`` is left empty
     because agy encodes no per-hook comment — only the lossy container *name*
     slug — and ``fail_closed``/``timeout`` are dropped for every tool today
@@ -734,9 +742,20 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                # Bare Stop handler: {"type", "command"} directly in the list.
+                # Bare Stop handler: {"type", "command"} directly in the list —
+                # ONLY when the entry is genuinely bare (no matcher/hooks keys).
+                # An entry carrying a stray matcher/hooks key is a matcher-wrapped
+                # (tool-scoped) entry, possibly malformed; routing it here would
+                # emit it unscoped (tools=[] == "all tools"), silently broadening
+                # a scoped guard. Let it fall through to the matcher-wrapped path
+                # where _matcher_is_malformed() (and the hooks-list check) guard it.
                 bare_command = entry.get("command")
-                if isinstance(bare_command, str) and bare_command:
+                if (
+                    isinstance(bare_command, str)
+                    and bare_command
+                    and "matcher" not in entry
+                    and "hooks" not in entry
+                ):
                     result.append(HookEntry(event=canonical_event, command=bare_command, tools=[]))
                     continue
                 # Matcher-wrapped entry: {"matcher", "hooks": [{"type","command"}]}.
