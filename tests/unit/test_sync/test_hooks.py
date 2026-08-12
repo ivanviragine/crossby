@@ -1209,6 +1209,111 @@ class TestReadClaudeShapeAndAgyHooksHardening:
         )
         assert _read_agy_hooks(tmp_path) == []
 
+    def test_agy_bare_shape_with_malformed_matcher_skips_entry(self, tmp_path: Path) -> None:
+        """A bare-shape entry carrying a stray non-string ``matcher`` must not
+        take the bare-command branch and be emitted unscoped — it routes to the
+        matcher-wrapped path where ``_matcher_is_malformed`` skips it. A valid
+        matcher-wrapped sibling keeps its scope."""
+        _write_agy_hooks_raw(
+            tmp_path,
+            [
+                {"matcher": 123, "command": "bad"},
+                {"matcher": "write_to_file", "hooks": [{"type": "command", "command": "good"}]},
+            ],
+        )
+        commands = {e.command: e.tools for e in _read_agy_hooks(tmp_path)}
+        assert "bad" not in commands
+        assert commands["good"] == ["Write"]
+
+    def test_agy_bare_shape_with_null_matcher_skips_entry(self, tmp_path: Path) -> None:
+        """Explicit ``matcher: null`` on a bare-shape entry is a present-but-invalid
+        scope; it must be skipped, not emitted unscoped via the bare branch."""
+        _write_agy_hooks_raw(
+            tmp_path,
+            [{"matcher": None, "command": "bad"}],
+        )
+        assert _read_agy_hooks(tmp_path) == []
+
+    def test_agy_bare_shape_with_valid_matcher_no_hooks_skips_entry(self, tmp_path: Path) -> None:
+        """A *valid* string matcher misplaced onto a top-level ``command`` (no
+        ``hooks`` list) expresses a real scope; routing it through the bare branch
+        would drop that scope and emit it unscoped. With a ``matcher`` key present
+        it falls through to the matcher-wrapped path, where the absent ``hooks``
+        list drops it (fail-closed) rather than broadening it to all tools."""
+        _write_agy_hooks_raw(
+            tmp_path,
+            [{"matcher": "write_to_file", "command": "bad"}],
+        )
+        assert _read_agy_hooks(tmp_path) == []
+
+    def test_agy_bare_shape_with_stray_hooks_key_skips_entry(self, tmp_path: Path) -> None:
+        """A stray ``hooks`` key (no ``matcher``) on a bare-shape entry also routes
+        away from the bare branch — the ``hooks`` half of the guard — and the
+        non-list ``hooks`` value then drops it rather than emitting it unscoped."""
+        _write_agy_hooks_raw(
+            tmp_path,
+            [{"hooks": "not-a-list", "command": "bad"}],
+        )
+        assert _read_agy_hooks(tmp_path) == []
+
+    def test_agy_stop_bare_handler_with_stray_matcher_is_emitted(self, tmp_path: Path) -> None:
+        """agy honours a ``matcher`` only on the tool-execution events; ``Stop``
+        ignores it and runs every handler by its top-level ``command``. So a
+        hand-authored Stop handler carrying a stray ``matcher``/``hooks`` key is
+        still a live hook agy runs — the reader must emit it unscoped, not route it
+        to the matcher-wrapped path where the absent ``hooks`` list would drop it
+        (which would silently omit the active hook on sync). The matcher/hooks
+        guard applies only to the tool-execution events, where a bare ``command``
+        alone runs nothing."""
+        path = tmp_path / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "container": {
+                        "Stop": [
+                            # Valid string matcher misplaced onto a Stop handler.
+                            {"type": "command", "command": "notify", "matcher": "write_to_file"},
+                            # Even a malformed matcher can't scope Stop, so the
+                            # handler still runs — emit it, don't drop it.
+                            {"type": "command", "command": "cleanup", "matcher": 123},
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        commands = {e.command: e.tools for e in _read_agy_hooks(tmp_path)}
+        assert commands == {"notify": [], "cleanup": []}
+        assert all(e.event == "stop" for e in _read_agy_hooks(tmp_path))
+
+    def test_agy_stop_matcher_wrapped_entry_is_dropped(self, tmp_path: Path) -> None:
+        """agy runs ``Stop`` handlers only by their direct top-level ``command`` —
+        it does not descend into a matcher-wrapped ``{"matcher", "hooks": [...]}``
+        object for ``Stop`` and cannot scope it. Such an entry runs nothing, so the
+        reader must drop it rather than emit a phantom, tool-scoped hook that would
+        then sync to other tools. A genuine bare Stop sibling is still read."""
+        path = tmp_path / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "container": {
+                        "Stop": [
+                            {
+                                "matcher": "write_to_file",
+                                "hooks": [{"type": "command", "command": "phantom"}],
+                            },
+                            {"type": "command", "command": "real"},
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        entries = _read_agy_hooks(tmp_path)
+        assert {e.command: e.tools for e in entries} == {"real": []}
+
 
 class TestReadCopilotHooksHardening:
     def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:
