@@ -1287,6 +1287,33 @@ class TestReadClaudeShapeAndAgyHooksHardening:
         assert commands == {"notify": [], "cleanup": []}
         assert all(e.event == "stop" for e in _read_agy_hooks(tmp_path))
 
+    def test_agy_stop_matcher_wrapped_entry_is_dropped(self, tmp_path: Path) -> None:
+        """agy runs ``Stop`` handlers only by their direct top-level ``command`` —
+        it does not descend into a matcher-wrapped ``{"matcher", "hooks": [...]}``
+        object for ``Stop`` and cannot scope it. Such an entry runs nothing, so the
+        reader must drop it rather than emit a phantom, tool-scoped hook that would
+        then sync to other tools. A genuine bare Stop sibling is still read."""
+        path = tmp_path / ".agents" / "hooks.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "container": {
+                        "Stop": [
+                            {
+                                "matcher": "write_to_file",
+                                "hooks": [{"type": "command", "command": "phantom"}],
+                            },
+                            {"type": "command", "command": "real"},
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        entries = _read_agy_hooks(tmp_path)
+        assert {e.command: e.tools for e in entries} == {"real": []}
+
 
 class TestReadCopilotHooksHardening:
     def test_non_string_bash_is_skipped(self, tmp_path: Path) -> None:

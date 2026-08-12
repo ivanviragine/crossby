@@ -721,13 +721,18 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
     it entirely and runs every handler by its top-level ``command``. So for
     ``Stop`` a top-level ``command`` is always an active handler and is emitted
     unscoped even when the entry carries a stray ``matcher``/``hooks`` key (agy
-    disregards those) — dropping it would silently omit a live hook on sync. On a
-    tool-execution event, though, a top-level ``command`` alone runs nothing (agy
-    needs the ``{"matcher", "hooks": [...]}`` shape there), so a bare-shape entry
-    carrying a stray ``matcher``/``hooks`` key (malformed, or a valid matcher
-    misplaced onto a top-level ``command``) is routed to the matcher-wrapped path
-    where ``_matcher_is_malformed`` and the hooks-list check guard it, rather than
-    being emitted unscoped via the bare branch.
+    disregards those) — dropping it would silently omit a live hook on sync.
+    Conversely, a ``Stop`` entry with *no* top-level ``command`` (e.g. a
+    matcher-wrapped ``{"matcher", "hooks": [...]}`` object) runs nothing under
+    ``Stop`` — agy does not descend into its ``hooks`` list and cannot scope
+    ``Stop`` — so it is dropped rather than emitted as a phantom, incorrectly
+    tool-scoped hook. On a tool-execution event, though, a top-level ``command``
+    alone runs nothing (agy needs the ``{"matcher", "hooks": [...]}`` shape
+    there), so a bare-shape entry carrying a stray ``matcher``/``hooks`` key
+    (malformed, or a valid matcher misplaced onto a top-level ``command``) is
+    routed to the matcher-wrapped path where ``_matcher_is_malformed`` and the
+    hooks-list check guard it, rather than being emitted unscoped via the bare
+    branch.
 
     Round-trip gaps (deliberate): the per-hook ``description`` is left empty
     because agy encodes no per-hook comment — only the lossy container *name*
@@ -775,7 +780,16 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
                 ):
                     result.append(HookEntry(event=canonical_event, command=bare_command, tools=[]))
                     continue
+                if event_ignores_matcher:
+                    # Stop: only direct top-level `command` handlers (emitted
+                    # above) run. agy does not descend into a matcher-wrapped
+                    # {"matcher", "hooks": [...]} object for Stop and cannot scope
+                    # it, so such an entry runs nothing — drop it rather than
+                    # emitting a phantom, incorrectly-scoped hook that would then
+                    # sync to other tools.
+                    continue
                 # Matcher-wrapped entry: {"matcher", "hooks": [{"type","command"}]}.
+                # (Tool-execution events only — Stop is handled above.)
                 if _matcher_is_malformed(entry):
                     continue
                 inner_hooks = entry.get("hooks")
