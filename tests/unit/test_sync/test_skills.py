@@ -738,6 +738,34 @@ class TestMirrorTree:
         assert (target / "sub" / "child.txt").read_text(encoding="utf-8") == "v1"
         assert not any(external.iterdir())  # escape target still untouched
 
+    def test_planted_temp_symlink_is_not_written_through(self, tmp_path: Path) -> None:
+        # Issue #133: mirror_tree's per-child write must not follow a pre-planted
+        # deterministic-named ``<child>.crossby-tmp`` sibling *symlink* — doing so
+        # would land attacker-controlled content at the link's referent outside
+        # the mirror root. mkstemp (O_EXCL, unpredictable name) closes this.
+        project = tmp_path / "project"
+        project.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        victim = external / "victim.txt"
+        victim.write_text("PRECIOUS", encoding="utf-8")
+
+        source = project / "src"
+        source.mkdir()
+        (source / "payload.md").write_text("attacker-content", encoding="utf-8")
+
+        target = project / "dst"
+        target.mkdir()  # a real target dir (e.g. a managed skills dir)
+        # The planted symlink at the exact deterministic temp name the old code used.
+        (target / "payload.md.crossby-tmp").symlink_to(victim)
+
+        assert mirror_tree(source, target, project_root=project) is True
+        assert victim.read_text(encoding="utf-8") == "PRECIOUS"  # never written through
+        # The child landed as a real file with the source content, inside the tree.
+        child = target / "payload.md"
+        assert not child.is_symlink()
+        assert child.read_text(encoding="utf-8") == "attacker-content"
+
 
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""

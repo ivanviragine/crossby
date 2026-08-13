@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 from crossby.sync.safe_write import (
@@ -147,6 +149,14 @@ def _atomic_write_if_different(path: Path, content: bytes, *, dry_run: bool = Fa
     contained once at entry, so re-checking each grandchild would both be
     redundant and spuriously fail under ``dry_run`` (where a nested target
     symlink is not actually removed and would look like a symlinked ancestor).
+
+    The temp file uses :func:`tempfile.mkstemp` (a unique, unpredictable name
+    created with ``O_CREAT|O_EXCL``) rather than a fixed ``<name>.crossby-tmp``
+    sibling written with ``Path.write_bytes``: a deterministic sibling name a
+    caller could pre-plant as a **symlink** would otherwise be *followed* by the
+    write, landing content at the link's referent outside the mirror root — the
+    exact symlink-escape class of issue #133. ``os.replace`` then swaps the temp
+    onto *path*, replacing a symlink leaf in place without following it.
     """
     try:
         if path.is_file() and not path.is_symlink() and path.read_bytes() == content:
@@ -156,10 +166,12 @@ def _atomic_write_if_different(path: Path, content: bytes, *, dry_run: bool = Fa
     if dry_run:
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".crossby-tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".crossby-tmp")
+    tmp = Path(tmp_name)
     try:
-        tmp.write_bytes(content)
-        tmp.replace(path)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
