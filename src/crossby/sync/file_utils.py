@@ -7,6 +7,14 @@ import shutil
 import stat
 from pathlib import Path
 
+from crossby.sync.safe_write import (
+    ProjectScope,
+    assert_ancestors,
+    first_symlinked_ancestor_in_scope,
+    safe_write_bytes,
+    safe_write_text,
+)
+
 # Marker file written into managed target directories (agents/skills) so
 # subsequent syncs can distinguish a directory crossby owns from one a user
 # (or another tool) populated by hand. Without this marker, a native-looking
@@ -75,17 +83,12 @@ def first_symlinked_ancestor(root: Path, target: Path) -> Path | None:
     link like ``.agents -> /outside`` lands writes outside *root* even when the
     final target component is itself guarded. Callers refuse the sync when this
     returns a path.
+
+    Thin wrapper over :func:`crossby.sync.safe_write.first_symlinked_ancestor_in_scope`
+    (the single canonical ancestor check), kept for the writer-facing
+    :meth:`crossby.sync.base.AbstractSyncWriter.contained_or_error` message.
     """
-    try:
-        rel = target.relative_to(root)
-    except ValueError:
-        return None
-    current = root
-    for part in rel.parts[:-1]:
-        current = current / part
-        if current.is_symlink():
-            return current
-    return None
+    return first_symlinked_ancestor_in_scope(ProjectScope(root), target)
 
 
 def clear_conflicting_type(dest: Path, *, want_dir: bool, dry_run: bool = False) -> bool:
@@ -114,21 +117,39 @@ def clear_conflicting_type(dest: Path, *, want_dir: bool, dry_run: bool = False)
     return False
 
 
-def write_if_different(path: Path, content: bytes, *, dry_run: bool = False) -> bool:
-    """Write *content* to *path* only when it differs from what's there.
+def write_if_different(
+    path: Path, content: bytes, *, project_root: Path, dry_run: bool = False
+) -> bool:
+    """Write *content* to *path* only when it differs, refusing symlink escape.
 
     Returns True when the file was written (or, under ``dry_run``, *would* be).
     Keeping unchanged files untouched is what lets writers report an honest
-    ``skipped`` and keeps re-syncs out of ``git status``. ``dry_run`` defaults
-    False, so existing callers keep the exact prior behavior.
+    ``skipped`` and keeps re-syncs out of ``git status``.
 
-    The write itself goes through a temp file plus rename, so an interrupted
-    sync leaves the previous content intact rather than a truncated file — the
-    same guarantee :func:`crossby.config.json_utils.atomic_write_text` gives
-    the config writers.
+    Thin wrapper over :func:`crossby.sync.safe_write.safe_write_bytes` with
+    ``leaf_policy="replace"`` (these are crossby-owned artifacts): a symlinked
+    ancestor between *project_root* and *path* is refused, a symlinked leaf is
+    replaced atomically (never read through), and a real unchanged file is left
+    untouched. The atomic temp-file + rename means an interrupted sync leaves
+    the previous content intact rather than a truncated file.
+    """
+    return safe_write_bytes(
+        ProjectScope(project_root), path, content, dry_run=dry_run, leaf_policy="replace"
+    )
+
+
+def _atomic_write_if_different(path: Path, content: bytes, *, dry_run: bool = False) -> bool:
+    """Write-if-different used *inside* :func:`mirror_tree` for a scrubbed child.
+
+    Unlike the public :func:`write_if_different`, this does **not** re-run the
+    ancestor containment check per child: ``mirror_tree`` already replaces every
+    symlink (root and nested) top-down before descending, and its *root* is
+    contained once at entry, so re-checking each grandchild would both be
+    redundant and spuriously fail under ``dry_run`` (where a nested target
+    symlink is not actually removed and would look like a symlinked ancestor).
     """
     try:
-        if path.is_file() and path.read_bytes() == content:
+        if path.is_file() and not path.is_symlink() and path.read_bytes() == content:
             return False
     except OSError:
         pass
@@ -180,10 +201,21 @@ def mirror_tree(
     source_dir: Path,
     target_dir: Path,
     *,
+    project_root: Path,
     preserve: frozenset[str] = frozenset(),
     dry_run: bool = False,
+    _check_containment: bool = True,
 ) -> bool:
     """Mirror *source_dir* onto *target_dir*, writing only what differs.
+
+    Containment: at the top-level call *target_dir* is checked for a symlinked
+    ancestor under *project_root* (:func:`assert_ancestors`); a symlinked
+    ancestor raises :class:`~crossby.sync.safe_write.SyncContainmentError`. Every
+    symlink *at or below* the mirror root is then replaced top-down before any
+    write, so no write escapes through a link — the recursion therefore skips
+    the redundant per-level ancestor re-check (``_check_containment=False``),
+    which would also spuriously fire under ``dry_run`` on a not-yet-removed
+    nested symlink.
 
     Unlike ``rmtree`` + ``copytree``, an unchanged tree is left completely
     untouched — no file is removed and rewritten just to arrive at the same
@@ -210,6 +242,11 @@ def mirror_tree(
     False, so every existing caller keeps the exact prior behavior; a dry-run
     caller gets an honest would-change flag for reporting ``skipped``.
     """
+    if _check_containment:
+        # Refuse a symlinked ancestor of the mirror root (e.g. ``.claude`` linked
+        # elsewhere). The root itself (a symlinked ``target_dir``) is the leaf,
+        # excluded here and replaced below.
+        assert_ancestors(ProjectScope(project_root), target_dir)
     changed = False
     # Never mirror *through* a symlinked target root — replace it with a real
     # directory so nothing lands at the symlink's destination.
@@ -272,11 +309,17 @@ def mirror_tree(
             # above still prevents writing *through* a link on the destination side.
             if child.is_dir():
                 changed |= clear_conflicting_type(dest, want_dir=True, dry_run=dry_run)
-                if mirror_tree(child, dest, dry_run=dry_run):
+                if mirror_tree(
+                    child,
+                    dest,
+                    project_root=project_root,
+                    dry_run=dry_run,
+                    _check_containment=False,
+                ):
                     changed = True
             elif child.is_file():
                 changed |= clear_conflicting_type(dest, want_dir=False, dry_run=dry_run)
-                if write_if_different(dest, child.read_bytes(), dry_run=dry_run):
+                if _atomic_write_if_different(dest, child.read_bytes(), dry_run=dry_run):
                     changed = True
                 if _sync_mode(dest, child, dry_run=dry_run):
                     changed = True
@@ -349,23 +392,29 @@ def has_managed_marker(target_dir: Path) -> bool:
     return marker.is_file() and not marker.is_symlink()
 
 
-def write_managed_marker(target_dir: Path) -> None:
+def write_managed_marker(target_dir: Path, *, project_root: Path, dry_run: bool = False) -> bool:
     """Idempotently write the crossby ownership marker into ``target_dir``.
 
-    Safe to call repeatedly — the marker content is fixed, so rewriting it
-    on every sync is a no-op for git. Callers should invoke this whenever a
-    write-bearing sync (copy or translate) produces or refreshes content in
-    ``target_dir``.
+    Returns a **would-change** bool (True when the marker was written, or under
+    ``dry_run`` *would* be) so a first-sync marker write is visible to dry-run
+    reporting instead of being invisible *and* mutating disk under ``--plan`` —
+    the latent idempotency bug this closes (issue #133). Callers should invoke
+    this whenever a write-bearing sync (copy or translate) produces or refreshes
+    content in ``target_dir``, and OR the result into their would-change flag.
 
-    A pre-existing marker *symlink* is replaced outright, never written through —
-    otherwise the write would land at the link's destination, potentially an
-    arbitrary external file.
+    Routed through :func:`crossby.sync.safe_write.safe_write_text` with
+    ``leaf_policy="replace"``: a symlinked ancestor is refused, a pre-existing
+    marker *symlink* is replaced outright (never written through, so the write
+    can't land at the link's arbitrary external destination), and an unchanged
+    real marker is left untouched.
     """
     if not target_dir.is_dir():
-        return
+        return False
     marker = target_dir / MANAGED_MARKER_NAME
-    if marker.is_symlink():
-        marker.unlink()
-    elif marker.is_file() and marker.read_text(encoding="utf-8") == _MANAGED_MARKER_BODY:
-        return
-    marker.write_text(_MANAGED_MARKER_BODY, encoding="utf-8")
+    return safe_write_text(
+        ProjectScope(project_root),
+        marker,
+        _MANAGED_MARKER_BODY,
+        dry_run=dry_run,
+        leaf_policy="replace",
+    )

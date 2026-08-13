@@ -176,7 +176,7 @@ class SceneLaunchContext:
                         "(crossby never creates symlinks under the launch dir)"
                     )
         atomic_write_text(path, content, within=self.project_root)
-        write_managed_marker(self.launch_dir)
+        write_managed_marker(self.launch_dir, project_root=self.project_root)
         ensure_launch_excluded(self.project_root)
         return path
 

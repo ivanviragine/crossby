@@ -442,9 +442,9 @@ class ClaudeHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".claude" / "settings.json"
-        ancestor_err = self.contained_or_error(project_root, path)
-        if ancestor_err is not None:
-            return ancestor_err
+        containment_err = self.merge_target_or_error(project_root, path)
+        if containment_err is not None:
+            return containment_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -802,9 +802,9 @@ class CursorHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".cursor" / "hooks.json"
-        ancestor_err = self.contained_or_error(project_root, path)
-        if ancestor_err is not None:
-            return ancestor_err
+        containment_err = self.merge_target_or_error(project_root, path)
+        if containment_err is not None:
+            return containment_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -963,9 +963,9 @@ class CopilotHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".github" / "hooks" / "hooks.json"
-        ancestor_err = self.contained_or_error(project_root, path)
-        if ancestor_err is not None:
-            return ancestor_err
+        containment_err = self.merge_target_or_error(project_root, path)
+        if containment_err is not None:
+            return containment_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -1195,9 +1195,9 @@ class AntigravityCLIHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".agents" / "hooks.json"
-        ancestor_err = self.contained_or_error(project_root, path)
-        if ancestor_err is not None:
-            return ancestor_err
+        containment_err = self.merge_target_or_error(project_root, path)
+        if containment_err is not None:
+            return containment_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -1450,9 +1450,15 @@ class CodexHooksWriter(AbstractSyncWriter):
             )
 
         path = project_root / ".codex" / "hooks.json"
-        ancestor_err = self.contained_or_error(project_root, path)
-        if ancestor_err is not None:
-            return ancestor_err
+        config_path = project_root / ".codex" / "config.toml"
+        # Multi-file writer: hooks.json *and* the config.toml feature flag. Both
+        # are shared merge files — preflight ancestor+leaf on BOTH before the
+        # first read/write, so a refused symlink on config.toml can't leave a
+        # partial hooks.json (and the previously-unguarded config.toml write at
+        # ``_ensure_codex_hooks_feature_flag`` is now contained too).
+        preflight_err = self.preflight(project_root, path, config_path)
+        if preflight_err is not None:
+            return preflight_err
         file_data, error, was_new = read_json_file(path)
         if error is not None:
             msg = f"{path} {error} — skipping hooks sync. Fix the file manually or delete it."
@@ -1567,7 +1573,6 @@ class CodexHooksWriter(AbstractSyncWriter):
             if flag_note is not None:
                 notes.append(flag_note)
 
-        config_path = project_root / ".codex" / "config.toml"
         if not hooks_changed and not flag_changed:
             return SyncResult(
                 tool_id=self.tool_id,

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Literal
@@ -21,6 +19,7 @@ from crossby.sync.instruction_markers import (
     manual_fix_notes_for_target,
 )
 from crossby.sync.manual_fix import append_manual_fix_block
+from crossby.sync.safe_write import ProjectScope, safe_copy, safe_write_text
 
 logger = structlog.get_logger()
 
@@ -159,21 +158,24 @@ def _render_copy_body(source_text: str, target_tool: AIToolID) -> str:
     return append_manual_fix_block(source_text, notes)
 
 
-def _write_copy(source_path: Path, target_path: Path, target_tool: AIToolID) -> None:
+def _write_copy(
+    source_path: Path, target_path: Path, target_tool: AIToolID, *, project_root: Path
+) -> None:
     """Copy source to target with managed header and optional manual-fix block."""
     source_text = source_path.read_text(encoding="utf-8")
     body = _render_copy_body(source_text, target_tool)
-    target_path.write_text(MANAGED_HEADER + "\n" + body, encoding="utf-8")
+    safe_write_text(
+        ProjectScope(project_root),
+        target_path,
+        MANAGED_HEADER + "\n" + body,
+        leaf_policy="replace",
+    )
 
 
-def _backup_file(target_path: Path) -> None:
+def _backup_file(target_path: Path, *, project_root: Path) -> None:
     """Create a .bak backup of the target file (numbered if .bak exists)."""
     dest = backup_path(target_path)
-    if target_path.is_symlink():
-        link_target = os.readlink(target_path)
-        os.symlink(link_target, dest)
-    else:
-        shutil.copy2(target_path, dest)
+    safe_copy(ProjectScope(project_root), dest, target_path)
 
 
 def _warn_if_git_tracked(project_root: Path, rel_path: str) -> None:
@@ -280,7 +282,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                         message="target exists and is not managed by crossby; use --force",
                     )
                 if not dry_run:
-                    _backup_file(target_path)
+                    _backup_file(target_path, project_root=project_root)
             elif _is_up_to_date(target_path, source_path, effective_strategy, self.tool_id):
                 _warn_if_git_tracked(project_root, self._target_rel)
                 return SyncResult(
@@ -323,7 +325,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     tool=str(self.tool_id),
                     target=self._target_rel,
                 )
-                _write_copy(source_path, target_path, self.tool_id)
+                _write_copy(source_path, target_path, self.tool_id, project_root=project_root)
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,
@@ -332,7 +334,7 @@ class _BaseRulesWriter(AbstractSyncWriter):
                     message="copy (symlink failed)",
                 )
         else:
-            _write_copy(source_path, target_path, self.tool_id)
+            _write_copy(source_path, target_path, self.tool_id, project_root=project_root)
 
         _warn_if_git_tracked(project_root, self._target_rel)
 
