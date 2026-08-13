@@ -583,9 +583,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 # A support-dir change means this skill was not a no-op, so a
                 # re-sync that only touched (or should touch) scripts/references/
                 # assets is reported as ``updated`` rather than ``skipped``.
-                if _refresh_skill_support_dirs(
-                    skill_dir, target_skill, project_root=project_root
-                ):
+                if _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root):
                     skipped_all = False
                 continue
 

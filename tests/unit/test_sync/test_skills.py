@@ -584,7 +584,8 @@ class TestMirrorTree:
         source.mkdir()  # empty source dir
         target = tmp_path / "dst"
 
-        assert mirror_tree(source, target, project_root=tmp_path, dry_run=True) is True  # would create it
+        # would create it
+        assert mirror_tree(source, target, project_root=tmp_path, dry_run=True) is True
         assert not target.exists()  # dry-run touched nothing
 
         assert mirror_tree(source, target, project_root=tmp_path) is True  # created the empty dir
@@ -643,7 +644,8 @@ class TestMirrorTree:
         (source / "run.sh").write_text("v2", encoding="utf-8")
         os.chmod(target, 0o400)
 
-        assert mirror_tree(source, target, project_root=tmp_path) is True  # must not raise PermissionError
+        # must not raise PermissionError
+        assert mirror_tree(source, target, project_root=tmp_path) is True
         assert (target / "run.sh").read_text(encoding="utf-8") == "v2"
 
         os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
@@ -1059,7 +1061,8 @@ class TestTranslateStrategy:
         # missing target, all without touching disk.
         source = _make_source(tmp_path, ["a", "b"])
         target = tmp_path / "target"
-        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True  # target absent
+        # target absent
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         assert not target.exists()  # nothing written in dry-run
 
         # Real copy, then an unchanged dry-run reports no change.

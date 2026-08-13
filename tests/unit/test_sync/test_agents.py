@@ -615,7 +615,9 @@ class TestCopyStrategy:
         target = tmp_path / ".claude" / "agents"
 
         # Fresh target: dry-run reports a change but writes nothing.
-        assert _copy_all_agents(source, target, "claude", project_root=tmp_path, dry_run=True) is True
+        assert (
+            _copy_all_agents(source, target, "claude", project_root=tmp_path, dry_run=True) is True
+        )
         assert not target.exists()
 
         # Materialise, then an unchanged dry-run reports no change (→ skipped).
@@ -629,7 +631,9 @@ class TestCopyStrategy:
             "---\nname: reviewer\ndescription: CHANGED\n---\nNew body.\n", encoding="utf-8"
         )
         before = (target / "reviewer.md").read_text(encoding="utf-8")
-        assert _copy_all_agents(source, target, "claude", project_root=tmp_path, dry_run=True) is True
+        assert (
+            _copy_all_agents(source, target, "claude", project_root=tmp_path, dry_run=True) is True
+        )
         assert (target / "reviewer.md").read_text(encoding="utf-8") == before  # unwritten
 
 
