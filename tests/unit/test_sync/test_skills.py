@@ -706,6 +706,38 @@ class TestMirrorTree:
 
         os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
 
+    def test_nested_target_symlink_dry_run_does_not_spuriously_error(self, tmp_path: Path) -> None:
+        # Issue #133 (A.6): a nested *target* symlink is not removed under
+        # dry_run (dry-run touches nothing), so a naive per-child ancestor
+        # re-check would see it as a symlinked ancestor and wrongly report a
+        # containment error even though the real run replaces it first. mirror_tree
+        # must report the would-change honestly and touch nothing.
+        project = tmp_path / "project"
+        project.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+
+        source = project / "src"
+        (source / "sub").mkdir(parents=True)
+        (source / "sub" / "child.txt").write_text("v1", encoding="utf-8")
+
+        target = project / "dst"
+        target.mkdir()
+        # A nested target child that is a symlink pointing outside the project.
+        (target / "sub").symlink_to(external, target_is_directory=True)
+
+        # Dry-run must not raise and must report a change (the symlink would be
+        # replaced + child written on the real run).
+        assert mirror_tree(source, target, project_root=project, dry_run=True) is True
+        assert (target / "sub").is_symlink()  # dry-run touched nothing
+        assert not any(external.iterdir())  # no write through the symlink
+
+        # The real run replaces the nested symlink and writes into a real dir.
+        assert mirror_tree(source, target, project_root=project) is True
+        assert not (target / "sub").is_symlink()
+        assert (target / "sub" / "child.txt").read_text(encoding="utf-8") == "v1"
+        assert not any(external.iterdir())  # escape target still untouched
+
 
 class TestTranslateStrategy:
     """``translate`` strategy: per-skill copy with target-aware SKILL.md rewriting."""
