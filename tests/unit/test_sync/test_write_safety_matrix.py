@@ -34,6 +34,7 @@ from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry, MCPServerConfig
 from crossby.sync import _registry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData
+from crossby.sync.file_utils import MANAGED_MARKER_NAME
 from crossby.sync.gitignore_utils import update_managed_block
 from crossby.sync.ownership import OwnershipLedger, load_ledger_checked, save_ledger
 from crossby.sync.report import write_persistent_report
@@ -246,11 +247,14 @@ def test_multifile_symlinked_secondary_refuses_before_first_write(
 def test_multifile_malformed_secondary_leaves_no_partial(
     writer: AbstractSyncWriter, roots: tuple[Path, Path]
 ) -> None:
-    # A malformed secondary is a *write-failure*, not a containment failure — the
-    # documented guarantee is containment-failures-only, so we assert the writer
-    # surfaces an ``error`` and does not silently claim success. (The primary may
-    # or may not be written depending on ordering; we only require an error row,
-    # not a false ``created``/``skipped``.)
+    # A malformed secondary is a *write-failure*, not a containment failure —
+    # the write-safety guarantee this matrix enforces is containment-only. So a
+    # malformed secondary is *tolerated*: the writer must not raise a traceback,
+    # and — the specific guarantee below — must never corrupt the file. It may
+    # still complete the run (e.g. Claude MCP writes ``.mcp.json`` and warns that
+    # ``.claude/settings.json`` could not be updated, telling the user to fix it
+    # by hand), so a ``created``/``updated``/``skipped`` outcome is valid here,
+    # not only ``error``.
     project, _external = roots
     spec = _spec_for(writer)
     assert spec.secondary_rel is not None
@@ -261,6 +265,7 @@ def test_multifile_malformed_secondary_leaves_no_partial(
 
     data = _build_data(writer.concern, project)
     result = writer.safe_sync(data, project)
+    # A defined SyncResult, never an escaped exception.
     assert result.action in {"error", "created", "updated", "skipped"}
     # The specific guarantee: a malformed secondary is never a *silent* success
     # that also corrupts the file — it stays byte-for-byte intact.
@@ -307,6 +312,61 @@ def test_dry_run_on_unchanged_target_is_skipped_and_inert(
         "instead of skipped (dry-run idempotency invariant)"
     )
     assert before == after, f"{_writer_id(writer)} mutated the target during a dry-run"
+
+
+# ---------------------------------------------------------------------------
+# Managed-marker would-change propagation — a managed dir whose content matches
+# but whose ``.crossby-managed`` marker drifted (e.g. a version bump changed the
+# marker body) is a *change*: the real run refreshes the marker, so the dry-run
+# must predict it and the real run must not misreport ``skipped`` (issue #133
+# dry-run idempotency class).
+# ---------------------------------------------------------------------------
+
+
+_MARKER_WRITERS = [
+    w for w in _all_writers() if w.concern in {SyncConcern.AGENTS, SyncConcern.SKILLS}
+]
+
+
+@pytest.mark.parametrize("writer", _MARKER_WRITERS, ids=_writer_id)
+def test_drifted_marker_on_unchanged_target_is_reported_as_change(
+    writer: AbstractSyncWriter, roots: tuple[Path, Path]
+) -> None:
+    project, _external = roots
+    data = _build_data(writer.concern, project)
+
+    first = writer.safe_sync(data, project)
+    if first.action not in {"created", "updated"}:
+        pytest.skip(f"{_writer_id(writer)} produced no artifact with the fixture data")
+
+    target = project / _spec_for(writer).target_rel
+    marker = target / MANAGED_MARKER_NAME
+    if not marker.is_file():
+        pytest.skip(f"{_writer_id(writer)} writes no managed marker with the fixture data")
+
+    # Drift only the marker body — content stays byte-identical. The marker is
+    # still a valid managed marker, so the ownership guard passes and the writer
+    # reaches its copy/translate path (not the unmanaged-dir refusal).
+    stale_body = "# crossby managed marker (older body)\n"
+    marker.write_text(stale_body, encoding="utf-8")
+
+    # Dry-run must predict the marker refresh, not report ``skipped`` …
+    preview = writer.safe_sync(data, project, dry_run=True)
+    assert preview.action != "skipped", (
+        f"{_writer_id(writer)} reported skipped despite a drifted marker (dry-run)"
+    )
+    assert marker.read_text(encoding="utf-8") == stale_body, (
+        f"{_writer_id(writer)} rewrote the marker during a dry-run"
+    )
+
+    # … and the real run refreshes the marker and reports the change.
+    real = writer.safe_sync(data, project)
+    assert real.action != "skipped", (
+        f"{_writer_id(writer)} reported skipped despite refreshing the marker"
+    )
+    assert marker.read_text(encoding="utf-8") != stale_body, (
+        f"{_writer_id(writer)} did not refresh the drifted marker"
+    )
 
 
 # ---------------------------------------------------------------------------

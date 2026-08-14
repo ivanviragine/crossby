@@ -279,9 +279,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     # so the reported action matches what the real copy fallback
                     # would do — no drift on modes or dest symlinks.
                     target_existed = target_dir.is_dir()
+                    # OR the marker would-change in: an existing dir whose content
+                    # matches but is missing the ``.crossby-managed`` marker is a
+                    # real change (the marker would be written), not a skip.
                     would_change = _copy_skills_dir(
                         source_dir, target_dir, project_root=project_root, dry_run=True
-                    )
+                    ) or write_managed_marker(target_dir, project_root=project_root, dry_run=True)
                     if target_existed and not would_change:
                         return SyncResult(
                             tool_id=self.tool_id,
@@ -299,8 +302,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     )
                 target_existed = target_dir.is_dir()
                 wrote = _copy_skills_dir(source_dir, target_dir, project_root=project_root)
-                write_managed_marker(target_dir, project_root=project_root)
-                if not wrote and target_existed:
+                # Writing the marker into a managed dir that lacked one is itself a
+                # change — fold it into ``wrote`` so the skip check below matches
+                # the dry-run's would-change.
+                marker_wrote = write_managed_marker(target_dir, project_root=project_root)
+                if not wrote and not marker_wrote and target_existed:
                     # A repeated copy-fallback run that changed nothing is an
                     # honest skip, not a phantom "created".
                     return SyncResult(
@@ -366,10 +372,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
             # Compare-only so an unchanged re-sync reports skipped, matching the
-            # real run below (not an unconditional created/updated).
+            # real run below (not an unconditional created/updated). The marker
+            # would-change is OR'd in so an existing dir with matching content but
+            # no ``.crossby-managed`` marker is reported as a change, not a skip.
             would_write = _copy_skills_dir(
                 source_dir, target_dir, project_root=project_root, dry_run=True
-            )
+            ) or write_managed_marker(target_dir, project_root=project_root, dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -378,8 +386,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 message="copy (dry-run)",
             )
         wrote = _copy_skills_dir(source_dir, target_dir, project_root=project_root)
-        write_managed_marker(target_dir, project_root=project_root)
-        if not wrote and target_existed:
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
+        if not wrote and not marker_wrote and target_existed:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -502,6 +510,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             would_change = True
                     elif child.is_dir():
                         would_change = True
+            # The real run (re)writes the ``.crossby-managed`` marker; an existing
+            # managed dir missing one is a change even when every SKILL.md matches.
+            would_change |= write_managed_marker(
+                target_dir, project_root=project_root, dry_run=True
+            )
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -516,7 +529,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             )
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        write_managed_marker(target_dir, project_root=project_root)
+        # Marker (re)write folds into the skip decision below: writing it into a
+        # managed dir that lacked one is a real change, so an otherwise-idempotent
+        # translate is reported ``updated`` (matching the dry-run's would-change).
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
         wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
             name for name, _ in command_skills
         }
@@ -619,7 +635,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
             )
 
-        if skipped_all and target_existed and not removed_any:
+        if skipped_all and target_existed and not removed_any and not marker_wrote:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
