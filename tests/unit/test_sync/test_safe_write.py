@@ -138,6 +138,44 @@ class TestSafeWriteBytes:
             safe_write_text(ProjectScope(root), target, "x", leaf_policy="replace")
         assert not (outside / "escape.txt").exists()
 
+    def test_new_file_lands_at_umask_default_not_0600(self, root: Path) -> None:
+        """``mkstemp`` creates the temp file ``0600`` and ``os.replace`` keeps it;
+        the write must instead stamp the ``0o666 & ~umask`` default so a synced
+        file is not silently owner-only."""
+        old = os.umask(0o022)
+        try:
+            target = root / "sub" / "file.md"
+            safe_write_text(ProjectScope(root), target, "hi", leaf_policy="replace")
+            assert (target.stat().st_mode & 0o777) == 0o644
+        finally:
+            os.umask(old)
+
+    def test_existing_regular_file_mode_preserved(self, root: Path) -> None:
+        """Rewriting an existing regular file keeps its mode (not reset to 0600)."""
+        target = root / "file.md"
+        target.write_text("old")
+        target.chmod(0o640)
+        safe_write_text(ProjectScope(root), target, "new content", leaf_policy="replace")
+        assert (target.stat().st_mode & 0o777) == 0o640
+
+    def test_replaced_symlink_leaf_lands_at_default_mode(self, root: Path, outside: Path) -> None:
+        """A replaced symlink leaf must not inherit its referent's mode — the link
+        is replaced, not followed — so it lands at the umask default and the
+        referent's own mode is left untouched."""
+        old = os.umask(0o022)
+        try:
+            escape = outside / "escape.md"
+            escape.write_text("x")
+            escape.chmod(0o600)
+            target = root / "link.md"
+            target.symlink_to(escape)
+            safe_write_text(ProjectScope(root), target, "new", leaf_policy="replace")
+            assert not target.is_symlink()
+            assert (target.stat().st_mode & 0o777) == 0o644
+            assert (escape.stat().st_mode & 0o777) == 0o600  # referent untouched
+        finally:
+            os.umask(old)
+
 
 # ---------------------------------------------------------------------------
 # Scopes

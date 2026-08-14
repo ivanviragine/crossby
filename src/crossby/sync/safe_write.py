@@ -198,18 +198,55 @@ def _refuse_symlink_leaf(target: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _default_file_mode() -> int:
+    """The ``0o666 & ~umask`` mode a plain ``open(..., "w")`` would give a file.
+
+    Read the current umask via the set-and-restore idiom (there is no read-only
+    getter). Sync runs single-threaded, so the momentary global umask flip is
+    safe here.
+    """
+    umask = os.umask(0o022)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
+def _replacement_mode(target: Path) -> int:
+    """The mode to stamp on the temp file before it replaces *target*.
+
+    Preserve an existing **regular** target's mode (a ``0640`` file stays
+    ``0640`` across a rewrite); for a missing or **symlink** target use the
+    normal ``0o666 & ~umask`` default. A symlink's own metadata is deliberately
+    never consulted — the link is being replaced, not followed.
+    """
+    if target.is_file() and not target.is_symlink():
+        try:
+            return stat.S_IMODE(target.stat().st_mode)
+        except OSError:
+            pass
+    return _default_file_mode()
+
+
 def _atomic_write_bytes(target: Path, content: bytes) -> None:
     """Write *content* to *target* via a unique temp file + atomic ``os.replace``.
 
     A symlink at *target* is replaced by the rename itself — ``os.replace`` acts
     on the link, never its referent — so the write can never leak through it.
+
+    ``mkstemp`` always creates the temp file ``0600`` and ``os.replace`` installs
+    *that* mode onto *target* (it never preserves the destination's own mode), so
+    the temp file's permissions are set explicitly *before* the swap — otherwise
+    a fresh sync artifact would land owner-only ``0600`` instead of the umask
+    default, and an existing ``0640`` file would be narrowed to ``0600`` on every
+    rewrite. See :func:`_replacement_mode`.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
+    mode = _replacement_mode(target)
     fd, tmp_name = tempfile.mkstemp(
         dir=target.parent, prefix=f".{target.name}.", suffix=".crossby-tmp"
     )
     tmp = Path(tmp_name)
     try:
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
         os.replace(tmp, target)
