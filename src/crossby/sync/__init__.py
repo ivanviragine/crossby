@@ -401,11 +401,26 @@ def run_sync(
         except SyncContainmentError as exc:
             # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
             # post-writer path: surface as an ``error`` row (the writes already
-            # succeeded) rather than escaping run_sync.
+            # succeeded) rather than escaping run_sync. Attribute the failure to
+            # the concern(s) whose ownership actually failed to persist — a
+            # hooks-only or permissions-only sync must not mis-report a ledger
+            # containment failure under MCP (the ledger holds all three, but only
+            # the concerns with pending ownership were being recorded this run).
             logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
-            results.append(
-                SyncResult(tool_id=None, concern=SyncConcern.MCP, action="error", message=str(exc))
-            )
+            for affected_concern, pending in (
+                (SyncConcern.HOOKS, pending_hooks),
+                (SyncConcern.PERMISSIONS, pending_perms),
+                (SyncConcern.MCP, pending_mcp),
+            ):
+                if pending:
+                    results.append(
+                        SyncResult(
+                            tool_id=None,
+                            concern=affected_concern,
+                            action="error",
+                            message=str(exc),
+                        )
+                    )
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or
     # when the user explicitly asked for the plugins concern. We don't run

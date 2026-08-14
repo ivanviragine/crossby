@@ -444,6 +444,26 @@ class TestRunSyncLedgerGating:
         settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         assert "PreToolUse" in settings["hooks"]
 
+    def test_persist_containment_failure_attributed_to_active_concern(self, tmp_path: Path) -> None:
+        # A symlinked owned.json makes save_ledger raise SyncContainmentError on
+        # the post-writer persist. The error row must be attributed to the concern
+        # that actually ran (hooks here), not hardcoded to MCP — a hooks-only sync
+        # must not mis-report the failure under a concern that never ran.
+        escape = tmp_path / "escape.json"
+        escape.write_text("{}", encoding="utf-8")
+        (tmp_path / ".crossby").mkdir()
+        (tmp_path / ".crossby" / "owned.json").symlink_to(escape)
+
+        reg = _registry(_make_writer(SyncConcern.HOOKS, "updated"))
+        results = run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
+
+        errors = [r for r in results if r.action == "error"]
+        assert errors, "expected a persist-failure error row"
+        assert all(r.concern == SyncConcern.HOOKS for r in errors)
+        assert not any(r.concern == SyncConcern.MCP for r in errors)
+        # The escape target was never written through.
+        assert escape.read_text(encoding="utf-8") == "{}"
+
     def test_gitignore_update_self_heals_after_transient_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
