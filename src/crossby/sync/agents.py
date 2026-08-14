@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +21,7 @@ from crossby.sync.file_utils import (
     write_managed_marker,
 )
 from crossby.sync.gitignore_utils import update_managed_block
+from crossby.sync.safe_write import ProjectScope, safe_copy, safe_rmtree, safe_write_text
 
 logger = structlog.get_logger()
 
@@ -365,7 +365,9 @@ def _render_agent_file(source: Path, tool_id: str) -> str:
     return content
 
 
-def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool = False) -> bool:
+def _copy_agent_file(
+    source: Path, target: Path, tool_id: str, *, project_root: Path, dry_run: bool = False
+) -> bool:
     """Copy one agent file to target, translating tool names.
 
     Returns True when the target was written or rewritten (or, under
@@ -389,8 +391,13 @@ def _copy_agent_file(source: Path, target: Path, tool_id: str, *, dry_run: bool 
         except OSError:
             pass
     if not dry_run:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(out, encoding="utf-8")
+        # No pre-write ``mkdir``: ``safe_write_text`` → ``_atomic_write_bytes``
+        # creates ``target.parent`` only *after* ``assert_ancestors`` passes, so
+        # a symlinked ancestor is refused before any directory is created. A
+        # pre-write ``mkdir(parents=True)`` here would instead follow that
+        # symlink and materialise directories outside the project root before the
+        # containment guard ever ran.
+        safe_write_text(ProjectScope(project_root), target, out, leaf_policy="replace")
     return True
 
 
@@ -525,24 +532,38 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 # Symlink strategy can't symlink-over an existing real dir, so
                 # it falls back to copy (matching pre-marker behavior).
                 if data.agents_strategy == "translate" and self._supports_translate:
-                    return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
-                return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
+                    return self._sync_translate(
+                        source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                    )
+                return self._sync_copy(
+                    source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                )
             else:
                 dir_was_cleared = True
                 if not dry_run:
                     bak = backup_path(target_dir)
-                    shutil.copytree(str(target_dir), str(bak))
-                    shutil.rmtree(str(target_dir))
+                    scope = ProjectScope(project_root)
+                    safe_copy(scope, bak, target_dir)
+                    safe_rmtree(scope, target_dir)
                     logger.info("agents.dir_backed_up", original=str(target_dir), backup=str(bak))
 
         if data.agents_strategy == "translate" and self._supports_translate:
-            return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
+            return self._sync_translate(
+                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            )
 
         if data.agents_strategy in ("copy", "translate"):
-            return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
+            return self._sync_copy(
+                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            )
 
         return self._sync_symlink(
-            source_dir, target_dir, dry_run=dry_run, force=force, dir_was_cleared=dir_was_cleared
+            source_dir,
+            target_dir,
+            project_root=project_root,
+            dry_run=dry_run,
+            force=force,
+            dir_was_cleared=dir_was_cleared,
         )
 
     def _sync_symlink(
@@ -550,6 +571,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
         source_dir: Path,
         target_dir: Path,
         *,
+        project_root: Path,
         dry_run: bool,
         force: bool,
         dir_was_cleared: bool = False,
@@ -577,9 +599,16 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                     # differs, otherwise updated/created by target existence —
                     # not an unconditional "created".
                     target_existed = target_dir.is_dir()
+                    # OR the marker would-change in: an existing dir whose content
+                    # matches but is missing the ``.crossby-managed`` marker is a
+                    # real change (the marker would be written), not a skip.
                     would_write = _copy_all_agents(
-                        source_dir, target_dir, str(self.tool_id), dry_run=True
-                    )
+                        source_dir,
+                        target_dir,
+                        str(self.tool_id),
+                        project_root=project_root,
+                        dry_run=True,
+                    ) or write_managed_marker(target_dir, project_root=project_root, dry_run=True)
                     if not would_write and target_existed:
                         return SyncResult(
                             tool_id=self.tool_id,
@@ -596,9 +625,14 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                         message="copy (symlink failed, dry-run)",
                     )
                 target_existed = target_dir.is_dir()
-                wrote = _copy_all_agents(source_dir, target_dir, str(self.tool_id))
-                write_managed_marker(target_dir)
-                if not wrote and target_existed:
+                wrote = _copy_all_agents(
+                    source_dir, target_dir, str(self.tool_id), project_root=project_root
+                )
+                # Writing the marker into a managed dir that lacked one is itself a
+                # change — fold it into ``wrote`` so the skip check matches the
+                # dry-run's would-change.
+                marker_wrote = write_managed_marker(target_dir, project_root=project_root)
+                if not wrote and not marker_wrote and target_existed:
                     # A repeated copy-fallback run that changed nothing is an
                     # honest skip, not a phantom "created".
                     return SyncResult(
@@ -657,13 +691,19 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
-    def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+    def _sync_copy(
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool
+    ) -> SyncResult:
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         if dry_run:
             # Compare-only so an unchanged re-sync reports skipped, matching the
-            # real run below (not an unconditional created/updated).
-            would_write = _copy_all_agents(source_dir, target_dir, str(self.tool_id), dry_run=True)
+            # real run below (not an unconditional created/updated). The marker
+            # would-change is OR'd in so an existing dir with matching content but
+            # no ``.crossby-managed`` marker is reported as a change, not a skip.
+            would_write = _copy_all_agents(
+                source_dir, target_dir, str(self.tool_id), project_root=project_root, dry_run=True
+            ) or write_managed_marker(target_dir, project_root=project_root, dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -671,9 +711,11 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 file_path=target_dir,
                 message="copy (dry-run)",
             )
-        wrote = _copy_all_agents(source_dir, target_dir, str(self.tool_id))
-        write_managed_marker(target_dir)
-        if not wrote and target_existed:
+        wrote = _copy_all_agents(
+            source_dir, target_dir, str(self.tool_id), project_root=project_root
+        )
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
+        if not wrote and not marker_wrote and target_existed:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -688,7 +730,9 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
-    def _sync_translate(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+    def _sync_translate(
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool
+    ) -> SyncResult:
         """Per-file translation with lossy-field annotation.
 
         Delegates parse/emit to :mod:`crossby.subagents.api.convert` — that's
@@ -754,6 +798,11 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 )
             if target_dir.is_dir():  # stale *.md whose source is gone
                 would_change |= any(f.name not in wanted for f in target_dir.glob("*.md"))
+            # The real run (re)writes the ``.crossby-managed`` marker; an existing
+            # managed dir missing one is a change even when every file matches.
+            would_change |= write_managed_marker(
+                target_dir, project_root=project_root, dry_run=True
+            )
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -768,7 +817,10 @@ class _BaseAgentsWriter(AbstractSyncWriter):
             )
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        write_managed_marker(target_dir)
+        # Marker (re)write folds into the skip decision below: writing it into a
+        # managed dir that lacked one is a real change (matching the dry-run's
+        # would-change), so an otherwise-idempotent translate reports ``updated``.
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
         wanted = {_target_name(src) for src in source_files}
         removed_any = False
         for existing in target_dir.glob("*.md"):
@@ -793,10 +845,12 @@ class _BaseAgentsWriter(AbstractSyncWriter):
                 target_file.unlink()
             if target_file.is_file() and target_file.read_text(encoding="utf-8") == rendered:
                 continue
-            target_file.write_text(rendered, encoding="utf-8")
+            safe_write_text(
+                ProjectScope(project_root), target_file, rendered, leaf_policy="replace"
+            )
             wrote_any = True
 
-        if not wrote_any and not removed_any and target_existed:
+        if not wrote_any and not removed_any and target_existed and not marker_wrote:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -814,7 +868,7 @@ class _BaseAgentsWriter(AbstractSyncWriter):
 
 
 def _copy_all_agents(
-    source_dir: Path, target_dir: Path, tool_id: str, *, dry_run: bool = False
+    source_dir: Path, target_dir: Path, tool_id: str, *, project_root: Path, dry_run: bool = False
 ) -> bool:
     """Copy all .md agent files from source to target, translating tool names.
 
@@ -837,7 +891,9 @@ def _copy_all_agents(
                 logger.info("agents.stale_removed", path=str(existing))
             changed = True
     for src in source_dir.glob("*.md"):
-        if _copy_agent_file(src, target_dir / src.name, tool_id, dry_run=dry_run):
+        if _copy_agent_file(
+            src, target_dir / src.name, tool_id, project_root=project_root, dry_run=dry_run
+        ):
             changed = True
     return changed
 
@@ -974,15 +1030,18 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 )
             if unmarked and force and not dry_run:
                 bak = backup_path(target_dir)
-                shutil.copytree(str(target_dir), str(bak))
-                shutil.rmtree(str(target_dir))
+                scope = ProjectScope(project_root)
+                safe_copy(scope, bak, target_dir)
+                safe_rmtree(scope, target_dir)
                 logger.info(
                     "agents.dir_backed_up",
                     original=str(target_dir),
                     backup=str(bak),
                 )
 
-        return self._translate_all(source_dir, target_dir, dry_run=dry_run)
+        return self._translate_all(
+            source_dir, target_dir, project_root=project_root, dry_run=dry_run
+        )
 
     def _source_files(self, source_dir: Path) -> list[Path]:
         # Source can be either Codex TOML (round-trip) or markdown agents.
@@ -1011,7 +1070,9 @@ class CodexAgentsWriter(AbstractSyncWriter):
             source_path=source,
         )
 
-    def _translate_all(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+    def _translate_all(
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool
+    ) -> SyncResult:
         sources = self._source_files(source_dir)
         target_existed = target_dir.is_dir()
 
@@ -1047,7 +1108,12 @@ class CodexAgentsWriter(AbstractSyncWriter):
 
         if not dry_run:
             target_dir.mkdir(parents=True, exist_ok=True)
-            write_managed_marker(target_dir)
+        # Marker (re)write is a real change; account for it under dry-run too so a
+        # managed dir missing its ``.crossby-managed`` marker is reported
+        # ``updated`` (and the dry-run predicts that same change), not ``skipped``.
+        if write_managed_marker(target_dir, project_root=project_root, dry_run=dry_run):
+            skipped_all = False
+            wrote_any = True
 
         # Stale cleanup — remove .toml outputs whose source is gone. A stale
         # deletion is itself a change, so it clears ``skipped_all``: a delete-only
@@ -1075,7 +1141,9 @@ class CodexAgentsWriter(AbstractSyncWriter):
                 wrote_any = True
                 if not dry_run:
                     dest.unlink()
-                    dest.write_text(agent_toml, encoding="utf-8")
+                    safe_write_text(
+                        ProjectScope(project_root), dest, agent_toml, leaf_policy="replace"
+                    )
                 continue
             if dest.is_file():
                 try:
@@ -1088,7 +1156,7 @@ class CodexAgentsWriter(AbstractSyncWriter):
                     pass
             skipped_all = False
             if not dry_run:
-                dest.write_text(agent_toml, encoding="utf-8")
+                safe_write_text(ProjectScope(project_root), dest, agent_toml, leaf_policy="replace")
             wrote_any = True
 
         if skipped_all and target_existed:
@@ -1208,8 +1276,9 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 # force=True: back up and clear the directory before re-syncing
                 if not dry_run:
                     bak = backup_path(target_dir)
-                    shutil.copytree(str(target_dir), str(bak))
-                    shutil.rmtree(str(target_dir))
+                    scope = ProjectScope(project_root)
+                    safe_copy(scope, bak, target_dir)
+                    safe_rmtree(scope, target_dir)
                     logger.info(
                         "agents.dir_backed_up",
                         original=str(target_dir),
@@ -1217,14 +1286,22 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                     )
 
         if data.agents_strategy == "copy":
-            return self._sync_copy(source_dir, target_dir, dry_run=dry_run)
+            return self._sync_copy(
+                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            )
 
         if data.agents_strategy == "translate":
-            return self._sync_translate(source_dir, target_dir, dry_run=dry_run)
+            return self._sync_translate(
+                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            )
 
-        return self._sync_symlinks(source_dir, target_dir, dry_run=dry_run, force=force)
+        return self._sync_symlinks(
+            source_dir, target_dir, project_root=project_root, dry_run=dry_run, force=force
+        )
 
-    def _sync_translate(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+    def _sync_translate(
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool
+    ) -> SyncResult:
         """Per-file translate to Copilot ``.agent.md`` format.
 
         Parallel to :meth:`_BaseAgentsWriter._sync_translate` but emits the
@@ -1278,6 +1355,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 )
             if target_dir.is_dir():  # stale *.agent.md whose source is gone
                 would_change |= any(f.name not in wanted for f in target_dir.glob("*.agent.md"))
+            # The real run (re)writes the ``.crossby-managed`` marker; an existing
+            # managed dir missing one is a change even when every file matches.
+            would_change |= write_managed_marker(
+                target_dir, project_root=project_root, dry_run=True
+            )
             message = (
                 f"translated (dry-run, {manual_fix_count} manual-fix)"
                 if manual_fix_count
@@ -1292,7 +1374,10 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             )
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        write_managed_marker(target_dir)
+        # Marker (re)write folds into the skip decision below: writing it into a
+        # managed dir that lacked one is a real change (matching the dry-run's
+        # would-change), so an otherwise-idempotent translate reports ``updated``.
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
         wanted = {_target_name(src) for src in source_files}
         removed_any = False
         # Stale cleanup: managed *.agent.md outputs whose source is gone.
@@ -1320,10 +1405,12 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 os.unlink(target_file)
             if target_file.is_file() and target_file.read_text(encoding="utf-8") == rendered:
                 continue
-            target_file.write_text(rendered, encoding="utf-8")
+            safe_write_text(
+                ProjectScope(project_root), target_file, rendered, leaf_policy="replace"
+            )
             wrote_any = True
 
-        if not wrote_any and not removed_any and target_existed:
+        if not wrote_any and not removed_any and target_existed and not marker_wrote:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1340,7 +1427,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         )
 
     def _sync_symlinks(
-        self, source_dir: Path, target_dir: Path, *, dry_run: bool, force: bool
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool, force: bool
     ) -> SyncResult:
         """Create/update per-file .agent.md symlinks; clean up stale ones."""
         target_existed = target_dir.is_dir()
@@ -1348,8 +1435,11 @@ class CopilotAgentsWriter(AbstractSyncWriter):
         if not dry_run and not target_dir.is_dir():
             target_dir.mkdir(parents=True, exist_ok=True)
             dir_newly_created = True
-        if not dry_run and target_dir.is_dir():
-            write_managed_marker(target_dir)
+        # Account for the marker under dry-run too: writing it into a managed dir
+        # that lacked one is a real change, folded into the skip decision below.
+        # The helper no-ops when target_dir is not a real directory, so the prior
+        # ``is_dir()`` guard is subsumed.
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root, dry_run=dry_run)
 
         source_stems = {f.stem for f in source_dir.glob("*.md")}
 
@@ -1395,15 +1485,19 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 elif (
                     link.exists()
                     and not link.is_symlink()
-                    and _copy_agent_file(src, link, "copilot", dry_run=dry_run)
+                    and _copy_agent_file(
+                        src, link, "copilot", project_root=project_root, dry_run=dry_run
+                    )
                 ):
                     created_count += 1
             except OSError:
                 # Fallback: copy the file (count only a real/needed write).
-                if _copy_agent_file(src, link, "copilot", dry_run=dry_run):
+                if _copy_agent_file(
+                    src, link, "copilot", project_root=project_root, dry_run=dry_run
+                ):
                     created_count += 1
 
-        if created_count == 0 and not dir_newly_created and not removed_any:
+        if created_count == 0 and not dir_newly_created and not removed_any and not marker_wrote:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1422,7 +1516,9 @@ class CopilotAgentsWriter(AbstractSyncWriter):
             file_path=target_dir,
         )
 
-    def _sync_copy(self, source_dir: Path, target_dir: Path, *, dry_run: bool) -> SyncResult:
+    def _sync_copy(
+        self, source_dir: Path, target_dir: Path, *, project_root: Path, dry_run: bool
+    ) -> SyncResult:
         target_existed = target_dir.is_dir()
         action: Literal["created", "updated"] = "updated" if target_existed else "created"
         wanted = {f"{src.stem}.agent.md" for src in source_dir.glob("*.md")}
@@ -1434,9 +1530,18 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 would_write |= any(f.name not in wanted for f in target_dir.glob("*.agent.md"))
             for src in source_dir.glob("*.md"):
                 if _copy_agent_file(
-                    src, target_dir / f"{src.stem}.agent.md", "copilot", dry_run=True
+                    src,
+                    target_dir / f"{src.stem}.agent.md",
+                    "copilot",
+                    project_root=project_root,
+                    dry_run=True,
                 ):
                     would_write = True
+            # An existing managed dir missing its ``.crossby-managed`` marker is a
+            # change even when every file matches — the real run writes the marker.
+            would_write |= write_managed_marker(
+                target_dir, project_root=project_root, dry_run=True
+            )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1445,7 +1550,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 message="copy (dry-run)",
             )
         target_dir.mkdir(parents=True, exist_ok=True)
-        write_managed_marker(target_dir)
+        marker_wrote = write_managed_marker(target_dir, project_root=project_root)
         wrote_any = False
         # Stale cleanup: managed *.agent.md outputs whose source .md is gone. A
         # removal counts as a change so a deleted source agent stops living here
@@ -1461,9 +1566,9 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                 wrote_any = True
         for src in source_dir.glob("*.md"):
             dest = target_dir / f"{src.stem}.agent.md"
-            if _copy_agent_file(src, dest, "copilot"):
+            if _copy_agent_file(src, dest, "copilot", project_root=project_root):
                 wrote_any = True
-        if not wrote_any and target_existed:
+        if not wrote_any and not marker_wrote and target_existed:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,

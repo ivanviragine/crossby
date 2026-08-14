@@ -18,6 +18,7 @@ import structlog
 from crossby.config.allowlist_util import AllowlistAction, configure_json_allowlist
 from crossby.models.ai import AIToolID
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
+from crossby.sync.safe_write import ExternalScope, SyncContainmentError, assert_ancestors
 
 logger = structlog.get_logger()
 
@@ -187,9 +188,12 @@ class ClaudePermissionWriter(AbstractSyncWriter):
             )
 
         settings_path = project_root / ".claude" / "settings.json"
-        ancestor_err = self.contained_or_error(project_root, settings_path)
-        if ancestor_err is not None:
-            return ancestor_err
+        # ``.claude/settings.json`` is a shared *merge* file — refuse a symlinked
+        # leaf (not just a symlinked ancestor) before it is read/parsed, so a
+        # link into a dotfiles repo is never written through.
+        containment_err = self.merge_target_or_error(project_root, settings_path)
+        if containment_err is not None:
+            return containment_err
         written_action, error, created, revoked = self.write(
             project_root, patterns, revoke, dry_run=dry_run
         )
@@ -289,11 +293,28 @@ class CursorPermissionWriter(AbstractSyncWriter):
 
         scope_root = project_root if self.scope == "project" else None
         config_path = _cursor_config_path(scope_root)
-        # No-op for global scope (config_path lands outside project_root, so
-        # first_symlinked_ancestor returns None).
-        ancestor_err = self.contained_or_error(project_root, config_path)
-        if ancestor_err is not None:
-            return ancestor_err
+        if self.scope == "project":
+            # ``.cursor/cli.json`` is a shared merge file — refuse a symlinked
+            # leaf as well as a symlinked ancestor.
+            containment_err = self.merge_target_or_error(project_root, config_path)
+            if containment_err is not None:
+                return containment_err
+        else:
+            # Global scope writes to ``~/.cursor/cli-config.json`` *by design* —
+            # the one deliberate off-project write path. Validate it under an
+            # explicit ``ExternalScope`` rooted at that config's directory rather
+            # than the project root (so an accidental ``..`` still can't escape),
+            # and refuse a symlinked leaf before the read-modify-write.
+            external = ExternalScope(config_path.parent)
+            try:
+                assert_ancestors(external, config_path)
+                if config_path.is_symlink():
+                    raise SyncContainmentError(
+                        f"{config_path} is a symlink; refusing to write through it "
+                        "(it may point outside the approved config directory)."
+                    )
+            except SyncContainmentError as exc:
+                return self._containment_error(exc)
         written_action, error, created, revoked = self.write(
             scope_root, patterns, revoke, dry_run=dry_run
         )

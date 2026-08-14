@@ -10,6 +10,13 @@ from pathlib import Path
 
 import structlog
 
+from crossby.sync.safe_write import (
+    ProjectScope,
+    SyncContainmentError,
+    assert_ancestors,
+    safe_write_text,
+)
+
 logger = structlog.get_logger()
 
 
@@ -46,6 +53,17 @@ def update_managed_block(
     block = "\n".join([block_start, *entries, block_end])
 
     gitignore_path = project_root / ".gitignore"
+    # ``.gitignore`` is a shared user file — refuse a symlinked leaf (or ancestor)
+    # *before* the read below, so this post-writer side effect can never follow a
+    # link out of the project. The caller (``run_sync``) turns the raised
+    # ``SyncContainmentError`` into an ``error`` row.
+    scope = ProjectScope(project_root)
+    assert_ancestors(scope, gitignore_path)
+    if gitignore_path.is_symlink():
+        raise SyncContainmentError(
+            f"{gitignore_path} is a symlink; refusing to write through it (it may point "
+            "outside the project). Remove the symlink and re-run."
+        )
     existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
 
     lines = existing.splitlines()
@@ -90,7 +108,9 @@ def update_managed_block(
     if new_content == existing:
         return False
 
-    if not dry_run:
-        gitignore_path.write_text(new_content, encoding="utf-8")
+    # Leaf/ancestor already verified above; route through the safe primitive for
+    # the atomic temp+rename guarantee (``leaf_policy="refuse"`` is a no-op here
+    # since the leaf is confirmed non-symlink).
+    safe_write_text(scope, gitignore_path, new_content, dry_run=dry_run, leaf_policy="refuse")
 
     return True

@@ -50,6 +50,7 @@ from crossby.sync.rules import (
     CursorRulesWriter,
     update_rules_gitignore,
 )
+from crossby.sync.safe_write import SyncContainmentError
 from crossby.sync.skills import (
     AntigravityCLISkillsWriter,
     ClaudeSkillsWriter,
@@ -281,7 +282,7 @@ def run_sync(
             writer_data = replace(data, mcp_remove=frozenset(disabled_mcp & mcp_owned))
 
         try:
-            result = writer.sync(writer_data, project_root, dry_run=dry_run, force=force)
+            result = writer.safe_sync(writer_data, project_root, dry_run=dry_run, force=force)
         except Exception as exc:
             result = SyncResult(
                 tool_id=writer.tool_id,
@@ -324,40 +325,44 @@ def run_sync(
         if writer.concern == SyncConcern.SKILLS:
             skills_writers_ran = True
 
-    # After all agents writers, update .gitignore managed block once.
-    # Skip when a specific tool filter is active to avoid cross-tool side effects
-    # and misattributed results during --tool runs.
+    # After all agents/rules/skills writers, update the .gitignore managed block
+    # once each. These post-writer side effects run OUTSIDE the per-writer
+    # try/except above, so a ``SyncContainmentError`` (a symlinked ``.gitignore``)
+    # would otherwise escape ``run_sync`` entirely instead of becoming an
+    # ``error`` row. Wrap each in the same error model. Skip when a specific tool
+    # filter is active to avoid cross-tool side effects during --tool runs.
+    def _side_effect_error(concern: SyncConcern, exc: SyncContainmentError) -> SyncResult:
+        return SyncResult(tool_id=None, concern=concern, action="error", message=str(exc))
+
     if agents_writers_ran and tool_id is None:
-        gi_result = update_agents_gitignore(
-            data,
-            project_root,
-            dry_run=dry_run,
-            installed_tools=installed_tools,
-        )
-        if gi_result is not None:
-            results.append(gi_result)
+        try:
+            gi_result = update_agents_gitignore(
+                data, project_root, dry_run=dry_run, installed_tools=installed_tools
+            )
+            if gi_result is not None:
+                results.append(gi_result)
+        except SyncContainmentError as exc:
+            results.append(_side_effect_error(SyncConcern.AGENTS, exc))
 
-    # After all rules writers, update .gitignore managed block once.
     if rules_writers_ran and tool_id is None:
-        gi_result = update_rules_gitignore(
-            data,
-            project_root,
-            dry_run=dry_run,
-            installed_tools=installed_tools,
-        )
-        if gi_result is not None:
-            results.append(gi_result)
+        try:
+            gi_result = update_rules_gitignore(
+                data, project_root, dry_run=dry_run, installed_tools=installed_tools
+            )
+            if gi_result is not None:
+                results.append(gi_result)
+        except SyncContainmentError as exc:
+            results.append(_side_effect_error(SyncConcern.RULES, exc))
 
-    # After all skills writers, update .gitignore managed block once.
     if skills_writers_ran and tool_id is None:
-        gi_result = update_skills_gitignore(
-            data,
-            project_root,
-            dry_run=dry_run,
-            installed_tools=installed_tools,
-        )
-        if gi_result is not None:
-            results.append(gi_result)
+        try:
+            gi_result = update_skills_gitignore(
+                data, project_root, dry_run=dry_run, installed_tools=installed_tools
+            )
+            if gi_result is not None:
+                results.append(gi_result)
+        except SyncContainmentError as exc:
+            results.append(_side_effect_error(SyncConcern.SKILLS, exc))
 
     # Persist the ownership ledger for every hooks/permissions/MCP writer that
     # succeeded. ``dry_run`` computes revocations above but writes neither the
@@ -393,6 +398,29 @@ def run_sync(
                 )
         except OSError as exc:
             logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
+        except SyncContainmentError as exc:
+            # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
+            # post-writer path: surface as an ``error`` row (the writes already
+            # succeeded) rather than escaping run_sync. Attribute the failure to
+            # the concern(s) whose ownership actually failed to persist — a
+            # hooks-only or permissions-only sync must not mis-report a ledger
+            # containment failure under MCP (the ledger holds all three, but only
+            # the concerns with pending ownership were being recorded this run).
+            logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
+            for affected_concern, pending in (
+                (SyncConcern.HOOKS, pending_hooks),
+                (SyncConcern.PERMISSIONS, pending_perms),
+                (SyncConcern.MCP, pending_mcp),
+            ):
+                if pending:
+                    results.append(
+                        SyncResult(
+                            tool_id=None,
+                            concern=affected_concern,
+                            action="error",
+                            message=str(exc),
+                        )
+                    )
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or
     # when the user explicitly asked for the plugins concern. We don't run

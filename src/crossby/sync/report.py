@@ -166,15 +166,21 @@ def write_persistent_report(
     results: Sequence[SyncResult],
     project_root: Path,
 ) -> Path:
-    """Write the report to ``.crossby/sync-report.md`` and return the path."""
+    """Write the report to ``.crossby/sync-report.md`` and return the path.
+
+    Routed through the safe primitive so a symlinked ``.crossby/`` ancestor is
+    refused and a symlinked report *leaf* is replaced in place rather than
+    written through to an arbitrary external file (issue #133).
+    """
+    from crossby.sync.safe_write import ProjectScope, safe_write_text
+
     body = render_persistent_report(
         results,
         project_name=project_root.name or "(unnamed project)",
         project_root=project_root,
     )
     path = project_root / REPORT_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    safe_write_text(ProjectScope(project_root), path, body, leaf_policy="replace")
     return path
 
 

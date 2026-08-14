@@ -72,6 +72,24 @@ class TestApplyProject:
         apply_scene(resolve(tmp_path, SCENE), tmp_path)
         assert (tmp_path / ".crossby" / "scene" / "active" / "skills").is_dir()
 
+    def test_projection_containment_failure_returns_error_row(self, tmp_path: Path) -> None:
+        populate_project(tmp_path)
+        # A symlinked ``.crossby/scene`` ancestor makes the projection tree's
+        # managed-marker write escape the root. The engine must convert that into
+        # an ``error`` row (matching run_sync's contract) rather than letting the
+        # SyncContainmentError escape apply_scene.
+        target = tmp_path / "_scene_target"
+        target.mkdir()
+        (tmp_path / ".crossby").mkdir(exist_ok=True)
+        (tmp_path / ".crossby" / "scene").symlink_to(target, target_is_directory=True)
+
+        results = apply_scene(resolve(tmp_path, SCENE), tmp_path)  # must not raise
+
+        skills_errors = [
+            r for r in results if r.concern.value == "skills" and r.action == "error"
+        ]
+        assert skills_errors, "expected a projection containment error row"
+
 
 class TestProvenance:
     def test_ledger_records_declare_keys(self, tmp_path: Path) -> None:

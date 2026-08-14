@@ -35,6 +35,7 @@ from crossby.sync.agents import _AGENT_TARGET_PATHS
 from crossby.sync.base import SyncConcern, SyncData, SyncResult
 from crossby.sync.ownership import OwnershipLedger, load_ledger, save_ledger
 from crossby.sync.readers import build_sync_data
+from crossby.sync.safe_write import SyncContainmentError
 
 logger = structlog.get_logger()
 
@@ -371,7 +372,18 @@ def _project_concern(ctx: _Context, kind: str, source_rel: str | None) -> list[S
             for tools in paths.values()
         ]
 
-    tree = ctx.tree(kind, source_rel)
+    try:
+        tree = ctx.tree(kind, source_rel)
+    except SyncContainmentError as exc:
+        # Materialising the projection tree is refused — e.g. a symlinked
+        # ``.crossby`` ancestor makes the managed-marker write escape the root.
+        # Mirror run_sync's containment contract: surface an ``error`` row per
+        # target path rather than letting the exception escape apply_scene, so a
+        # direct engine caller gets the same reported-row result the CLI wraps.
+        return [
+            SyncResult(tool_id=tools[0], concern=concern, action="error", message=str(exc))
+            for tools in paths.values()
+        ]
     results: list[SyncResult] = []
     for target_rel, tools in paths.items():
         results.append(_repoint_path(ctx, tree, target_rel, tuple(tools), source_rel))

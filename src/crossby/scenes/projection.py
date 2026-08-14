@@ -140,7 +140,7 @@ def materialise_tree(
     concern = SyncConcern.SKILLS if kind == "skills" else SyncConcern.AGENTS
     tree = project_root / _kind_dir(kind)
     tree.mkdir(parents=True, exist_ok=True)
-    write_managed_marker(tree)
+    write_managed_marker(tree, project_root=project_root)
 
     source_dir = project_root / source_rel
     wanted = selected_basenames(project_root, source_rel, kind, selected)

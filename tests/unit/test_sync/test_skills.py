@@ -82,7 +82,7 @@ def test_managed_marker_symlink_is_not_trusted_and_replaced(tmp_path: Path) -> N
     os.symlink(external, d / MANAGED_MARKER_NAME)
 
     assert has_managed_marker(d) is False  # a symlinked marker is not trusted
-    write_managed_marker(d)  # must replace the symlink, not write through it
+    write_managed_marker(d, project_root=tmp_path)  # must replace the symlink, not write through it
     assert not (d / MANAGED_MARKER_NAME).is_symlink()
     assert has_managed_marker(d) is True
     assert external.read_text(encoding="utf-8") == "SECRET"  # external file untouched
@@ -584,15 +584,16 @@ class TestMirrorTree:
         source.mkdir()  # empty source dir
         target = tmp_path / "dst"
 
-        assert mirror_tree(source, target, dry_run=True) is True  # would create it
+        # would create it
+        assert mirror_tree(source, target, project_root=tmp_path, dry_run=True) is True
         assert not target.exists()  # dry-run touched nothing
 
-        assert mirror_tree(source, target) is True  # created the empty dir
+        assert mirror_tree(source, target, project_root=tmp_path) is True  # created the empty dir
         assert target.is_dir()
 
         # Now that it exists and matches, a re-sync is a genuine no-op.
-        assert mirror_tree(source, target) is False
-        assert mirror_tree(source, target, dry_run=True) is False
+        assert mirror_tree(source, target, project_root=tmp_path) is False
+        assert mirror_tree(source, target, project_root=tmp_path, dry_run=True) is False
 
     def test_read_only_target_dir_is_updatable(self, tmp_path: Path) -> None:
         # Issue #83: a preserved read-only source mode (0555) is applied to the
@@ -606,12 +607,12 @@ class TestMirrorTree:
         os.chmod(source, 0o555)  # read-only source dir
         target = tmp_path / "dst"
 
-        assert mirror_tree(source, target) is True
+        assert mirror_tree(source, target, project_root=tmp_path) is True
         assert stat.S_IMODE(target.stat().st_mode) == 0o555
         assert (target / "run.sh").read_text(encoding="utf-8") == "v1"
 
         # An unchanged re-sync of the read-only dir reports no change (no churn).
-        assert mirror_tree(source, target) is False
+        assert mirror_tree(source, target, project_root=tmp_path) is False
         assert stat.S_IMODE(target.stat().st_mode) == 0o555
 
         # Change source content (relax the source to edit, then restore 0555).
@@ -620,7 +621,7 @@ class TestMirrorTree:
         os.chmod(source, 0o555)
 
         # The update must not raise PermissionError writing into the 0555 target.
-        assert mirror_tree(source, target) is True
+        assert mirror_tree(source, target, project_root=tmp_path) is True
         assert (target / "run.sh").read_text(encoding="utf-8") == "v2"
         assert stat.S_IMODE(target.stat().st_mode) == 0o555  # mode restored
 
@@ -637,13 +638,14 @@ class TestMirrorTree:
         source.mkdir()
         (source / "run.sh").write_text("v1", encoding="utf-8")
         target = tmp_path / "dst"
-        assert mirror_tree(source, target) is True
+        assert mirror_tree(source, target, project_root=tmp_path) is True
 
         # Change source content, then clamp the target to r-- (no write, no exec).
         (source / "run.sh").write_text("v2", encoding="utf-8")
         os.chmod(target, 0o400)
 
-        assert mirror_tree(source, target) is True  # must not raise PermissionError
+        # must not raise PermissionError
+        assert mirror_tree(source, target, project_root=tmp_path) is True
         assert (target / "run.sh").read_text(encoding="utf-8") == "v2"
 
         os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
@@ -658,18 +660,18 @@ class TestMirrorTree:
         source.mkdir()  # default (umask) mode, e.g. 0755
         (source / "run.sh").write_text("v1", encoding="utf-8")
         target = tmp_path / "dst"
-        assert mirror_tree(source, target) is True  # initial create
+        assert mirror_tree(source, target, project_root=tmp_path) is True  # initial create
 
         # Clamp only the *target dir* mode to 0555 (read-only); content unchanged.
         os.chmod(target, 0o555)
 
         # The re-sync restores the target dir to the source mode (0755) — a real
         # change, so it must report True, not a phantom skipped.
-        assert mirror_tree(source, target) is True
+        assert mirror_tree(source, target, project_root=tmp_path) is True
         assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
 
         # Idempotent now that modes match.
-        assert mirror_tree(source, target) is False
+        assert mirror_tree(source, target, project_root=tmp_path) is False
 
     def test_failed_mirror_restores_relaxed_dir_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -683,7 +685,7 @@ class TestMirrorTree:
         source.mkdir()
         (source / "run.sh").write_text("v1", encoding="utf-8")
         target = tmp_path / "dst"
-        assert mirror_tree(source, target) is True  # initial create
+        assert mirror_tree(source, target, project_root=tmp_path) is True  # initial create
 
         # Change source content so the next mirror must write, and clamp the target
         # dir to 0555 (read+exec, no write) so mirror_tree relaxes it to 0755.
@@ -693,16 +695,76 @@ class TestMirrorTree:
         def _boom(*_args: object, **_kwargs: object) -> bool:
             raise OSError("simulated disk-full")
 
-        monkeypatch.setattr("crossby.sync.file_utils.write_if_different", _boom)
+        monkeypatch.setattr("crossby.sync.file_utils._atomic_write_if_different", _boom)
 
         with pytest.raises(OSError, match="simulated disk-full"):
-            mirror_tree(source, target)
+            mirror_tree(source, target, project_root=tmp_path)
 
         # Despite the failure, the relaxed dir must be restored to its pre-relax
         # mode (0555) — not left at the owner-writable 0755 it was relaxed to.
         assert stat.S_IMODE(target.stat().st_mode) == 0o555
 
         os.chmod(target, 0o755)  # cleanup safety for tmp_path teardown
+
+    def test_nested_target_symlink_dry_run_does_not_spuriously_error(self, tmp_path: Path) -> None:
+        # Issue #133 (A.6): a nested *target* symlink is not removed under
+        # dry_run (dry-run touches nothing), so a naive per-child ancestor
+        # re-check would see it as a symlinked ancestor and wrongly report a
+        # containment error even though the real run replaces it first. mirror_tree
+        # must report the would-change honestly and touch nothing.
+        project = tmp_path / "project"
+        project.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+
+        source = project / "src"
+        (source / "sub").mkdir(parents=True)
+        (source / "sub" / "child.txt").write_text("v1", encoding="utf-8")
+
+        target = project / "dst"
+        target.mkdir()
+        # A nested target child that is a symlink pointing outside the project.
+        (target / "sub").symlink_to(external, target_is_directory=True)
+
+        # Dry-run must not raise and must report a change (the symlink would be
+        # replaced + child written on the real run).
+        assert mirror_tree(source, target, project_root=project, dry_run=True) is True
+        assert (target / "sub").is_symlink()  # dry-run touched nothing
+        assert not any(external.iterdir())  # no write through the symlink
+
+        # The real run replaces the nested symlink and writes into a real dir.
+        assert mirror_tree(source, target, project_root=project) is True
+        assert not (target / "sub").is_symlink()
+        assert (target / "sub" / "child.txt").read_text(encoding="utf-8") == "v1"
+        assert not any(external.iterdir())  # escape target still untouched
+
+    def test_planted_temp_symlink_is_not_written_through(self, tmp_path: Path) -> None:
+        # Issue #133: mirror_tree's per-child write must not follow a pre-planted
+        # deterministic-named ``<child>.crossby-tmp`` sibling *symlink* — doing so
+        # would land attacker-controlled content at the link's referent outside
+        # the mirror root. mkstemp (O_EXCL, unpredictable name) closes this.
+        project = tmp_path / "project"
+        project.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        victim = external / "victim.txt"
+        victim.write_text("PRECIOUS", encoding="utf-8")
+
+        source = project / "src"
+        source.mkdir()
+        (source / "payload.md").write_text("attacker-content", encoding="utf-8")
+
+        target = project / "dst"
+        target.mkdir()  # a real target dir (e.g. a managed skills dir)
+        # The planted symlink at the exact deterministic temp name the old code used.
+        (target / "payload.md.crossby-tmp").symlink_to(victim)
+
+        assert mirror_tree(source, target, project_root=project) is True
+        assert victim.read_text(encoding="utf-8") == "PRECIOUS"  # never written through
+        # The child landed as a real file with the source content, inside the tree.
+        child = target / "payload.md"
+        assert not child.is_symlink()
+        assert child.read_text(encoding="utf-8") == "attacker-content"
 
 
 class TestTranslateStrategy:
@@ -1059,28 +1121,29 @@ class TestTranslateStrategy:
         # missing target, all without touching disk.
         source = _make_source(tmp_path, ["a", "b"])
         target = tmp_path / "target"
-        assert _copy_skills_dir(source, target, dry_run=True) is True  # target absent
+        # target absent
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         assert not target.exists()  # nothing written in dry-run
 
         # Real copy, then an unchanged dry-run reports no change.
-        assert _copy_skills_dir(source, target) is True
-        assert _copy_skills_dir(source, target, dry_run=True) is False
+        assert _copy_skills_dir(source, target, project_root=tmp_path) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is False
 
         # A byte change in a SKILL.md → change (dry-run leaves it unwritten).
         (target / "a" / "SKILL.md").write_text("# a changed\n", encoding="utf-8")
-        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         assert (target / "a" / "SKILL.md").read_text(encoding="utf-8") == "# a changed\n"
 
         # A mode-only difference is detected (this was the reviewer's drift point).
         (target / "a" / "SKILL.md").write_text("# a\n", encoding="utf-8")
-        assert _copy_skills_dir(source, target, dry_run=True) is False
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is False
         os.chmod(source / "a" / "SKILL.md", 0o600)
-        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         os.chmod(source / "a" / "SKILL.md", 0o644)
 
         # A stale skill dir in the target → change.
         (target / "stale").mkdir()
-        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         assert (target / "stale").is_dir()  # not removed in dry-run
 
     def test_copy_skills_dir_removes_stale_symlinks(self, tmp_path: Path) -> None:
@@ -1091,8 +1154,8 @@ class TestTranslateStrategy:
         # through. A symlink to a real file is left alone (not a stale skill dir).
         source = _make_source(tmp_path, ["a"])
         target = tmp_path / "target"
-        assert _copy_skills_dir(source, target) is True
-        assert _copy_skills_dir(source, target) is False  # unchanged → no-op
+        assert _copy_skills_dir(source, target, project_root=tmp_path) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path) is False  # unchanged → no-op
 
         outside = tmp_path / "outside"
         outside.mkdir()
@@ -1103,11 +1166,11 @@ class TestTranslateStrategy:
         os.symlink(tmp_path / "does-not-exist", broken)  # broken symlink
 
         # dry-run reports the pending removals, touching nothing.
-        assert _copy_skills_dir(source, target, dry_run=True) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path, dry_run=True) is True
         assert live.is_symlink() and broken.is_symlink()
 
         # real run unlinks both stale symlinks (no rmtree crash on a link).
-        assert _copy_skills_dir(source, target) is True
+        assert _copy_skills_dir(source, target, project_root=tmp_path) is True
         assert not live.is_symlink()
         assert not broken.is_symlink()
         # The real skill survives, and the live link's destination is not deleted.

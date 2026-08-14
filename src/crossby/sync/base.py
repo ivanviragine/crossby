@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from crossby.models.ai import AIToolID
 from crossby.sync.file_utils import first_symlinked_ancestor
+from crossby.sync.safe_write import SyncContainmentError
 
 if TYPE_CHECKING:
     from crossby.models.config import HookEntry, MCPServerConfig
@@ -180,6 +181,85 @@ class AbstractSyncWriter(ABC):
                 "outside the project). Remove the symlink and re-run."
             ),
         )
+
+    def merge_target_or_error(self, project_root: Path, target: Path) -> SyncResult | None:
+        """Ancestor **and leaf** containment for a shared *merge* config file.
+
+        ``contained_or_error`` guards only the *ancestor* chain (a symlinked
+        parent), because whole-file writers replace a symlink *leaf* in place.
+        Merge writers (permissions / MCP / hooks) instead read-modify-write a
+        shared file the user may legitimately keep as a symlink into a dotfiles
+        repo — following it would write through to an arbitrary destination. So
+        for those files a symlink **leaf** is refused too, and — critically —
+        this runs **before** the file is read/parsed, so a refused symlink never
+        reads or rewrites the target. Returns an ``error`` result or ``None``.
+        """
+        err = self.contained_or_error(project_root, target)
+        if err is not None:
+            return err
+        if target.is_symlink():
+            try:
+                shown: Path | str = target.relative_to(project_root)
+            except ValueError:
+                shown = target
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=(
+                    f"{shown} is a symlink; refusing to write through it (it may point "
+                    "outside the project). Remove the symlink and re-run."
+                ),
+            )
+        return None
+
+    def preflight(self, project_root: Path, *targets: Path) -> SyncResult | None:
+        """Ancestor+leaf-contain **all** *targets* before the first write.
+
+        Multi-file writers (``ClaudeMCPWriter``, ``CodexHooksWriter``) write two
+        artifacts. Calling this on every target up front means a refused symlink
+        on the *second* target can't leave the *first* partially applied — the
+        writer bails with the returned ``error`` result before touching disk.
+        Uses :meth:`merge_target_or_error` (leaf-aware) since both multi-file
+        writers are merge writers. Returns the first containment error, or
+        ``None`` when every target is clear.
+        """
+        for target in targets:
+            err = self.merge_target_or_error(project_root, target)
+            if err is not None:
+                return err
+        return None
+
+    def _containment_error(self, exc: SyncContainmentError) -> SyncResult:
+        """Wrap a :class:`SyncContainmentError` into an ``error`` result row."""
+        return SyncResult(
+            tool_id=self.tool_id,
+            concern=self.concern,
+            action="error",
+            message=str(exc),
+        )
+
+    def safe_sync(
+        self,
+        data: SyncData,
+        project_root: Path,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> SyncResult:
+        """Run :meth:`sync` and convert any escaped :class:`SyncContainmentError`
+        into an ``action="error"`` result.
+
+        ``run_sync`` wraps each writer in its own try/except, but a writer may be
+        invoked directly (the safety-spec matrix does exactly this). Routing all
+        direct invocations through here guarantees a refused write surfaces as an
+        ``error`` row rather than an escaped exception, regardless of caller — so
+        every writer satisfies the "refusal ⇒ error row" contract by construction.
+        """
+        try:
+            return self.sync(data, project_root, dry_run=dry_run, force=force)
+        except SyncContainmentError as exc:
+            return self._containment_error(exc)
 
     @abstractmethod
     def sync(

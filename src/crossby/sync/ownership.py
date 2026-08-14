@@ -240,8 +240,14 @@ def load_ledger_checked(project_root: Path) -> LoadedLedger:
     if not os.path.lexists(path):
         # Truly absent — never corrupt; a fresh clone starts from an empty ledger.
         return LoadedLedger(OwnershipLedger())
-    if not path.is_file():
-        # A directory or broken symlink at the path: present but not a ledger.
+    if path.is_symlink() or not path.is_file():
+        # A symlink (even one pointing at a valid file), directory, or broken
+        # link at the ledger path: present but not a plain ledger. Fail closed —
+        # ``run_sync`` reads the ledger *before* the post-writer save, so a
+        # symlinked ``owned.json`` must not be followed (it could redirect the
+        # read/write outside ``.crossby/``). ``load_ledger`` degrades this to an
+        # empty ledger (own-nothing / additive-only); the fail-closed callers
+        # (scene use/clear) refuse on ``corrupt``.
         logger.warning("ownership.malformed_ledger", path=str(path))
         return LoadedLedger(OwnershipLedger(), corrupt=True)
     try:
@@ -350,8 +356,21 @@ def save_ledger(project_root: Path, ledger: OwnershipLedger) -> bool:
     Returns ``True`` when the file was created or its contents changed, ``False``
     when the on-disk file already matched (so callers can skip a redundant
     ``.gitignore`` touch on an idempotent re-run).
+
+    Fails closed on a symlinked ``owned.json`` (or a symlinked ``.crossby``
+    ancestor) *before* the read below — the ledger is provenance state, never
+    ordinary generated output, so it is refused rather than followed (mirroring
+    the ``load_ledger`` fail-closed path). Raises :class:`SyncContainmentError`.
     """
+    from crossby.sync.safe_write import ProjectScope, SyncContainmentError, assert_ancestors
+
     path = project_root / LEDGER_PATH
+    assert_ancestors(ProjectScope(project_root), path)
+    if path.is_symlink():
+        raise SyncContainmentError(
+            f"{path} is a symlink; refusing to write the ownership ledger through it. "
+            "Remove the symlink and re-run."
+        )
     exists = path.is_file()
     # Don't materialise an empty ledger just because a ledger-bearing concern
     # ran with nothing to record — but a file that already exists must still be
