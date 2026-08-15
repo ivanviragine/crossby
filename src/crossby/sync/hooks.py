@@ -1344,10 +1344,17 @@ _CODEX_FEATURES_MIGRATION_NOTE = ManualFixNote(
 
 
 def codex_hooks_alias_needs_migration(project_root: Path) -> bool:
-    """Return whether project Codex config contains the deprecated hooks alias."""
+    """Return whether a safely readable Codex config has the deprecated alias.
+
+    Alias detection participates in the same ancestor-and-leaf symlink refusal
+    as the merge writer. This check must happen before ``read_text`` because the
+    CLI probes for migration work before it dispatches the writer.
+    """
     import tomllib
 
     path = project_root / ".codex" / "config.toml"
+    if CodexHooksWriter().preflight(project_root, path) is not None:
+        return False
     try:
         existing = tomllib.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
@@ -1472,21 +1479,21 @@ class CodexHooksWriter(AbstractSyncWriter):
         force: bool = False,
     ) -> SyncResult:
         has_hook_work = bool(data.hooks or data.hooks_remove)
-        migrate_alias_only = not has_hook_work and codex_hooks_alias_needs_migration(project_root)
-        if not has_hook_work and not migrate_alias_only:
-            return SyncResult(
-                tool_id=self.tool_id,
-                concern=self.concern,
-                action="skipped",
-                message="no hooks config",
-            )
-
         path = project_root / ".codex" / "hooks.json"
         config_path = project_root / ".codex" / "config.toml"
-        if migrate_alias_only:
+        if not has_hook_work:
+            # Preflight before alias detection so a symlinked config is refused
+            # without ever following it for the read/parse probe.
             preflight_err = self.preflight(project_root, config_path)
             if preflight_err is not None:
                 return preflight_err
+            if not codex_hooks_alias_needs_migration(project_root):
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="skipped",
+                    message="no hooks config",
+                )
             flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
                 project_root, dry_run=dry_run, enable=False
             )

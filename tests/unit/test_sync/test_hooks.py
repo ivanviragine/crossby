@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1508,6 +1509,42 @@ class TestCodexHooksWriter:
         assert result.action == "error"
         assert "symlinked directory" in (result.message or "")
         assert not any(outside.iterdir())  # neither hooks.json nor config.toml written
+
+    @pytest.mark.parametrize("link_kind", ["ancestor", "leaf"])
+    def test_alias_probe_refuses_symlink_without_reading_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        link_kind: str,
+    ) -> None:
+        import os
+
+        from crossby.sync.hooks import codex_hooks_alias_needs_migration
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_config = outside / "config.toml"
+        outside_config.write_text("[features]\ncodex_hooks = true\n", encoding="utf-8")
+        config = tmp_path / ".codex" / "config.toml"
+        if link_kind == "ancestor":
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        else:
+            config.parent.mkdir()
+            os.symlink(outside_config, config)
+
+        real_read_text = Path.read_text
+
+        def guarded_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == config:
+                raise AssertionError("symlinked Codex config was read")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+        assert codex_hooks_alias_needs_migration(tmp_path) is False
+        result = self.writer.sync(SyncData(), tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
 
     def test_drops_notification_event(self, tmp_path: Path) -> None:
         """Codex has no notification event; it should be dropped with a note."""
