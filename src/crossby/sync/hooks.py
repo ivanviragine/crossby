@@ -22,7 +22,7 @@ from crossby.models.config import HookEntry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import atomic_write_text, read_json_file, write_json_file
 from crossby.sync.manual_fix import ManualFixNote
-from crossby.sync.toml_edit import set_scalar, splice_or_none
+from crossby.sync.toml_edit import set_scalar, splice_or_none, unset_scalar
 
 _HookAction = Literal["created", "updated", "skipped", "error"]
 
@@ -1329,39 +1329,31 @@ _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
     category="features.hooks",
     message=(
         "Could not update `.codex/config.toml` automatically — set "
-        "`[features].hooks = true` (and `codex_hooks = true` for older Codex "
-        "builds) there manually so Codex loads these hooks."
+        "`[features].hooks = true` there manually so Codex loads these hooks."
     ),
 )
-
-# Canonical key first, deprecated alias second. `hooks` is the current name and
-# has been stable and ON by default since Codex 0.146.0 (`codex features list`
-# reports `hooks stable true`); `codex_hooks` resolves to it as a deprecated
-# alias. Unknown feature keys are inert, so writing both is safe on every build
-# and is purely defensive for older ones.
-_CODEX_FEATURE_KEYS: tuple[str, ...] = ("hooks", "codex_hooks")
 
 
 def _ensure_codex_hooks_feature_flag(
     project_root: Path, *, dry_run: bool
 ) -> tuple[bool, ManualFixNote | None]:
-    """Enable the Codex hooks feature flags in ``.codex/config.toml`` (idempotent).
+    """Enable the canonical Codex hooks flag in ``.codex/config.toml`` (idempotent).
 
-    Writes both ``[features].hooks`` (canonical) and ``[features].codex_hooks``
-    (deprecated alias) so the config works on current and older Codex alike.
-    Merges into any existing config, preserving other keys/tables.
+    Writes ``[features].hooks = true`` and removes the deprecated
+    ``[features].codex_hooks`` alias that older crossby versions wrote. Merges
+    into any existing config, preserving other keys/tables.
 
     On current Codex this is belt-and-braces — the feature is stable and enabled
-    by default, so hooks load whether or not the flag is present. It still gets
-    written so a project pinned to an older Codex is not silently left with
-    inert hooks.
+    by default, so hooks load whether or not the flag is present. Keeping the
+    canonical flag explicit makes the generated config's intent clear.
 
     Returns ``(changed, note)``:
 
-    - ``changed`` is True when at least one feature key was missing — meaning the
-      file was written (non-dry-run) or *would* be written (dry-run). It is False
-      when both flags are already set or the file is malformed (nothing written).
-      The caller uses this so a ``skipped`` row can never hide a real flag write,
+    - ``changed`` is True when the canonical key needs enabling or the deprecated
+      alias needs removing — meaning the file was written (non-dry-run) or
+      *would* be written (dry-run). It is False when the canonical flag is already
+      set without the alias, or the file is malformed (nothing written). The
+      caller uses this so a ``skipped`` row can never hide a real config write,
       while self-heal still fires on an otherwise-unchanged re-sync.
     - ``note`` is :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is
       malformed TOML and can't be updated automatically, else ``None``.
@@ -1383,25 +1375,27 @@ def _ensure_codex_hooks_feature_flag(
     features = existing.get("features")
     if not isinstance(features, dict):
         features = {}
-    missing = [key for key in _CODEX_FEATURE_KEYS if features.get(key) is not True]
-    if not missing:
+    needs_enable = features.get("hooks") is not True
+    has_deprecated_alias = "codex_hooks" in features
+    if not needs_enable and not has_deprecated_alias:
         return False, None  # already enabled — nothing to do
 
     if dry_run:
         return True, None  # would write, but dry-run writes nothing
 
-    for key in missing:
-        features[key] = True
+    features["hooks"] = True
+    features.pop("codex_hooks", None)
     existing["features"] = features
 
-    # Splice each key in textually so the user's comments and key ordering
-    # survive; fall back to the (lossy) full dump only if that can't be done.
+    # Splice the canonical key and remove the old alias textually so the user's
+    # comments and key ordering survive; fall back to the (lossy) full dump only
+    # if that can't be done.
     # Reuses the text read above — a second read could see a different file.
-    spliced: str | None = original
-    for key in missing:
-        if spliced is None:
-            break
-        spliced = set_scalar(spliced, ("features",), key, "true")
+    spliced = (
+        set_scalar(original, ("features",), "hooks", "true") if needs_enable else original
+    )
+    if spliced is not None and has_deprecated_alias:
+        spliced = unset_scalar(spliced, ("features",), "codex_hooks")
 
     new_text = splice_or_none(spliced, existing)
     if new_text is None:
@@ -1423,11 +1417,11 @@ class CodexHooksWriter(AbstractSyncWriter):
     are reported as manual-fix notes in the ``SyncResult.message`` so the
     sync report classifies the row as ``Check before using``.
 
-    The writer also sets ``[features].hooks = true`` and its deprecated alias
-    ``codex_hooks`` in ``.codex/config.toml`` (a manual-fix note is surfaced only
-    if that file can't be written). On current Codex this is defensive only —
-    the hooks feature is stable and enabled by default since 0.146.0 — but it
-    keeps a project pinned to an older Codex from ending up with inert hooks.
+    The writer also sets ``[features].hooks = true`` in ``.codex/config.toml``
+    and removes the deprecated ``codex_hooks`` alias left by older crossby
+    versions (a manual-fix note is surfaced only if that file can't be written).
+    On current Codex this is defensive only: the hooks feature is stable and
+    enabled by default since 0.146.0.
     """
 
     tool_id = AIToolID.CODEX

@@ -10,7 +10,7 @@ not an acceptable trade.
 crossby only ever needs three edits, so these helpers splice the document
 textually and leave everything they don't own byte-for-byte intact:
 
-- :func:`set_scalar` — set one key inside one table (``[features].codex_hooks``)
+- :func:`set_scalar` — set one key inside one table (``[features].hooks``)
 - :func:`unset_scalar` — remove one key from one table (revert an added key)
 - :func:`upsert_table` — add or replace one table (``[mcp_servers.<name>]``)
 - :func:`remove_table` — drop one table
