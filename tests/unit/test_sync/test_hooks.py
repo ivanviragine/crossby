@@ -1804,6 +1804,31 @@ class TestCodexHooksWriter:
         # The malformed file is left as-is (not clobbered).
         assert config.read_text(encoding="utf-8") == "this is = = not valid toml"
 
+    def test_non_table_features_value_is_preserved(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = 'features = "custom"\nmodel = "gpt-5"\n'
+        config.write_text(original, encoding="utf-8")
+
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        assert result.message is not None
+        assert "features.hooks" in result.message
+        assert config.read_text(encoding="utf-8") == original
+
+    def test_migration_dry_run_rejects_unsplicable_escaped_alias(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = '[features]\n"codex\\u005fhooks" = false\n'
+        config.write_text(original, encoding="utf-8")
+
+        result = self.writer.sync(SyncData(), tmp_path, dry_run=True)
+
+        assert result.action == "error"
+        assert result.message is not None
+        assert "preserving its current boolean value" in result.message
+        assert config.read_text(encoding="utf-8") == original
+
     def test_merges_with_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".codex" / "hooks.json"
         path.parent.mkdir(parents=True)

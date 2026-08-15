@@ -1405,17 +1405,15 @@ def _ensure_codex_hooks_feature_flag(
         except (tomllib.TOMLDecodeError, OSError, ValueError):
             return False, failure_note
 
-    features = existing.get("features")
-    if not isinstance(features, dict):
-        features = {}
+    raw_features = existing.get("features")
+    if "features" in existing and not isinstance(raw_features, dict):
+        return False, failure_note
+    features: dict[str, Any] = raw_features if isinstance(raw_features, dict) else {}
     has_canonical_key = "hooks" in features
     needs_enable = enable and features.get("hooks") is not True
     has_deprecated_alias = "codex_hooks" in features
     if not needs_enable and not has_deprecated_alias:
         return False, None  # nothing to migrate or enable
-
-    if dry_run:
-        return True, None  # would write, but dry-run writes nothing
 
     if needs_enable:
         features["hooks"] = True
@@ -1444,6 +1442,9 @@ def _ensure_codex_hooks_feature_flag(
         if has_deprecated_alias:
             return False, failure_note
         new_text = tomli_w.dumps(existing)
+
+    if dry_run:
+        return True, None  # validated the edit; dry-run writes nothing
 
     try:
         atomic_write_text(path, new_text)
