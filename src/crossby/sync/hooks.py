@@ -1391,9 +1391,7 @@ def _ensure_codex_hooks_feature_flag(
     # comments and key ordering survive; fall back to the (lossy) full dump only
     # if that can't be done.
     # Reuses the text read above — a second read could see a different file.
-    spliced = (
-        set_scalar(original, ("features",), "hooks", "true") if needs_enable else original
-    )
+    spliced = set_scalar(original, ("features",), "hooks", "true") if needs_enable else original
     if spliced is not None and has_deprecated_alias:
         spliced = unset_scalar(spliced, ("features",), "codex_hooks")
 

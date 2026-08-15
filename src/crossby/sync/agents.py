@@ -1539,9 +1539,7 @@ class CopilotAgentsWriter(AbstractSyncWriter):
                     would_write = True
             # An existing managed dir missing its ``.crossby-managed`` marker is a
             # change even when every file matches — the real run writes the marker.
-            would_write |= write_managed_marker(
-                target_dir, project_root=project_root, dry_run=True
-            )
+            would_write |= write_managed_marker(target_dir, project_root=project_root, dry_run=True)
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
