@@ -1343,6 +1343,18 @@ _CODEX_FEATURES_MIGRATION_NOTE = ManualFixNote(
 )
 
 
+def _codex_hooks_alias_present(path: Path) -> bool:
+    """Return alias presence after the caller has preflighted *path*."""
+    import tomllib
+
+    try:
+        existing = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
+        return False
+    features = existing.get("features")
+    return isinstance(features, dict) and "codex_hooks" in features
+
+
 def probe_codex_hooks_alias_migration(
     project_root: Path,
 ) -> tuple[bool, SyncResult | None]:
@@ -1354,18 +1366,11 @@ def probe_codex_hooks_alias_migration(
     preflight error lets that CLI still dispatch the writer and surface the
     refusal instead of misreporting that no work was found.
     """
-    import tomllib
-
     path = project_root / ".codex" / "config.toml"
     preflight_error = CodexHooksWriter().preflight(project_root, path)
     if preflight_error is not None:
         return False, preflight_error
-    try:
-        existing = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
-        return False, None
-    features = existing.get("features")
-    return isinstance(features, dict) and "codex_hooks" in features, None
+    return _codex_hooks_alias_present(path), None
 
 
 def _ensure_codex_hooks_feature_flag(
@@ -1536,6 +1541,7 @@ class CodexHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
+        needs_alias_migration = _codex_hooks_alias_present(config_path)
         kept, notes = _filter_supported_hooks(data.hooks, _CODEX_SUPPORTED_EVENTS)
 
         existing = file_data or {}
@@ -1626,13 +1632,14 @@ class CodexHooksWriter(AbstractSyncWriter):
         hooks_changed = bool(added or revoked)
 
         # Enable the feature for retained hooks, or migrate only the deprecated
-        # alias during a removal-only sync. This runs independently of
-        # ``hooks_changed`` so the config self-heals on an otherwise unchanged
-        # sync without overriding an explicit ``hooks = false`` during removal.
+        # alias during removal-only and unsupported-input syncs. This runs
+        # independently of ``hooks_changed`` so the config self-heals on an
+        # otherwise unchanged sync without overriding an explicit
+        # ``hooks = false`` when no supported input hook survives filtering.
         # ``flag_changed`` reflects a real (or, in dry-run, a would-be) write to
         # ``.codex/config.toml`` so a ``skipped`` row cannot hide a config write.
         flag_changed = False
-        if kept or has_supported_removals:
+        if kept or has_supported_removals or needs_alias_migration:
             flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
                 project_root, dry_run=dry_run, enable=bool(kept)
             )

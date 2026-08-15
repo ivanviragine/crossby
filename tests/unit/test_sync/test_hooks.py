@@ -1559,6 +1559,29 @@ class TestCodexHooksWriter:
         assert "manual_fix" in result.message
         assert "hooks.notification" in result.message
 
+    def test_unsupported_only_input_still_migrates_codex_alias(self, tmp_path: Path) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve unsupported-only migration\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+
+        result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert result.action == "updated"
+        assert result.file_path == config
+        assert result.message is not None
+        assert "hooks.notification" in result.message
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve unsupported-only migration" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
     def test_user_prompt_submit_drops_matcher(self, tmp_path: Path) -> None:
         ups_with_tools = HookEntry(
             event="user_prompt_submit",
