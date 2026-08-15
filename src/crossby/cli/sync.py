@@ -101,7 +101,7 @@ def sync(
     )
     from crossby.sync import run_sync
     from crossby.sync.base import SyncConcern, SyncData
-    from crossby.sync.hooks import codex_hooks_alias_needs_migration
+    from crossby.sync.hooks import CodexHooksWriter, codex_hooks_alias_needs_migration
     from crossby.sync.readers import (
         build_sync_data,
         discover_hooks,
@@ -268,13 +268,11 @@ def sync(
             skip_concerns=skip_concerns,
         )
         if needs_codex_hooks_migration and not main_runs_codex_hooks:
-            results += run_sync(
-                SyncData(),
-                project_root,
-                tool_id=AIToolID.CODEX,
-                concern=SyncConcern.HOOKS,
-                dry_run=dry_run,
-                force=force,
+            # This is a config-key migration, not an empty hooks sync. Calling
+            # run_sync(SyncData()) here would ownership-diff the empty hook set
+            # and revoke every Codex hook crossby previously recorded.
+            results.append(
+                CodexHooksWriter().safe_sync(SyncData(), project_root, dry_run=dry_run, force=force)
             )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:

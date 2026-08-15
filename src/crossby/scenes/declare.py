@@ -325,13 +325,18 @@ def apply_codex_disabled_mcp(
         # either way, since a reverted server never re-enters ``new_owned``.
         if server not in present:
             continue
-        spliced = unset_scalar(new_text, ("mcp_servers", server), "enabled")
+        spliced = unset_scalar(
+            new_text,
+            ("mcp_servers", server),
+            "enabled",
+            include_implicit=True,
+        )
         # unset_scalar returns the text UNCHANGED (not None) when the marker lives
-        # in a representation it can't edit textually — an inline table or a dotted
-        # key. Since ``server in present`` means ``enabled = false`` IS in the
-        # parsed data, "no change" means the revert did not land: treat it as a
-        # failure (retain ownership + error below), not a phantom success that
-        # would leave the server disabled on disk with no provenance.
+        # in a representation it can't edit textually. Since ``server in present``
+        # means ``enabled = false`` IS in the parsed data, "no change" means the
+        # revert did not land: treat it as a failure (retain ownership + error
+        # below), not a phantom success that would leave the server disabled on
+        # disk with no provenance.
         if spliced is not None and spliced != new_text:
             new_text = spliced
             removed_ok.add(server)

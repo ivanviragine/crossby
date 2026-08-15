@@ -381,30 +381,30 @@ class TestCodexPartialFailure:
 
         return tomllib.loads((tmp_path / CODEX_CONFIG).read_text(encoding="utf-8"))
 
-    def test_inline_table_removal_failure_retains_ownership(self, tmp_path: Path) -> None:
-        # linear is defined as an INLINE table with enabled=false. unset_scalar
-        # cannot edit an inline table, so it returns the text UNCHANGED (not None).
-        # The clear must treat "no change" as a failed revert — keep linear owned
-        # and report an error — not a phantom success that drops ownership while
-        # the server stays disabled on disk. No monkeypatch: the real splicer.
+    @pytest.mark.parametrize(
+        "config_text",
+        [
+            'mcp_servers.linear.command = "lin-mcp"\nmcp_servers.linear.enabled = true\n',
+            'mcp_servers.linear = { command = "lin-mcp", enabled = true }\n',
+        ],
+    )
+    def test_implicit_enabled_value_reverts_cleanly(self, tmp_path: Path, config_text: str) -> None:
+        # set_scalar supports both dotted assignments and inline-table entries;
+        # clearing the scene must be able to undo either representation too.
         (tmp_path / ".codex").mkdir()
-        # linear is a top-level inline table (before any header, so it is NOT
-        # nested under [mcp_servers.github]); unset_scalar can't edit it.
-        (tmp_path / CODEX_CONFIG).write_text(
-            'mcp_servers.linear = { command = "lin-mcp", enabled = false }\n\n'
-            '[mcp_servers.github]\ncommand = "gh-mcp"\n',
-            encoding="utf-8",
-        )
+        (tmp_path / CODEX_CONFIG).write_text(config_text, encoding="utf-8")
         ledger = OwnershipLedger()
-        ledger.record_scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED, {"linear"})
 
-        result = declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)
-        assert result.action == "error"
-        # linear is still disabled on disk (unremovable) and still owned for retry.
+        applied = declare.apply_codex_disabled_mcp(tmp_path, {"linear"}, ledger, trusted=True)
+        assert applied.action == "updated"
         assert self._codex_data(tmp_path)["mcp_servers"]["linear"]["enabled"] is False
-        assert ledger.scene_declare(
-            AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED
-        ) == frozenset({"linear"})
+        result = declare.apply_codex_disabled_mcp(tmp_path, set(), ledger, trusted=True)
+        assert result.action == "updated"
+        assert result.revoked == 1
+        assert "enabled" not in self._codex_data(tmp_path)["mcp_servers"]["linear"]
+        assert (
+            ledger.scene_declare(AIToolID.CODEX, SceneDeclareKey.CODEX_MCP_DISABLED) == frozenset()
+        )
 
     def test_all_removals_fail_retain_all_ownership(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -434,8 +434,18 @@ class TestCodexPartialFailure:
 
         real = declare.unset_scalar
 
-        def _fail_linear(text: str, path: tuple[str, ...], key: str) -> str | None:
-            return None if path[-1] == "linear" else real(text, path, key)
+        def _fail_linear(
+            text: str,
+            path: tuple[str, ...],
+            key: str,
+            *,
+            include_implicit: bool = False,
+        ) -> str | None:
+            return (
+                None
+                if path[-1] == "linear"
+                else real(text, path, key, include_implicit=include_implicit)
+            )
 
         monkeypatch.setattr("crossby.scenes.declare.unset_scalar", _fail_linear)
 

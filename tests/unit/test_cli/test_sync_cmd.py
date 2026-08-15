@@ -931,6 +931,24 @@ class TestWizardRevocation:
             "# source config\n[features]\ncodex_hooks = false\n",
             encoding="utf-8",
         )
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Edit",
+                                "hooks": [{"type": "command", "command": "guard"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_hooks = hooks_path.read_bytes()
+        _seed_hook_ledger(tmp_path, AIToolID.CODEX, {_GUARD_HOOK})
         monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
         monkeypatch.setattr(
             "crossby.ai_tools.base.AbstractAITool.detect_installed",
@@ -948,7 +966,8 @@ class TestWizardRevocation:
         assert parsed["features"]["hooks"] is False
         assert "codex_hooks" not in parsed["features"]
         assert "# source config" in text
-        assert not (tmp_path / ".codex" / "hooks.json").exists()
+        assert hooks_path.read_bytes() == original_hooks
+        assert load_ledger(tmp_path).hooks(AIToolID.CODEX) == frozenset({_GUARD_HOOK})
 
     def test_wizard_revokes_environment_wide_emptied_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
