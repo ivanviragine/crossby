@@ -22,7 +22,7 @@ from crossby.models.config import HookEntry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import atomic_write_text, read_json_file, write_json_file
 from crossby.sync.manual_fix import ManualFixNote
-from crossby.sync.toml_edit import set_scalar, splice_or_none, unset_scalar
+from crossby.sync.toml_edit import rename_scalar, set_scalar, splice_or_none, unset_scalar
 
 _HookAction = Literal["created", "updated", "skipped", "error"]
 
@@ -1328,8 +1328,9 @@ _CODEX_MATCHER_EVENTS: frozenset[str] = frozenset(
 _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
     category="features.hooks",
     message=(
-        "Could not update `.codex/config.toml` automatically — set "
-        "`[features].hooks = true` there manually so Codex loads these hooks."
+        "Could not safely update `.codex/config.toml` automatically — set "
+        "`[features].hooks = true` and remove the deprecated `codex_hooks` "
+        "key there manually so Codex loads these hooks without a warning."
     ),
 )
 
@@ -1388,15 +1389,25 @@ def _ensure_codex_hooks_feature_flag(
     existing["features"] = features
 
     # Splice the canonical key and remove the old alias textually so the user's
-    # comments and key ordering survive; fall back to the (lossy) full dump only
-    # if that can't be done.
+    # comments and key ordering survive. Alias migration refuses a lossy full
+    # dump when that can't be done safely.
     # Reuses the text read above — a second read could see a different file.
-    spliced = set_scalar(original, ("features",), "hooks", "true") if needs_enable else original
-    if spliced is not None and has_deprecated_alias:
-        spliced = unset_scalar(spliced, ("features",), "codex_hooks")
+    if has_deprecated_alias:
+        spliced = (
+            rename_scalar(original, ("features",), "codex_hooks", "hooks")
+            if needs_enable
+            else unset_scalar(original, ("features",), "codex_hooks", include_implicit=True)
+        )
+    else:
+        spliced = set_scalar(original, ("features",), "hooks", "true")
 
     new_text = splice_or_none(spliced, existing)
     if new_text is None:
+        # Alias migration must never trade a deprecation warning for silently
+        # erased comments or formatting. Surface a manual step when an unusual
+        # but valid TOML representation cannot be spliced safely.
+        if has_deprecated_alias:
+            return False, _CODEX_FEATURES_FLAG_NOTE
         new_text = tomli_w.dumps(existing)
 
     try:

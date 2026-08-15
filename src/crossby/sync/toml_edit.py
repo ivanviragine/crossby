@@ -7,20 +7,22 @@ discarded when it's dumped back. ``.codex/config.toml`` is a file crossby
 settings live there — so rewriting it to add one boolean or one MCP server is
 not an acceptable trade.
 
-crossby only ever needs three edits, so these helpers splice the document
+crossby only needs a small set of edits, so these helpers splice the document
 textually and leave everything they don't own byte-for-byte intact:
 
 - :func:`set_scalar` — set one key inside one table (``[features].hooks``)
+- :func:`rename_scalar` — rename one key without changing its value
 - :func:`unset_scalar` — remove one key from one table (revert an added key)
 - :func:`upsert_table` — add or replace one table (``[mcp_servers.<name>]``)
 - :func:`remove_table` — drop one table
 
 Every function is best-effort and returns ``None`` when it can't apply the edit
-confidently (an unterminated string, a table defined inline, a non-contiguous
-child table). They guarantee two things: the return value is either ``None`` or
-valid TOML, and they never silently report a no-op as a completed edit. Callers
-still verify the *data* against their intent with :func:`splice_or_none` before
-writing, and fall back to the full round-trip when it disagrees.
+confidently (an unterminated string, an unsupported table representation, a
+non-contiguous child table). They guarantee two things: the return value is
+either ``None`` or valid TOML, and they never silently report a no-op as a
+completed edit. Callers still verify the *data* against their intent with
+:func:`splice_or_none` before writing and choose whether to fall back or surface
+a manual edit when it disagrees.
 """
 
 from __future__ import annotations
@@ -49,6 +51,17 @@ class _Assign:
     parts: tuple[str, ...]
     start: int  # offset of the first character of the key
     end: int  # offset just past the assignment's final newline
+
+
+@dataclass(frozen=True)
+class _InlineEntry:
+    """One direct key/value entry inside an inline table assignment."""
+
+    start: int  # offset just after the preceding ``{`` or comma
+    end: int  # offset of the following comma or closing ``}``
+    key_start: int
+    key_end: int
+    parts: tuple[str, ...]
 
 
 def _find_string_end(text: str, i: int) -> int | None:
@@ -263,6 +276,148 @@ def _find_table(headers: list[_Header], parts: tuple[str, ...]) -> int | None:
     return None
 
 
+def _find_assignment_equals(text: str, start: int, end: int) -> int | None:
+    """Find the first unquoted ``=`` in one assignment or inline entry."""
+    i = start
+    while i < end:
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            string_end = _find_multiline_end(text, i + 3, text[i : i + 3])
+            if string_end is None or string_end > end:
+                return None
+            i = string_end
+            continue
+        if text[i] in "\"'":
+            string_end = _find_string_end(text, i)
+            if string_end is None or string_end > end:
+                return None
+            i = string_end
+            continue
+        if text[i] == "=":
+            return i
+        i += 1
+    return None
+
+
+def _assignment_key_span(
+    text: str, start: int, end: int
+) -> tuple[int, int, tuple[str, ...]] | None:
+    """Return the non-whitespace key span and parsed parts before ``=``."""
+    equals = _find_assignment_equals(text, start, end)
+    if equals is None:
+        return None
+    key_start = start
+    while key_start < equals and text[key_start] in " \t\r\n":
+        key_start += 1
+    key_end = equals
+    while key_end > key_start and text[key_end - 1] in " \t\r\n":
+        key_end -= 1
+    if key_start == key_end:
+        return None
+    return key_start, key_end, _split_key(text[key_start:key_end])
+
+
+def _inline_entries(text: str, assign: _Assign) -> list[_InlineEntry] | None:
+    """Parse direct entries from an inline-table assignment, preserving offsets."""
+    equals = _find_assignment_equals(text, assign.start, assign.end)
+    if equals is None:
+        return None
+    opening = equals + 1
+    while opening < assign.end and text[opening] in " \t\r\n":
+        opening += 1
+    if opening >= assign.end or text[opening] != "{":
+        return None
+
+    spans: list[tuple[int, int]] = []
+    entry_start = opening + 1
+    depth = 1
+    i = entry_start
+    while i < assign.end:
+        if text.startswith('"""', i) or text.startswith("'''", i):
+            string_end = _find_multiline_end(text, i + 3, text[i : i + 3])
+            if string_end is None or string_end > assign.end:
+                return None
+            i = string_end
+            continue
+        ch = text[i]
+        if ch in "\"'":
+            string_end = _find_string_end(text, i)
+            if string_end is None or string_end > assign.end:
+                return None
+            i = string_end
+            continue
+        if ch == "#":
+            newline = text.find("\n", i, assign.end)
+            i = assign.end if newline == -1 else newline + 1
+            continue
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                if ch != "}":
+                    return None
+                if text[entry_start:i].strip():
+                    spans.append((entry_start, i))
+                entries: list[_InlineEntry] = []
+                for start, end in spans:
+                    key_span = _assignment_key_span(text, start, end)
+                    if key_span is None:
+                        return None
+                    key_start, key_end, parts = key_span
+                    entries.append(_InlineEntry(start, end, key_start, key_end, parts))
+                return entries
+        elif ch == "," and depth == 1:
+            if not text[entry_start:i].strip():
+                return None
+            spans.append((entry_start, i))
+            entry_start = i + 1
+        i += 1
+    return None
+
+
+def _top_level_assigns(text: str, headers: list[_Header], assigns: list[_Assign]) -> list[_Assign]:
+    """Return assignments before the first table header."""
+    end = headers[0].start if headers else len(text)
+    return [assign for assign in assigns if assign.start < end]
+
+
+def _find_implicit_scalar(
+    text: str,
+    headers: list[_Header],
+    assigns: list[_Assign],
+    table: tuple[str, ...],
+    key: str,
+) -> tuple[str, _Assign, _InlineEntry | None, list[_InlineEntry] | None] | None:
+    """Find a scalar defined by a top-level dotted key or inline table."""
+    top_level = _top_level_assigns(text, headers, assigns)
+    path = (*table, key)
+    for assign in top_level:
+        if assign.parts == path:
+            return "dotted", assign, None, None
+    for assign in top_level:
+        if assign.parts != table:
+            continue
+        entries = _inline_entries(text, assign)
+        if entries is None:
+            continue
+        for entry in entries:
+            if entry.parts == (key,):
+                return "inline", assign, entry, entries
+    return None
+
+
+def _remove_inline_entry(text: str, entry: _InlineEntry, entries: list[_InlineEntry]) -> str:
+    """Remove one inline-table entry together with exactly one delimiter."""
+    index = entries.index(entry)
+    if len(entries) == 1:
+        start, end = entry.start, entry.end
+    elif index < len(entries) - 1:
+        start, end = entry.start, entries[index + 1].start
+    else:
+        start, end = entries[index - 1].end, entry.end
+    return text[:start] + text[end:]
+
+
 def _detach_trailing_comments(text: str, end: int, floor: int) -> int:
     """Hand back the run of blank/comment lines sitting just before *end*.
 
@@ -474,15 +629,70 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
     return _still_parses(text[: header.body_start] + line + text[header.body_start :])
 
 
-def unset_scalar(text: str, table: tuple[str, ...], key: str) -> str | None:
+def rename_scalar(text: str, table: tuple[str, ...], old_key: str, new_key: str) -> str | None:
+    """Rename one scalar key, including dotted and inline-table definitions.
+
+    The value and every byte outside the key token stay untouched. Returns
+    ``None`` when the old key is defined in a representation this targeted
+    editor cannot safely change, or when the new key already exists.
+    """
+    scan = _scan(text)
+    if scan is None:
+        return None
+    headers, assigns = scan
+    old_path = (*table, old_key)
+    if _is_defined(text, (*table, new_key)):
+        return None
+
+    idx = _find_table(headers, table)
+    if idx is not None:
+        header = headers[idx]
+        body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)
+        for assign in assigns:
+            if assign.parts != (old_key,) or not (header.body_start <= assign.start < body_end):
+                continue
+            key_span = _assignment_key_span(text, assign.start, assign.end)
+            if key_span is None:
+                return None
+            key_start, key_end, _ = key_span
+            return _still_parses(text[:key_start] + _render_key((new_key,)) + text[key_end:])
+    else:
+        implicit = _find_implicit_scalar(text, headers, assigns, table, old_key)
+        if implicit is not None:
+            kind, assign, entry, _entries = implicit
+            if kind == "dotted":
+                key_span = _assignment_key_span(text, assign.start, assign.end)
+                if key_span is None:
+                    return None
+                key_start, key_end, _ = key_span
+                return _still_parses(
+                    text[:key_start] + _render_key((*table, new_key)) + text[key_end:]
+                )
+            assert entry is not None
+            return _still_parses(
+                text[: entry.key_start] + _render_key((new_key,)) + text[entry.key_end :]
+            )
+
+    return None if _is_defined(text, old_path) else text
+
+
+def unset_scalar(
+    text: str,
+    table: tuple[str, ...],
+    key: str,
+    *,
+    include_implicit: bool = False,
+) -> str | None:
     """Remove ``key = ...`` from ``[table]`` if present, preserving the rest.
 
     Returns the edited text, the unchanged *text* when the table or key is
     absent (a clean no-op — used to revert a key crossby added earlier without
     leaving an ``enabled = true`` residue), or ``None`` when the document does
     not scan. Only the one assignment line is removed; the table header,
-    comments, ordering and every other key survive. Removing an emptied table's
-    header is :func:`remove_table`'s job, not this one.
+    comments, ordering and every other key survive. With
+    ``include_implicit=True``, a top-level dotted assignment or direct
+    inline-table entry is removed too. Removing an emptied table's header is
+    :func:`remove_table`'s job, not this one.
     """
     scan = _scan(text)
     if scan is None:
@@ -490,6 +700,16 @@ def unset_scalar(text: str, table: tuple[str, ...], key: str) -> str | None:
     headers, assigns = scan
     idx = _find_table(headers, table)
     if idx is None:
+        if include_implicit:
+            implicit = _find_implicit_scalar(text, headers, assigns, table, key)
+            if implicit is not None:
+                kind, assign, entry, entries = implicit
+                if kind == "dotted":
+                    return _still_parses(text[: assign.start] + text[assign.end :])
+                assert entry is not None and entries is not None
+                return _still_parses(_remove_inline_entry(text, entry, entries))
+            if _is_defined(text, (*table, key)):
+                return None
         return text
     header = headers[idx]
     body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)

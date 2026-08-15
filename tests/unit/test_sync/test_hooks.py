@@ -1630,6 +1630,47 @@ class TestCodexHooksWriter:
         assert result.action == "updated"
         assert result.file_path == config
 
+    def test_migrates_implicit_feature_shapes_without_losing_comments(self, tmp_path: Path) -> None:
+        """Dotted and inline feature definitions get targeted, lossless edits."""
+        import tomllib
+
+        cases = {
+            "dotted-both": (
+                "# preserve dotted layout\n"
+                "features.hooks = true\nfeatures.codex_hooks = true\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-both": (
+                "# preserve inline layout\n"
+                'features = { hooks = true, codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-alias-only": (
+                "# preserve dotted layout\nfeatures.codex_hooks = true\nmodel = 'gpt-5'\n"
+            ),
+            "inline-alias-only": (
+                "# preserve inline layout\n"
+                'features = { codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+        }
+
+        for name, original in cases.items():
+            root = tmp_path / name
+            self.writer.sync(_cfg(GUARD_HOOK), root)
+            config = root / ".codex" / "config.toml"
+            config.write_text(original, encoding="utf-8")
+
+            result = self.writer.sync(_cfg(GUARD_HOOK), root)
+
+            text = config.read_text(encoding="utf-8")
+            parsed = tomllib.loads(text)
+            assert parsed["features"]["hooks"] is True, name
+            assert "codex_hooks" not in parsed["features"], name
+            assert parsed["model"] == "gpt-5", name
+            assert "# preserve" in text, name
+            assert result.action == "updated", name
+
     def test_malformed_config_surfaces_manual_fix_note(self, tmp_path: Path) -> None:
         """If .codex/config.toml is invalid TOML, surface a manual-fix note."""
         config = tmp_path / ".codex" / "config.toml"
