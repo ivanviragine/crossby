@@ -2106,6 +2106,27 @@ class TestOtherWritersRemoval:
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         assert "PreToolUse" not in data.get("hooks", {})
 
+    def test_codex_removal_only_sync_migrates_legacy_feature_alias(self, tmp_path: Path) -> None:
+        import tomllib
+
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        config = tmp_path / ".codex" / "config.toml"
+        config.write_text(
+            "# preserve legacy config\n[features]\ncodex_hooks = true\n",
+            encoding="utf-8",
+        )
+
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["features"]["hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve legacy config" in config.read_text(encoding="utf-8")
+        assert result.revoked == 1
+
     def test_antigravity_removes_named_hook(self, tmp_path: Path) -> None:
         from crossby.sync.hooks import AntigravityCLIHooksWriter
 

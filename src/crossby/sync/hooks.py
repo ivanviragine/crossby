@@ -1429,8 +1429,7 @@ class CodexHooksWriter(AbstractSyncWriter):
     The writer also sets ``[features].hooks = true`` in ``.codex/config.toml``
     and removes the deprecated ``codex_hooks`` alias left by older crossby
     versions (a manual-fix note is surfaced only if that file can't be written).
-    On current Codex this is defensive only: the hooks feature is stable and
-    enabled by default since 0.146.0.
+    On current Codex this is defensive only: hooks are enabled by default.
     """
 
     tool_id = AIToolID.CODEX
@@ -1539,7 +1538,9 @@ class CodexHooksWriter(AbstractSyncWriter):
                 created.append((hook.event, command))
 
         revoked = 0
+        has_supported_removals = False
         for event, command in data.hooks_remove:
+            has_supported_removals |= event in _CODEX_SUPPORTED_EVENTS
             revoked += _remove_claude_shape(
                 hooks_section, _translate_event(event, self.tool_id), command
             )
@@ -1562,14 +1563,15 @@ class CodexHooksWriter(AbstractSyncWriter):
         hooks_changed = bool(added or revoked)
 
         # Enable the feature flag so Codex actually loads these hooks. Runs
-        # whenever there are supported hooks — independent of ``hooks_changed`` —
-        # so a missing ``[features].hooks`` flag self-heals even on an otherwise
-        # unchanged re-sync. On success this is silent; if it can't be written a
+        # whenever there are supported hooks or supported hooks are being
+        # removed — independent of ``hooks_changed`` — so a missing canonical
+        # flag or deprecated alias self-heals even on an otherwise unchanged or
+        # removal-only sync. On success this is silent; if it can't be written a
         # manual-fix note is surfaced. ``flag_changed`` reflects a real (or, in
         # dry-run, a would-be) write to ``.codex/config.toml`` so a ``skipped``
         # row can never hide a config write.
         flag_changed = False
-        if kept:
+        if kept or has_supported_removals:
             flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
                 project_root, dry_run=dry_run
             )
