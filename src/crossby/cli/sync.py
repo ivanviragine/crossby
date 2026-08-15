@@ -224,6 +224,15 @@ def sync(
         console.info("Dry-run mode — no files will be written")
 
     results: list[SyncResult] = []
+    hooks_concern_active = sync_concern is None or sync_concern == SyncConcern.HOOKS
+    codex_in_scope = (
+        source_tool == AIToolID.CODEX
+        or target_tool == AIToolID.CODEX
+        or ((source_tool is None or target_tool is None) and AIToolID.CODEX in installed_tools)
+    )
+    needs_codex_hooks_migration = (
+        hooks_concern_active and codex_in_scope and codex_hooks_alias_needs_migration(project_root)
+    )
 
     # Non-interactive mode: a confirmed source bypasses the per-concern wizard.
     # ``source_tool`` may come from --from, ``sync_defaults.from`` in
@@ -239,6 +248,14 @@ def sync(
         target_tools = (
             [target_tool] if target_tool else [t for t in installed_tools if t != source_tool]
         )
+        main_runs_codex_hooks = (
+            hooks_concern_active
+            and SyncConcern.HOOKS not in skip_concerns
+            and (
+                target_tool == AIToolID.CODEX
+                or (target_tool is None and AIToolID.CODEX in target_tools)
+            )
+        )
         results = run_sync(
             data,
             project_root,
@@ -250,6 +267,15 @@ def sync(
             include_user_scope=include_user_scope,
             skip_concerns=skip_concerns,
         )
+        if needs_codex_hooks_migration and not main_runs_codex_hooks:
+            results += run_sync(
+                SyncData(),
+                project_root,
+                tool_id=AIToolID.CODEX,
+                concern=SyncConcern.HOOKS,
+                dry_run=dry_run,
+                force=force,
+            )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
             _persist_report(results, project_root)
@@ -294,12 +320,6 @@ def sync(
     )
     owns_mcp = _concern_active(SyncConcern.MCP) and any(ledger.mcp(t) for t in installed_tools)
     owns_any = owns_hooks or owns_perms or owns_mcp
-    needs_codex_hooks_migration = (
-        _concern_active(SyncConcern.HOOKS)
-        and AIToolID.CODEX in installed_tools
-        and codex_hooks_alias_needs_migration(project_root)
-    )
-
     # Continue when something was found, the ledger needs a revocation pass, or
     # Codex config needs a deprecated hooks-key migration. The last path is
     # intentionally independent of hook discovery and ownership.

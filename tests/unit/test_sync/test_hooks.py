@@ -1626,6 +1626,25 @@ class TestCodexHooksWriter:
         assert "# preserve migration-only config" in text
         assert not (tmp_path / ".codex" / "hooks.json").exists()
 
+    def test_migration_only_failure_guidance_preserves_disabled_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[features]\ncodex_hooks = false\n", encoding="utf-8")
+
+        def fail_write(*_args: object, **_kwargs: object) -> None:
+            raise OSError("read-only")
+
+        monkeypatch.setattr("crossby.sync.hooks.atomic_write_text", fail_write)
+
+        result = self.writer.sync(SyncData(), tmp_path)
+
+        assert result.action == "error"
+        assert result.message is not None
+        assert "preserving its current boolean value" in result.message
+        assert "hooks = true" not in result.message
+
     def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
         """Enabling the flag merges into an existing config, keeping other keys."""
         import tomllib

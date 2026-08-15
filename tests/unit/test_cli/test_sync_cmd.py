@@ -920,6 +920,36 @@ class TestWizardRevocation:
         assert "# preserve config" in text
         assert not (tmp_path / ".codex" / "hooks.json").exists()
 
+    def test_confirmed_codex_source_still_runs_alias_migration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# source config\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex", "claude"],
+        )
+
+        result = runner.invoke(
+            app,
+            ["sync", "--from", "codex", "--to", "claude", "--path", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# source config" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
     def test_wizard_revokes_environment_wide_emptied_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

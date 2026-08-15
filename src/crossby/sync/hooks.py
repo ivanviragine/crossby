@@ -1333,6 +1333,14 @@ _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
         "key there manually so Codex loads these hooks without a warning."
     ),
 )
+_CODEX_FEATURES_MIGRATION_NOTE = ManualFixNote(
+    category="features.hooks",
+    message=(
+        "Could not safely migrate `.codex/config.toml` automatically — replace "
+        "the deprecated `[features].codex_hooks` key with `[features].hooks`, "
+        "preserving its current boolean value."
+    ),
+)
 
 
 def codex_hooks_alias_needs_migration(project_root: Path) -> bool:
@@ -1372,13 +1380,15 @@ def _ensure_codex_hooks_feature_flag(
       caller uses this so a ``skipped`` row can never hide a real config write,
       while self-heal still fires on an otherwise-unchanged re-sync.
     - ``note`` is :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is
-      malformed TOML and can't be updated automatically, else ``None``.
+      malformed TOML or can't be updated automatically in enable mode. Migration
+      mode returns value-preserving guidance instead. Otherwise it is ``None``.
     """
     import tomllib
 
     import tomli_w
 
     path = project_root / ".codex" / "config.toml"
+    failure_note = _CODEX_FEATURES_FLAG_NOTE if enable else _CODEX_FEATURES_MIGRATION_NOTE
     existing: dict[str, Any] = {}
     original = ""
     if path.exists():
@@ -1386,7 +1396,7 @@ def _ensure_codex_hooks_feature_flag(
             original = path.read_text(encoding="utf-8")
             existing = tomllib.loads(original)
         except (tomllib.TOMLDecodeError, OSError, ValueError):
-            return False, _CODEX_FEATURES_FLAG_NOTE
+            return False, failure_note
 
     features = existing.get("features")
     if not isinstance(features, dict):
@@ -1425,13 +1435,13 @@ def _ensure_codex_hooks_feature_flag(
         # erased comments or formatting. Surface a manual step when an unusual
         # but valid TOML representation cannot be spliced safely.
         if has_deprecated_alias:
-            return False, _CODEX_FEATURES_FLAG_NOTE
+            return False, failure_note
         new_text = tomli_w.dumps(existing)
 
     try:
         atomic_write_text(path, new_text)
     except OSError:
-        return False, _CODEX_FEATURES_FLAG_NOTE
+        return False, failure_note
     return True, None
 
 
@@ -1486,7 +1496,7 @@ class CodexHooksWriter(AbstractSyncWriter):
                     concern=self.concern,
                     action="error",
                     file_path=config_path,
-                    message=_message_with_notes(None, [flag_note]),
+                    message=_message_with_notes(flag_note.message, [flag_note]),
                 )
             return SyncResult(
                 tool_id=self.tool_id,
