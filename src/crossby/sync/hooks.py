@@ -22,7 +22,7 @@ from crossby.models.config import HookEntry
 from crossby.sync.base import AbstractSyncWriter, SyncConcern, SyncData, SyncResult
 from crossby.sync.json_utils import atomic_write_text, read_json_file, write_json_file
 from crossby.sync.manual_fix import ManualFixNote
-from crossby.sync.toml_edit import set_scalar, splice_or_none
+from crossby.sync.toml_edit import rename_scalar, set_scalar, splice_or_none, unset_scalar
 
 _HookAction = Literal["created", "updated", "skipped", "error"]
 
@@ -1328,49 +1328,84 @@ _CODEX_MATCHER_EVENTS: frozenset[str] = frozenset(
 _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
     category="features.hooks",
     message=(
-        "Could not update `.codex/config.toml` automatically — set "
-        "`[features].hooks = true` (and `codex_hooks = true` for older Codex "
-        "builds) there manually so Codex loads these hooks."
+        "Could not safely update `.codex/config.toml` automatically — set "
+        "`[features].hooks = true` and remove the deprecated `codex_hooks` "
+        "key there manually so Codex loads these hooks without a warning."
+    ),
+)
+_CODEX_FEATURES_MIGRATION_NOTE = ManualFixNote(
+    category="features.hooks",
+    message=(
+        "Could not safely migrate `.codex/config.toml` automatically — replace "
+        "the deprecated `[features].codex_hooks` key with `[features].hooks`, "
+        "preserving its current boolean value."
     ),
 )
 
-# Canonical key first, deprecated alias second. `hooks` is the current name and
-# has been stable and ON by default since Codex 0.146.0 (`codex features list`
-# reports `hooks stable true`); `codex_hooks` resolves to it as a deprecated
-# alias. Unknown feature keys are inert, so writing both is safe on every build
-# and is purely defensive for older ones.
-_CODEX_FEATURE_KEYS: tuple[str, ...] = ("hooks", "codex_hooks")
+
+def _codex_hooks_alias_present(path: Path) -> bool:
+    """Return alias presence after the caller has preflighted *path*."""
+    import tomllib
+
+    try:
+        existing = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
+        return False
+    features = existing.get("features")
+    return isinstance(features, dict) and "codex_hooks" in features
+
+
+def probe_codex_hooks_alias_migration(
+    project_root: Path,
+) -> tuple[bool, SyncResult | None]:
+    """Return alias presence plus any refusal to inspect the Codex config.
+
+    Alias detection participates in the same ancestor-and-leaf symlink refusal
+    as the merge writer. This check must happen before ``read_text`` because the
+    CLI probes for migration work before it dispatches the writer. Returning the
+    preflight error lets that CLI still dispatch the writer and surface the
+    refusal instead of misreporting that no work was found.
+    """
+    path = project_root / ".codex" / "config.toml"
+    preflight_error = CodexHooksWriter().preflight(project_root, path)
+    if preflight_error is not None:
+        return False, preflight_error
+    return _codex_hooks_alias_present(path), None
 
 
 def _ensure_codex_hooks_feature_flag(
-    project_root: Path, *, dry_run: bool
+    project_root: Path, *, dry_run: bool, enable: bool = True
 ) -> tuple[bool, ManualFixNote | None]:
-    """Enable the Codex hooks feature flags in ``.codex/config.toml`` (idempotent).
+    """Synchronize the canonical Codex hooks flag in ``.codex/config.toml``.
 
-    Writes both ``[features].hooks`` (canonical) and ``[features].codex_hooks``
-    (deprecated alias) so the config works on current and older Codex alike.
-    Merges into any existing config, preserving other keys/tables.
+    With ``enable=True``, writes ``[features].hooks = true``. With
+    ``enable=False``, preserves the user's canonical value while migrating a
+    deprecated ``[features].codex_hooks`` alias in place. Both paths remove the
+    alias that older crossby versions wrote and preserve other keys/tables.
 
     On current Codex this is belt-and-braces — the feature is stable and enabled
-    by default, so hooks load whether or not the flag is present. It still gets
-    written so a project pinned to an older Codex is not silently left with
-    inert hooks.
+    by default, so hooks load whether or not the flag is present. Keeping the
+    canonical flag explicit makes the generated config's intent clear.
 
     Returns ``(changed, note)``:
 
-    - ``changed`` is True when at least one feature key was missing — meaning the
-      file was written (non-dry-run) or *would* be written (dry-run). It is False
-      when both flags are already set or the file is malformed (nothing written).
-      The caller uses this so a ``skipped`` row can never hide a real flag write,
+    - ``changed`` is True when the canonical key needs enabling or the deprecated
+      alias needs removing — meaning the file was written (non-dry-run) or
+      *would* be written (dry-run). It is False when the canonical key already
+      satisfies the requested mode without the alias, or the file is malformed
+      (nothing written). The
+      caller uses this so a ``skipped`` row can never hide a real config write,
       while self-heal still fires on an otherwise-unchanged re-sync.
     - ``note`` is :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is
-      malformed TOML and can't be updated automatically, else ``None``.
+      malformed TOML or can't be updated automatically in enable mode. Migration
+      mode returns value-preserving guidance instead. Otherwise it is ``None``.
     """
     import tomllib
 
     import tomli_w
 
     path = project_root / ".codex" / "config.toml"
+    failure_note = _CODEX_FEATURES_FLAG_NOTE if enable else _CODEX_FEATURES_MIGRATION_NOTE
     existing: dict[str, Any] = {}
     original = ""
     if path.exists():
@@ -1378,39 +1413,53 @@ def _ensure_codex_hooks_feature_flag(
             original = path.read_text(encoding="utf-8")
             existing = tomllib.loads(original)
         except (tomllib.TOMLDecodeError, OSError, ValueError):
-            return False, _CODEX_FEATURES_FLAG_NOTE
+            return False, failure_note
 
-    features = existing.get("features")
-    if not isinstance(features, dict):
-        features = {}
-    missing = [key for key in _CODEX_FEATURE_KEYS if features.get(key) is not True]
-    if not missing:
-        return False, None  # already enabled — nothing to do
+    raw_features = existing.get("features")
+    if "features" in existing and not isinstance(raw_features, dict):
+        return False, failure_note
+    features: dict[str, Any] = raw_features if isinstance(raw_features, dict) else {}
+    has_canonical_key = "hooks" in features
+    needs_enable = enable and features.get("hooks") is not True
+    has_deprecated_alias = "codex_hooks" in features
+    if not needs_enable and not has_deprecated_alias:
+        return False, None  # nothing to migrate or enable
 
-    if dry_run:
-        return True, None  # would write, but dry-run writes nothing
-
-    for key in missing:
-        features[key] = True
+    if needs_enable:
+        features["hooks"] = True
+    elif has_deprecated_alias and not has_canonical_key:
+        features["hooks"] = features["codex_hooks"]
+    features.pop("codex_hooks", None)
     existing["features"] = features
 
-    # Splice each key in textually so the user's comments and key ordering
-    # survive; fall back to the (lossy) full dump only if that can't be done.
+    # Splice the canonical key and remove the old alias textually so the user's
+    # comments and key ordering survive. Alias migration refuses a lossy full
+    # dump when that can't be done safely.
     # Reuses the text read above — a second read could see a different file.
     spliced: str | None = original
-    for key in missing:
-        if spliced is None:
-            break
-        spliced = set_scalar(spliced, ("features",), key, "true")
+    if has_deprecated_alias and not has_canonical_key:
+        spliced = rename_scalar(original, ("features",), "codex_hooks", "hooks")
+    if needs_enable and spliced is not None:
+        spliced = set_scalar(spliced, ("features",), "hooks", "true")
+    if has_deprecated_alias and spliced is not None:
+        spliced = unset_scalar(spliced, ("features",), "codex_hooks", include_implicit=True)
 
     new_text = splice_or_none(spliced, existing)
     if new_text is None:
+        # Alias migration must never trade a deprecation warning for silently
+        # erased comments or formatting. Surface a manual step when an unusual
+        # but valid TOML representation cannot be spliced safely.
+        if has_deprecated_alias:
+            return False, failure_note
         new_text = tomli_w.dumps(existing)
+
+    if dry_run:
+        return True, None  # validated the edit; dry-run writes nothing
 
     try:
         atomic_write_text(path, new_text)
     except OSError:
-        return False, _CODEX_FEATURES_FLAG_NOTE
+        return False, failure_note
     return True, None
 
 
@@ -1423,11 +1472,10 @@ class CodexHooksWriter(AbstractSyncWriter):
     are reported as manual-fix notes in the ``SyncResult.message`` so the
     sync report classifies the row as ``Check before using``.
 
-    The writer also sets ``[features].hooks = true`` and its deprecated alias
-    ``codex_hooks`` in ``.codex/config.toml`` (a manual-fix note is surfaced only
-    if that file can't be written). On current Codex this is defensive only —
-    the hooks feature is stable and enabled by default since 0.146.0 — but it
-    keeps a project pinned to an older Codex from ending up with inert hooks.
+    The writer also sets ``[features].hooks = true`` in ``.codex/config.toml``
+    and removes the deprecated ``codex_hooks`` alias left by older crossby
+    versions (a manual-fix note is surfaced only if that file can't be written).
+    On current Codex this is defensive only: hooks are enabled by default.
     """
 
     tool_id = AIToolID.CODEX
@@ -1441,16 +1489,38 @@ class CodexHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks and not data.hooks_remove:
+        has_hook_work = bool(data.hooks or data.hooks_remove)
+        path = project_root / ".codex" / "hooks.json"
+        config_path = project_root / ".codex" / "config.toml"
+        if not has_hook_work:
+            needs_migration, preflight_err = probe_codex_hooks_alias_migration(project_root)
+            if preflight_err is not None:
+                return preflight_err
+            if not needs_migration:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="skipped",
+                    message="no hooks config",
+                )
+            flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
+                project_root, dry_run=dry_run, enable=False
+            )
+            if flag_note is not None:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=config_path,
+                    message=_message_with_notes(flag_note.message, [flag_note]),
+                )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="skipped",
-                message="no hooks config",
+                action="updated" if flag_changed else "skipped",
+                file_path=config_path,
             )
 
-        path = project_root / ".codex" / "hooks.json"
-        config_path = project_root / ".codex" / "config.toml"
         # Multi-file writer: hooks.json *and* the config.toml feature flag. Both
         # are shared merge files — preflight ancestor+leaf on BOTH before the
         # first read/write, so a refused symlink on config.toml can't leave a
@@ -1471,6 +1541,7 @@ class CodexHooksWriter(AbstractSyncWriter):
                 message=msg,
             )
 
+        needs_alias_migration = _codex_hooks_alias_present(config_path)
         kept, notes = _filter_supported_hooks(data.hooks, _CODEX_SUPPORTED_EVENTS)
 
         existing = file_data or {}
@@ -1536,7 +1607,9 @@ class CodexHooksWriter(AbstractSyncWriter):
                 created.append((hook.event, command))
 
         revoked = 0
+        has_supported_removals = False
         for event, command in data.hooks_remove:
+            has_supported_removals |= event in _CODEX_SUPPORTED_EVENTS
             revoked += _remove_claude_shape(
                 hooks_section, _translate_event(event, self.tool_id), command
             )
@@ -1558,17 +1631,17 @@ class CodexHooksWriter(AbstractSyncWriter):
         # CopilotHooksWriter's ``changed = bool(added or revoked)`` gate.
         hooks_changed = bool(added or revoked)
 
-        # Enable the feature flag so Codex actually loads these hooks. Runs
-        # whenever there are supported hooks — independent of ``hooks_changed`` —
-        # so a missing ``[features].hooks`` flag self-heals even on an otherwise
-        # unchanged re-sync. On success this is silent; if it can't be written a
-        # manual-fix note is surfaced. ``flag_changed`` reflects a real (or, in
-        # dry-run, a would-be) write to ``.codex/config.toml`` so a ``skipped``
-        # row can never hide a config write.
+        # Enable the feature for retained hooks, or migrate only the deprecated
+        # alias during removal-only and unsupported-input syncs. This runs
+        # independently of ``hooks_changed`` so the config self-heals on an
+        # otherwise unchanged sync without overriding an explicit
+        # ``hooks = false`` when no supported input hook survives filtering.
+        # ``flag_changed`` reflects a real (or, in dry-run, a would-be) write to
+        # ``.codex/config.toml`` so a ``skipped`` row cannot hide a config write.
         flag_changed = False
-        if kept:
+        if kept or has_supported_removals or needs_alias_migration:
             flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
-                project_root, dry_run=dry_run
+                project_root, dry_run=dry_run, enable=bool(kept)
             )
             if flag_note is not None:
                 notes.append(flag_note)

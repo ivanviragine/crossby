@@ -101,6 +101,7 @@ def sync(
     )
     from crossby.sync import run_sync
     from crossby.sync.base import SyncConcern, SyncData
+    from crossby.sync.hooks import CodexHooksWriter, probe_codex_hooks_alias_migration
     from crossby.sync.readers import (
         build_sync_data,
         discover_hooks,
@@ -223,6 +224,18 @@ def sync(
         console.info("Dry-run mode — no files will be written")
 
     results: list[SyncResult] = []
+    hooks_concern_active = sync_concern is None or sync_concern == SyncConcern.HOOKS
+    codex_in_scope = (
+        source_tool == AIToolID.CODEX
+        or target_tool == AIToolID.CODEX
+        or ((source_tool is None or target_tool is None) and AIToolID.CODEX in installed_tools)
+    )
+    needs_codex_hooks_migration = False
+    if hooks_concern_active and codex_in_scope:
+        alias_present, migration_probe_error = probe_codex_hooks_alias_migration(project_root)
+        # A refused probe is still pending work: dispatch the writer so its
+        # normal preflight error is visible instead of reporting a clean no-op.
+        needs_codex_hooks_migration = alias_present or migration_probe_error is not None
 
     # Non-interactive mode: a confirmed source bypasses the per-concern wizard.
     # ``source_tool`` may come from --from, ``sync_defaults.from`` in
@@ -238,6 +251,14 @@ def sync(
         target_tools = (
             [target_tool] if target_tool else [t for t in installed_tools if t != source_tool]
         )
+        main_runs_codex_hooks = (
+            hooks_concern_active
+            and SyncConcern.HOOKS not in skip_concerns
+            and (
+                target_tool == AIToolID.CODEX
+                or (target_tool is None and AIToolID.CODEX in target_tools)
+            )
+        )
         results = run_sync(
             data,
             project_root,
@@ -249,6 +270,13 @@ def sync(
             include_user_scope=include_user_scope,
             skip_concerns=skip_concerns,
         )
+        if needs_codex_hooks_migration and not main_runs_codex_hooks:
+            # This is a config-key migration, not an empty hooks sync. Calling
+            # run_sync(SyncData()) here would ownership-diff the empty hook set
+            # and revoke every Codex hook crossby previously recorded.
+            results.append(
+                CodexHooksWriter().safe_sync(SyncData(), project_root, dry_run=dry_run, force=force)
+            )
         _display_results(results, report_format=report_format, project_root=project_root)
         if not dry_run and not no_persist_report:
             _persist_report(results, project_root)
@@ -293,9 +321,9 @@ def sync(
     )
     owns_mcp = _concern_active(SyncConcern.MCP) and any(ledger.mcp(t) for t in installed_tools)
     owns_any = owns_hooks or owns_perms or owns_mcp
-
-    # Check if anything was found (or the ledger still owns a now-emptied concern,
-    # which needs a revocation pass even with nothing discovered).
+    # Continue when something was found, the ledger needs a revocation pass, or
+    # Codex config needs a deprecated hooks-key migration. The last path is
+    # intentionally independent of hook discovery and ownership.
     has_data = (
         any(
             [
@@ -309,6 +337,7 @@ def sync(
             ]
         )
         or owns_any
+        or needs_codex_hooks_migration
     )
     if not has_data:
         console.info("No tool configs found to sync.")
@@ -423,8 +452,8 @@ def sync(
         if hooks and prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
             data.hooks = hooks
 
-    # Check if user confirmed anything (or the ledger still owns a now-emptied
-    # concern, which needs a revocation pass even with no new source data).
+    # Continue when the user confirmed work, the ledger needs a revocation pass,
+    # or Codex config needs its deprecated hooks key migrated.
     has_sync = (
         any(
             [
@@ -437,6 +466,7 @@ def sync(
             ]
         )
         or owns_any
+        or needs_codex_hooks_migration
     )
     if not has_sync:
         console.info("Nothing to sync.")
@@ -448,8 +478,10 @@ def sync(
     #
     # The three revocable concerns dispatch on *data OR ownership*: run_sync
     # fires when there's new source data for the concern OR the ledger still owns
-    # entries for it. The ownership arm reaches the ledger diff when the concern
-    # has emptied across the whole environment, so run_sync computes
+    # entries for it. Hooks also has a migration-only arm for deprecated Codex
+    # config, even when no hooks are discovered or owned. The ownership arm
+    # reaches the ledger diff when the concern has emptied across the whole
+    # environment, so run_sync computes
     # ``hooks_remove = owned - {}`` (owned minus the empty source) and revokes
     # (permissions likewise). MCP is disable-based (``mcp_remove = disabled &
     # owned``), so an owned-but-emptied MCP dispatch removes nothing and only
@@ -507,7 +539,9 @@ def sync(
             force=force,
             installed_tools=installed_tools,
         )
-    if (data.hooks or owns_hooks) and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
+    if (data.hooks or owns_hooks or needs_codex_hooks_migration) and (
+        sync_concern is None or sync_concern == SyncConcern.HOOKS
+    ):
         results += run_sync(
             data,
             project_root,

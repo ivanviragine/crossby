@@ -14,7 +14,14 @@ import tomllib
 import pytest
 import tomli_w
 
-from crossby.sync.toml_edit import remove_table, set_scalar, splice_or_none, upsert_table
+from crossby.sync.toml_edit import (
+    remove_table,
+    rename_scalar,
+    set_scalar,
+    splice_or_none,
+    unset_scalar,
+    upsert_table,
+)
 
 
 class TestSetScalar:
@@ -75,6 +82,76 @@ class TestSetScalar:
         parsed = tomllib.loads(out)
         assert parsed["features"]["codex_hooks"] is True
         assert parsed["features"]["sub"]["codex_hooks"] is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "features.hooks = false  # dotted\n",
+            "features = { hooks = false, other = 1 }  # inline\n",
+            "[features]\nhooks = false  # header\n",
+        ],
+    )
+    def test_replaces_boolean_in_place_and_preserves_comments(self, text: str) -> None:
+        out = set_scalar(text, ("features",), "hooks", "true")
+
+        assert out is not None
+        assert tomllib.loads(out)["features"]["hooks"] is True
+        assert "# " in out
+
+
+class TestImplicitScalarEdits:
+    def test_unsets_dotted_key_without_rewriting_document(self) -> None:
+        text = (
+            "# keep this comment\n"
+            "features.hooks = true\n"
+            "features.codex_hooks = true\n"
+            "model = 'gpt-5'  # keep trailing\n"
+        )
+
+        out = unset_scalar(text, ("features",), "codex_hooks", include_implicit=True)
+
+        assert out is not None
+        assert tomllib.loads(out) == {"features": {"hooks": True}, "model": "gpt-5"}
+        assert "# keep this comment" in out
+        assert "# keep trailing" in out
+
+    def test_unsets_inline_key_without_rewriting_document(self) -> None:
+        text = (
+            "# keep this comment\n"
+            'features = { hooks = true, codex_hooks = true, other = "x,y" }  # layout\n'
+            "model = 'gpt-5'\n"
+        )
+
+        out = unset_scalar(text, ("features",), "codex_hooks", include_implicit=True)
+
+        assert out is not None
+        assert tomllib.loads(out) == {
+            "features": {"hooks": True, "other": "x,y"},
+            "model": "gpt-5",
+        }
+        assert "# keep this comment" in out
+        assert "# layout" in out
+
+    def test_renames_dotted_key_without_rewriting_document(self) -> None:
+        text = "# keep\nfeatures.codex_hooks = true\nmodel = 'gpt-5'\n"
+
+        out = rename_scalar(text, ("features",), "codex_hooks", "hooks")
+
+        assert out is not None
+        assert tomllib.loads(out) == {"features": {"hooks": True}, "model": "gpt-5"}
+        assert "# keep" in out
+
+    def test_renames_inline_key_without_rewriting_document(self) -> None:
+        text = "# keep\nfeatures = { codex_hooks = true, other = { values = [1, 2] } }  # layout\n"
+
+        out = rename_scalar(text, ("features",), "codex_hooks", "hooks")
+
+        assert out is not None
+        assert tomllib.loads(out) == {
+            "features": {"hooks": True, "other": {"values": [1, 2]}},
+        }
+        assert "# keep" in out
+        assert "# layout" in out
 
 
 class TestUpsertTable:

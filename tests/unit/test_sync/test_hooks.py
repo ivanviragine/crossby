@@ -5,6 +5,9 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry
@@ -1507,6 +1510,46 @@ class TestCodexHooksWriter:
         assert "symlinked directory" in (result.message or "")
         assert not any(outside.iterdir())  # neither hooks.json nor config.toml written
 
+    @pytest.mark.parametrize("link_kind", ["ancestor", "leaf"])
+    def test_alias_probe_refuses_symlink_without_reading_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        link_kind: str,
+    ) -> None:
+        import os
+
+        from crossby.sync.hooks import probe_codex_hooks_alias_migration
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_config = outside / "config.toml"
+        outside_config.write_text("[features]\ncodex_hooks = true\n", encoding="utf-8")
+        config = tmp_path / ".codex" / "config.toml"
+        if link_kind == "ancestor":
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        else:
+            config.parent.mkdir()
+            os.symlink(outside_config, config)
+
+        real_read_text = Path.read_text
+
+        def guarded_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == config:
+                raise AssertionError("symlinked Codex config was read")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+        needs_migration, preflight_error = probe_codex_hooks_alias_migration(tmp_path)
+        assert needs_migration is False
+        assert preflight_error is not None
+        assert preflight_error.action == "error"
+        assert "symlink" in (preflight_error.message or "")
+        result = self.writer.sync(SyncData(), tmp_path)
+        assert result.action == "error"
+        assert "symlink" in (result.message or "")
+
     def test_drops_notification_event(self, tmp_path: Path) -> None:
         """Codex has no notification event; it should be dropped with a note."""
         result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
@@ -1515,6 +1558,29 @@ class TestCodexHooksWriter:
         assert result.message is not None
         assert "manual_fix" in result.message
         assert "hooks.notification" in result.message
+
+    def test_unsupported_only_input_still_migrates_codex_alias(self, tmp_path: Path) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve unsupported-only migration\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+
+        result = self.writer.sync(_cfg(_notification_hook()), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert result.action == "updated"
+        assert result.file_path == config
+        assert result.message is not None
+        assert "hooks.notification" in result.message
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve unsupported-only migration" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
 
     def test_user_prompt_submit_drops_matcher(self, tmp_path: Path) -> None:
         ups_with_tools = HookEntry(
@@ -1538,31 +1604,26 @@ class TestCodexHooksWriter:
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         assert "matcher" not in data["hooks"]["Stop"][0]
 
-    def test_enables_both_codex_hooks_feature_flags(self, tmp_path: Path) -> None:
-        """Writes the canonical `hooks` key AND the deprecated `codex_hooks` alias.
-
-        `hooks` is stable and on by default since Codex 0.146.0, so this is
-        defensive; the alias keeps a project pinned to an older Codex working.
-        Unknown feature keys are inert, so writing both is safe everywhere.
-        """
+    def test_enables_canonical_codex_hooks_feature_flag(self, tmp_path: Path) -> None:
+        """Writes only the canonical `hooks` key, without the deprecated alias."""
         import tomllib
 
         result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
         assert result.action == "created"
-        # Flags written automatically → no manual-fix note on the happy path.
+        # Flag written automatically → no manual-fix note on the happy path.
         assert result.message is None or "features.hooks" not in result.message
 
         config = tmp_path / ".codex" / "config.toml"
         assert config.is_file()
         parsed = tomllib.loads(config.read_text(encoding="utf-8"))
         assert parsed["features"]["hooks"] is True
-        assert parsed["features"]["codex_hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
 
-    def test_adds_missing_canonical_key_to_legacy_config(self, tmp_path: Path) -> None:
-        """A config written by an older crossby only has the alias — top it up.
+    def test_migrates_legacy_feature_alias_to_canonical_key(self, tmp_path: Path) -> None:
+        """Replace the alias written by older crossby with the canonical key.
 
         The splicer must preserve surrounding comments and key order while
-        adding just the missing key.
+        replacing the deprecated key.
         """
         import tomllib
 
@@ -1579,11 +1640,74 @@ class TestCodexHooksWriter:
         text = config.read_text(encoding="utf-8")
         parsed = tomllib.loads(text)
         assert parsed["features"]["hooks"] is True
-        assert parsed["features"]["codex_hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
+        assert "codex_hooks" not in text
         assert parsed["model"] == "gpt-5"
         # Comments survive the splice.
         assert "# my codex config" in text
         assert "# enable hooks" in text
+
+    def test_migrates_disabled_legacy_alias_and_enables_hooks(self, tmp_path: Path) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[features]\ncodex_hooks = false  # preserve trailing\n",
+            encoding="utf-8",
+        )
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve trailing" in text
+
+    @pytest.mark.parametrize("legacy_value", [True, False])
+    def test_migrates_legacy_alias_without_any_hook_work(
+        self, tmp_path: Path, legacy_value: bool
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve migration-only config\n[features]\n"
+            f"codex_hooks = {str(legacy_value).lower()}\n",
+            encoding="utf-8",
+        )
+
+        result = self.writer.sync(SyncData(), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert result.action == "updated"
+        assert result.file_path == config
+        assert parsed["features"]["hooks"] is legacy_value
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve migration-only config" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
+    def test_migration_only_failure_guidance_preserves_disabled_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("[features]\ncodex_hooks = false\n", encoding="utf-8")
+
+        def fail_write(*_args: object, **_kwargs: object) -> None:
+            raise OSError("read-only")
+
+        monkeypatch.setattr("crossby.sync.hooks.atomic_write_text", fail_write)
+
+        result = self.writer.sync(SyncData(), tmp_path)
+
+        assert result.action == "error"
+        assert result.message is not None
+        assert "preserving its current boolean value" in result.message
+        assert "hooks = true" not in result.message
 
     def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
         """Enabling the flag merges into an existing config, keeping other keys."""
@@ -1598,18 +1722,102 @@ class TestCodexHooksWriter:
         parsed = tomllib.loads(config.read_text(encoding="utf-8"))
         assert parsed["model"] == "gpt-5"
         assert parsed["features"]["other_flag"] is True
-        assert parsed["features"]["codex_hooks"] is True
+        assert parsed["features"]["hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
 
     def test_feature_flag_idempotent_when_already_set(self, tmp_path: Path) -> None:
         """A config that already enables the flag is left untouched."""
         config = tmp_path / ".codex" / "config.toml"
         config.parent.mkdir(parents=True)
-        original = "[features]\nhooks = true\ncodex_hooks = true\n"
+        original = "[features]\nhooks = true\n"
         config.write_text(original, encoding="utf-8")
 
         self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
 
         assert config.read_text(encoding="utf-8") == original
+
+    def test_removes_deprecated_alias_when_canonical_key_is_already_set(
+        self, tmp_path: Path
+    ) -> None:
+        """A config generated by older crossby self-heals on the next sync."""
+        import tomllib
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        config = tmp_path / ".codex" / "config.toml"
+        config.write_text(
+            "[features]\nhooks = true\ncodex_hooks = true\nother_flag = true\n",
+            encoding="utf-8",
+        )
+
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["features"]["hooks"] is True
+        assert parsed["features"]["other_flag"] is True
+        assert "codex_hooks" not in parsed["features"]
+        assert result.action == "updated"
+        assert result.file_path == config
+
+    def test_migrates_implicit_feature_shapes_without_losing_comments(self, tmp_path: Path) -> None:
+        """Dotted and inline feature definitions get targeted, lossless edits."""
+        import tomllib
+
+        cases = {
+            "dotted-both": (
+                "# preserve dotted layout\n"
+                "features.hooks = true\nfeatures.codex_hooks = true\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-both": (
+                "# preserve inline layout\n"
+                'features = { hooks = true, codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-alias-only": (
+                "# preserve dotted layout\nfeatures.codex_hooks = true\nmodel = 'gpt-5'\n"
+            ),
+            "inline-alias-only": (
+                "# preserve inline layout\n"
+                'features = { codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-alias-false": (
+                "# preserve dotted layout\n"
+                "features.codex_hooks = false  # keep trailing\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-alias-false": (
+                "# preserve inline layout\n"
+                'features = { codex_hooks = false, other = "x,y" }  # keep trailing\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-canonical-false-with-alias": (
+                "# preserve dotted layout\n"
+                "features.hooks = false\nfeatures.codex_hooks = true\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-canonical-false-with-alias": (
+                "# preserve inline layout\n"
+                'features = { hooks = false, codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+        }
+
+        for name, original in cases.items():
+            root = tmp_path / name
+            self.writer.sync(_cfg(GUARD_HOOK), root)
+            config = root / ".codex" / "config.toml"
+            config.write_text(original, encoding="utf-8")
+
+            result = self.writer.sync(_cfg(GUARD_HOOK), root)
+
+            text = config.read_text(encoding="utf-8")
+            parsed = tomllib.loads(text)
+            assert parsed["features"]["hooks"] is True, name
+            assert "codex_hooks" not in parsed["features"], name
+            assert parsed["model"] == "gpt-5", name
+            assert "# preserve" in text, name
+            assert result.action == "updated", name
 
     def test_malformed_config_surfaces_manual_fix_note(self, tmp_path: Path) -> None:
         """If .codex/config.toml is invalid TOML, surface a manual-fix note."""
@@ -1622,6 +1830,31 @@ class TestCodexHooksWriter:
         assert "features.hooks" in result.message
         # The malformed file is left as-is (not clobbered).
         assert config.read_text(encoding="utf-8") == "this is = = not valid toml"
+
+    def test_non_table_features_value_is_preserved(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = 'features = "custom"\nmodel = "gpt-5"\n'
+        config.write_text(original, encoding="utf-8")
+
+        result = self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        assert result.message is not None
+        assert "features.hooks" in result.message
+        assert config.read_text(encoding="utf-8") == original
+
+    def test_migration_dry_run_rejects_unsplicable_escaped_alias(self, tmp_path: Path) -> None:
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = '[features]\n"codex\\u005fhooks" = false\n'
+        config.write_text(original, encoding="utf-8")
+
+        result = self.writer.sync(SyncData(), tmp_path, dry_run=True)
+
+        assert result.action == "error"
+        assert result.message is not None
+        assert "preserving its current boolean value" in result.message
+        assert config.read_text(encoding="utf-8") == original
 
     def test_merges_with_existing_file(self, tmp_path: Path) -> None:
         path = tmp_path / ".codex" / "hooks.json"
@@ -1703,9 +1936,6 @@ class TestCodexHooksWriter:
 # ---------------------------------------------------------------------------
 # Cross-writer parity — every existing writer drops unsupported events
 # ---------------------------------------------------------------------------
-
-
-import pytest  # noqa: E402
 
 
 class TestCrossWriterUnsupportedEvents:
@@ -2045,6 +2275,50 @@ class TestOtherWritersRemoval:
         assert result.revoked == 1
         data = _read_json(tmp_path / ".codex" / "hooks.json")
         assert "PreToolUse" not in data.get("hooks", {})
+
+    @pytest.mark.parametrize("legacy_value", [True, False])
+    def test_codex_removal_only_sync_migrates_legacy_feature_alias(
+        self, tmp_path: Path, legacy_value: bool
+    ) -> None:
+        import tomllib
+
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        config = tmp_path / ".codex" / "config.toml"
+        config.write_text(
+            f"# preserve legacy config\n[features]\ncodex_hooks = {str(legacy_value).lower()}\n",
+            encoding="utf-8",
+        )
+
+        result = writer.sync(_remove(("pre_tool_use", GUARD_HOOK.command)), tmp_path)
+
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["features"]["hooks"] is legacy_value
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve legacy config" in config.read_text(encoding="utf-8")
+        assert result.revoked == 1
+
+    @pytest.mark.parametrize(
+        ("command", "expected_revoked"),
+        [(GUARD_HOOK.command, 1), ("never-written", 0)],
+    )
+    def test_codex_removal_only_sync_preserves_disabled_canonical_flag(
+        self, tmp_path: Path, command: str, expected_revoked: int
+    ) -> None:
+        from crossby.sync.hooks import CodexHooksWriter
+
+        writer = CodexHooksWriter()
+        writer.sync(_cfg(GUARD_HOOK), tmp_path)
+        config = tmp_path / ".codex" / "config.toml"
+        original = "# keep disabled\n[features]\nhooks = false\n"
+        config.write_text(original, encoding="utf-8")
+
+        result = writer.sync(_remove(("pre_tool_use", command)), tmp_path)
+
+        assert config.read_text(encoding="utf-8") == original
+        assert result.revoked == expected_revoked
 
     def test_antigravity_removes_named_hook(self, tmp_path: Path) -> None:
         from crossby.sync.hooks import AntigravityCLIHooksWriter

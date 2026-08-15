@@ -85,9 +85,7 @@ class TestApplyProject:
 
         results = apply_scene(resolve(tmp_path, SCENE), tmp_path)  # must not raise
 
-        skills_errors = [
-            r for r in results if r.concern.value == "skills" and r.action == "error"
-        ]
+        skills_errors = [r for r in results if r.concern.value == "skills" and r.action == "error"]
         assert skills_errors, "expected a projection containment error row"
 
 

@@ -323,9 +323,11 @@ class TestCodexConfigPreservation:
         text = path.read_text(encoding="utf-8")
         assert "# Sandbox policy: keep this strict." in text
         assert "# Profiles I actually use." in text
-        assert tomllib.loads(text)["features"]["codex_hooks"] is True
+        features = tomllib.loads(text)["features"]
+        assert features["hooks"] is True
+        assert "codex_hooks" not in features
 
-        # Idempotent re-run: both flags already set → (False, None), no rewrite.
+        # Idempotent re-run: canonical flag already set → (False, None), no rewrite.
         assert _ensure_codex_hooks_feature_flag(tmp_path, dry_run=False) == (False, None)
 
     def test_existing_server_is_replaced_not_duplicated(self, tmp_path: Path) -> None:

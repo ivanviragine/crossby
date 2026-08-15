@@ -892,6 +892,116 @@ class TestWizardRevocation:
     revoke what it wrote earlier — the follow-up behaviour from Issue #111.
     """
 
+    def test_wizard_migrates_codex_alias_without_discovered_or_owned_hooks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve config\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve config" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
+    @pytest.mark.parametrize("link_kind", ["ancestor", "leaf"])
+    def test_wizard_surfaces_codex_migration_probe_symlink_refusal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        link_kind: str,
+    ) -> None:
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_config = outside / "config.toml"
+        outside_config.write_text("[features]\ncodex_hooks = true\n", encoding="utf-8")
+        config = tmp_path / ".codex" / "config.toml"
+        if link_kind == "ancestor":
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        else:
+            config.parent.mkdir()
+            os.symlink(outside_config, config)
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "hooks", "--path", str(tmp_path)])
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert "No tool configs found to sync." not in result.output
+
+    def test_confirmed_codex_source_still_runs_alias_migration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# source config\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Edit",
+                                "hooks": [{"type": "command", "command": "guard"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_hooks = hooks_path.read_bytes()
+        _seed_hook_ledger(tmp_path, AIToolID.CODEX, {_GUARD_HOOK})
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex", "claude"],
+        )
+
+        result = runner.invoke(
+            app,
+            ["sync", "--from", "codex", "--to", "claude", "--path", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# source config" in text
+        assert hooks_path.read_bytes() == original_hooks
+        assert load_ledger(tmp_path).hooks(AIToolID.CODEX) == frozenset({_GUARD_HOOK})
+
     def test_wizard_revokes_environment_wide_emptied_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
