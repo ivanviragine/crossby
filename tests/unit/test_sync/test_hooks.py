@@ -1581,6 +1581,24 @@ class TestCodexHooksWriter:
         assert "# my codex config" in text
         assert "# enable hooks" in text
 
+    def test_migrates_disabled_legacy_alias_and_enables_hooks(self, tmp_path: Path) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "[features]\ncodex_hooks = false  # preserve trailing\n",
+            encoding="utf-8",
+        )
+
+        self.writer.sync(_cfg(GUARD_HOOK), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is True
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve trailing" in text
+
     def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
         """Enabling the flag merges into an existing config, keeping other keys."""
         import tomllib
@@ -1651,6 +1669,26 @@ class TestCodexHooksWriter:
             "inline-alias-only": (
                 "# preserve inline layout\n"
                 'features = { codex_hooks = true, other = "x,y" }\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-alias-false": (
+                "# preserve dotted layout\n"
+                "features.codex_hooks = false  # keep trailing\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-alias-false": (
+                "# preserve inline layout\n"
+                'features = { codex_hooks = false, other = "x,y" }  # keep trailing\n'
+                "model = 'gpt-5'\n"
+            ),
+            "dotted-canonical-false-with-alias": (
+                "# preserve dotted layout\n"
+                "features.hooks = false\nfeatures.codex_hooks = true\n"
+                "model = 'gpt-5'\n"
+            ),
+            "inline-canonical-false-with-alias": (
+                "# preserve inline layout\n"
+                'features = { hooks = false, codex_hooks = true, other = "x,y" }\n'
                 "model = 'gpt-5'\n"
             ),
         }

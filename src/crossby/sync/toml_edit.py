@@ -316,6 +316,32 @@ def _assignment_key_span(
     return key_start, key_end, _split_key(text[key_start:key_end])
 
 
+def _replace_boolean_literal(text: str, start: int, end: int, literal: str) -> str | None:
+    """Replace a boolean assignment value while preserving its surrounding text."""
+    if literal not in {"true", "false"}:
+        return None
+    equals = _find_assignment_equals(text, start, end)
+    if equals is None:
+        return None
+    value_start = equals + 1
+    while value_start < end and text[value_start] in " \t\r":
+        value_start += 1
+
+    current = next(
+        (value for value in ("true", "false") if text.startswith(value, value_start)),
+        None,
+    )
+    if current is None:
+        return None
+    value_end = value_start + len(current)
+    suffix = value_end
+    while suffix < end and text[suffix] in " \t\r":
+        suffix += 1
+    if suffix < end and text[suffix] not in "#\n":
+        return None
+    return _still_parses(text[:value_start] + literal + text[value_end:])
+
+
 def _inline_entries(text: str, assign: _Assign) -> list[_InlineEntry] | None:
     """Parse direct entries from an inline-table assignment, preserving offsets."""
     equals = _find_assignment_equals(text, assign.start, assign.end)
@@ -615,6 +641,13 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
 
     idx = _find_table(headers, table)
     if idx is None:
+        implicit = _find_implicit_scalar(text, headers, assigns, table, key)
+        if implicit is not None:
+            kind, assign, entry, _entries = implicit
+            if kind == "dotted":
+                return _replace_boolean_literal(text, assign.start, assign.end, literal)
+            assert entry is not None
+            return _replace_boolean_literal(text, entry.start, entry.end, literal)
         return _still_parses(_append_block(text, f"[{_render_key(table)}]\n{line}"))
 
     # Only the table's own body, not the child tables ``_extent`` would swallow:
@@ -624,6 +657,9 @@ def set_scalar(text: str, table: tuple[str, ...], key: str, literal: str) -> str
     body_end = headers[idx + 1].start if idx + 1 < len(headers) else len(text)
     for assign in assigns:
         if assign.parts == (key,) and header.body_start <= assign.start < body_end:
+            boolean_edit = _replace_boolean_literal(text, assign.start, assign.end, literal)
+            if boolean_edit is not None:
+                return boolean_edit
             return _still_parses(text[: assign.start] + line + text[assign.end :])
 
     return _still_parses(text[: header.body_start] + line + text[header.body_start :])

@@ -1376,6 +1376,7 @@ def _ensure_codex_hooks_feature_flag(
     features = existing.get("features")
     if not isinstance(features, dict):
         features = {}
+    has_canonical_key = "hooks" in features
     needs_enable = features.get("hooks") is not True
     has_deprecated_alias = "codex_hooks" in features
     if not needs_enable and not has_deprecated_alias:
@@ -1392,14 +1393,13 @@ def _ensure_codex_hooks_feature_flag(
     # comments and key ordering survive. Alias migration refuses a lossy full
     # dump when that can't be done safely.
     # Reuses the text read above — a second read could see a different file.
-    if has_deprecated_alias:
-        spliced = (
-            rename_scalar(original, ("features",), "codex_hooks", "hooks")
-            if needs_enable
-            else unset_scalar(original, ("features",), "codex_hooks", include_implicit=True)
-        )
-    else:
-        spliced = set_scalar(original, ("features",), "hooks", "true")
+    spliced: str | None = original
+    if has_deprecated_alias and not has_canonical_key:
+        spliced = rename_scalar(original, ("features",), "codex_hooks", "hooks")
+    if needs_enable and spliced is not None:
+        spliced = set_scalar(spliced, ("features",), "hooks", "true")
+    if has_deprecated_alias and spliced is not None:
+        spliced = unset_scalar(spliced, ("features",), "codex_hooks", include_implicit=True)
 
     new_text = splice_or_none(spliced, existing)
     if new_text is None:

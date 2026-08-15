@@ -83,6 +83,21 @@ class TestSetScalar:
         assert parsed["features"]["codex_hooks"] is True
         assert parsed["features"]["sub"]["codex_hooks"] is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "features.hooks = false  # dotted\n",
+            "features = { hooks = false, other = 1 }  # inline\n",
+            "[features]\nhooks = false  # header\n",
+        ],
+    )
+    def test_replaces_boolean_in_place_and_preserves_comments(self, text: str) -> None:
+        out = set_scalar(text, ("features",), "hooks", "true")
+
+        assert out is not None
+        assert tomllib.loads(out)["features"]["hooks"] is True
+        assert "# " in out
+
 
 class TestImplicitScalarEdits:
     def test_unsets_dotted_key_without_rewriting_document(self) -> None:
