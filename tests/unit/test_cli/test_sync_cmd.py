@@ -892,6 +892,34 @@ class TestWizardRevocation:
     revoke what it wrote earlier — the follow-up behaviour from Issue #111.
     """
 
+    def test_wizard_migrates_codex_alias_without_discovered_or_owned_hooks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve config\n[features]\ncodex_hooks = false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "--path", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert parsed["features"]["hooks"] is False
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve config" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
     def test_wizard_revokes_environment_wide_emptied_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

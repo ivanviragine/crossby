@@ -1335,6 +1335,19 @@ _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
 )
 
 
+def codex_hooks_alias_needs_migration(project_root: Path) -> bool:
+    """Return whether project Codex config contains the deprecated hooks alias."""
+    import tomllib
+
+    path = project_root / ".codex" / "config.toml"
+    try:
+        existing = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
+        return False
+    features = existing.get("features")
+    return isinstance(features, dict) and "codex_hooks" in features
+
+
 def _ensure_codex_hooks_feature_flag(
     project_root: Path, *, dry_run: bool, enable: bool = True
 ) -> tuple[bool, ManualFixNote | None]:
@@ -1448,7 +1461,9 @@ class CodexHooksWriter(AbstractSyncWriter):
         dry_run: bool = False,
         force: bool = False,
     ) -> SyncResult:
-        if not data.hooks and not data.hooks_remove:
+        has_hook_work = bool(data.hooks or data.hooks_remove)
+        migrate_alias_only = not has_hook_work and codex_hooks_alias_needs_migration(project_root)
+        if not has_hook_work and not migrate_alias_only:
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
@@ -1458,6 +1473,28 @@ class CodexHooksWriter(AbstractSyncWriter):
 
         path = project_root / ".codex" / "hooks.json"
         config_path = project_root / ".codex" / "config.toml"
+        if migrate_alias_only:
+            preflight_err = self.preflight(project_root, config_path)
+            if preflight_err is not None:
+                return preflight_err
+            flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
+                project_root, dry_run=dry_run, enable=False
+            )
+            if flag_note is not None:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=config_path,
+                    message=_message_with_notes(None, [flag_note]),
+                )
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="updated" if flag_changed else "skipped",
+                file_path=config_path,
+            )
+
         # Multi-file writer: hooks.json *and* the config.toml feature flag. Both
         # are shared merge files — preflight ancestor+leaf on BOTH before the
         # first read/write, so a refused symlink on config.toml can't leave a

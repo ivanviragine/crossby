@@ -6,6 +6,8 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
+
 from crossby.models.ai import AIToolID
 from crossby.models.config import HookEntry
 from crossby.sync.base import SyncData
@@ -1599,6 +1601,31 @@ class TestCodexHooksWriter:
         assert "codex_hooks" not in parsed["features"]
         assert "# preserve trailing" in text
 
+    @pytest.mark.parametrize("legacy_value", [True, False])
+    def test_migrates_legacy_alias_without_any_hook_work(
+        self, tmp_path: Path, legacy_value: bool
+    ) -> None:
+        import tomllib
+
+        config = tmp_path / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "# preserve migration-only config\n[features]\n"
+            f"codex_hooks = {str(legacy_value).lower()}\n",
+            encoding="utf-8",
+        )
+
+        result = self.writer.sync(SyncData(), tmp_path)
+
+        text = config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(text)
+        assert result.action == "updated"
+        assert result.file_path == config
+        assert parsed["features"]["hooks"] is legacy_value
+        assert "codex_hooks" not in parsed["features"]
+        assert "# preserve migration-only config" in text
+        assert not (tmp_path / ".codex" / "hooks.json").exists()
+
     def test_feature_flag_preserves_existing_config(self, tmp_path: Path) -> None:
         """Enabling the flag merges into an existing config, keeping other keys."""
         import tomllib
@@ -1801,9 +1828,6 @@ class TestCodexHooksWriter:
 # ---------------------------------------------------------------------------
 # Cross-writer parity — every existing writer drops unsupported events
 # ---------------------------------------------------------------------------
-
-
-import pytest  # noqa: E402
 
 
 class TestCrossWriterUnsupportedEvents:
