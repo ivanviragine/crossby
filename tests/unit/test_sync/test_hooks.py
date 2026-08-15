@@ -1519,7 +1519,7 @@ class TestCodexHooksWriter:
     ) -> None:
         import os
 
-        from crossby.sync.hooks import codex_hooks_alias_needs_migration
+        from crossby.sync.hooks import probe_codex_hooks_alias_migration
 
         outside = tmp_path / "outside"
         outside.mkdir()
@@ -1541,7 +1541,11 @@ class TestCodexHooksWriter:
 
         monkeypatch.setattr(Path, "read_text", guarded_read_text)
 
-        assert codex_hooks_alias_needs_migration(tmp_path) is False
+        needs_migration, preflight_error = probe_codex_hooks_alias_migration(tmp_path)
+        assert needs_migration is False
+        assert preflight_error is not None
+        assert preflight_error.action == "error"
+        assert "symlink" in (preflight_error.message or "")
         result = self.writer.sync(SyncData(), tmp_path)
         assert result.action == "error"
         assert "symlink" in (result.message or "")

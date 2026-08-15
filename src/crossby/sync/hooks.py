@@ -1343,24 +1343,29 @@ _CODEX_FEATURES_MIGRATION_NOTE = ManualFixNote(
 )
 
 
-def codex_hooks_alias_needs_migration(project_root: Path) -> bool:
-    """Return whether a safely readable Codex config has the deprecated alias.
+def probe_codex_hooks_alias_migration(
+    project_root: Path,
+) -> tuple[bool, SyncResult | None]:
+    """Return alias presence plus any refusal to inspect the Codex config.
 
     Alias detection participates in the same ancestor-and-leaf symlink refusal
     as the merge writer. This check must happen before ``read_text`` because the
-    CLI probes for migration work before it dispatches the writer.
+    CLI probes for migration work before it dispatches the writer. Returning the
+    preflight error lets that CLI still dispatch the writer and surface the
+    refusal instead of misreporting that no work was found.
     """
     import tomllib
 
     path = project_root / ".codex" / "config.toml"
-    if CodexHooksWriter().preflight(project_root, path) is not None:
-        return False
+    preflight_error = CodexHooksWriter().preflight(project_root, path)
+    if preflight_error is not None:
+        return False, preflight_error
     try:
         existing = tomllib.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, tomllib.TOMLDecodeError, OSError, ValueError):
-        return False
+        return False, None
     features = existing.get("features")
-    return isinstance(features, dict) and "codex_hooks" in features
+    return isinstance(features, dict) and "codex_hooks" in features, None
 
 
 def _ensure_codex_hooks_feature_flag(
@@ -1483,12 +1488,10 @@ class CodexHooksWriter(AbstractSyncWriter):
         path = project_root / ".codex" / "hooks.json"
         config_path = project_root / ".codex" / "config.toml"
         if not has_hook_work:
-            # Preflight before alias detection so a symlinked config is refused
-            # without ever following it for the read/parse probe.
-            preflight_err = self.preflight(project_root, config_path)
+            needs_migration, preflight_err = probe_codex_hooks_alias_migration(project_root)
             if preflight_err is not None:
                 return preflight_err
-            if not codex_hooks_alias_needs_migration(project_root):
+            if not needs_migration:
                 return SyncResult(
                     tool_id=self.tool_id,
                     concern=self.concern,

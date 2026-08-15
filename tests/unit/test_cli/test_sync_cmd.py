@@ -920,6 +920,39 @@ class TestWizardRevocation:
         assert "# preserve config" in text
         assert not (tmp_path / ".codex" / "hooks.json").exists()
 
+    @pytest.mark.parametrize("link_kind", ["ancestor", "leaf"])
+    def test_wizard_surfaces_codex_migration_probe_symlink_refusal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        link_kind: str,
+    ) -> None:
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        outside_config = outside / "config.toml"
+        outside_config.write_text("[features]\ncodex_hooks = true\n", encoding="utf-8")
+        config = tmp_path / ".codex" / "config.toml"
+        if link_kind == "ancestor":
+            os.symlink(os.path.relpath(outside, tmp_path), tmp_path / ".codex")
+        else:
+            config.parent.mkdir()
+            os.symlink(outside_config, config)
+
+        monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            lambda: ["codex"],
+        )
+        monkeypatch.setattr("crossby.sync.readers.scan_project", _empty_project_scan)
+
+        result = runner.invoke(app, ["sync", "hooks", "--path", str(tmp_path)])
+
+        assert result.exit_code == 1, result.output
+        assert "symlink" in result.output
+        assert "No tool configs found to sync." not in result.output
+
     def test_confirmed_codex_source_still_runs_alias_migration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

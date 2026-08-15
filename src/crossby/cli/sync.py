@@ -101,7 +101,7 @@ def sync(
     )
     from crossby.sync import run_sync
     from crossby.sync.base import SyncConcern, SyncData
-    from crossby.sync.hooks import CodexHooksWriter, codex_hooks_alias_needs_migration
+    from crossby.sync.hooks import CodexHooksWriter, probe_codex_hooks_alias_migration
     from crossby.sync.readers import (
         build_sync_data,
         discover_hooks,
@@ -230,9 +230,12 @@ def sync(
         or target_tool == AIToolID.CODEX
         or ((source_tool is None or target_tool is None) and AIToolID.CODEX in installed_tools)
     )
-    needs_codex_hooks_migration = (
-        hooks_concern_active and codex_in_scope and codex_hooks_alias_needs_migration(project_root)
-    )
+    needs_codex_hooks_migration = False
+    if hooks_concern_active and codex_in_scope:
+        alias_present, migration_probe_error = probe_codex_hooks_alias_migration(project_root)
+        # A refused probe is still pending work: dispatch the writer so its
+        # normal preflight error is visible instead of reporting a clean no-op.
+        needs_codex_hooks_migration = alias_present or migration_probe_error is not None
 
     # Non-interactive mode: a confirmed source bypasses the per-concern wizard.
     # ``source_tool`` may come from --from, ``sync_defaults.from`` in
