@@ -1336,13 +1336,14 @@ _CODEX_FEATURES_FLAG_NOTE = ManualFixNote(
 
 
 def _ensure_codex_hooks_feature_flag(
-    project_root: Path, *, dry_run: bool
+    project_root: Path, *, dry_run: bool, enable: bool = True
 ) -> tuple[bool, ManualFixNote | None]:
-    """Enable the canonical Codex hooks flag in ``.codex/config.toml`` (idempotent).
+    """Synchronize the canonical Codex hooks flag in ``.codex/config.toml``.
 
-    Writes ``[features].hooks = true`` and removes the deprecated
-    ``[features].codex_hooks`` alias that older crossby versions wrote. Merges
-    into any existing config, preserving other keys/tables.
+    With ``enable=True``, writes ``[features].hooks = true``. With
+    ``enable=False``, preserves the user's canonical value while migrating a
+    deprecated ``[features].codex_hooks`` alias in place. Both paths remove the
+    alias that older crossby versions wrote and preserve other keys/tables.
 
     On current Codex this is belt-and-braces — the feature is stable and enabled
     by default, so hooks load whether or not the flag is present. Keeping the
@@ -1352,8 +1353,9 @@ def _ensure_codex_hooks_feature_flag(
 
     - ``changed`` is True when the canonical key needs enabling or the deprecated
       alias needs removing — meaning the file was written (non-dry-run) or
-      *would* be written (dry-run). It is False when the canonical flag is already
-      set without the alias, or the file is malformed (nothing written). The
+      *would* be written (dry-run). It is False when the canonical key already
+      satisfies the requested mode without the alias, or the file is malformed
+      (nothing written). The
       caller uses this so a ``skipped`` row can never hide a real config write,
       while self-heal still fires on an otherwise-unchanged re-sync.
     - ``note`` is :data:`_CODEX_FEATURES_FLAG_NOTE` when the existing file is
@@ -1377,15 +1379,18 @@ def _ensure_codex_hooks_feature_flag(
     if not isinstance(features, dict):
         features = {}
     has_canonical_key = "hooks" in features
-    needs_enable = features.get("hooks") is not True
+    needs_enable = enable and features.get("hooks") is not True
     has_deprecated_alias = "codex_hooks" in features
     if not needs_enable and not has_deprecated_alias:
-        return False, None  # already enabled — nothing to do
+        return False, None  # nothing to migrate or enable
 
     if dry_run:
         return True, None  # would write, but dry-run writes nothing
 
-    features["hooks"] = True
+    if needs_enable:
+        features["hooks"] = True
+    elif has_deprecated_alias and not has_canonical_key:
+        features["hooks"] = features["codex_hooks"]
     features.pop("codex_hooks", None)
     existing["features"] = features
 
@@ -1562,18 +1567,16 @@ class CodexHooksWriter(AbstractSyncWriter):
         # CopilotHooksWriter's ``changed = bool(added or revoked)`` gate.
         hooks_changed = bool(added or revoked)
 
-        # Enable the feature flag so Codex actually loads these hooks. Runs
-        # whenever there are supported hooks or supported hooks are being
-        # removed — independent of ``hooks_changed`` — so a missing canonical
-        # flag or deprecated alias self-heals even on an otherwise unchanged or
-        # removal-only sync. On success this is silent; if it can't be written a
-        # manual-fix note is surfaced. ``flag_changed`` reflects a real (or, in
-        # dry-run, a would-be) write to ``.codex/config.toml`` so a ``skipped``
-        # row can never hide a config write.
+        # Enable the feature for retained hooks, or migrate only the deprecated
+        # alias during a removal-only sync. This runs independently of
+        # ``hooks_changed`` so the config self-heals on an otherwise unchanged
+        # sync without overriding an explicit ``hooks = false`` during removal.
+        # ``flag_changed`` reflects a real (or, in dry-run, a would-be) write to
+        # ``.codex/config.toml`` so a ``skipped`` row cannot hide a config write.
         flag_changed = False
         if kept or has_supported_removals:
             flag_changed, flag_note = _ensure_codex_hooks_feature_flag(
-                project_root, dry_run=dry_run
+                project_root, dry_run=dry_run, enable=bool(kept)
             )
             if flag_note is not None:
                 notes.append(flag_note)
