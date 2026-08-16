@@ -183,8 +183,14 @@ def probe_claude() -> set[str]:
     interpreted as a *prompt* and returns prose, not a model list, so it cannot
     be scraped. The published models docs page is therefore the sole source of
     truth for the Claude catalog.
+
+    The docs page uses Claude's own dashed ID format (``claude-haiku-4-5``),
+    but ``models.json`` stores the internal dotted convention
+    (``claude-haiku-4.5``, see ``AbstractAITool.standardize_model_id``), so
+    scraped IDs are converted before comparison.
     """
-    return _scrape_models("claude")
+    adapter = AbstractAITool.get("claude")
+    return {adapter.standardize_model_id(model) for model in _scrape_models("claude")}
 
 
 def probe_copilot() -> set[str]:

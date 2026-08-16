@@ -61,6 +61,25 @@ class TestClaudeScrapePattern:
         assert re.findall(CLAUDE_PATTERN, "claude-3-5-sonnet-20241022") == []
 
 
+def test_probe_claude_standardizes_dashed_docs_ids_to_registry_dotted_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The published docs page uses Claude's own dashed ID format
+    # (claude-haiku-4-5), but models.json stores the internal dotted
+    # convention (claude-haiku-4.5) — probe_claude must bridge the two so
+    # the registry diff doesn't report every model as both missing and new.
+    monkeypatch.setattr(
+        PROBE_MODULE,
+        "_scrape_models",
+        lambda _tool: {"claude-haiku-4-5", "claude-opus-4-6", "claude-sonnet-5"},
+    )
+    assert PROBE_MODULE.probe_claude() == {
+        "claude-haiku-4.5",
+        "claude-opus-4.6",
+        "claude-sonnet-5",
+    }
+
+
 def test_copilot_pattern_captures_mai_id_without_matching_prose() -> None:
     text = "Maintain support for mai-code-1-flash and gemini-3.6-flash in the main catalog."
     assert set(re.findall(COPILOT_PATTERN, text)) == {
