@@ -44,11 +44,11 @@ _SCRAPE_PATTERNS: dict[str, str] = {
 }
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_ANTIGRAVITY_MODEL_RE = re.compile(
-    r"(?<![a-z0-9._/-])((?:gemini|claude|gpt)(?:[./-][a-z0-9._-]+)+)"
-    r"(?![a-z0-9._/-])",
-    re.IGNORECASE,
-)
+# Provider-agnostic: matches the model-ID column of `agy models` output
+# regardless of vendor prefix (gemini, claude, gpt, or a future mai/grok/o3
+# family), as long as it looks like a multi-segment identifier (e.g.
+# "foo-1.2-bar") rather than a plain word from the description column.
+_ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[./-][a-z0-9._-]+)+$")
 _ANTIGRAVITY_GEMINI_EFFORT_RE = re.compile(
     r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro))-(?:low|medium|high)$"
 )
@@ -240,12 +240,19 @@ def normalize_antigravity_model_id(model: str) -> str:
 
 
 def parse_antigravity_models(output: str) -> set[str]:
-    """Extract and canonicalize model IDs from ``agy models`` output."""
+    """Extract and canonicalize model IDs from ``agy models`` output.
+
+    Takes the first whitespace-delimited token of each line — the model-ID
+    column — without assuming which vendor families can appear there.
+    """
     models: set[str] = set()
     for line in output.splitlines():
-        clean_line = _ANSI_ESCAPE_RE.sub("", line)
-        for match in _ANTIGRAVITY_MODEL_RE.finditer(clean_line):
-            models.add(normalize_antigravity_model_id(match.group(1)))
+        clean_line = _ANSI_ESCAPE_RE.sub("", line).strip()
+        if not clean_line:
+            continue
+        first_token = clean_line.split(maxsplit=1)[0]
+        if _ANTIGRAVITY_MODEL_ID_RE.match(first_token):
+            models.add(normalize_antigravity_model_id(first_token))
     return models
 
 
@@ -555,8 +562,10 @@ def main() -> int:
             # Claude and Copilot `--json-schema` wraps the answer inside `structured_output`
             if isinstance(parsed, dict) and "structured_output" in parsed:
                 return json.dumps(parsed["structured_output"], indent=2)
-            # Or it might just be the direct object itself
-            if isinstance(parsed, dict) and any(k in parsed for k in registry):
+            # Or it might just be the direct object itself. Require the full
+            # top-level key set so a partial payload (e.g. {"copilot": [...]})
+            # is rejected instead of silently deleting the omitted providers.
+            if isinstance(parsed, dict) and set(parsed) == set(registry_raw):
                 return json.dumps(parsed, indent=2)
             return None
 

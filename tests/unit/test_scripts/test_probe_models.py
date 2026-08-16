@@ -133,6 +133,20 @@ class TestAntigravityModelParsing:
     def test_normalizes_only_known_gemini_effort_suffixes(self, model: str, expected: str) -> None:
         assert PROBE_MODULE.normalize_antigravity_model_id(model) == expected
 
+    def test_extracts_models_without_hard_coded_family_prefix(self) -> None:
+        output = """
+        Available models:
+          mai-code-1-flash           MAI Code 1 (Flash)
+          grok-4-fast                Grok 4 Fast
+          o3-mini                    O3 Mini
+        """
+
+        assert PROBE_MODULE.parse_antigravity_models(output) == {
+            "mai-code-1-flash",
+            "grok-4-fast",
+            "o3-mini",
+        }
+
     def test_empty_output_returns_no_models(self) -> None:
         assert PROBE_MODULE.parse_antigravity_models("") == set()
         assert PROBE_MODULE.parse_antigravity_models("Available models:\n") == set()
