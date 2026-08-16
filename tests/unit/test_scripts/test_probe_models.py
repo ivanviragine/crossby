@@ -70,16 +70,20 @@ def test_copilot_pattern_captures_mai_id_without_matching_prose() -> None:
 
 
 def test_copilot_docs_parser_uses_model_table_not_table_of_contents() -> None:
+    # Mirrors the real GitHub docs page: nav links and prose repeat the
+    # "Supported models" / "Tool availability values" text before the real
+    # heading, and unrelated prose (an example CLI invocation) mentions a
+    # model-like token that isn't actually in the supported-models table.
     page = """
-    Supported models
-    Tool availability values
-    unrelated option prose mentioning gpt-noise
-    Supported models
+    <a href="#supported-models">Supported models</a>
+    <a href="#tool-availability-values">Tool availability values</a>
+    Run <code>copilot config --repo model gpt-5.2</code> to override.
+    <h2 id="supported-models">Supported models</h2>
     `claude-sonnet-4.6` | General-purpose coding
     `gpt-5.4` | Complex reasoning
     `gemini-3.6-flash` | Fast responses
     `mai-code-1-flash` | Adaptive coding
-    Tool availability values
+    <h2 id="tool-availability-values">Tool availability values</h2>
     `gpt-not-a-model-table-entry`
     """
 
@@ -89,6 +93,10 @@ def test_copilot_docs_parser_uses_model_table_not_table_of_contents() -> None:
         "gemini-3.6-flash",
         "mai-code-1-flash",
     }
+
+
+def test_copilot_docs_parser_returns_empty_when_headings_missing() -> None:
+    assert PROBE_MODULE.parse_documented_models("copilot", "no anchors here") == set()
 
 
 def test_catalog_diff_preserves_exact_provider_spelling() -> None:

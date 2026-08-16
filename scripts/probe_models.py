@@ -155,10 +155,9 @@ def _pattern_matches(pattern: str, text: str) -> set[str]:
 def parse_documented_models(tool: str, text: str) -> set[str]:
     """Extract model IDs from a tool's published documentation.
 
-    GitHub's page repeats section titles in its table of contents. Evaluate
-    every ``Supported models`` → ``Tool availability values`` span and use the
-    one containing the most IDs, which selects the actual table without
-    allowing model-like option values elsewhere on the page into the catalog.
+    GitHub's page repeats section titles in its table of contents and other
+    prose, so this anchors on the unique heading-id attributes rather than
+    the visible heading text to isolate the actual table.
     """
     pattern = _SCRAPE_PATTERNS[tool]
 
@@ -168,12 +167,11 @@ def parse_documented_models(tool: str, text: str) -> set[str]:
             return set(full_matches)
 
     if tool == "copilot":
-        candidates: list[set[str]] = []
-        for heading in re.finditer("Supported models", text):
-            end = text.find("Tool availability values", heading.end())
-            if end >= 0:
-                candidates.append(_pattern_matches(pattern, text[heading.end() : end]))
-        return max(candidates, key=len, default=set())
+        start = text.find('id="supported-models"')
+        end = text.find('id="tool-availability-values"', start if start >= 0 else 0)
+        if start < 0 or end < 0:
+            return set()
+        return _pattern_matches(pattern, text[start:end])
 
     return _pattern_matches(pattern, text)
 
