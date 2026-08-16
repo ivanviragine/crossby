@@ -1,8 +1,12 @@
-"""Codex sandbox composition: writable roots, single sandbox flag, network pin.
+"""Codex sandbox composition: writable roots (--add-dir), single sandbox flag, pin.
 
 Argv matrix over a **real** linked worktree (git init + commit + worktree add,
 plus a detached-HEAD variant) crossed with autonomy tiers, trusted dirs, and
-network on/off — plus the non-worktree byte-identity guarantee and TOML quoting.
+network on/off — plus the non-worktree byte-identity guarantee.
+
+The git-metadata dirs are granted via **additive** ``--add-dir`` (so a user's
+configured ``sandbox_workspace_write.writable_roots`` is preserved), while the
+network flag is deliberately the replacing ``-c`` pin.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from crossby.ai_tools.codex import CodexAdapter, _toml_quote
+from crossby.ai_tools.codex import CodexAdapter
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -27,10 +31,14 @@ class Worktree:
     common: Path
 
     @property
-    def writable_roots_arg(self) -> str:
-        dirs = sorted({self.common, self.private})
-        roots = ", ".join(_toml_quote(str(p.resolve())) for p in dirs)
-        return f"sandbox_workspace_write.writable_roots=[{roots}]"
+    def metadata_add_dir_args(self) -> list[str]:
+        # Resolver returns the out-of-root metadata dirs canonicalised + sorted;
+        # common (``.git``) sorts before the nested private dir.
+        dirs = sorted({self.common.resolve(), self.private.resolve()})
+        out: list[str] = []
+        for d in dirs:
+            out += ["--add-dir", str(d)]
+        return out
 
 
 def _make_worktree(tmp_path: Path, *, detach: bool = False) -> Worktree:
@@ -79,8 +87,7 @@ class TestWorktreeLaunch:
             "codex",
             "--sandbox",
             "workspace-write",
-            "-c",
-            wt.writable_roots_arg,
+            *wt.metadata_add_dir_args,
             "-c",
             "sandbox_workspace_write.network_access=false",
         ]
@@ -92,16 +99,21 @@ class TestWorktreeLaunch:
         assert cmd.count("--sandbox") == 1
         assert cmd.count("workspace-write") == 1
         assert cmd.index("--sandbox") < cmd.index("--add-dir")
-        assert "/tmp/plan" in cmd
+        assert "/tmp/plan" in cmd  # trusted dir also via --add-dir
+
+    def test_no_writable_roots_config_key(self, wt: Worktree) -> None:
+        # Metadata dirs are additive --add-dir, never a replacing -c writable_roots.
+        # (Match the config-key form, not a loose substring — pytest's tmp_path is
+        # named after the test, so paths contain "writable_roots" incidentally.)
+        cmd = CodexAdapter().build_launch_command(working_dir=wt.path)
+        assert not any(a.startswith("sandbox_workspace_write.writable_roots") for a in cmd)
 
     def test_detached_head_worktree_grants_roots(self, tmp_path: Path) -> None:
         wt = _make_worktree(tmp_path, detach=True)
         cmd = CodexAdapter().build_launch_command(working_dir=wt.path)
         assert "--sandbox" in cmd
-        # common dir is always granted; a detached worktree's private dir name is
-        # path-derived, so just assert the writable_roots arg is present.
-        assert any(a.startswith("sandbox_workspace_write.writable_roots=[") for a in cmd)
-        assert str(wt.common.resolve()) in " ".join(cmd)
+        assert "--add-dir" in cmd
+        assert str(wt.common.resolve()) in cmd
 
     @pytest.mark.parametrize("network", [True, False])
     def test_network_pin_reflects_flag(self, wt: Worktree, network: bool) -> None:
@@ -115,13 +127,13 @@ class TestWorktreeLaunch:
         cmd = CodexAdapter().build_launch_command(yolo=True, working_dir=wt.path)
         assert cmd[:3] == ["codex", "-a", "never"]
         assert "--sandbox" in cmd
-        assert any(a.startswith("sandbox_workspace_write.writable_roots=[") for a in cmd)
+        assert str(wt.common.resolve()) in cmd
 
     def test_accept_edits_in_worktree(self, wt: Worktree) -> None:
         cmd = CodexAdapter().build_launch_command(accept_edits=True, working_dir=wt.path)
         assert cmd[1:3] == ["-a", "untrusted"]
         assert cmd.count("--sandbox") == 1
-        assert wt.writable_roots_arg in cmd
+        assert wt.metadata_add_dir_args[1] in cmd  # a granted metadata path
 
 
 class TestNetworkForcesWorkspaceWrite:
@@ -154,10 +166,11 @@ class TestResume:
     def test_worktree_resume_grants_roots_approval_neutral(self, wt: Worktree) -> None:
         cmd = CodexAdapter().build_resume_command("sid", working_dir=wt.path)
         assert cmd is not None
-        # Sandbox + writable roots + network pin, but NO injected approval flag.
+        # Sandbox + --add-dir metadata + network pin, but NO injected approval flag.
         assert cmd[:3] == ["codex", "resume", "sid"]
         assert "--sandbox" in cmd
-        assert wt.writable_roots_arg in cmd
+        assert "--add-dir" in cmd
+        assert str(wt.common.resolve()) in cmd
         assert "sandbox_workspace_write.network_access=false" in cmd
         assert "-a" not in cmd
         assert "never" not in cmd
@@ -169,24 +182,3 @@ class TestResume:
         assert cmd is not None
         assert "sandbox_workspace_write.network_access=true" in cmd
         assert "-a" not in cmd
-
-
-class TestTomlQuoting:
-    def test_plain_path(self) -> None:
-        assert _toml_quote("/a/b") == '"/a/b"'
-
-    def test_spaces_need_no_escape(self) -> None:
-        assert _toml_quote("/a b/c") == '"/a b/c"'
-
-    def test_double_quote_escaped(self) -> None:
-        assert _toml_quote('/a"b') == '"/a\\"b"'
-
-    def test_backslash_escaped(self) -> None:
-        assert _toml_quote("/a\\b") == '"/a\\\\b"'
-
-    def test_backslash_before_quote(self) -> None:
-        # Backslash escaped first, then the quote — order matters.
-        assert _toml_quote('/a\\"b') == '"/a\\\\\\"b"'
-
-    def test_control_chars_escaped(self) -> None:
-        assert _toml_quote("/a\tb\nc") == '"/a\\tb\\nc"'

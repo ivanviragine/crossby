@@ -32,25 +32,6 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
 }
 
 
-def _toml_quote(value: str) -> str:
-    """Render *value* as a TOML basic string for a ``writable_roots`` array element.
-
-    Codex parses the ``-c key=value`` value as TOML, so the paths inside
-    ``writable_roots=["…"]`` must be valid TOML basic strings. Escape backslashes
-    first, then double-quotes, then the control chars TOML forbids raw — covering
-    the paths-with-quotes/backslashes/spaces cases (spaces need no escaping
-    inside a quoted string).
-    """
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    return f'"{escaped}"'
-
-
 class CodexAdapter(AbstractAITool):
     """Adapter for OpenAI Codex CLI."""
 
@@ -154,12 +135,17 @@ class CodexAdapter(AbstractAITool):
         ``autonomy_args=[]``, from :meth:`build_resume_command`.
 
         Emits, **in order**, a single ``--sandbox workspace-write`` before any
-        ``--add-dir``, the trusted-dir ``--add-dir`` flags, the linked-worktree
-        git-metadata ``writable_roots`` (so sandboxed git writes reach the
+        ``--add-dir``, then one ``--add-dir`` per trusted dir and per
+        linked-worktree git-metadata dir (so sandboxed git writes reach the
         external gitdir), and an explicit ``network_access`` pin — but only when
         crossby actually **forces** workspace-write. When nothing forces it,
         returns ``[]`` so the launch/resume stays byte-identical to an unmanaged
         Codex run.
+
+        The metadata dirs go through ``--add-dir`` (which *adds* to the sandbox's
+        writable roots) rather than ``-c sandbox_workspace_write.writable_roots``
+        (which would *replace* any roots the user configured). The network pin
+        is deliberately the replacing form — see below.
 
         workspace-write is forced by any of: accept-edits/auto (detected as
         ``-a untrusted`` in ``autonomy_args``), one or more ``trusted_dirs``,
@@ -187,9 +173,8 @@ class CodexAdapter(AbstractAITool):
         args: list[str] = ["--sandbox", "workspace-write"]
         for d in trusted:
             args.extend(self.plan_dir_args(d))
-        if metadata:
-            roots = ", ".join(_toml_quote(str(p)) for p in metadata)
-            args.extend(["-c", f"sandbox_workspace_write.writable_roots=[{roots}]"])
+        for meta_dir in metadata:
+            args.extend(self.plan_dir_args(str(meta_dir)))
         args.extend(
             [
                 "-c",

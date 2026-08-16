@@ -348,7 +348,9 @@ def test_codex_summarizer_in_worktree_gets_writable_roots_and_cwd(tmp_path: Path
     launched_cmd = codex_call.args[0]
     assert "--sandbox" in launched_cmd
     assert "workspace-write" in launched_cmd
-    assert any(a.startswith("sandbox_workspace_write.writable_roots=[") for a in launched_cmd)
+    # Metadata dirs granted additively via --add-dir (the common .git dir here).
+    assert "--add-dir" in launched_cmd
+    assert str((repo / ".git").resolve()) in launched_cmd
     assert "sandbox_workspace_write.network_access=false" in launched_cmd
     # The subprocess cwd matches the worktree whose metadata it granted writable.
     assert codex_call.kwargs["cwd"] == wt

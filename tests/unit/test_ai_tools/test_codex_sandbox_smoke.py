@@ -105,10 +105,10 @@ def test_sandbox_blocks_git_metadata_write_without_roots(
 def test_writable_roots_enable_git_write(
     worktree: tuple[Path, Path, Path], network: bool
 ) -> None:
-    """Fix: with the metadata dirs in writable_roots, sandboxed git add succeeds."""
+    """Fix: with the metadata dirs granted (--add-dir, as the composer emits),
+    sandboxed git add succeeds."""
     wt, private, common = worktree
     (wt / "new.txt").write_text("y\n")
-    roots = f'["{private}","{common}"]'
     proc = subprocess.run(
         [
             "codex",
@@ -118,8 +118,10 @@ def test_writable_roots_enable_git_write(
             "--skip-git-repo-check",
             "-C",
             str(wt),
-            "-c",
-            f"sandbox_workspace_write.writable_roots={roots}",
+            "--add-dir",
+            str(common),
+            "--add-dir",
+            str(private),
             "-c",
             f"sandbox_workspace_write.network_access={'true' if network else 'false'}",
             "-c",

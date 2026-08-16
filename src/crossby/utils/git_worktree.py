@@ -75,11 +75,11 @@ def outside_root_git_metadata_dirs(working_dir: Path) -> list[Path]:
         if not common_path.is_absolute():
             common_path = Path(working_dir) / common_path
         candidates = {private_path.resolve(), common_path.resolve()}
-    except (OSError, ValueError) as exc:  # pragma: no cover - defensive
+    except (OSError, ValueError, RuntimeError) as exc:  # RuntimeError: symlink loop
         logger.debug("git_worktree.resolve_failed", working_dir=str(working_dir), error=str(exc))
         return []
 
-    outside = [c for c in candidates if not _is_within(c, root)]
+    outside = [c for c in candidates if not _is_within(c, root) and _looks_like_git_metadata(c)]
     return sorted(outside)
 
 
@@ -88,6 +88,22 @@ def _is_within(path: Path, root: Path) -> bool:
     try:
         return path.is_relative_to(root)
     except ValueError:  # pragma: no cover - different drives (Windows)
+        return False
+
+
+def _looks_like_git_metadata(path: Path) -> bool:
+    """Defense-in-depth check that *path* is a real git-metadata dir.
+
+    Both a common git dir and a per-worktree/submodule private git dir contain a
+    ``HEAD`` file. Requiring it rejects a hostile repo whose ``.git`` gitlink (or
+    ``commondir``) points at an arbitrary non-git location — otherwise crossby
+    would add e.g. ``~/.ssh`` to the sandbox writable roots. This is not a full
+    trust boundary (the working dir is still the user's chosen repo), but it
+    blocks pointing writable roots at a sensitive directory.
+    """
+    try:
+        return (path / "HEAD").is_file()
+    except OSError:  # pragma: no cover - defensive
         return False
 
 
@@ -108,7 +124,8 @@ def _run_git(working_dir: Path, *args: str) -> list[str] | None:
             check=False,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        # UnicodeError: text=True can hit a path with non-UTF-8 bytes.
         logger.debug("git_worktree.git_failed", args=args, error=str(exc))
         return None
     if proc.returncode != 0:

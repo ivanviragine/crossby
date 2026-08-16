@@ -12,7 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from crossby.utils.git_worktree import outside_root_git_metadata_dirs
+from crossby.utils.git_worktree import (
+    _looks_like_git_metadata,
+    outside_root_git_metadata_dirs,
+)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -168,6 +171,29 @@ class TestFailureModes:
 
         result = set(outside_root_git_metadata_dirs(wt))
         assert result == _resolved(repo / ".git" / "worktrees" / "wt", repo / ".git")
+
+
+class TestHostileMetadataGuard:
+    """A crafted gitlink must not expand the sandbox writable roots."""
+
+    def test_looks_like_git_metadata_requires_head(self, tmp_path: Path) -> None:
+        d = tmp_path / "notgit"
+        d.mkdir()
+        assert _looks_like_git_metadata(d) is False
+        (d / "HEAD").write_text("ref: refs/heads/x\n")
+        assert _looks_like_git_metadata(d) is True
+
+    def test_crafted_gitlink_to_non_git_dir_grants_nothing(self, tmp_path: Path) -> None:
+        # A hostile working tree whose .git points at a sensitive, non-git dir
+        # (no HEAD). The resolver must grant nothing — otherwise crossby would add
+        # that dir to the sandbox writable roots.
+        sensitive = tmp_path / "sensitive"
+        sensitive.mkdir()
+        (sensitive / "secret").write_text("x\n")
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / ".git").write_text(f"gitdir: {sensitive}\n")
+        assert outside_root_git_metadata_dirs(work) == []
 
 
 class TestSymlinks:
