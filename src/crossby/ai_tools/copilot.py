@@ -67,8 +67,18 @@ class CopilotAdapter(AbstractAITool):
             scene_tool_denylist_flag="--excluded-tools",
         )
 
-    def build_resume_command(self, session_id: str) -> list[str] | None:
-        """Resume a Copilot session: ``copilot --resume=<session_id>``."""
+    def build_resume_command(
+        self,
+        session_id: str,
+        *,
+        working_dir: Path | None = None,
+        network_access: bool = False,
+    ) -> list[str] | None:
+        """Resume a Copilot session: ``copilot --resume=<session_id>``.
+
+        Accepts and ignores the sandbox context (Copilot does not hard-confine
+        writes); the keyword-only params keep polymorphic dispatch TypeError-free.
+        """
         return ["copilot", f"--resume={session_id}"]
 
     def locate_sessions(self, project_path: Path) -> list[SessionRef]:

@@ -151,7 +151,7 @@ Per-tool mapping (verified against official docs, July 2026 — flags drift betw
 | Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
 | --------------- | ------------------------------------- | ----------------------------------------- |
 | Claude          | `--permission-mode acceptEdits`       | `--permission-mode auto`                  |
-| Codex           | `-s workspace-write -a untrusted`     | ↓ downgrades to accept-edits              |
+| Codex           | `--sandbox workspace-write -a untrusted` | ↓ downgrades to accept-edits           |
 | Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | ↓ downgrades to accept-edits |
 | Copilot         | `--allow-tool write`                  | ↓ downgrades to accept-edits              |
 | Antigravity CLI | `--mode accept-edits`                 | ↓ downgrades to accept-edits              |
@@ -159,6 +159,14 @@ Per-tool mapping (verified against official docs, July 2026 — flags drift betw
 | VS Code, Antigravity IDE | ↓ default prompting (GUI)    | ↓ default prompting                       |
 
 > Codex's old `--approval-mode auto-edit` was **removed** in the Rust CLI — crossby never emits it. Note Cursor CLI's default *is* accept-edits (the inverse of the Cursor IDE default), so `--accept-edits` is honored with no extra flag and no warning.
+
+### Codex sandbox: linked worktrees & `--network`
+
+Codex confines writes with an OS sandbox (`--sandbox workspace-write` — Seatbelt on macOS, Landlock on Linux). crossby **keeps that sandbox on every path** — it never emits `--yolo` / `--dangerously-bypass-approvals-and-sandbox`; Codex's yolo is approval-skipping only (`-a never`), and approval `never` appears **only** when you actually request `--yolo`.
+
+- **Linked worktrees & submodules just work.** In a linked worktree the working tree's `.git` is a *file* pointing at metadata that lives **outside** the working directory (`…/.git/worktrees/<name>` and the common `…/.git`), which the sandbox would otherwise block — so `git` staging, commit, checkout and ref updates fail. crossby detects this (via `git rev-parse --show-toplevel`, granting only metadata dirs **outside** that root, and only ones that look like real git metadata) and grants those dirs to the sandbox with `--add-dir` — which *adds* to the writable roots, preserving any `sandbox_workspace_write.writable_roots` you configured — so sandboxed git operations succeed while the sandbox stays on. A normal checkout — even launched from a nested subdirectory — grants nothing. This applies to launch, `--resume` (approval-neutral: no `-a` injected), and the headless handoff summarizer.
+- **`--network` (Codex only).** `crossby launch --network` allows network access inside the sandbox (package installs, remote fetch/push). It is **security-sensitive** — sandboxed commands can then reach the network — and off by default. On tools without a sandbox network opt-in it is **warned and ignored** on every path (launch, resume, GUI).
+- **Explicit network pin.** Whenever crossby forces `workspace-write` (a worktree, `--network`, `--accept-edits`, or `--trusted-dir`), it also emits an explicit `-c sandbox_workspace_write.network_access=<true|false>` (`true` only with `--network`) so an ambient `network_access = true` in your Codex config can never silently enable networking in a crossby-managed sandbox. A plain, unmanaged launch emits no sandbox flag and stays byte-identical.
 
 ## Agent-readable runbook
 

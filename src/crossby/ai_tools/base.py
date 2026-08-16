@@ -142,6 +142,7 @@ class AbstractAITool(ABC):
         accept_edits: bool = False,
         auto: bool = False,
         scene: SceneLaunchContext | None = None,
+        network_access: bool = False,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -174,6 +175,10 @@ class AbstractAITool(ABC):
                 contributes extra argv (appended to the launch command) and env
                 (merged over ``os.environ`` for the child) — touching nothing in
                 the tracked project files.
+            network_access: If True, request network access inside the tool's
+                sandbox. Only Codex acts on it (it pins
+                ``sandbox_workspace_write.network_access``); other tools warn and
+                ignore it upstream via the ``supports_network_access`` capability.
 
         Returns:
             Exit code from the tool process (0 for detached).
@@ -195,6 +200,8 @@ class AbstractAITool(ABC):
             accept_edits=accept_edits,
             auto=auto,
             scene=scene_args,
+            working_dir=working_dir,
+            network_access=network_access,
         )
         extra_env = self.build_launch_environment(scene=scene_args)
         child_env = {**os.environ, **extra_env} if extra_env else None
@@ -271,6 +278,32 @@ class AbstractAITool(ABC):
         for d in dirs:
             result.extend(self.plan_dir_args(d))
         return result
+
+    def sandbox_config_args(
+        self,
+        *,
+        autonomy_args: list[str],
+        trusted_dirs: list[str] | None,
+        working_dir: Path | None,
+        network_access: bool,
+    ) -> list[str]:
+        """Compose the sandbox / writable-root / network args for a launch.
+
+        Default: emit only the trusted-directory flags (the pre-existing
+        behavior), so ``working_dir`` and ``network_access`` are ignored — no
+        non-Codex tool hard-confines writes, so none has a writable-root or
+        network-pin concept, and this stays byte-identical to before for them.
+
+        Codex overrides this to become the single owner of its sandbox
+        composition: exactly one ``--sandbox workspace-write`` before any
+        ``--add-dir``, git-metadata writable roots for a linked worktree, and an
+        explicit ``network_access`` pin. Called once by
+        :meth:`build_launch_command` in place of the old direct
+        ``trusted_dirs_args`` call.
+        """
+        if trusted_dirs:
+            return self.trusted_dirs_args(trusted_dirs, autonomy_args=autonomy_args)
+        return []
 
     def normalize_model_format(self, model_id: str) -> str:
         """Normalize a model ID to this tool's expected format.
@@ -412,12 +445,25 @@ class AbstractAITool(ABC):
         """
         return []
 
-    def build_resume_command(self, session_id: str) -> list[str] | None:
+    def build_resume_command(
+        self,
+        session_id: str,
+        *,
+        working_dir: Path | None = None,
+        network_access: bool = False,
+    ) -> list[str] | None:
         """Build a command to resume a previous session.
 
         Returns None if the tool does not support session resume.
         Override in adapters that support resume (and set supports_resume=True
         in capabilities).
+
+        ``working_dir`` and ``network_access`` carry the same sandbox context as
+        :meth:`build_launch_command`. They are keyword-only with defaults so
+        every override can accept and ignore them without a ``TypeError`` on
+        polymorphic dispatch; only Codex acts on them (worktree resume grants the
+        git-metadata writable roots and pins the network, while staying
+        approval-neutral — it never injects ``-a never``).
         """
         return None
 
@@ -555,6 +601,8 @@ class AbstractAITool(ABC):
         accept_edits: bool = False,
         auto: bool = False,
         scene: SceneLaunchArgs | None = None,
+        working_dir: Path | None = None,
+        network_access: bool = False,
     ) -> list[str]:
         """Build the command line for launching this tool.
 
@@ -562,6 +610,12 @@ class AbstractAITool(ABC):
         for a session-scoped scene; its ``args`` are appended last. When it is
         ``None`` (every non-scene launch) the command is byte-identical to
         before, so the existing argv-assertion tests need no changes.
+
+        ``working_dir`` and ``network_access`` are keyword-only sandbox context
+        forwarded to :meth:`sandbox_config_args`. They are inert for every tool
+        but Codex, which uses ``working_dir`` to detect a linked worktree's
+        out-of-root git metadata and ``network_access`` to pin its sandbox
+        network flag; when neither applies, the emitted command is unchanged.
         """
         caps = self.capabilities()
         cmd = [caps.binary]
@@ -623,8 +677,17 @@ class AbstractAITool(ABC):
         if json_schema:
             cmd.extend(self.structured_output_args(json_schema))
 
-        if trusted_dirs:
-            cmd.extend(self.trusted_dirs_args(trusted_dirs, autonomy_args=autonomy_args))
+        # One hook owns sandbox mode + writable roots + trusted dirs + network,
+        # so the mode is emitted once, before any --add-dir. Default reproduces
+        # the old trusted-dir emission; Codex overrides it (see its docstring).
+        cmd.extend(
+            self.sandbox_config_args(
+                autonomy_args=autonomy_args,
+                trusted_dirs=trusted_dirs,
+                working_dir=working_dir,
+                network_access=network_access,
+            )
+        )
 
         # Effort args (tool-specific flags like --settings, --variant, etc.)
         if effort and caps.supports_effort:

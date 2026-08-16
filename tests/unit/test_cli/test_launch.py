@@ -26,6 +26,43 @@ def _mock_adapter() -> MagicMock:
     return mock
 
 
+class TestNetworkFlag:
+    """--network is capability-gated: forwarded to Codex, warned+ignored elsewhere."""
+
+    def _run(self, tmp_path: Path, *, supports_network: bool) -> tuple[Any, MagicMock]:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = MagicMock()
+        mock_adapter.launch.return_value = 0
+        mock_adapter.capabilities.return_value = MagicMock(
+            display_name="A Tool",
+            supports_initial_message=True,
+            supports_trusted_dirs=False,
+            supports_network_access=supports_network,
+        )
+        mock_adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False, False, False),
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", "claude", "--network"])
+        return result, mock_adapter
+
+    def test_forwarded_when_supported(self, tmp_path: Path) -> None:
+        result, mock_adapter = self._run(tmp_path, supports_network=True)
+        assert result.exit_code == 0, result.output
+        assert mock_adapter.launch.call_args.kwargs["network_access"] is True
+        assert "does not support --network" not in result.output
+
+    def test_warned_and_ignored_when_unsupported(self, tmp_path: Path) -> None:
+        result, mock_adapter = self._run(tmp_path, supports_network=False)
+        assert result.exit_code == 0, result.output
+        assert mock_adapter.launch.call_args.kwargs["network_access"] is False
+        assert "does not support --network" in result.output
+
+
 class TestTranscriptRelativePath:
     """Relative --transcript path is resolved against work_dir before use."""
 
@@ -135,16 +172,39 @@ class TestTranscriptParentDir:
 class TestResumeFlag:
     """--resume routes to build_resume_command and run_with_transcript."""
 
-    def _make_adapter(self, supports_resume: bool = True) -> MagicMock:
+    def _make_adapter(
+        self, supports_resume: bool = True, supports_network: bool = False
+    ) -> MagicMock:
         adapter = MagicMock()
         adapter.capabilities.return_value = MagicMock(
             display_name="Claude Code",
             supports_resume=supports_resume,
             supports_initial_message=True,
+            supports_network_access=supports_network,
         )
         adapter.build_resume_command.return_value = ["claude", "--resume", "abc-123"]
         adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
         return adapter
+
+    def test_resume_network_warned_and_ignored_on_unsupported_tool(self, tmp_path: Path) -> None:
+        """--resume --network on a non-Codex tool warns and passes network_access=False."""
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+        mock_adapter = self._make_adapter(supports_network=False)
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=mock_adapter),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                return_value=("claude", None, None, False, False, False),
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "claude", "--resume", "abc-123", "--network"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "does not support --network" in result.output
+        assert mock_adapter.build_resume_command.call_args.kwargs["network_access"] is False
 
     def test_resume_calls_build_resume_command(self, tmp_path: Path) -> None:
         """--resume reaches adapter.build_resume_command with the correct session ID."""
@@ -165,7 +225,11 @@ class TestResumeFlag:
             )
 
         assert result.exit_code == 0, result.output
-        mock_adapter.build_resume_command.assert_called_once_with("abc-123")
+        # Resume now forwards the sandbox context (working_dir + the gated
+        # network flag) so a Codex worktree resume can grant its writable roots.
+        mock_adapter.build_resume_command.assert_called_once_with(
+            "abc-123", working_dir=tmp_path.resolve(), network_access=False
+        )
         mock_run.assert_called_once()
         launched_cmd = mock_run.call_args[0][0]
         assert launched_cmd == ["claude", "--resume", "abc-123"]

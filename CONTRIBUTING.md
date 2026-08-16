@@ -105,7 +105,7 @@ The adapter pattern is designed so adding a tool is a single-file change.
 2. Create `src/crossby/ai_tools/<tool>.py` subclassing `AbstractAITool`:
    - Set `TOOL_ID = AIToolID.<TOOL>` (this auto-registers the adapter).
    - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, `supports_*` booleans.
-   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`, `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, `initial_message_args()`.
+   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`, `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, `initial_message_args()`. A tool that hard-confines writes to a sandbox can override `sandbox_config_args()` (Codex does) to own its sandbox-mode / writable-root / network composition in one place.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
@@ -363,13 +363,16 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | --------------- |
 | Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
-| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `--yolo`                           | —                 | `--force`                  | —       | —               |
+| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `-a never` (approval-skip, keeps sandbox) | —          | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
 | `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
 | `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--add-dir`                       | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —               |
+| `--network`   | — (warn+ignore)                    | — (warn+ignore)   | — (warn+ignore)                   | `-c sandbox_workspace_write.network_access=true` | — (warn+ignore) | — (warn+ignore)     | — (warn+ignore) | — (warn+ignore) |
+
+Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin) is composed in **one** place — `CodexAdapter.sandbox_config_args`, reached from `build_launch_command` (the launch hook) and `build_resume_command`. It emits a single `--sandbox workspace-write` before any `--add-dir`, then one `--add-dir` per trusted dir and per out-of-root git-metadata dir (from `utils/git_worktree.outside_root_git_metadata_dirs`) so sandboxed git writes work in a linked worktree/submodule. `--add-dir` is used (not `-c sandbox_workspace_write.writable_roots=[...]`) because it *adds* to the writable roots rather than *replacing* any the user configured. It pins `network_access` (the replacing `-c` form, intentionally — an ambient `network_access = true` must not leak in) whenever crossby forces workspace-write, and never emits `--yolo` / a sandbox-bypass. `--network` is capability-gated by `supports_network_access` (Codex-only); every other tool warns and ignores it.
 
 ### Effort Level Mapping
 

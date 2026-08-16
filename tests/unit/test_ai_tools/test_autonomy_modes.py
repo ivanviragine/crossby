@@ -29,11 +29,15 @@ class TestAcceptEditsArgs:
             "acceptEdits",
         ]
 
-    def test_codex_uses_workspace_write_untrusted(self) -> None:
-        # The removed --approval-mode auto-edit must NOT be used.
+    def test_codex_untrusted_approval_only(self) -> None:
+        # accept_edits_args() is now the approval half only; the
+        # ``--sandbox workspace-write`` it needs is emitted once by the
+        # centralized sandbox composer. The removed --approval-mode auto-edit
+        # must NOT be used.
         args = AbstractAITool.get("codex").accept_edits_args()
-        assert args == ["-s", "workspace-write", "-a", "untrusted"]
+        assert args == ["-a", "untrusted"]
         assert "--approval-mode" not in args
+        assert "-s" not in args
 
     def test_cursor_native_default_no_flag(self) -> None:
         assert AbstractAITool.get("cursor").accept_edits_args() == []
@@ -86,8 +90,19 @@ class TestAcceptEditsComposition:
         assert _permission_mode(cmd) == "acceptEdits"
 
     def test_codex(self) -> None:
+        # accept-edits (non-worktree): approval flag + a single
+        # ``--sandbox workspace-write`` + an explicit network-off pin. No
+        # writable_roots without a worktree working_dir.
         cmd = AbstractAITool.get("codex").build_launch_command(accept_edits=True)
-        assert cmd[-4:] == ["-s", "workspace-write", "-a", "untrusted"]
+        assert cmd == [
+            "codex",
+            "-a",
+            "untrusted",
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "sandbox_workspace_write.network_access=false",
+        ]
 
     def test_cursor_emits_no_extra_flag(self) -> None:
         adapter = AbstractAITool.get("cursor")
@@ -117,7 +132,11 @@ class TestAutoDowngrade:
         adapter = AbstractAITool.get("codex")
         with pytest.warns(UserWarning, match="downgrading to accept-edits"):
             cmd = adapter.build_launch_command(auto=True)
-        assert cmd[-4:] == ["-s", "workspace-write", "-a", "untrusted"]
+        # auto downgrades to accept-edits, which resolves to ``-a untrusted`` and
+        # forces the single ``--sandbox workspace-write`` via the composer.
+        assert "untrusted" in cmd
+        assert cmd.count("workspace-write") == 1
+        assert cmd.index("-a") < cmd.index("--sandbox")
 
     def test_cursor_downgrades_to_accept_edits_no_flag(self) -> None:
         adapter = AbstractAITool.get("cursor")

@@ -55,9 +55,11 @@ class VSCodeAdapter(AbstractAITool):
         accept_edits: bool = False,
         auto: bool = False,
         scene: SceneLaunchContext | None = None,
+        network_access: bool = False,
     ) -> int:
-        # VS Code is a GUI launcher and has no session-scoped scene lever; the
-        # CLI warns and drops --scene before dispatch, so `scene` is inert here.
+        # VS Code is a GUI launcher: it has no sandbox, so `network_access` is
+        # inert (the CLI already warns + ignores --network for GUI tools), and
+        # no session-scoped scene lever, so `scene` is inert too.
         cmd = ["code", str(working_dir)]
         logger.info("ai_tool.launch", tool="vscode", cwd=str(working_dir))
         return run_with_transcript(cmd, transcript_path, cwd=working_dir)

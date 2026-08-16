@@ -275,9 +275,13 @@ class TestDowngradeAutonomyTier:
     def test_mirrors_builder_for_every_registered_tool(self) -> None:
         """The helper's tier choice matches the args build_launch_command emits.
 
-        Building with a single autonomy flag and no other options yields
-        ``[binary, *autonomy_args]``, so ``cmd[1:]`` is exactly the effective
-        tier's args — which must equal the tier the helper resolves.
+        Building with a single autonomy flag and no other options places the
+        effective tier's autonomy args right after the binary, so
+        ``cmd[1 : 1 + len(expected)]`` is exactly the effective tier's args —
+        which must equal the tier the helper resolves. Codex additionally appends
+        its sandbox composition (``--sandbox workspace-write`` + network pin) for
+        the workspace-write-forcing tiers, so the comparison is a prefix rather
+        than the whole command.
         """
         import warnings
 
@@ -306,6 +310,6 @@ class TestDowngradeAutonomyTier:
                         accept_edits=requested == "accept_edits",
                     )
                 expected = tier_args[effective] if effective is not None else []
-                assert cmd[1:] == expected, (
+                assert cmd[1 : 1 + len(expected)] == expected, (
                     f"{tool}: requested={requested} effective={effective} cmd={cmd}"
                 )
