@@ -30,6 +30,60 @@ class TestModelRegistry:
         for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-opus-5", "claude-fable-5"):
             assert model in claude_models
 
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "cursor-grok-4.6-high",
+            "cursor-grok-4.6-high-fast",
+            "cursor-grok-4.6-low",
+            "cursor-grok-4.6-low-fast",
+            "cursor-grok-4.6-medium",
+            "cursor-grok-4.6-medium-fast",
+            "cursor-grok-4.6-xhigh",
+            "cursor-grok-4.6-xhigh-fast",
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-low",
+            "gemini-3.7-flash-medium",
+            "kimi-k3-high",
+            "kimi-k3-low",
+            "kimi-k3-max",
+        ],
+    )
+    def test_cursor_registry_includes_live_cli_models(self, model: str) -> None:
+        assert model in get_models_for_tool("cursor")
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gpt-5.4",
+            "mai-code-1-flash",
+        ],
+    )
+    def test_copilot_registry_includes_current_cli_models(self, model: str) -> None:
+        assert model in get_models_for_tool("copilot")
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "github-copilot/gemini-3.6-flash",
+            "github-copilot/gemini-3.7-flash",
+            "github-copilot/grok-4.5",
+            "github-copilot/grok-4.6",
+            "github-copilot/kimi-k3",
+            "github-copilot/mai-code-1.1-flash",
+            "google/antigravity-claude-opus-4-6-thinking",
+            "google/antigravity-claude-sonnet-4-6",
+            "google/gemini-3.7-flash",
+            "opencode/hy3-free",
+            "opencode/nemotron-3.5-lightning-free",
+        ],
+    )
+    def test_opencode_registry_includes_live_cli_models(self, model: str) -> None:
+        assert model in get_models_for_tool("opencode")
+
     @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
     def test_codex_registry_includes_gpt_5_6(self, model: str) -> None:
         """Codex now ships the gpt-5.6 family (luna/sol/terra) — Issue #112."""
@@ -63,6 +117,10 @@ class TestRegistryGetModels:
         model_ids = [m.id for m in models]
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
         # Catalog lists base IDs only — effort is baked in at launch, not stored.
+        assert "gemini-3.7-flash" in model_ids
+        assert "gemini-3.7-flash-high" not in model_ids
+        assert "gemini-3.7-flash-medium" not in model_ids
+        assert "gemini-3.7-flash-low" not in model_ids
         assert "gemini-3.6-flash" in model_ids
         assert "gemini-3.6-flash-high" not in model_ids
         assert "gpt-oss-120b-medium" not in model_ids

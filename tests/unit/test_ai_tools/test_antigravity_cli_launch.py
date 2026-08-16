@@ -38,6 +38,29 @@ class TestAntigravityCLIEffort:
             EffortLevel.HIGH,
         )
 
+    @pytest.mark.parametrize("effort", [EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH])
+    def test_gemini_3_7_bakes_each_supported_effort(self, effort: EffortLevel) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.7-flash", effort=effort)
+        assert _model_of(cmd) == f"gemini-3.7-flash-{effort.value}"
+        assert "--effort" not in cmd
+
+    def test_gemini_3_7_no_effort_defaults_to_medium(self) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.7-flash", effort=None)
+        assert _model_of(cmd) == "gemini-3.7-flash-medium"
+
+    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
+    def test_gemini_3_7_xhigh_and_max_normalize_to_high(self, effort: EffortLevel) -> None:
+        with pytest.warns(UserWarning, match="only low/medium/high"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.7-flash", effort)
+        assert resolved == "gemini-3.7-flash-high"
+
+    def test_gemini_3_7_suffix_wins_and_minimal_is_never_emitted(self) -> None:
+        resolved = AntigravityCLIAdapter().resolve_effort_model(
+            "gemini-3.7-flash-low", EffortLevel.HIGH
+        )
+        assert resolved == "gemini-3.7-flash-low"
+        assert "minimal" not in resolved
+
     def test_base_plus_effort_bakes_suffix_and_omits_effort_flag(self) -> None:
         cmd = AntigravityCLIAdapter().build_launch_command(
             model="gemini-3.6-flash", effort=EffortLevel.HIGH

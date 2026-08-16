@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +23,11 @@ from crossby.ai_tools.base import AbstractAITool
 JSON_PATH = Path(__file__).parent.parent / "src" / "crossby" / "data" / "models.json"
 
 _DOCS_URLS: dict[str, str] = {
-    "claude": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
-    "gemini": "https://geminicli.com/docs/cli/model/",
-    "codex": "https://developers.openai.com/codex/models",
+    "claude": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "copilot": (
+        "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference"
+    ),
+    "codex": "https://learn.chatgpt.com/docs/models",
 }
 
 _SCRAPE_PATTERNS: dict[str, str] = {
@@ -34,9 +36,22 @@ _SCRAPE_PATTERNS: dict[str, str] = {
     # while excluding dated snapshots (-20251001), -v1 variants, and docs-page
     # slug run-ons.
     "claude": r"claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?(?!\d|-\d|-v\d)\b",
-    "gemini": r"gemini-[0-9][.0-9]*-(flash|pro|ultra)[a-z0-9._-]*",
+    "copilot": (
+        r"(?:claude|gemini|gpt|codex|o[0-9])[a-zA-Z0-9._-]*|"
+        r"mai-[a-zA-Z0-9._-]+"
+    ),
     "codex": r"gpt-[0-9][.0-9]*[a-zA-Z0-9._-]*",
 }
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# Provider-agnostic: matches the model-ID column of `agy models` output
+# regardless of vendor prefix (gemini, claude, gpt, or a future mai/grok/o3
+# family), as long as it looks like a multi-segment identifier (e.g.
+# "foo-1.2-bar") rather than a plain word from the description column.
+_ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[./-][a-z0-9._-]+)+$")
+_ANTIGRAVITY_GEMINI_EFFORT_RE = re.compile(
+    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro))-(?:low|medium|high)$"
+)
 
 # Per-tool expected CLI flag patterns, keyed by capability name.
 # Values are substrings to search for in `--help` / `-h` output.
@@ -49,13 +64,13 @@ _EXPECTED_FLAGS: dict[str, dict[str, str]] = {
         "profile": "--profile",
         "image": "--image",
     },
-    "gemini": {
-        "headless": "-p",  # matches both -p and --prompt
-        "resume": "--resume",
-        "output_format": "--output-format",
+    "antigravity-cli": {
+        "headless": "--print",
+        "resume": "--conversation",
+        "model": "--model",
+        "plan_mode": "--mode",
         "sandbox": "--sandbox",
-        "allowed_tools": "--allowed-tools",
-        "yolo": "--yolo",
+        "yolo": "--dangerously-skip-permissions",
     },
     "claude": {
         "headless": "--print",
@@ -116,7 +131,6 @@ def _scrape_models(tool: str) -> set[str]:
         return set()
 
     url = _DOCS_URLS[tool]
-    pattern = _SCRAPE_PATTERNS[tool]
 
     try:
         result = subprocess.run(
@@ -128,20 +142,38 @@ def _scrape_models(tool: str) -> set[str]:
         if result.returncode != 0:
             return set()
 
-        if tool == "codex":
-            full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", result.stdout)
-            if full_matches:
-                return set(full_matches)
-
-        matches = re.findall(pattern, result.stdout)
-        if tool == "gemini":
-            # Rebuild full match from HTML since findall returns capture groups
-            matches = re.findall(
-                r"gemini-[0-9][.0-9]*-(?:flash|pro|ultra)[a-z0-9._-]*", result.stdout
-            )
-        return set(m if isinstance(m, str) else m[0] for m in matches)
+        return parse_documented_models(tool, result.stdout)
     except Exception:
         return set()
+
+
+def _pattern_matches(pattern: str, text: str) -> set[str]:
+    matches = re.findall(pattern, text)
+    return {match if isinstance(match, str) else match[0] for match in matches}
+
+
+def parse_documented_models(tool: str, text: str) -> set[str]:
+    """Extract model IDs from a tool's published documentation.
+
+    GitHub's page repeats section titles in its table of contents and other
+    prose, so this anchors on the unique heading-id attributes rather than
+    the visible heading text to isolate the actual table.
+    """
+    pattern = _SCRAPE_PATTERNS[tool]
+
+    if tool == "codex":
+        full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", text)
+        if full_matches:
+            return set(full_matches)
+
+    if tool == "copilot":
+        start = text.find('id="supported-models"')
+        end = text.find('id="tool-availability-values"', start if start >= 0 else 0)
+        if start < 0 or end < 0:
+            return set()
+        return _pattern_matches(pattern, text[start:end])
+
+    return _pattern_matches(pattern, text)
 
 
 def probe_claude() -> set[str]:
@@ -151,22 +183,30 @@ def probe_claude() -> set[str]:
     interpreted as a *prompt* and returns prose, not a model list, so it cannot
     be scraped. The published models docs page is therefore the sole source of
     truth for the Claude catalog.
+
+    The docs page uses Claude's own dashed ID format (``claude-haiku-4-5``),
+    but ``models.json`` stores the internal dotted convention
+    (``claude-haiku-4.5``, see ``AbstractAITool.standardize_model_id``), so
+    scraped IDs are converted before comparison.
     """
-    return _scrape_models("claude")
+    adapter = AbstractAITool.get("claude")
+    return {adapter.standardize_model_id(model) for model in _scrape_models("claude")}
 
 
 def probe_copilot() -> set[str]:
-    if not shutil.which("copilot"):
-        return set()
-    try:
-        res = subprocess.run(
-            ["copilot", "--model", "x"], capture_output=True, text=True, timeout=15
-        )
-        out = res.stdout + res.stderr
-        matches = re.findall(r"(?:claude|gpt|gemini|codex|o[0-9])[a-zA-Z0-9._-]*", out)
-        return {re.sub(r"[.,;]+$", "", m) for m in matches if not m.startswith(".")}
-    except Exception:
-        return set()
+    if shutil.which("copilot"):
+        try:
+            res = subprocess.run(
+                ["copilot", "--model", "x"], capture_output=True, text=True, timeout=15
+            )
+            out = res.stdout + res.stderr
+            matches = re.findall(_SCRAPE_PATTERNS["copilot"], out)
+            models = {re.sub(r"[.,;]+$", "", m) for m in matches if not m.startswith(".")}
+            if models:
+                return models
+        except Exception:
+            pass
+    return _scrape_models("copilot")
 
 
 def probe_cursor() -> set[str]:
@@ -191,23 +231,46 @@ def probe_cursor() -> set[str]:
     return set()
 
 
-def probe_gemini() -> set[str]:
+def normalize_antigravity_model_id(model: str) -> str:
+    """Collapse only agy's known Gemini effort-expanded IDs to base IDs.
+
+    Non-Gemini suffixes such as ``claude-opus-4-6-thinking`` and
+    ``gpt-oss-120b-medium`` are part of those tools' model names and must stay
+    intact. Gemini suffixes other than low/medium/high are also preserved so a
+    newly introduced variant is reported rather than silently rewritten.
+    """
+    match = _ANTIGRAVITY_GEMINI_EFFORT_RE.fullmatch(model)
+    return match.group(1) if match else model
+
+
+def parse_antigravity_models(output: str) -> set[str]:
+    """Extract and canonicalize model IDs from ``agy models`` output.
+
+    Takes the first whitespace-delimited token of each line — the model-ID
+    column — without assuming which vendor families can appear there.
+    """
+    models: set[str] = set()
+    for line in output.splitlines():
+        clean_line = _ANSI_ESCAPE_RE.sub("", line).strip()
+        if not clean_line:
+            continue
+        first_token = clean_line.split(maxsplit=1)[0]
+        if _ANTIGRAVITY_MODEL_ID_RE.match(first_token):
+            models.add(normalize_antigravity_model_id(first_token))
+    return models
+
+
+def probe_antigravity_cli() -> set[str]:
+    """Probe Antigravity CLI via its authoritative ``agy models`` command."""
+    if not shutil.which("agy"):
+        return set()
     try:
-        res = subprocess.run(
-            ["gemini", "--list-models"], capture_output=True, text=True, timeout=15
-        )
+        res = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=15)
         if res.returncode == 0:
-            models = set()
-            for line in res.stdout.splitlines():
-                if line.strip() and not line.startswith(("#", "-")):
-                    parts = line.split()
-                    if parts and parts[0].lower() not in ("model", "name", "id"):
-                        models.add(parts[0])
-            if models:
-                return models
+            return parse_antigravity_models(res.stdout)
     except Exception:
         pass
-    return _scrape_models("gemini")
+    return set()
 
 
 def probe_codex() -> set[str]:
@@ -243,6 +306,37 @@ def probe_opencode() -> set[str]:
     except Exception:
         pass
     return set()
+
+
+# These keys deliberately match every non-meta key in data/models.json. Keeping
+# routing in one table makes a renamed/replaced tool visible to unit tests rather
+# than silently skipping its registry section.
+_MODEL_PROBES: dict[str, Callable[[], set[str]]] = {
+    "claude": probe_claude,
+    "cursor": probe_cursor,
+    "copilot": probe_copilot,
+    "antigravity-cli": probe_antigravity_cli,
+    "codex": probe_codex,
+    "opencode": probe_opencode,
+}
+
+_MODEL_PROBE_SOURCES: dict[str, str] = {
+    "claude": "published Claude model documentation",
+    "cursor": "agent --list-models",
+    "copilot": "Copilot CLI picker or published CLI reference",
+    "antigravity-cli": "agy models",
+    "codex": "Codex local model cache or published Codex guidance",
+    "opencode": "opencode models",
+}
+
+
+def model_catalog_diff(registered: set[str], discovered: set[str]) -> tuple[set[str], set[str]]:
+    """Return retained-but-unseen and newly discovered exact model IDs.
+
+    Provider prefixes and punctuation are part of a tool's accepted model ID,
+    so this comparison deliberately does not run adapter normalization.
+    """
+    return registered - discovered, discovered - registered
 
 
 def probe_cli_args(tool: str) -> dict[str, bool]:
@@ -361,12 +455,7 @@ def main() -> int:
 
     with console.status("Probing external AI providers..."):
         found: dict[str, set[str]] = {
-            "claude": probe_claude(),
-            "cursor": probe_cursor(),
-            "copilot": probe_copilot(),
-            "gemini": probe_gemini(),
-            "codex": probe_codex(),
-            "opencode": probe_opencode(),
+            tool: _MODEL_PROBES[tool]() for tool in registry if tool in _MODEL_PROBES
         }
 
     has_diff = False
@@ -376,38 +465,35 @@ def main() -> int:
     for tool, expected in registry.items():
         actual_raw = found.get(tool, set())
 
-        # If we found nothing, maybe the CLI is missing or network failed.
+        # An unavailable source is not evidence that every registered model was
+        # removed. Make the affected tool/source explicit and skip its diff.
         if not actual_raw:
-            console.warn(f"[{tool}] Could not probe (CLI missing or offline). Skipping diff.")
+            source = _MODEL_PROBE_SOURCES.get(tool, "model source")
+            console.warn(
+                f"[{tool}] SKIPPED: {source} returned no models "
+                "(missing CLI, authentication, network, cache, or command failure)."
+            )
             continue
 
-        try:
-            adapter = AbstractAITool.get(tool)
-        except ValueError:
-            adapter = None
-
-        actual = {adapter.standardize_model_id(m) if adapter else m for m in actual_raw}
-
-        missing = expected - actual
-        new = actual - expected
+        not_returned, new = model_catalog_diff(expected, actual_raw)
 
         console.header(f"Provider: {tool}")
-        if not missing and not new:
+        if not not_returned and not new:
             console.detail("✓ Up to date.")
         else:
-            has_diff = True
             if new:
+                has_diff = True
                 console.warn(f"NEW (found in probe but not in {JSON_PATH.name}):")
                 for m in sorted(new):
                     console.detail(f"  + {m}")
                 diff_summary.append(f"For the '{tool}' tools list, ADD these items: {sorted(new)}")
-            if missing:
-                console.warn(f"OBSOLETE (found in {JSON_PATH.name} but not in probe):")
-                for m in sorted(missing):
-                    console.detail(f"  - {m}")
-                diff_summary.append(
-                    f"For the '{tool}' tools list, REMOVE these items: {sorted(missing)}"
+            if not_returned:
+                console.warn(
+                    "NOT RETURNED (retained; absence alone is not tool-specific "
+                    "retirement evidence):"
                 )
+                for m in sorted(not_returned):
+                    console.detail(f"  - {m}")
         console.empty()
 
     has_diff = report_cli_args() or has_diff
@@ -479,12 +565,12 @@ def main() -> int:
         def extract_payload(parsed: Any) -> str | None:
             # Claude and Copilot `--json-schema` wraps the answer inside `structured_output`
             if isinstance(parsed, dict) and "structured_output" in parsed:
-                return json.dumps(parsed["structured_output"], indent=2)
-            # Or it might just be the direct object itself
-            if isinstance(parsed, dict):
-                providers = ["claude", "cursor", "copilot", "gemini", "codex", "opencode"]
-                if any(k in parsed for k in providers):
-                    return json.dumps(parsed, indent=2)
+                parsed = parsed["structured_output"]
+            # Require the full top-level key set so a partial payload (e.g.
+            # {"copilot": [...]}), wrapped or not, is rejected instead of
+            # silently deleting the omitted providers.
+            if isinstance(parsed, dict) and set(parsed) == set(registry_raw):
+                return json.dumps(parsed, indent=2)
             return None
 
         # Strategy 1: The whole thing might be valid JSON

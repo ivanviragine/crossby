@@ -93,9 +93,7 @@ class TestWorktreeLaunch:
         ]
 
     def test_single_sandbox_before_add_dir(self, wt: Worktree) -> None:
-        cmd = CodexAdapter().build_launch_command(
-            working_dir=wt.path, trusted_dirs=["/tmp/plan"]
-        )
+        cmd = CodexAdapter().build_launch_command(working_dir=wt.path, trusted_dirs=["/tmp/plan"])
         assert cmd.count("--sandbox") == 1
         assert cmd.count("workspace-write") == 1
         assert cmd.index("--sandbox") < cmd.index("--add-dir")
@@ -117,9 +115,7 @@ class TestWorktreeLaunch:
 
     @pytest.mark.parametrize("network", [True, False])
     def test_network_pin_reflects_flag(self, wt: Worktree, network: bool) -> None:
-        cmd = CodexAdapter().build_launch_command(
-            working_dir=wt.path, network_access=network
-        )
+        cmd = CodexAdapter().build_launch_command(working_dir=wt.path, network_access=network)
         pin = f"sandbox_workspace_write.network_access={'true' if network else 'false'}"
         assert pin in cmd
 
@@ -176,9 +172,7 @@ class TestResume:
         assert "never" not in cmd
 
     def test_worktree_resume_with_network(self, wt: Worktree) -> None:
-        cmd = CodexAdapter().build_resume_command(
-            "sid", working_dir=wt.path, network_access=True
-        )
+        cmd = CodexAdapter().build_resume_command("sid", working_dir=wt.path, network_access=True)
         assert cmd is not None
         assert "sandbox_workspace_write.network_access=true" in cmd
         assert "-a" not in cmd

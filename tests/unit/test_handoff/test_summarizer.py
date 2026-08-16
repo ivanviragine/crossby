@@ -318,9 +318,7 @@ def test_codex_summarizer_in_worktree_gets_writable_roots_and_cwd(tmp_path: Path
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
 
-    summarizer = HandoffSummarizer(
-        CodexAdapter(), prompt_template="TEST PROMPT", working_dir=wt
-    )
+    summarizer = HandoffSummarizer(CodexAdapter(), prompt_template="TEST PROMPT", working_dir=wt)
     fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
     real_run = subprocess.run
 
