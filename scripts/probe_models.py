@@ -131,7 +131,6 @@ def _scrape_models(tool: str) -> set[str]:
         return set()
 
     url = _DOCS_URLS[tool]
-    pattern = _SCRAPE_PATTERNS[tool]
 
     try:
         result = subprocess.run(
@@ -143,26 +142,40 @@ def _scrape_models(tool: str) -> set[str]:
         if result.returncode != 0:
             return set()
 
-        if tool == "codex":
-            full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", result.stdout)
-            if full_matches:
-                return set(full_matches)
-
-        scrape_text = result.stdout
-        if tool == "copilot":
-            # The CLI reference contains many option values outside its model
-            # table. Restrict extraction to the documented Supported models
-            # section so those unrelated tokens cannot enter the registry.
-            start = scrape_text.find("Supported models")
-            end = scrape_text.find("Tool availability values", start + 1)
-            if start < 0 or end < 0:
-                return set()
-            scrape_text = scrape_text[start:end]
-
-        matches = re.findall(pattern, scrape_text)
-        return set(m if isinstance(m, str) else m[0] for m in matches)
+        return parse_documented_models(tool, result.stdout)
     except Exception:
         return set()
+
+
+def _pattern_matches(pattern: str, text: str) -> set[str]:
+    matches = re.findall(pattern, text)
+    return {match if isinstance(match, str) else match[0] for match in matches}
+
+
+def parse_documented_models(tool: str, text: str) -> set[str]:
+    """Extract model IDs from a tool's published documentation.
+
+    GitHub's page repeats section titles in its table of contents. Evaluate
+    every ``Supported models`` → ``Tool availability values`` span and use the
+    one containing the most IDs, which selects the actual table without
+    allowing model-like option values elsewhere on the page into the catalog.
+    """
+    pattern = _SCRAPE_PATTERNS[tool]
+
+    if tool == "codex":
+        full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", text)
+        if full_matches:
+            return set(full_matches)
+
+    if tool == "copilot":
+        candidates: list[set[str]] = []
+        for heading in re.finditer("Supported models", text):
+            end = text.find("Tool availability values", heading.end())
+            if end >= 0:
+                candidates.append(_pattern_matches(pattern, text[heading.end() : end]))
+        return max(candidates, key=len, default=set())
+
+    return _pattern_matches(pattern, text)
 
 
 def probe_claude() -> set[str]:
@@ -306,6 +319,15 @@ _MODEL_PROBE_SOURCES: dict[str, str] = {
 }
 
 
+def model_catalog_diff(registered: set[str], discovered: set[str]) -> tuple[set[str], set[str]]:
+    """Return retained-but-unseen and newly discovered exact model IDs.
+
+    Provider prefixes and punctuation are part of a tool's accepted model ID,
+    so this comparison deliberately does not run adapter normalization.
+    """
+    return registered - discovered, discovered - registered
+
+
 def probe_cli_args(tool: str) -> dict[str, bool]:
     """Run ``<tool> --help`` and check for expected flag patterns.
 
@@ -442,15 +464,7 @@ def main() -> int:
             )
             continue
 
-        try:
-            adapter = AbstractAITool.get(tool)
-        except ValueError:
-            adapter = None
-
-        actual = {adapter.standardize_model_id(m) if adapter else m for m in actual_raw}
-
-        not_returned = expected - actual
-        new = actual - expected
+        not_returned, new = model_catalog_diff(expected, actual_raw)
 
         console.header(f"Provider: {tool}")
         if not not_returned and not new:

@@ -69,6 +69,38 @@ def test_copilot_pattern_captures_mai_id_without_matching_prose() -> None:
     }
 
 
+def test_copilot_docs_parser_uses_model_table_not_table_of_contents() -> None:
+    page = """
+    Supported models
+    Tool availability values
+    unrelated option prose mentioning gpt-noise
+    Supported models
+    `claude-sonnet-4.6` | General-purpose coding
+    `gpt-5.4` | Complex reasoning
+    `gemini-3.6-flash` | Fast responses
+    `mai-code-1-flash` | Adaptive coding
+    Tool availability values
+    `gpt-not-a-model-table-entry`
+    """
+
+    assert PROBE_MODULE.parse_documented_models("copilot", page) == {
+        "claude-sonnet-4.6",
+        "gpt-5.4",
+        "gemini-3.6-flash",
+        "mai-code-1-flash",
+    }
+
+
+def test_catalog_diff_preserves_exact_provider_spelling() -> None:
+    registered = {"google/antigravity-claude-sonnet-4.6"}
+    discovered = {"google/antigravity-claude-sonnet-4-6"}
+
+    assert PROBE_MODULE.model_catalog_diff(registered, discovered) == (
+        registered,
+        discovered,
+    )
+
+
 class TestAntigravityModelParsing:
     def test_extracts_gemini_3_7_and_deduplicates_effort_variants(self) -> None:
         output = """
