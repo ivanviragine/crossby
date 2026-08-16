@@ -70,6 +70,15 @@ def launch(
     trusted_dirs: list[str] | None = typer.Option(
         None, "--trusted-dir", help="Pre-authorize a directory (repeatable)."
     ),
+    network: bool = typer.Option(
+        False,
+        "--network",
+        help=(
+            "Allow network access inside the tool's sandbox (Codex only). "
+            "Security-sensitive: lets sandboxed commands reach the network. "
+            "Warned and ignored on tools without a sandbox network opt-in."
+        ),
+    ),
 ) -> None:
     """Launch an AI tool with resolved configuration.
 
@@ -195,7 +204,12 @@ def launch(
         if not caps.supports_resume:
             console.error(f"{caps.display_name} does not support session resume.")
             raise typer.Exit(1)
-        resume_cmd = adapter.build_resume_command(resume)
+        # Gate --network before the resume short-circuit so a non-Codex resume
+        # warns and ignores it rather than silently dropping the request.
+        resume_network = _resolve_network_access(network, caps)
+        resume_cmd = adapter.build_resume_command(
+            resume, working_dir=work_dir, network_access=resume_network
+        )
         if resume_cmd is None:
             console.error(
                 f"{caps.display_name}.build_resume_command returned None "
@@ -290,6 +304,11 @@ def launch(
     if normalized_trusted_dirs and not caps.supports_trusted_dirs:
         console.error(f"{caps.display_name} does not support --trusted-dir.")
         raise typer.Exit(1)
+
+    # Normalize --network against the tool's capability (warn + ignore on tools
+    # with no sandbox network opt-in). Applied here so GUI adapters — which
+    # override launch() and never reach the builder — still surface the warning.
+    network_effective = _resolve_network_access(network, caps)
 
     # Normalize accept-edits/auto against the tool's capabilities and surface any
     # downgrade through crossby's own UI. resolve_accept_edits()/resolve_auto()
@@ -392,6 +411,7 @@ def launch(
             accept_edits=resolved_accept_edits,
             auto=resolved_auto,
             scene=scene_ctx,
+            network_access=network_effective,
         )
     except PathContainmentError as exc:
         console.error(f"Refusing to launch scene {scene!r}: {exc}")
@@ -409,6 +429,21 @@ def launch(
             console.kv("Session ID", usage.session_id)
 
     raise typer.Exit(exit_code)
+
+
+def _resolve_network_access(requested: bool, caps: AIToolCapabilities) -> bool:
+    """Return the effective ``--network`` value for *caps*.
+
+    ``--network`` is CLI-only (no ``.crossby.yml`` field). On a tool without a
+    sandbox network opt-in (``supports_network_access`` False — everything but
+    Codex) the request is warned about and ignored on every path (launch,
+    resume, GUI), so a non-Codex tool never receives a network flag it cannot
+    honor.
+    """
+    if requested and not caps.supports_network_access:
+        console.warn(f"{caps.display_name} does not support --network; ignoring.")
+        return False
+    return requested
 
 
 def _prepare_scene_launch(

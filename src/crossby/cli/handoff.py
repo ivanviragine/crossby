@@ -219,6 +219,10 @@ def handoff(
         summarizer_adapter,
         prompt_template=prompt_template,
         token_budget=token_budget,
+        # Run the summarizer subprocess inside the project root so a sandboxed
+        # Codex summarizer in a linked worktree gets the git-metadata writable
+        # roots (and a matching cwd). Network stays off for summarization.
+        working_dir=project_root,
     )
 
     def _warn_truncation(total: int, kept: int) -> None:
@@ -291,7 +295,9 @@ def handoff(
         )
         return
 
-    cmd = target_adapter.build_launch_command(initial_message=initial_message)
+    cmd = target_adapter.build_launch_command(
+        initial_message=initial_message, working_dir=project_root
+    )
     console.step(f"Launching {target_id}: {shlex.join(cmd)}")
     try:
         result = subprocess.run(cmd, cwd=project_root, check=False)

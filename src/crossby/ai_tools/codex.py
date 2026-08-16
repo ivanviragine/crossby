@@ -17,6 +17,7 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
 )
+from crossby.utils.git_worktree import outside_root_git_metadata_dirs
 
 if TYPE_CHECKING:
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
@@ -29,6 +30,25 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
+
+
+def _toml_quote(value: str) -> str:
+    """Render *value* as a TOML basic string for a ``writable_roots`` array element.
+
+    Codex parses the ``-c key=value`` value as TOML, so the paths inside
+    ``writable_roots=["…"]`` must be valid TOML basic strings. Escape backslashes
+    first, then double-quotes, then the control chars TOML forbids raw — covering
+    the paths-with-quotes/backslashes/spaces cases (spaces need no escaping
+    inside a quoted string).
+    """
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
 
 
 class CodexAdapter(AbstractAITool):
@@ -62,6 +82,7 @@ class CodexAdapter(AbstractAITool):
             hook_output_dialect=HookOutputDialect.HOOK_SPECIFIC_OUTPUT,
             hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
             sandboxes_writes=True,
+            supports_network_access=True,
             supports_usage_reporting=True,
             # Session-scoped scenes: Codex takes a named profile that layers a
             # generated ``$CODEX_HOME/<name>.config.toml`` over the base config
@@ -70,9 +91,35 @@ class CodexAdapter(AbstractAITool):
             scene_profile_flag="--profile",
         )
 
-    def build_resume_command(self, session_id: str) -> list[str] | None:
-        """Resume a Codex session: ``codex resume <session_id>``."""
-        return ["codex", "resume", session_id]
+    def build_resume_command(
+        self,
+        session_id: str,
+        *,
+        working_dir: Path | None = None,
+        network_access: bool = False,
+    ) -> list[str] | None:
+        """Resume a Codex session: ``codex resume <session_id>``.
+
+        In a linked worktree, append the sandbox config so git writes work —
+        ``--sandbox workspace-write`` + the git-metadata ``writable_roots`` +
+        the network pin — but **approval-neutral**: resume deliberately skips
+        autonomy resolution, so no ``-a`` flag is injected and the session's
+        existing approval policy is preserved (forcing ``-a never`` would disable
+        approval prompts for a user who never requested YOLO). A non-worktree
+        resume with no ``--network`` composes nothing extra, so it stays
+        byte-identical to ``["codex", "resume", <id>]``.
+        """
+        return [
+            "codex",
+            "resume",
+            session_id,
+            *self.sandbox_config_args(
+                autonomy_args=[],
+                trusted_dirs=None,
+                working_dir=working_dir,
+                network_access=network_access,
+            ),
+        ]
 
     def locate_sessions(self, project_path: Path) -> list[SessionRef]:
         return codex_reader.locate_sessions(project_path)
@@ -93,22 +140,63 @@ class CodexAdapter(AbstractAITool):
         """Codex uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]
 
-    def trusted_dirs_args(
-        self, dirs: list[str], *, autonomy_args: list[str] | None = None
+    def sandbox_config_args(
+        self,
+        *,
+        autonomy_args: list[str],
+        trusted_dirs: list[str] | None,
+        working_dir: Path | None,
+        network_access: bool,
     ) -> list[str]:
-        """Codex requires workspace-write sandbox mode for --add-dir to take effect.
+        """Single owner of Codex's sandbox / writable-root / network argv.
 
-        Skip re-emitting ``--sandbox workspace-write`` when the resolved
-        autonomy tier already supplied it (accept-edits sets ``-s
-        workspace-write``, and auto downgrades to accept-edits on Codex),
-        so an accept-edits launch with trusted dirs doesn't pass Codex the
-        sandbox option twice.
+        Reached from :meth:`build_launch_command` (the launch hook) and, with
+        ``autonomy_args=[]``, from :meth:`build_resume_command`.
+
+        Emits, **in order**, a single ``--sandbox workspace-write`` before any
+        ``--add-dir``, the trusted-dir ``--add-dir`` flags, the linked-worktree
+        git-metadata ``writable_roots`` (so sandboxed git writes reach the
+        external gitdir), and an explicit ``network_access`` pin — but only when
+        crossby actually **forces** workspace-write. When nothing forces it,
+        returns ``[]`` so the launch/resume stays byte-identical to an unmanaged
+        Codex run.
+
+        workspace-write is forced by any of: accept-edits/auto (detected as
+        ``-a untrusted`` in ``autonomy_args``), one or more ``trusted_dirs``,
+        out-of-root worktree metadata, or ``network_access``. YOLO alone
+        (``-a never``) does **not** force it. This never emits an ``-a`` flag
+        itself: on launch the approval flag already sits in ``autonomy_args``;
+        on resume it is intentionally absent (approval-neutral). Treating
+        ``--sandbox``/``-s`` as one setting and owning the ordering here is what
+        guarantees the mode is emitted exactly once.
+
+        The network pin defends against an ambient ``network_access=true`` in the
+        user's config: whenever crossby forces workspace-write it explicitly sets
+        the flag (``true`` only with ``--network``, else ``false``), so ambient
+        config can never silently enable networking in a crossby-managed sandbox.
         """
-        sandbox_already_set = "workspace-write" in (autonomy_args or [])
-        result: list[str] = [] if sandbox_already_set else ["--sandbox", "workspace-write"]
-        for d in dirs:
-            result.extend(self.plan_dir_args(d))
-        return result
+        trusted = list(trusted_dirs or [])
+        metadata = (
+            outside_root_git_metadata_dirs(working_dir) if working_dir is not None else []
+        )
+        accept_edits = "untrusted" in autonomy_args
+
+        if not (accept_edits or trusted or metadata or network_access):
+            return []
+
+        args: list[str] = ["--sandbox", "workspace-write"]
+        for d in trusted:
+            args.extend(self.plan_dir_args(d))
+        if metadata:
+            roots = ", ".join(_toml_quote(str(p)) for p in metadata)
+            args.extend(["-c", f"sandbox_workspace_write.writable_roots=[{roots}]"])
+        args.extend(
+            [
+                "-c",
+                f"sandbox_workspace_write.network_access={'true' if network_access else 'false'}",
+            ]
+        )
+        return args
 
     def is_model_compatible(self, model: str) -> bool:
         """Codex accepts codex-*, gpt-*, and o<digit>* model IDs."""
@@ -124,14 +212,17 @@ class CodexAdapter(AbstractAITool):
         return ["-c", f'model_reasoning_effort="{mapped}"']
 
     def accept_edits_args(self) -> list[str]:
-        """Codex accept-edits: workspace-write sandbox auto-applies edits while
-        untrusted shell commands still escalate for approval.
+        """Codex accept-edits: auto-apply file edits, still escalate untrusted
+        shell commands for approval — the approval half only (``-a untrusted``).
 
-        ``-s workspace-write -a untrusted``. The old ``--approval-mode
-        auto-edit`` flag was removed in the Rust CLI (v0.14x) and must not be
-        used.
+        The workspace-write sandbox that accept-edits needs is emitted by
+        :meth:`sandbox_config_args`, which owns sandbox-mode selection so the
+        ``--sandbox workspace-write`` flag is passed exactly once (before any
+        ``--add-dir``) even when trusted dirs or worktree metadata are also
+        present. The old ``--approval-mode auto-edit`` flag was removed in the
+        Rust CLI (v0.14x) and must not be used.
         """
-        return ["-s", "workspace-write", "-a", "untrusted"]
+        return ["-a", "untrusted"]
 
     def yolo_args(self) -> list[str]:
         """Codex skips approval prompts with ``-a never`` while keeping its

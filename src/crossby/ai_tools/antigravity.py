@@ -70,10 +70,11 @@ class AntigravityAdapter(AbstractAITool):
         accept_edits: bool = False,
         auto: bool = False,
         scene: SceneLaunchContext | None = None,
+        network_access: bool = False,
     ) -> int:
-        # The Antigravity IDE is a GUI launcher with no session-scoped scene
-        # lever; the CLI warns and drops --scene before dispatch, so `scene` is
-        # inert here.
+        # The Antigravity IDE is a GUI launcher: it has no sandbox, so
+        # `network_access` is inert (the CLI warns + ignores --network for GUI
+        # tools), and no session-scoped scene lever, so `scene` is inert too.
         # `antigravity <path>` opens the workspace, mirroring the VS Code-family
         # launcher convention (`code <path>` / `cursor <path>`). Pass the working
         # dir explicitly rather than "." so the target is unambiguous.

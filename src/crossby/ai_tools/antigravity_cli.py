@@ -150,8 +150,19 @@ class AntigravityCLIAdapter(AbstractAITool):
         safety sandbox."""
         return ["--dangerously-skip-permissions", "--sandbox"]
 
-    def build_resume_command(self, session_id: str) -> list[str] | None:
-        """Resume a specific Antigravity CLI conversation by ID."""
+    def build_resume_command(
+        self,
+        session_id: str,
+        *,
+        working_dir: Path | None = None,
+        network_access: bool = False,
+    ) -> list[str] | None:
+        """Resume a specific Antigravity CLI conversation by ID.
+
+        Accepts and ignores the sandbox context (agy's ``--sandbox`` is a
+        separate yolo-time flag, not a writable-root mechanism); the keyword-only
+        params keep polymorphic dispatch TypeError-free.
+        """
         return ["agy", "--conversation", session_id]
 
     def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:

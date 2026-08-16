@@ -127,12 +127,21 @@ class HandoffSummarizer:
         token_budget: int = DEFAULT_TOKEN_BUDGET,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         model: str | None = None,
+        working_dir: Path | None = None,
+        network_access: bool = False,
     ) -> None:
         self.summarizer_tool = summarizer_tool
         self.prompt_template = prompt_template
         self.token_budget = token_budget
         self.timeout_seconds = timeout_seconds
         self.model = model
+        # Sandbox context for the summarizer subprocess. ``working_dir`` doubles
+        # as the process cwd and the worktree the sandbox composer inspects, so a
+        # Codex summarizer run inside a linked worktree gets the git-metadata
+        # writable roots it needs. Handoff summarization does not need the
+        # network, so ``network_access`` defaults off.
+        self.working_dir = working_dir
+        self.network_access = network_access
 
     def ensure_installed(self) -> None:
         """Raise if the summarizer tool is not available on this system."""
@@ -314,6 +323,8 @@ class HandoffSummarizer:
                 model=self.model,
                 prompt=None,
                 json_schema=json_schema,
+                working_dir=self.working_dir,
+                network_access=self.network_access,
             )
             cmd = [*cmd, *stdin_args]
             stdin_input: str | None = prompt
@@ -322,6 +333,8 @@ class HandoffSummarizer:
                 model=self.model,
                 prompt=prompt,
                 json_schema=json_schema,
+                working_dir=self.working_dir,
+                network_access=self.network_access,
             )
             stdin_input = None
         logger.info(
@@ -339,6 +352,9 @@ class HandoffSummarizer:
                 encoding="utf-8",
                 timeout=self.timeout_seconds,
                 check=False,
+                # Match the sandbox composer's worktree view: run the summarizer
+                # inside the same dir whose git metadata it granted writable.
+                cwd=self.working_dir,
             )
         except subprocess.TimeoutExpired as exc:
             raise SummarizerParseError(

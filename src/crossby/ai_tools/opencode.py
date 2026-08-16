@@ -66,8 +66,18 @@ class OpenCodeAdapter(AbstractAITool):
             for mid in get_models_for_tool(str(self.TOOL_ID))
         ]
 
-    def build_resume_command(self, session_id: str) -> list[str] | None:
-        """Resume an OpenCode session: ``opencode -s <session_id>``."""
+    def build_resume_command(
+        self,
+        session_id: str,
+        *,
+        working_dir: Path | None = None,
+        network_access: bool = False,
+    ) -> list[str] | None:
+        """Resume an OpenCode session: ``opencode -s <session_id>``.
+
+        Accepts and ignores the sandbox context (OpenCode does not hard-confine
+        writes); the keyword-only params keep polymorphic dispatch TypeError-free.
+        """
         return ["opencode", "-s", session_id]
 
     def initial_message_args(self, prompt: str) -> list[str]:

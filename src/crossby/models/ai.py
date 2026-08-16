@@ -192,6 +192,13 @@ class AIToolCapabilities(BaseModel, frozen=True):
     redundant. Distinct from ``supports_trusted_dirs`` (which only means the tool
     accepts a trusted-dir flag; Claude adds dirs but still prompts rather than
     hard-blocks)."""
+    supports_network_access: bool = False
+    """Tool exposes a launch-time opt-in to allow network access from inside its
+    sandbox (``crossby launch --network``). Codex-only: it pins
+    ``sandbox_workspace_write.network_access`` whenever crossby forces
+    workspace-write. Narrower and clearer than reusing ``sandboxes_writes``:
+    every path (launch, resume, GUI) warns and ignores ``--network`` when this is
+    False, so a non-Codex tool never receives a network flag it cannot honor."""
     hook_output_dialect: HookOutputDialect = HookOutputDialect.HOOK_SPECIFIC_OUTPUT
     """Which stdout shape this tool reads a *tool-call* hook decision from."""
     hook_stop_dialect: HookStopDialect = HookStopDialect.NONE

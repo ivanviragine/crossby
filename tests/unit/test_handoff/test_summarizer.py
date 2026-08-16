@@ -298,6 +298,62 @@ def test_summarize_raw_returns_rawhandoff_and_skips_json_schema() -> None:
     assert kwargs["json_schema"] is None
 
 
+def test_codex_summarizer_in_worktree_gets_writable_roots_and_cwd(tmp_path: Path) -> None:
+    """A Codex summarizer run in a linked worktree grants its git-metadata
+    writable roots and runs with a cwd inside the worktree."""
+    from crossby.ai_tools.codex import CodexAdapter
+
+    # Real linked worktree so build_launch_command's composer resolves metadata.
+    def _git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.co")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("x\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-q", "-m", "init")
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
+
+    summarizer = HandoffSummarizer(
+        CodexAdapter(), prompt_template="TEST PROMPT", working_dir=wt
+    )
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+    real_run = subprocess.run
+
+    # ``patch(...summarizer.subprocess.run)`` swaps the attribute on the shared
+    # ``subprocess`` module, which would also intercept the resolver's real
+    # ``git rev-parse`` — so delegate git calls to the real subprocess and mock
+    # only the summarizer (codex) invocation.
+    def _dispatch(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, **kwargs)
+        return fake_proc
+
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CODEX]),
+        patch("crossby.handoff.summarizer.subprocess.run", side_effect=_dispatch) as run,
+    ):
+        summarizer.summarize_raw(
+            _transcript(),
+            source_tool=AIToolID.CODEX,
+            target_tool=AIToolID.CLAUDE,
+            prompt_source="default",
+        )
+
+    codex_call = next(c for c in run.call_args_list if c.args[0][0] == "codex")
+    launched_cmd = codex_call.args[0]
+    assert "--sandbox" in launched_cmd
+    assert "workspace-write" in launched_cmd
+    assert any(a.startswith("sandbox_workspace_write.writable_roots=[") for a in launched_cmd)
+    assert "sandbox_workspace_write.network_access=false" in launched_cmd
+    # The subprocess cwd matches the worktree whose metadata it granted writable.
+    assert codex_call.kwargs["cwd"] == wt
+
+
 # ---------------------------------------------------------------------------
 # argv byte-ceiling: re-truncation, preflight, and E2BIG backstop
 # ---------------------------------------------------------------------------
