@@ -108,9 +108,7 @@ class TestResumeContextNoTypeError:
             adapter = AbstractAITool.get(tool)
             # Passing working_dir (even a real worktree) + network must not raise
             # and must not change the non-Codex command.
-            cmd = adapter.build_resume_command(
-                "sid", working_dir=tmp_path, network_access=True
-            )
+            cmd = adapter.build_resume_command("sid", working_dir=tmp_path, network_access=True)
             assert cmd == want
 
     def test_base_default_accepts_context(self) -> None:

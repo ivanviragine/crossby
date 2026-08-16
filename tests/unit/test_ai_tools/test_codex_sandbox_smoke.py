@@ -102,9 +102,7 @@ def test_sandbox_blocks_git_metadata_write_without_roots(
     "set CROSSBY_CODEX_SANDBOX_SMOKE_EXEC=1",
 )
 @pytest.mark.parametrize("network", [False, True])
-def test_writable_roots_enable_git_write(
-    worktree: tuple[Path, Path, Path], network: bool
-) -> None:
+def test_writable_roots_enable_git_write(worktree: tuple[Path, Path, Path], network: bool) -> None:
     """Fix: with the metadata dirs granted (--add-dir, as the composer emits),
     sandboxed git add succeeds."""
     wt, private, common = worktree

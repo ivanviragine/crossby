@@ -162,9 +162,7 @@ class CodexAdapter(AbstractAITool):
         config can never silently enable networking in a crossby-managed sandbox.
         """
         trusted = list(trusted_dirs or [])
-        metadata = (
-            outside_root_git_metadata_dirs(working_dir) if working_dir is not None else []
-        )
+        metadata = outside_root_git_metadata_dirs(working_dir) if working_dir is not None else []
         accept_edits = "untrusted" in autonomy_args
 
         if not (accept_edits or trusted or metadata or network_access):
