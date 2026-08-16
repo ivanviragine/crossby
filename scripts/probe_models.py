@@ -561,10 +561,10 @@ def main() -> int:
         def extract_payload(parsed: Any) -> str | None:
             # Claude and Copilot `--json-schema` wraps the answer inside `structured_output`
             if isinstance(parsed, dict) and "structured_output" in parsed:
-                return json.dumps(parsed["structured_output"], indent=2)
-            # Or it might just be the direct object itself. Require the full
-            # top-level key set so a partial payload (e.g. {"copilot": [...]})
-            # is rejected instead of silently deleting the omitted providers.
+                parsed = parsed["structured_output"]
+            # Require the full top-level key set so a partial payload (e.g.
+            # {"copilot": [...]}), wrapped or not, is rejected instead of
+            # silently deleting the omitted providers.
             if isinstance(parsed, dict) and set(parsed) == set(registry_raw):
                 return json.dumps(parsed, indent=2)
             return None
