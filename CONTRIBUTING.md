@@ -223,7 +223,7 @@ in `cli/launch.py`.
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
 | Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
 | Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
-| OpenCode | none — falls back to persistent activation (`OPENCODE_CONFIG` loads between the global and project layers, so a project `opencode.json` can re-enable a deselected server) |
+| OpenCode | none — persistent-activation fallback is a no-op (no sync writer for any concern), so deselected servers stay enabled; a project `opencode.json` layered via `OPENCODE_CONFIG` could re-enable them anyway |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |
 | VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
 
