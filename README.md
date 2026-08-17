@@ -8,12 +8,12 @@
 - **Focus an agent on a task-shaped set of capabilities.** A **scene** narrows the installed tools down to just the skills, agents, MCP servers, hooks, and permissions a task needs — persistently, or for a single launch.
 - **Carry a live session to another agent.** `crossby handoff` summarizes your current transcript and continues it in another tool, so you never re-explain what you were doing.
 
-```
+```console
 $ crossby sync --from claude
 
 ✓  rules         CLAUDE.md          →  AGENTS.md, .cursorrules, +1 more
 ✓  agents        .claude/agents/    →  .cursor/agents/, .codex/agents/, +2 more
-✓  skills        .claude/skills/    →  .cursor/skills/, .codex/skills/, +2 more
+✓  skills        .claude/skills/    →  .cursor/skills/, .agents/skills/, +2 more
 ✓  permissions                      →  translated for Cursor
 ✓  hooks                            →  written for Cursor, Codex, Copilot, Antigravity CLI
 ✓  mcp servers                      →  merged into Cursor, Codex, Copilot, Antigravity CLI
@@ -347,7 +347,7 @@ The default preset produces a structured six-section handoff (current task, key 
 
 `crossby launch` exposes a four-tier **autonomy ladder** — how much the agent may do without asking. These are *permission* modes, not model selection:
 
-```
+```text
 --plan  <  --accept-edits  <  --auto  <  --yolo
 read-only   auto-edit,        classifier-       skip all
             ask shell         guarded           prompts
@@ -490,7 +490,7 @@ The `models:` section maps a tool + complexity tier to a model id. Each tier (`e
 
 The bundle follows the [Agent Skills](https://agentskills.io) standard layout (`SKILL.md`, `agents/openai.yaml`, `references/`), so Codex users can also install it via the upstream `$skill-installer` skill:
 
-```
+```shell
 $skill-installer install https://github.com/ivanviragine/crossby/tree/main/src/crossby/data/skill
 ```
 
