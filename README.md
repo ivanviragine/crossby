@@ -132,7 +132,7 @@ A sync **writer** exists for five tools. These are the only tools crossby writes
 A checkmark is **per surface, not per tool** — the exceptions are real:
 
 - **Permissions sync only to Claude and Cursor** — the tools with a persistent per-project permission file that crossby writes. Copilot, Codex, and Antigravity CLI gate command permissions through launch-time flags or sandbox modes (`--allow-tool`, `--sandbox`, `--mode`) rather than a synced policy file, so they have no permission writer.
-- **Plugins are detected, never written.** `.claude/plugins/`, `plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; their bundled commands/agents/MCP servers must be migrated by hand.
+- **Plugins are detected, never written.** `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; their bundled commands/agents/MCP servers must be migrated by hand.
 
 ### Launch and handoff
 
@@ -167,7 +167,7 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` per tool — **Claude and Cursor only** (see [above](#direct-sync-targets)). Revocable: a pattern crossby wrote is removed when the source drops it (see [Revocable sync](#revocable-sync)). |
 | Hooks       | Write                | Per-tool native hook schema; a crossby-written hook's matcher narrows as well as widens on re-runs, and the hook is revoked when the source drops it. |
 | MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars`. |
-| Plugins     | Detect (manual)      | `.claude/plugins/`, `plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand. |
+| Plugins     | Detect (manual)      | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand. |
 
 ### Preview before you write
 
