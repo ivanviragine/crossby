@@ -204,7 +204,7 @@ Re-running `crossby sync` replaces the block in lockstep with the source — no 
 
 ### Revocable sync
 
-crossby never destructively reconciles configuration you own — it only ever *revokes an entry it recorded writing*, tracked in a per-machine, gitignored `.crossby/owned.json` ledger. A hand-authored entry that merely shares a name with a source entry is never revoked.
+crossby never *removes* configuration you own — it only ever *revokes an entry it recorded writing*, tracked in a per-machine, gitignored `.crossby/owned.json` ledger. A hand-authored entry that merely shares a name with a source entry is never revoked, though a normal same-named merge can still overwrite its contents — this guarantee bounds *removal*, not additive or update writes.
 
 Within that boundary, hooks and permissions are *additive by default but revocable*: syncing `--from A` then `--from B` leaves each target reflecting B, not the union of both — a hook or permission pattern crossby wrote for A is taken back once it's gone from the source. MCP servers are narrower: crossby removes a server only when it wrote that server *and* the source marks it disabled (`enabled: false`); a server merely dropped from the source is left in place, so for MCP the two syncs leave the union. A same-named MCP server you wrote by hand is never deleted, though a normal MCP merge can still overwrite its config — the ledger bounds *removal*, not additive or update writes. A fresh clone starts with an empty ledger, so it never revokes until it has recorded writes of its own.
 
@@ -279,7 +279,7 @@ Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, loc
 
 ### Session-scoped scenes — `crossby launch --scene`
 
-`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one doesn't get session isolation. crossby warns and does what it can: a CLI tool with no launch lever falls back to persistent `scene use` activation (so it needs a later `clear`), and a GUI tool just launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
+`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one doesn't get session isolation. crossby warns and does what it can: a CLI tool with no launch lever falls back to persistent `scene use` activation — needing a later `clear` for whatever that actually writes, though for a tool like OpenCode whose every concern is unsupported it writes nothing and the deselected capabilities stay enabled — and a GUI tool just launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
 
 ```bash
 # Launch Claude with the pr-review scene for this session only.
@@ -305,7 +305,7 @@ crossby launch --scene pr-review --tool codex --model gpt-5.2
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
 | Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
 | Cursor | none — falls back to persistent activation (its only knob relocates the whole config base including auth) |
-| OpenCode | none — falls back to persistent activation (a project `opencode.json` can re-enable a deselected server; isolation isn't guaranteed) |
+| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so deselected servers stay enabled and there's nothing to `clear` |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
 | VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |
 
