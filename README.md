@@ -19,7 +19,7 @@ $ crossby sync --from claude
 ✓  mcp servers                      →  merged into Cursor, Codex, Copilot, Antigravity CLI
 ```
 
-Any of the five direct-sync tools can be the source — `crossby sync --from cursor` works the same way. (Permissions land only where a persistent policy file exists, which is why they reach Cursor but not Codex, Copilot, or Antigravity CLI above.) crossby is **stateless by default** — it reads directly from each tool's standard paths, so no config file is required.
+Any of the five direct-sync tools can be the source — `crossby sync --from cursor` works the same way. (No tool holds every surface, though: permissions live only in Claude's and Cursor's config, so a sync *from* Codex, Copilot, or Antigravity CLI has no permissions to read, and a sync *to* them writes none.) crossby is **stateless by default** — it reads directly from each tool's standard paths, so no config file is required.
 
 ## Which workflow do you want?
 
@@ -45,7 +45,7 @@ Requires Python 3.11+.
 
 ## Quick start
 
-Wherever a command changes state, crossby gives you a preview first — `sync --plan`, `scene show`, `handoff --no-launch` — so you can see what it would do before committing.
+Lead with the read-only inspection commands to see what crossby would do before it writes: `sync --plan` / `--doctor`, `scene show`, `scene use --plan`. Commands that write or launch (handoff, `scene add` / `use`) note their side effects in the sections below.
 
 ```bash
 # Don't know where to start? Run crossby with no args for an interactive menu (TTY only).
@@ -279,7 +279,7 @@ Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, loc
 
 ### Session-scoped scenes — `crossby launch --scene`
 
-`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one **falls back to persistent activation** (and warns), so on those it behaves like `scene use` and does need a later `clear` — see the per-tool table below.
+`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one doesn't get session isolation. crossby warns and does what it can: a CLI tool with no launch lever falls back to persistent `scene use` activation (so it needs a later `clear`), and a GUI tool just launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
 
 ```bash
 # Launch Claude with the pr-review scene for this session only.
@@ -297,7 +297,7 @@ crossby launch --scene pr-review --tool codex --model gpt-5.2
 
 `--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out — that's what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one.
 
-**Not every tool has a session-scoped lever.** Where a tool can't scope a scene at launch, crossby warns and falls back to persistent activation instead of silently applying nothing:
+**Not every tool has a session-scoped lever.** Where a tool can't scope a scene (or a specific concern) at launch, crossby warns rather than applying nothing silently — but the outcome varies: a CLI tool without a launch lever falls back to persistent activation, a concern with no lever at all can be left wide open, and a GUI tool just launches without the scene:
 
 | Tool | Session-scoped lever |
 | --- | --- |
@@ -360,7 +360,7 @@ read-only   auto-edit,        classifier-       skip all
 
 **Precedence (most permissive wins):** `yolo > auto > accept-edits > plan`. If you pass several, the highest applies. A requested tier a tool doesn't support downgrades to the next lower *autonomy* tier it does support (emitting a `UserWarning`), stopping at default prompting — it never escalates.
 
-Per-tool mapping (verified against official docs, July 2026 — flags drift between versions, so crossby re-checks against `<tool> --help`):
+Per-tool mapping (verified against official docs, July 2026; CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
 
 | Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
 | --------------- | ------------------------------------- | ----------------------------------------- |

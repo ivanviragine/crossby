@@ -400,11 +400,12 @@ with a warning so `agy` is never handed a suffixed ID it rejects.
 
 Crossby stores canonical command patterns (e.g. `myapp:*`) and writes them into each tool's native config format.
 
-Antigravity CLI has no per-project allowlist or hooks config — permissions
-are mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
-`--mode`) and it has no hook system at all, so `(ANTIGRAVITY_CLI,
-PERMISSIONS)` and `(ANTIGRAVITY_CLI, HOOKS)` have no writer (same as Codex
-having no permission writer).
+Antigravity CLI has no per-project *allowlist* — its permissions are
+mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
+`--mode`), so `(ANTIGRAVITY_CLI, PERMISSIONS)` has no writer (same as Codex
+having no permission writer). It *does* have a hooks config, though:
+`(ANTIGRAVITY_CLI, HOOKS)` writes `.agents/hooks.json` (and `(CODEX, HOOKS)`
+writes `.codex/hooks.json`), each with a matching reader so hooks round-trip.
 
 | Feature            | Claude                      | Copilot                        | Cursor                        |
 | ------------------ | --------------------------- | ------------------------------ | ----------------------------- |
