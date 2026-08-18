@@ -2,12 +2,15 @@
 
 Per-surface **sync** mapping table for the five tools `crossby` writes
 configuration into: Claude, Cursor, Codex, Copilot, and Antigravity CLI.
-These are the only direct-sync targets — the tables below never write into
-the other three launch adapters. OpenCode and VS Code are launch-only (no
-sync writer), and the Antigravity IDE consumes Antigravity CLI's `.agents/`
-layout transitively, so syncing to `antigravity-cli` provisions it too.
-Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔ `Shell(myapp:*)` ↔ `myapp:*`)
-are listed once; lossy or unsupported edges are flagged.
+These are the only direct-sync targets — the other three launch adapters
+have no dedicated sync writer. OpenCode and VS Code are launch-only, and
+the Antigravity IDE consumes Antigravity CLI's `.agents/` layout
+transitively, so syncing to `antigravity-cli` provisions it too. (One
+shared-path caveat: Copilot's MCP config lives at `.vscode/mcp.json`, so a
+sync *to Copilot* does write that workspace file — as the Copilot target,
+not a VS Code one.) Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
+`Shell(myapp:*)` ↔ `myapp:*`) are listed once; lossy or unsupported edges
+are flagged.
 
 Docs last checked: 2026-08-17. If today's date is later, re-open each
 tool's docs and confirm the schemas before trusting these rows.
