@@ -363,7 +363,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | --------------- |
 | Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
-| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions --sandbox` | `-a never` (approval-skip, keeps sandbox) | —          | `--force`                  | —       | —               |
+| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval-skip, keeps sandbox) | —          | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
 | `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
@@ -401,8 +401,9 @@ with a warning so `agy` is never handed a suffixed ID it rejects.
 Crossby stores canonical command patterns (e.g. `myapp:*`) and writes them into each tool's native config format.
 
 Antigravity CLI has no per-project *allowlist* — its permissions are
-mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
-`--mode`), so `(ANTIGRAVITY_CLI, PERMISSIONS)` has no writer (same as Codex
+mode-based launch flags (`--dangerously-skip-permissions`/`--mode`; agy's
+`--sandbox` is a terminal restriction, not a permission grant, and crossby
+does not emit it), so `(ANTIGRAVITY_CLI, PERMISSIONS)` has no writer (same as Codex
 having no permission writer). It *does* have a hooks config, though:
 `(ANTIGRAVITY_CLI, HOOKS)` writes `.agents/hooks.json` (and `(CODEX, HOOKS)`
 writes `.codex/hooks.json`), each with a matching reader so hooks round-trip.

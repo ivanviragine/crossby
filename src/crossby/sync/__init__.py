@@ -62,7 +62,7 @@ from crossby.sync.skills import (
 
 # Global default registry — one writer per (tool, concern) pair.
 # Neither Codex nor Antigravity CLI has a PERMISSIONS writer: their autonomy is
-# mode-based launch flags (Codex sandbox mode; agy --mode/--sandbox/
+# mode-based launch flags (Codex sandbox mode; agy --mode/
 # --dangerously-skip-permissions), not a per-project policy file to sync. Both
 # DO have a HOOKS writer — CodexHooksWriter (.codex/hooks.json) and
 # AntigravityCLIHooksWriter (.agents/hooks.json), registered below — each with a

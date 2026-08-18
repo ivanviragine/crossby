@@ -16,9 +16,11 @@ def _model_of(cmd: list[str]) -> str | None:
 
 
 class TestAntigravityCLIYolo:
-    def test_yolo_skips_permissions_and_keeps_sandbox(self) -> None:
+    def test_yolo_skips_permissions_without_sandbox(self) -> None:
+        # agy's --sandbox is a terminal restriction (blocks every shell command),
+        # not a write sandbox, so yolo must NOT pair it with skip-permissions.
         args = AntigravityCLIAdapter().yolo_args()
-        assert args == ["--dangerously-skip-permissions", "--sandbox"]
+        assert args == ["--dangerously-skip-permissions"]
 
     def test_supports_yolo_capability(self) -> None:
         assert AntigravityCLIAdapter().capabilities().supports_yolo is True
@@ -190,7 +192,9 @@ class TestAntigravityCLIBuildLaunchCommand:
         assert _model_of(cmd) == "gemini-3.6-flash-high"
         assert "--effort" not in cmd
         assert "--dangerously-skip-permissions" in cmd
-        assert "--sandbox" in cmd
+        # Regression guard: agy's --sandbox is a terminal restriction that blocks
+        # shell commands, so a yolo launch must never emit it.
+        assert "--sandbox" not in cmd
 
     def test_initial_message_is_first_positional(self) -> None:
         cmd = AntigravityCLIAdapter().build_launch_command(initial_message="hello there")

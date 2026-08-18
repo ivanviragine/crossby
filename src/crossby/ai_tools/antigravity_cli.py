@@ -116,13 +116,13 @@ class AntigravityCLIAdapter(AbstractAITool):
             # `unknown pre-tool hook decision "block"`).
             hook_stop_dialect=HookStopDialect.CONTINUE_DECISION,
             hook_fail_open_default=False,
-            # sandboxes_writes stays False deliberately: agy's write sandbox is an
-            # opt-in flag (``--sandbox``, passed only in yolo_args), not a verified
-            # default, so we do NOT tell wade an out-of-worktree write is already
-            # confined — wade keeps its own containment guard rather than trusting
-            # an unconfirmed native sandbox. agy's own bundled plugin registers no
-            # PreToolUse hook, so that guard is best-effort there; Stop is the
-            # reliable enforcement surface.
+            # sandboxes_writes stays False deliberately: agy exposes no verified
+            # write-confinement mechanism (its ``--sandbox`` flag is a *terminal*
+            # restriction, not a write jail, and crossby no longer emits it), so we
+            # do NOT tell wade an out-of-worktree write is already confined — wade
+            # keeps its own containment guard rather than trusting a native sandbox.
+            # agy's own bundled plugin registers no PreToolUse hook, so that guard
+            # is best-effort there; Stop is the reliable enforcement surface.
             sandboxes_writes=False,
         )
 
@@ -146,10 +146,15 @@ class AntigravityCLIAdapter(AbstractAITool):
         return ["--add-dir", plan_dir]
 
     def yolo_args(self) -> list[str]:
-        """Skip permission prompts while keeping the terminal sandbox active —
-        mirrors Codex's philosophy of skipping approvals without removing the
-        safety sandbox."""
-        return ["--dangerously-skip-permissions", "--sandbox"]
+        """Auto-approve all tool permission requests without prompting.
+
+        Only ``--dangerously-skip-permissions`` — agy's ``--sandbox`` is a
+        *terminal-restriction* flag ("run in a sandbox with terminal restrictions
+        enabled"), NOT a write sandbox, and pairing it with skip-permissions blocks
+        every shell command. wade does not rely on agy for write confinement
+        (``sandboxes_writes=False``); it keeps its own worktree-containment guard.
+        """
+        return ["--dangerously-skip-permissions"]
 
     def build_resume_command(
         self,
@@ -160,9 +165,9 @@ class AntigravityCLIAdapter(AbstractAITool):
     ) -> list[str] | None:
         """Resume a specific Antigravity CLI conversation by ID.
 
-        Accepts and ignores the sandbox context (agy's ``--sandbox`` is a
-        separate yolo-time flag, not a writable-root mechanism); the keyword-only
-        params keep polymorphic dispatch TypeError-free.
+        Accepts and ignores the sandbox context (agy has no writable-root
+        mechanism to configure at resume — crossby emits no sandbox flag); the
+        keyword-only params keep polymorphic dispatch TypeError-free.
         """
         return ["agy", "--conversation", session_id]
 
