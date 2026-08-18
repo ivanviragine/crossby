@@ -149,7 +149,7 @@ Launching and handoff reach a wider set of tools than sync:
 | Antigravity IDE | via Antigravity CLI | ✓ (GUI) | — | manual |
 | VS Code | — | ✓ (GUI) | — | manual |
 
-- **OpenCode and VS Code are launch adapters, not sync targets.** crossby can launch them (and hand off *to* them), but it writes no rules/agents/skills/MCP/hooks/permissions into either.
+- **OpenCode and VS Code are launch adapters, not sync targets.** crossby can launch them (and hand off *to* them), but neither has its own sync writer, so a sync never targets them directly. (One shared-file caveat: Copilot's MCP config lives at `.vscode/mcp.json`, so a sync *to Copilot* does write into that workspace file — as the Copilot target, not a VS Code one.)
 - **The Antigravity IDE consumes the CLI's configuration transitively.** It reads the same project-level `.agents/` layout as **Antigravity CLI** (`AGENTS.md`, `.agents/skills`, `.agents/agents`, `.agents/mcp_config.json`), so syncing to `antigravity-cli` provisions the IDE too. There is no separate IDE sync target.
 - **"✓ auto" vs "manual" handoff.** For CLI targets, crossby launches the tool with the handoff summary pre-loaded as the initial prompt. GUI tools (VS Code, Antigravity IDE) can't take an initial message, so crossby **writes the handoff file and prints its path for you to open by hand** — it does not launch them with the context loaded.
 

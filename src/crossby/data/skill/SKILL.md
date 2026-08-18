@@ -1,6 +1,6 @@
 ---
 name: crossby-sync
-description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across Claude Code, Codex, Cursor, GitHub Copilot, OpenCode, VS Code, Antigravity IDE, or Antigravity CLI. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
+description: Use when the user asks to sync, mirror, or port AI tool configuration — rules, agents, skills, MCP servers, hooks, and permissions — across the five tools crossby writes into: Claude Code, Codex, Cursor, GitHub Copilot, and Antigravity CLI. Also handles cross-tool translation with manual-fix notes for lossy fields (e.g. Claude `permissionMode: plan` → Codex), Claude slash commands as namespaced skills, and pre-write inspection via `--plan` / `--doctor` / `--validate-target`.
 metadata:
   short-description: Sync AI tool config across every installed CLI
 ---
@@ -60,7 +60,7 @@ Run in this order for each project:
 
 4. Convert / sync surfaces in the order Crossby's writers run:
 
-   - **rules**: source instruction file → every other tool's path,
+   - **rules**: source instruction file → each other direct-sync tool's path,
      symlinked when content is neutral, copied with a manual-fix block
      when the content references another tool's surfaces (`/hooks`,
      `ExitPlanMode`, `permissionMode`, `.claude/agents/`, etc.).
@@ -85,7 +85,7 @@ Run in this order for each project:
      here (same as Codex's sandbox mode).
    - **hooks**: dedup by `(event, command)` with matcher widening.
    - **plugins**: detect-only; emits `Not Added` rows for `.claude/
-     plugins/`, `plugin-marketplaces.json`, and `.claude-plugin/
+     plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/
      marketplace.json`. Migrate by hand.
 
 5. Run the real sync, then inspect for manual-fix items:
