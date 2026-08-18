@@ -1,12 +1,15 @@
 # crossby cross-tool differences
 
-Per-surface mapping table for the eight tools `crossby` supports today:
-Claude, Cursor, Codex, Copilot, OpenCode, VS Code, Antigravity IDE, and
-Antigravity CLI. Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔
-`Shell(myapp:*)` ↔ `myapp:*`) are listed once; lossy or unsupported
-edges are flagged.
+Per-surface **sync** mapping table for the five tools `crossby` writes
+configuration into: Claude, Cursor, Codex, Copilot, and Antigravity CLI.
+These are the only direct-sync targets — the tables below never write into
+the other three launch adapters. OpenCode and VS Code are launch-only (no
+sync writer), and the Antigravity IDE consumes Antigravity CLI's `.agents/`
+layout transitively, so syncing to `antigravity-cli` provisions it too.
+Direct 1:1 mappings (e.g. `Bash(myapp:*)` ↔ `Shell(myapp:*)` ↔ `myapp:*`)
+are listed once; lossy or unsupported edges are flagged.
 
-Docs last checked: 2026-05-15. If today's date is later, re-open each
+Docs last checked: 2026-08-17. If today's date is later, re-open each
 tool's docs and confirm the schemas before trusting these rows.
 
 ## Rules / instructions
@@ -102,7 +105,7 @@ track its own "already nudged" state rather than rely on the payload.
 
 | Source family | Codex default | Effort bias | Notes |
 | --- | --- | --- | --- |
-| `claude-opus-*` | `gpt-5.4` | 1:1 (`max → xhigh`) | Reverse: `gpt-5.4 → claude-opus-4.7` (latest alias). |
+| `claude-opus-*` | `gpt-5.4` | 1:1 (`max → xhigh`) | Reverse: `gpt-5.4` (and `gpt-5.5`) → `claude-opus-5` (latest alias). |
 | `claude-sonnet-*` | `gpt-5.4-mini` | shift up one tier | Coding-agent bias; reverse picks the lowest source tier that maps to the given Codex tier (`xhigh → high`). |
 | `claude-haiku-*` | `gpt-5.4-mini` | 1:1 (`max → xhigh`) | Reverse: `gpt-5.4-mini → claude-sonnet-4.6` by default. |
 

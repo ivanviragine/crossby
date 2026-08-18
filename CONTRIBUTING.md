@@ -175,7 +175,7 @@ matrix lives in `scenes/mechanism.py`:
 | agents | DECLARE (`permissions.deny`) | PROJECT | PROJECT | PROJECT | PROJECT |
 | mcp | DECLARE (`disabledMcpjsonServers`) | DECLARE (`enabled=false`) | DECLARE (`disabled=true`) | UNSUPPORTED | UNSUPPORTED |
 | hooks | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) | PROJECT (removal) |
-| permissions | PROJECT (removal) | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| permissions | PROJECT (removal) | UNSUPPORTED | UNSUPPORTED | PROJECT (removal) | UNSUPPORTED |
 
 Rules that keep the matrix honest:
 
@@ -441,7 +441,7 @@ Session IDs are extracted automatically from transcripts when `--transcript` is 
 | Tool                                  | Source (read)                                        | Target (launch) |
 | ------------------------------------- | ---------------------------------------------------- | --------------- |
 | Claude                                | ✓ (`~/.claude/projects/<encoded>/<id>.jsonl`)        | ✓               |
-| Cursor                                | ✓ (`~/.cursor/projects/<encoded>/chat.json`)         | ✓               |
+| Cursor                                | ✓ (`~/.cursor/projects/<encoded>/**/*.json`, chat-shaped) | ✓        |
 | Codex                                 | ✓ (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`)   | ✓               |
 | Copilot                               | ✓ (`~/.copilot/session-state/<id>/events.jsonl`)     | ✓               |
 | Antigravity CLI, OpenCode, Antigravity IDE, VS Code| —                                        | ✓               |
