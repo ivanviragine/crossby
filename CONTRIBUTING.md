@@ -223,7 +223,7 @@ in `cli/launch.py`.
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
 | Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
 | Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
-| OpenCode | none — falls back to persistent activation (`OPENCODE_CONFIG` loads between the global and project layers, so a project `opencode.json` can re-enable a deselected server) |
+| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so nothing is narrowed and the project's `opencode.json` stays authoritative |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |
 | VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
 
@@ -400,11 +400,12 @@ with a warning so `agy` is never handed a suffixed ID it rejects.
 
 Crossby stores canonical command patterns (e.g. `myapp:*`) and writes them into each tool's native config format.
 
-Antigravity CLI has no per-project allowlist or hooks config — permissions
-are mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
-`--mode`) and it has no hook system at all, so `(ANTIGRAVITY_CLI,
-PERMISSIONS)` and `(ANTIGRAVITY_CLI, HOOKS)` have no writer (same as Codex
-having no permission writer).
+Antigravity CLI has no per-project *allowlist* — its permissions are
+mode-based launch flags (`--dangerously-skip-permissions`/`--sandbox`/
+`--mode`), so `(ANTIGRAVITY_CLI, PERMISSIONS)` has no writer (same as Codex
+having no permission writer). It *does* have a hooks config, though:
+`(ANTIGRAVITY_CLI, HOOKS)` writes `.agents/hooks.json` (and `(CODEX, HOOKS)`
+writes `.codex/hooks.json`), each with a matching reader so hooks round-trip.
 
 | Feature            | Claude                      | Copilot                        | Cursor                        |
 | ------------------ | --------------------------- | ------------------------------ | ----------------------------- |
