@@ -13,7 +13,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.github/copilot-instructions.md` | every other tool's instruction file (`AGENTS.md` is shared by Codex and Antigravity CLI) | symlink (default) | All tools accept the same plain-markdown body; symlink keeps every target in lockstep with the source. |
+| `CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.github/copilot-instructions.md` | every other direct-sync tool's instruction file (`AGENTS.md` is shared by Codex and Antigravity CLI) | symlink (default) | All tools accept the same plain-markdown body; symlink keeps every target in lockstep with the source. |
 | Source content with Claude-only markers (`/hooks`, `.claude/agents/`, `Subagent`, `permissionMode`, `ExitPlanMode`, `TodoWrite`) | every non-Claude target | force-copy with `<!-- crossby:manual-fix -->` | Crossby refuses to symlink so target-tool semantics aren't silently overridden. Edit the copy and remove the manual-fix block when done. |
 | Source content with Codex-only markers (`.codex/`, `sandbox_mode`, `developer_instructions`) | every non-Codex target | force-copy with manual-fix | Same idea, reversed direction. |
 
@@ -33,7 +33,7 @@ tool's docs and confirm the schemas before trusting these rows.
 
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
-| `<tool>/skills/<name>/SKILL.md` | every other tool's skills dir | directory symlink (default) | All tools accept SKILL.md verbatim. |
+| `<tool>/skills/<name>/SKILL.md` | every other direct-sync tool's skills dir | directory symlink (default) | All tools accept SKILL.md verbatim. |
 | Source has `allowed-tools` and target ≠ Claude | per-tool copy with manual-fix | translate strategy (`--strategy translate`) | `allowed-tools` is Claude-only; non-Claude targets see a manual-fix note explaining the field isn't enforced. |
 | Source has `model`, `effort`, `disable-model-invocation`, `user-invocable`, `argument-hint`, `context`, `agent`, `hooks`, or `paths`/`shell` and target ≠ Claude | per-tool copy with manual-fix | translate strategy | These Claude-only skill fields are kept in frontmatter for reference (no data loss, round-trips back to Claude cleanly) but flagged with one combined manual-fix note since no other tool interprets them. |
 | Source `scripts/`, `references/`, `assets/` subdirs | mirrored into the translated target skill dir | translate strategy | Support files are copied verbatim. |
