@@ -63,7 +63,7 @@ tool's docs and confirm the schemas before trusting these rows.
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
 | `.claude/settings.json` `permissions.allow` (`Bash(cmd:*)`) | canonical `cmd:*` | reverse parse | Only `Bash(...)` entries are read; non-Bash patterns are skipped. |
-| Canonical `cmd:*` | `Bash(cmd:*)` (Claude), `Shell(cmd:*)` (Cursor) | per-tool translator | Symmetrical: every supported tool can be source or target. Antigravity CLI has no persistent allowlist file — permissions are launch-time flags (`--dangerously-skip-permissions`/`--sandbox`), so it's outside this table (same as Codex's sandbox mode). |
+| Canonical `cmd:*` | `Bash(cmd:*)` (Claude), `Shell(cmd:*)` (Cursor) | per-tool translator | Symmetrical: every supported tool can be source or target. Antigravity CLI has no persistent allowlist file — permission granting is the launch-time flag `--dangerously-skip-permissions` (agy's `--sandbox` is a terminal restriction, not a permission grant, and crossby does not emit it), so it's outside this table (same as Codex's sandbox mode). |
 | Cursor-specific shape (`Shell(cmd:*)`) | canonical | reverse parse | Allows any tool to seed the canonical pattern set. |
 
 ## Hooks

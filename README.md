@@ -131,7 +131,7 @@ A sync **writer** exists for five tools. These are the only tools crossby writes
 
 A checkmark is **per surface, not per tool** — the exceptions are real:
 
-- **Permissions sync only to Claude and Cursor** — the tools with a persistent per-project permission file that crossby writes. Copilot, Codex, and Antigravity CLI gate command permissions through launch-time flags or sandbox modes (`--allow-tool`, `--sandbox`, `--mode`) rather than a synced policy file, so they have no permission writer.
+- **Permissions sync only to Claude and Cursor** — the tools with a persistent per-project permission file that crossby writes. Copilot, Codex, and Antigravity CLI gate command permissions through launch-time flags or sandbox modes (`--allow-tool`, `--dangerously-skip-permissions`) rather than a synced policy file, so they have no permission writer. (Antigravity CLI's `--sandbox` is a terminal-restriction flag, not a permission grant, and crossby does not emit it.)
 - **Plugins are detected, never written.** `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; their bundled commands/agents/MCP servers must be migrated by hand.
 
 ### Launch and handoff

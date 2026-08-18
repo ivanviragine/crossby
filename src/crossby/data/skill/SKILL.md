@@ -83,8 +83,8 @@ Run in this order for each project:
      `cmd:args` and `Bash(...)` / `Shell(...)` — **Claude and Cursor
      only**. Copilot, Codex, and Antigravity CLI have no persistent
      allowlist file (they gate commands through launch-time flags or
-     sandbox modes, e.g. `--dangerously-skip-permissions` / `--sandbox`),
-     so they get no permission writer and are skipped here.
+     sandbox modes, e.g. `--dangerously-skip-permissions`), so they get
+     no permission writer and are skipped here.
    - **hooks**: dedup by `(event, command)` with matcher widening.
    - **plugins**: detect-only; emits `Not Added` rows for `.claude/
      plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/

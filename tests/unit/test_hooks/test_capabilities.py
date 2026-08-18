@@ -63,8 +63,9 @@ class TestSandboxAndFailOpen:
 
     def test_antigravity_cli_fails_closed_but_sandbox_unclaimed(self) -> None:
         # agy denies a tool call when its PreToolUse hook errors (fail-closed),
-        # but its write sandbox is an opt-in flag, not a verified default — so we
-        # do NOT claim sandboxes_writes, keeping wade's own containment guard.
+        # but it exposes no verified write-confinement mechanism (its --sandbox is
+        # a terminal restriction, not a write jail) — so we do NOT claim
+        # sandboxes_writes, keeping wade's own containment guard.
         caps = _caps(AIToolID.ANTIGRAVITY_CLI)
         assert caps.hook_fail_open_default is False
         assert caps.sandboxes_writes is False
