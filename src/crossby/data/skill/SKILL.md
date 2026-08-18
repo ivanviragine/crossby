@@ -8,8 +8,9 @@ metadata:
 # crossby sync runbook
 
 `crossby` is a CLI that keeps AI tool config (rules / agents / skills /
-MCP servers / hooks / permissions) consistent across every supported AI
-tool. This skill drives it without a human at the keyboard: it inspects
+MCP servers / hooks / permissions) consistent across the tools it writes
+into — the five direct-sync tools, with permissions reaching only Claude
+and Cursor. This skill drives it without a human at the keyboard: it inspects
 the project, runs sync, fixes manual-fix items inside generated
 artifacts, validates, and re-runs until the result is clean.
 
@@ -79,10 +80,11 @@ Run in this order for each project:
      become `env_http_headers`; env-var self-references become
      `env_vars`.
    - **permissions**: per-tool allowlist translation between canonical
-     `cmd:args` and `Bash(...)` / `Shell(...)`. Antigravity CLI has no
-     persistent allowlist file — permissions are launch-time flags
-     (`--dangerously-skip-permissions`/`--sandbox`), so it's skipped
-     here (same as Codex's sandbox mode).
+     `cmd:args` and `Bash(...)` / `Shell(...)` — **Claude and Cursor
+     only**. Copilot, Codex, and Antigravity CLI have no persistent
+     allowlist file (they gate commands through launch-time flags or
+     sandbox modes, e.g. `--dangerously-skip-permissions` / `--sandbox`),
+     so they get no permission writer and are skipped here.
    - **hooks**: dedup by `(event, command)` with matcher widening.
    - **plugins**: detect-only; emits `Not Added` rows for `.claude/
      plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/
