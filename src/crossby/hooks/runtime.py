@@ -27,10 +27,14 @@ the flat permission shape for PreToolUse but ``{"decision": "block"}`` for
 - Cursor → ``FOLLOWUP_MESSAGE``
 - Antigravity CLI (``agy``) → ``CONTINUE_DECISION``
 
-A deny always exits 2 regardless of dialect, so the block is honored even by a
-tool that ignores stdout (and a security guard stays fail-*closed*); the dialect
-only governs the stdout payload. A *Stop* decision never exits 2 — that channel
-stays fail-open so a guard cannot trap the agent mid-turn.
+A deny exits 2 on every dialect **except** ``DECISION`` (agy), so the block is
+honored even by a tool that ignores stdout (and a security guard stays
+fail-*closed*); the dialect only governs the stdout payload. ``DECISION`` is the
+exception: agy reads a non-zero exit as a hook *crash* (raw stderr surfaced,
+stdout discarded), so its deny is exit 0 and fail-closed is carried by the
+structured ``{"decision": "deny"}`` on stdout, per agy's contract. A *Stop*
+decision never exits 2 — that channel stays fail-open so a guard cannot trap the
+agent mid-turn.
 """
 
 from __future__ import annotations
@@ -248,6 +252,15 @@ class HookEmission(BaseModel):
 
 _FILE_PATH_KEYS = ("file_path", "filePath", "path", "notebook_path", "notebookPath")
 
+# agy's ``toolCall.args`` uses PascalCase keys the other tools never emit:
+# ``TargetFile`` is the write target for ``write_to_file`` /
+# ``replace_file_content`` / ``multi_replace_file_content``. Scoped to the agy
+# args channel only (see ``_extract_file_path``) rather than widening the global
+# ``_FILE_PATH_KEYS`` — so Cursor's top-level fallback and Copilot's ``toolArgs``
+# channel can't be spoofed by a PascalCase key. snake_case is kept after it as
+# defense-in-depth in case a future agy build switches casing.
+_AGY_FILE_PATH_KEYS = ("TargetFile", *_FILE_PATH_KEYS)
+
 
 def _first_str(source: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     """Return the first non-empty string value among ``keys`` in ``source``."""
@@ -278,10 +291,11 @@ def _extract_file_path(data: dict[str, Any]) -> str | None:
 
     Handles Claude/Cursor (``tool_input``/``toolInput`` dict with
     ``file_path``/``filePath``/``path``/``notebook_path``), Copilot (``toolArgs``
-    JSON string), Antigravity CLI (``toolCall.args`` dict), and Cursor's event
-    hooks that place the path at the payload *top level* (e.g. ``beforeReadFile``,
-    which has no ``tool_input`` wrapper). ``notebook_path`` covers NotebookEdit,
-    whose target lives in a differently-named field.
+    JSON string), Antigravity CLI (``toolCall.args`` dict, whose write target is
+    the PascalCase ``TargetFile``), and Cursor's event hooks that place the path
+    at the payload *top level* (e.g. ``beforeReadFile``, which has no
+    ``tool_input`` wrapper). ``notebook_path`` covers NotebookEdit, whose target
+    lives in a differently-named field.
     """
     tool_input = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(tool_input, dict):
@@ -289,7 +303,8 @@ def _extract_file_path(data: dict[str, Any]) -> str | None:
         if found:
             return found
 
-    found = _first_str(_tool_call_args(data), _FILE_PATH_KEYS)
+    # agy's args channel: PascalCase `TargetFile` first, snake_case as fallback.
+    found = _first_str(_tool_call_args(data), _AGY_FILE_PATH_KEYS)
     if found:
         return found
 
@@ -320,9 +335,10 @@ def _extract_command(data: dict[str, Any]) -> str | None:
         val = tool_input.get("command")
         if isinstance(val, str) and val:
             return val
-    # Antigravity CLI nests args under toolCall.args.
-    args_val = _tool_call_args(data).get("command")
-    if isinstance(args_val, str) and args_val:
+    # Antigravity CLI nests args under toolCall.args; its run_command key is the
+    # PascalCase `CommandLine` (snake_case `command` kept as defense-in-depth).
+    args_val = _first_str(_tool_call_args(data), ("CommandLine", "command"))
+    if args_val:
         return args_val
     tool_args = data.get("toolArgs")
     if isinstance(tool_args, str):
@@ -352,6 +368,21 @@ def _extract_tool_name(data: dict[str, Any]) -> str | None:
         if isinstance(name, str) and name:
             return name.lower()
     return None
+
+
+def _extract_cwd(data: dict[str, Any]) -> str | None:
+    """Resolve the command's working directory from any supported dialect.
+
+    A valid top-level lowercase ``cwd`` wins; agy nests its working directory as
+    the PascalCase ``toolCall.args.Cwd``, used only as a fallback. Empty /
+    non-string values are ignored (mirroring ``_first_str``) so a consumer's
+    command guard can resolve a relative shell redirect against the real working
+    directory instead of a ``None``.
+    """
+    top = data.get("cwd")
+    if isinstance(top, str) and top:
+        return top
+    return _first_str(_tool_call_args(data), ("Cwd",))
 
 
 def _canonical_event(event: str | None) -> str | None:
@@ -445,7 +476,7 @@ def parse_event(raw_stdin: str, *, event: str | None = None) -> HookEvent:
         tool_name=_extract_tool_name(data),
         file_path=_extract_file_path(data),
         command=_extract_command(data),
-        cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+        cwd=_extract_cwd(data),
         stop_hook_active=bool(data.get("stop_hook_active") or data.get("stopHookActive")),
         raw=data,
     )
@@ -460,18 +491,23 @@ def emit_decision(
     """Serialize a :class:`HookDecision` into a tool's stdout/stderr/exit contract.
 
     - ``allow`` → exit 0, no output (every tool treats exit 0 as allow), except
-      ``DECISION`` (agy), which gets an explicit ``{}`` — its documented "no
-      opinion, proceed" signal — since a truly empty stdout risks an
-      "invalid hook output" rejection.
-    - ``deny`` → exit 2 always (universal block), plus the dialect's stdout JSON
-      and the reason on stderr (human-readable, honored by ``EXIT_CODE`` tools).
+      ``DECISION`` (agy), which gets an explicit ``{"decision": "allow"}``: agy
+      marks ``decision`` **required** on a tool-call hook and reads a payload
+      with none (a bare ``{}``) as a *deny*, so the allow must name itself.
+    - ``deny`` → exit 2 plus the dialect's stdout JSON and the reason on stderr
+      (human-readable, honored by ``EXIT_CODE`` tools) — except ``DECISION``
+      (agy), which denies at **exit 0** carrying ``{"decision": "deny",
+      "reason": …}``: agy reads a non-zero exit as a hook *crash* and surfaces
+      raw stderr instead of parsing the structured deny, so the block is carried
+      by stdout there, not the exit code.
     - ``context`` → exit 0, with the injection key each tool actually reads:
       ``hookSpecificOutput.additionalContext`` for ``HOOK_SPECIFIC_OUTPUT``
       (Claude/Codex), a **flat** top-level ``additionalContext`` for
       ``PERMISSION_DECISION`` (Copilot), and a top-level ``additional_context``
       for ``PERMISSION`` (Cursor) — the last only on the events Cursor reads it
       on. ``DECISION`` (agy) has no verified context-injection channel, so it
-      degrades to a no-op proceed.
+      degrades to an explicit ``{"decision": "allow"}`` proceed (a bare ``{}``
+      would read as a deny).
 
       The shapes are deliberately *not* interchangeable. Claude validates
       PreToolUse output strictly and silently fails open on an unexpected
@@ -487,7 +523,8 @@ def emit_decision(
     """
     if decision.action == "allow":
         if dialect is HookOutputDialect.DECISION:
-            return HookEmission(stdout=json.dumps({}), exit_code=0)
+            # agy requires an explicit decision; a bare {} reads as a deny.
+            return HookEmission(stdout=json.dumps({"decision": "allow"}), exit_code=0)
         return HookEmission(exit_code=0)
 
     if decision.action == "context":
@@ -519,16 +556,21 @@ def emit_decision(
                 exit_code=0,
             )
         if dialect is HookOutputDialect.DECISION:
-            return HookEmission(stdout=json.dumps({}), exit_code=0)
+            # agy has no verified context channel; degrade to an explicit allow
+            # (a bare {} would read as a deny).
+            return HookEmission(stdout=json.dumps({"decision": "allow"}), exit_code=0)
         return HookEmission(exit_code=0)
 
-    # deny — always exit 2 so the block is honored regardless of dialect.
+    # deny — exit 2 so the block is honored regardless of dialect, except agy
+    # (DECISION), which denies at exit 0 via structured stdout (see below).
     reason = decision.reason
     if dialect is HookOutputDialect.DECISION:
-        # agy blocks a tool call via a top-level {"decision": "deny"}; exit 2
-        # keeps the guard fail-closed if agy ever ignores the stdout decision.
+        # agy blocks a tool call via a top-level {"decision": "deny"} at exit 0.
+        # A non-zero exit makes agy report a hook *crash* (raw stderr, discarded
+        # reason), so the block is carried by stdout here, not the exit code —
+        # per agy's contract. `reason` still goes to stderr for humans/logs.
         agy_deny: dict[str, Any] = {"decision": "deny", "reason": reason}
-        return HookEmission(stdout=json.dumps(agy_deny), stderr=reason, exit_code=2)
+        return HookEmission(stdout=json.dumps(agy_deny), stderr=reason, exit_code=0)
     if dialect is HookOutputDialect.HOOK_SPECIFIC_OUTPUT:
         deny_payload: dict[str, Any] = {
             "hookSpecificOutput": {
