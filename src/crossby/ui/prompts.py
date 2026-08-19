@@ -9,7 +9,7 @@ Uses questionary for arrow-key navigation menus.
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import Any, cast
 
 import questionary
 import typer
@@ -196,9 +196,9 @@ def multi_select(
         return list(range(len(items)))
 
     if select_all:
-        result: list[str] | None = _select_all_checkbox(title, items).ask()
-        _handle_none(result)
-        return _resolve_select_all_indices(result or [], items)
+        select_all_result: list[int | str] | None = _select_all_checkbox(title, items).ask()
+        _handle_none(select_all_result)
+        return _resolve_select_all_indices(select_all_result or [], items)
 
     result = questionary.checkbox(
         title,
@@ -215,13 +215,20 @@ def multi_select(
 
 
 def _build_select_all_choices(items: list[str]) -> list[questionary.Choice]:
-    """Build choices for select_all mode: "Select all" checked, items unchecked."""
+    """Build choices for select_all mode: "Select all" checked, items unchecked.
+
+    Individual choices use their 0-based index as the value (not the label)
+    so duplicate labels and a literal item named "__all__" both stay
+    distinguishable from the "Select all" sentinel.
+    """
     choices = [questionary.Choice("Select all", value=_SELECT_ALL_VALUE, checked=True)]
-    choices.extend(questionary.Choice(item, value=item, checked=False) for item in items)
+    choices.extend(
+        questionary.Choice(item, value=index, checked=False) for index, item in enumerate(items)
+    )
     return choices
 
 
-def _toggle_select_all(selected: list[str], pointed_value: str) -> list[str]:
+def _toggle_select_all(selected: list[int | str], pointed_value: int | str) -> list[int | str]:
     """Apply the mutual-exclusion toggle for one checkbox interaction.
 
     Toggling "Select all" on clears every individual choice (and off leaves
@@ -240,7 +247,7 @@ def _toggle_select_all(selected: list[str], pointed_value: str) -> list[str]:
     return new_selected
 
 
-def _resolve_select_all_indices(selected: list[str], items: list[str]) -> list[int]:
+def _resolve_select_all_indices(selected: list[int | str], items: list[str]) -> list[int]:
     """Map selected checkbox values back to 0-based indices.
 
     "__all__" (or every individual item already checked) resolves to every
@@ -248,7 +255,7 @@ def _resolve_select_all_indices(selected: list[str], items: list[str]) -> list[i
     """
     if _SELECT_ALL_VALUE in selected:
         return list(range(len(items)))
-    return [items.index(v) for v in selected if v in items]
+    return [v for v in selected if isinstance(v, int)]
 
 
 def _select_all_checkbox(title: str, items: list[str]) -> Question:
@@ -280,7 +287,7 @@ def _select_all_checkbox(title: str, items: list[str]) -> Question:
 
     @bindings.add(" ", eager=True)
     def _toggle(_event: Any) -> None:
-        pointed_value = str(ic.get_pointed_at().value)
+        pointed_value = cast("int | str", ic.get_pointed_at().value)
         ic.selected_options = _toggle_select_all(ic.selected_options, pointed_value)
 
     @bindings.add(Keys.Down, eager=True)
