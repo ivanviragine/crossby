@@ -66,19 +66,108 @@ class TestParseEventDialects:
         assert ev.command == "rm -rf /"
         assert ev.file_path is None
 
+    @staticmethod
+    def _agy_payload(name: str, args: dict) -> str:
+        """A live-shaped agy toolCall payload: PascalCase args + the extra
+        envelope keys a real agy capture carries, so a real payload can't
+        regress silently."""
+        return json.dumps(
+            {
+                "toolCall": {
+                    "name": name,
+                    "args": {
+                        **args,
+                        "Cwd": "/repo/wt",
+                        "WaitMsBeforeAsync": 0,
+                    },
+                    "toolAction": "edit",
+                    "toolSummary": "editing a file",
+                },
+                "workspacePaths": ["/repo/wt"],
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        ["write_to_file", "replace_file_content", "multi_replace_file_content"],
+    )
+    def test_antigravity_cli_write_tools_use_pascalcase_targetfile(self, name: str) -> None:
+        # agy's write tools all address their target via PascalCase `TargetFile`
+        # inside toolCall.args — snake_case is never emitted.
+        ev = parse_event(self._agy_payload(name, {"TargetFile": "/repo/wt/a.py"}))
+        assert ev.tool_name == name
+        assert ev.file_path == "/repo/wt/a.py"
+        assert ev.is_write is True
+        assert ev.cwd == "/repo/wt"
+
     @pytest.mark.parametrize("key", ["file_path", "filePath", "path"])
-    def test_antigravity_cli_toolcall_wrapper(self, key: str) -> None:
-        # agy nests the call as {"toolCall": {"name", "args": {...}}}.
-        payload = {"toolCall": {"name": "write_file", "args": {key: "/repo/a.py"}}}
+    def test_antigravity_cli_toolcall_snake_case_fallback(self, key: str) -> None:
+        # Defense-in-depth: if a future agy build ever switches to snake_case,
+        # the args channel still resolves the path.
+        payload = {"toolCall": {"name": "write_to_file", "args": {key: "/repo/a.py"}}}
         ev = parse_event(json.dumps(payload))
-        assert ev.tool_name == "write_file"
+        assert ev.tool_name == "write_to_file"
         assert ev.file_path == "/repo/a.py"
 
-    def test_antigravity_cli_toolcall_command(self) -> None:
+    def test_antigravity_cli_run_command_uses_pascalcase_commandline(self) -> None:
+        # agy's run_command carries the command as PascalCase `CommandLine`.
+        ev = parse_event(self._agy_payload("run_command", {"CommandLine": "git push"}))
+        assert ev.tool_name == "run_command"
+        assert ev.command == "git push"
+        assert ev.cwd == "/repo/wt"
+
+    def test_antigravity_cli_toolcall_command_snake_case_fallback(self) -> None:
         payload = {"toolCall": {"name": "run_command", "args": {"command": "git push"}}}
         ev = parse_event(json.dumps(payload))
         assert ev.tool_name == "run_command"
         assert ev.command == "git push"
+
+    def test_antigravity_cli_nested_cwd_populates_event_cwd(self) -> None:
+        # Without the nested Cwd fallback, a consumer's command guard cannot
+        # resolve a relative redirect against the command's working directory.
+        payload = {"toolCall": {"name": "run_command", "args": {"CommandLine": "ls", "Cwd": "/wt"}}}
+        assert parse_event(json.dumps(payload)).cwd == "/wt"
+
+    def test_top_level_cwd_wins_over_nested_agy_cwd(self) -> None:
+        payload = {
+            "cwd": "/top",
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "ls", "Cwd": "/nested"}},
+        }
+        assert parse_event(json.dumps(payload)).cwd == "/top"
+
+    @pytest.mark.parametrize("bad", ["", 123, None, ["/wt"]])
+    def test_malformed_nested_cwd_ignored(self, bad: object) -> None:
+        # An empty or non-string Cwd yields None when there is no top-level cwd.
+        payload = {"toolCall": {"name": "run_command", "args": {"CommandLine": "ls", "Cwd": bad}}}
+        assert parse_event(json.dumps(payload)).cwd is None
+
+    def test_agy_out_of_worktree_redirect_is_surfaced(self) -> None:
+        # A2 gap closed: an escape redirect must reach HookEvent.command (and
+        # cwd) so a consumer's command guard can inspect it. Denying is the
+        # consumer's job; crossby's job is surfacing command + cwd.
+        ev = parse_event(self._agy_payload("run_command", {"CommandLine": "echo x > ../../escape"}))
+        assert ev.command == "echo x > ../../escape"
+        assert ev.cwd == "/repo/wt"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # Top-level (Cursor-style) PascalCase keys must NOT be read as agy's.
+            {"tool_name": "write", "TargetFile": "/repo/a.py"},
+            {"command": "echo hi", "CommandLine": "echo evil"},
+            # Copilot toolArgs string carrying TargetFile must NOT populate it.
+            {"toolName": "edit", "toolArgs": json.dumps({"TargetFile": "/repo/a.py"})},
+        ],
+    )
+    def test_pascalcase_keys_scoped_to_agy_args_channel(self, payload: dict) -> None:
+        # The PascalCase keys are recognized ONLY inside toolCall.args, pinning
+        # the scoping decision so a non-agy dialect can't be spoofed.
+        ev = parse_event(json.dumps(payload))
+        assert ev.file_path is None
+        # `command`/`CommandLine` at the top level: only the lowercase Cursor
+        # `command` fallback is honored, never a top-level `CommandLine`.
+        assert ev.command in (None, "echo hi")
+        assert ev.command != "echo evil"
 
     def test_cursor_top_level_command(self) -> None:
         # Cursor beforeShellExecution puts command at the top level, no wrapper.
@@ -270,11 +359,12 @@ class TestEmitDecisionAllow:
         assert em.stdout == ""
         assert em.stderr == ""
 
-    def test_allow_emits_empty_object_for_decision_dialect(self) -> None:
-        # agy rejects a truly empty stdout; {} is its "no opinion, proceed" no-op.
+    def test_allow_emits_decision_allow_for_decision_dialect(self) -> None:
+        # agy marks `decision` required on a tool-call hook; a bare {} reads as a
+        # deny, so allow must name itself as {"decision": "allow"}.
         em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION)
         assert em.exit_code == 0
-        assert json.loads(em.stdout) == {}
+        assert json.loads(em.stdout) == {"decision": "allow"}
         assert em.stderr == ""
 
 
@@ -308,16 +398,24 @@ class TestEmitDecisionDeny:
         assert em.stderr == "blocked"
 
     def test_decision_dialect(self) -> None:
-        # agy blocks a tool call via a top-level {"decision": "deny"}; exit 2
-        # keeps the guard fail-closed even if agy ignores the stdout decision.
+        # agy denies at exit 0 via structured stdout: a non-zero exit makes agy
+        # report a hook *crash* (raw stderr, discarded reason), not a clean deny.
         em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.DECISION)
-        assert em.exit_code == 2
-        assert em.stderr == "nope"
+        assert em.exit_code == 0
+        assert em.stderr == "nope"  # reason still on stderr for humans/logs
         assert json.loads(em.stdout) == {"decision": "deny", "reason": "nope"}
 
-    @pytest.mark.parametrize("dialect", list(HookOutputDialect))
-    def test_deny_always_exits_two(self, dialect: HookOutputDialect) -> None:
+    @pytest.mark.parametrize(
+        "dialect",
+        [d for d in HookOutputDialect if d is not HookOutputDialect.DECISION],
+    )
+    def test_non_agy_deny_always_exits_two(self, dialect: HookOutputDialect) -> None:
+        # Every dialect except agy (DECISION) keeps exit-2 fail-closed on deny.
         assert emit_decision(HookDecision.deny("x"), dialect).exit_code == 2
+
+    def test_agy_deny_exits_zero(self) -> None:
+        # DECISION is the single exception — enforced by structured stdout.
+        assert emit_decision(HookDecision.deny("x"), HookOutputDialect.DECISION).exit_code == 0
 
 
 class TestEmitDecisionContext:
@@ -338,11 +436,11 @@ class TestEmitDecisionContext:
         assert em.stdout == ""
 
     def test_context_no_op_for_decision_dialect(self) -> None:
-        # agy has no verified context-injection field, so context degrades to a
-        # bare {} proceed rather than blocking or injecting.
+        # agy has no verified context-injection field, so context degrades to an
+        # explicit {"decision": "allow"} proceed — a bare {} would read as deny.
         em = emit_decision(HookDecision.context("hello"), HookOutputDialect.DECISION)
         assert em.exit_code == 0
-        assert json.loads(em.stdout) == {}
+        assert json.loads(em.stdout) == {"decision": "allow"}
 
     def test_context_injected_for_permission_dialect_on_session_start(self) -> None:
         # Cursor injects context via a top-level `additional_context` field, not
@@ -373,6 +471,71 @@ class TestEmitDecisionContext:
         em = emit_decision(HookDecision.context("hello"), HookOutputDialect.PERMISSION_DECISION)
         assert em.exit_code == 0
         assert json.loads(em.stdout) == {"additionalContext": "hello"}
+
+
+class TestEmitDecisionAgyEventMatrix:
+    """agy's DECISION shape is per-event: PreToolUse carries a decision; every
+    other event expects a bare {} (no decision field).
+
+    Per agy's official hook schema (antigravity.google/docs/hooks): PreToolUse
+    requires `decision`; PostToolUse returns `{}`. agy accepts a `decision` field
+    only on PreToolUse, so any other event (PostToolUse, SessionStart, invocation
+    events) must emit {} — a {"decision": …} there is the wrong schema.
+    """
+
+    # --- PreToolUse: explicit decision required ---
+
+    @pytest.mark.parametrize(
+        ("decision", "expected"),
+        [
+            (HookDecision.allow(), {"decision": "allow"}),
+            (HookDecision.deny("nope"), {"decision": "deny", "reason": "nope"}),
+            (HookDecision.context("hi"), {"decision": "allow"}),
+        ],
+    )
+    def test_pre_tool_use_carries_decision(self, decision: HookDecision, expected: dict) -> None:
+        em = emit_decision(decision, HookOutputDialect.DECISION, event="pre_tool_use")
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == expected
+
+    def test_pre_tool_use_accepts_pascalcase_event_name(self) -> None:
+        # wade may pass the tool-native casing; it is normalized before gating.
+        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event="PreToolUse")
+        assert json.loads(em.stdout) == {"decision": "allow"}
+
+    # --- PostToolUse: bare {}, never a decision field ---
+
+    @pytest.mark.parametrize(
+        "decision",
+        [HookDecision.allow(), HookDecision.deny("nope"), HookDecision.context("hi")],
+    )
+    def test_post_tool_use_is_bare_empty_object(self, decision: HookDecision) -> None:
+        # agy's PostToolUse schema is {} with no decision field; a {"decision":…}
+        # there is the wrong schema. Every action collapses to {} at exit 0.
+        em = emit_decision(decision, HookOutputDialect.DECISION, event="post_tool_use")
+        assert em.exit_code == 0
+        assert json.loads(em.stdout) == {}
+
+    def test_post_tool_use_accepts_pascalcase_event_name(self) -> None:
+        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event="PostToolUse")
+        assert json.loads(em.stdout) == {}
+
+    # --- Any other non-PreToolUse event: also a bare {} ---
+
+    @pytest.mark.parametrize("event", ["session_start", "SessionStart", "user_prompt_submit"])
+    def test_non_pre_tool_use_events_emit_bare_empty_object(self, event: str) -> None:
+        # agy accepts a `decision` only on PreToolUse; every other event (e.g.
+        # wade's agy SessionStart no-op) expects {} — never {"decision": …}.
+        for decision in (HookDecision.allow(), HookDecision.context("hi")):
+            em = emit_decision(decision, HookOutputDialect.DECISION, event=event)
+            assert em.exit_code == 0
+            assert json.loads(em.stdout) == {}
+
+    def test_missing_event_defaults_to_pre_tool_use_gate(self) -> None:
+        # event=None must not silently deny: it defaults to the PreToolUse gate,
+        # so a deny still emits the structured decision rather than a bare {}.
+        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.DECISION)
+        assert json.loads(em.stdout) == {"decision": "deny", "reason": "nope"}
 
 
 class TestEmitStopDecision:
