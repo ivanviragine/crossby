@@ -510,9 +510,9 @@ def emit_decision(
       degrades to a proceed.
 
     ``DECISION`` (agy) is gated by event: only **PreToolUse** carries a
-    ``decision`` (allow/deny) — its **PostToolUse** schema is a bare ``{}`` with
-    no decision field, so on PostToolUse every action collapses to ``{}`` at
-    exit 0 (the call already ran; there is nothing to gate). ``event=None``
+    ``decision`` (allow/deny). Every other event — PostToolUse (schema is a bare
+    ``{}``), SessionStart, invocation events — expects ``{}`` with no decision
+    field, so every action collapses to ``{}`` at exit 0 there. ``event=None``
     defaults to the PreToolUse gate so a missing event can't silently deny.
 
       The shapes are deliberately *not* interchangeable. Claude validates
@@ -528,12 +528,18 @@ def emit_decision(
             gate Cursor's context injection to the events that accept it, and to
             select agy's per-event ``DECISION`` shape (see below).
     """
-    # agy (DECISION) accepts a `decision` only on PreToolUse; its PostToolUse
-    # output schema is a bare {} (no decision field — the call already ran, there
-    # is nothing to gate), so on PostToolUse every action collapses to that
-    # no-op. agy fires no other tool-call event, and event=None defaults to the
-    # PreToolUse gate below so a missing event can never silently deny everything.
-    if dialect is HookOutputDialect.DECISION and _canonical_event(event) == "post_tool_use":
+    # agy (DECISION) accepts a `decision` field ONLY on PreToolUse. Every other
+    # event it fires (PostToolUse — schema is a bare {}; SessionStart /
+    # invocation events) expects `{}` with no decision field: the call is not
+    # being gated there, and a {"decision": …} is the wrong schema (wade's agy
+    # SessionStart no-op, for one, expects {}). So on any non-PreToolUse event
+    # every action collapses to {} at exit 0. event=None defaults to the
+    # PreToolUse gate below, so a missing event can never silently deny.
+    if (
+        dialect is HookOutputDialect.DECISION
+        and (canonical_event := _canonical_event(event)) is not None
+        and canonical_event != "pre_tool_use"
+    ):
         return HookEmission(stdout=json.dumps({}), exit_code=0)
 
     if decision.action == "allow":

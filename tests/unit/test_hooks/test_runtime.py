@@ -474,12 +474,13 @@ class TestEmitDecisionContext:
 
 
 class TestEmitDecisionAgyEventMatrix:
-    """agy's DECISION shape is per-event: PreToolUse carries a decision;
-    PostToolUse must be a bare {} (no decision field — the call already ran).
+    """agy's DECISION shape is per-event: PreToolUse carries a decision; every
+    other event expects a bare {} (no decision field).
 
     Per agy's official hook schema (antigravity.google/docs/hooks): PreToolUse
-    requires `decision`; PostToolUse returns `{}`. session_start is N/A — the agy
-    adapter does not support SessionStart hooks (AntigravityCliAdapter.capabilities).
+    requires `decision`; PostToolUse returns `{}`. agy accepts a `decision` field
+    only on PreToolUse, so any other event (PostToolUse, SessionStart, invocation
+    events) must emit {} — a {"decision": …} there is the wrong schema.
     """
 
     # --- PreToolUse: explicit decision required ---
@@ -518,6 +519,17 @@ class TestEmitDecisionAgyEventMatrix:
     def test_post_tool_use_accepts_pascalcase_event_name(self) -> None:
         em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event="PostToolUse")
         assert json.loads(em.stdout) == {}
+
+    # --- Any other non-PreToolUse event: also a bare {} ---
+
+    @pytest.mark.parametrize("event", ["session_start", "SessionStart", "user_prompt_submit"])
+    def test_non_pre_tool_use_events_emit_bare_empty_object(self, event: str) -> None:
+        # agy accepts a `decision` only on PreToolUse; every other event (e.g.
+        # wade's agy SessionStart no-op) expects {} — never {"decision": …}.
+        for decision in (HookDecision.allow(), HookDecision.context("hi")):
+            em = emit_decision(decision, HookOutputDialect.DECISION, event=event)
+            assert em.exit_code == 0
+            assert json.loads(em.stdout) == {}
 
     def test_missing_event_defaults_to_pre_tool_use_gate(self) -> None:
         # event=None must not silently deny: it defaults to the PreToolUse gate,
