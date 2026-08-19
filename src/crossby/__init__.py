@@ -1,3 +1,3 @@
 """CROSSBY — Cross-platform Bridge for Your AI agents."""
 
-__version__ = "0.24.3"
+__version__ = "0.24.4"
