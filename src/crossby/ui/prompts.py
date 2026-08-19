@@ -9,13 +9,24 @@ Uses questionary for arrow-key navigation menus.
 from __future__ import annotations
 
 import sys
+from typing import Any, cast
 
 import questionary
 import typer
+from prompt_toolkit.application import Application
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
+from questionary.prompts import common
+from questionary.prompts.common import InquirerControl
+from questionary.question import Question
+from questionary.styles import merge_styles_default
 from rich.console import Console
 
 _console = Console(stderr=True)
+
+# Sentinel value for the synthetic "Select all" checkbox choice.
+_SELECT_ALL_VALUE = "__all__"
 
 # Custom prompt_toolkit style matching the color palette
 _style = Style(
@@ -169,16 +180,27 @@ def menu(
 def multi_select(
     title: str,
     items: list[str],
+    select_all: bool = False,
 ) -> list[int]:
     """Checkbox multi-select — arrow keys + Space to toggle, Enter to confirm.
 
     Returns a list of 0-based indices.
     Returns all items when stdin is not a TTY.
+
+    When select_all is True, a "Select all" choice is prepended, checked by
+    default, and mutually exclusive with the individual items: toggling it
+    on unchecks every individual item, and toggling any individual item on
+    unchecks it.
     """
     if not is_tty():
         return list(range(len(items)))
 
-    result: list[str] | None = questionary.checkbox(
+    if select_all:
+        select_all_result: list[int | str] | None = _select_all_checkbox(title, items).ask()
+        _handle_none(select_all_result)
+        return _resolve_select_all_indices(select_all_result or [], items)
+
+    result = questionary.checkbox(
         title,
         choices=items,
         pointer="\u203a",
@@ -190,3 +212,112 @@ def multi_select(
     # Map selected labels back to indices
     selected = result or []
     return [items.index(s) for s in selected if s in items]
+
+
+def _build_select_all_choices(items: list[str]) -> list[questionary.Choice]:
+    """Build choices for select_all mode: "Select all" checked, items unchecked.
+
+    Individual choices use their 0-based index as the value (not the label)
+    so duplicate labels and a literal item named "__all__" both stay
+    distinguishable from the "Select all" sentinel.
+    """
+    choices = [questionary.Choice("Select all", value=_SELECT_ALL_VALUE, checked=True)]
+    choices.extend(
+        questionary.Choice(item, value=index, checked=False) for index, item in enumerate(items)
+    )
+    return choices
+
+
+def _toggle_select_all(selected: list[int | str], pointed_value: int | str) -> list[int | str]:
+    """Apply the mutual-exclusion toggle for one checkbox interaction.
+
+    Toggling "Select all" on clears every individual choice (and off leaves
+    nothing selected). Toggling any individual choice clears "Select all".
+    """
+    if pointed_value == _SELECT_ALL_VALUE:
+        if _SELECT_ALL_VALUE in selected:
+            return []
+        return [_SELECT_ALL_VALUE]
+
+    new_selected = [v for v in selected if v != _SELECT_ALL_VALUE]
+    if pointed_value in new_selected:
+        new_selected.remove(pointed_value)
+    else:
+        new_selected.append(pointed_value)
+    return new_selected
+
+
+def _resolve_select_all_indices(selected: list[int | str], items: list[str]) -> list[int]:
+    """Map selected checkbox values back to 0-based indices.
+
+    "__all__" (or every individual item already checked) resolves to every
+    index; otherwise only the selected items' indices are returned.
+    """
+    if _SELECT_ALL_VALUE in selected:
+        return list(range(len(items)))
+    return [v for v in selected if isinstance(v, int)]
+
+
+def _select_all_checkbox(title: str, items: list[str]) -> Question:
+    """Build a checkbox Question with select_all's mutual-exclusion toggle.
+
+    questionary's public checkbox() has no hook for customizing what a
+    toggle does, so the Space/Enter key bindings are reimplemented here
+    against InquirerControl directly, mirroring questionary's own
+    checkbox.py minus the features (search filter, invert-all) this mode
+    doesn't need.
+    """
+    merged_style = merge_styles_default([_style])
+    ic = InquirerControl(_build_select_all_choices(items), None, pointer="\u203a")
+
+    def get_prompt_tokens() -> list[tuple[str, str]]:
+        tokens = [("class:qmark", "?"), ("class:question", f" {title} ")]
+        if ic.is_answered:
+            tokens.append(("class:answer", f"done ({len(ic.selected_options)} selections)"))
+        else:
+            tokens.append(("class:instruction", "(Space to toggle, Enter to confirm)"))
+        return tokens
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.ControlQ, eager=True)
+    @bindings.add(Keys.ControlC, eager=True)
+    def _abort(event: Any) -> None:
+        event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+    @bindings.add(" ", eager=True)
+    def _toggle(_event: Any) -> None:
+        pointed_value = cast("int | str", ic.get_pointed_at().value)
+        ic.selected_options = _toggle_select_all(ic.selected_options, pointed_value)
+
+    @bindings.add(Keys.Down, eager=True)
+    def _down(_event: Any) -> None:
+        ic.select_next()
+        while not ic.is_selection_valid():
+            ic.select_next()
+
+    @bindings.add(Keys.Up, eager=True)
+    def _up(_event: Any) -> None:
+        ic.select_previous()
+        while not ic.is_selection_valid():
+            ic.select_previous()
+
+    @bindings.add(Keys.ControlM, eager=True)
+    def _submit(event: Any) -> None:
+        ic.is_answered = True
+        selected_values = [c.value for c in ic.get_selected_values()]
+        event.app.exit(result=selected_values)
+
+    @bindings.add(Keys.Any)
+    def _other(_event: Any) -> None:
+        """Disallow inserting other text."""
+
+    layout = common.create_inquirer_layout(ic, get_prompt_tokens)
+
+    return Question(
+        Application(
+            layout=layout,
+            key_bindings=bindings,
+            style=merged_style,
+        )
+    )

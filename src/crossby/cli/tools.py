@@ -152,7 +152,7 @@ def _select_interactive(updatable: list[AIToolID]) -> list[AIToolID]:
     for tool_id in updatable:
         display_name, command = _tool_command(tool_id)
         labels.append(f"{display_name} — {' '.join(command)}")
-    indices = prompts.multi_select("Select tools to update", labels)
+    indices = prompts.multi_select("Select tools to update", labels, select_all=True)
     return [updatable[i] for i in indices]
 
 

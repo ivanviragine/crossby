@@ -142,6 +142,25 @@ class TestSelection:
         assert "No tools selected" in result.output
         run_mock.assert_not_called()
 
+    def test_interactive_prompt_defaults_to_select_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pin_installed(monkeypatch, [AIToolID.CLAUDE, AIToolID.CODEX])
+        _pin_tty(monkeypatch, True)
+        multi_select_mock = MagicMock(return_value=[0, 1])
+        monkeypatch.setattr("crossby.ui.prompts.multi_select", multi_select_mock)
+        monkeypatch.setattr("crossby.ui.prompts.confirm", lambda *_a, **_k: True)
+
+        def fake_run(tool_id: AIToolID) -> UpdateResult:
+            return _result(tool_id, display_name=str(tool_id), command=("x", "update"))
+
+        monkeypatch.setattr("crossby.services.tool_update.run_update", fake_run)
+        result = runner.invoke(app, ["tools", "update"])
+
+        assert result.exit_code == 0, result.output
+        _args, kwargs = multi_select_mock.call_args
+        assert kwargs.get("select_all") is True
+
     def test_non_tty_selects_all_updatable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _pin_installed(monkeypatch, [AIToolID.CLAUDE, AIToolID.CODEX])
         _pin_tty(monkeypatch, False)
