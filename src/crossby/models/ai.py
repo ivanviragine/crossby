@@ -71,10 +71,11 @@ class HookOutputDialect(StrEnum):
       channel.
     - ``DECISION`` — a ``{"decision": "deny"|"allow"|"ask", "reason": …}`` object
       on stdout, with a Stop hook blocking via ``{"decision": "continue"}``
-      (Antigravity CLI / ``agy``). Field names are top-level. On a tool-call hook
-      ``decision`` is **required**: a payload with none (a bare ``{}``) is read
-      as a *deny*, so both allow and context emit an explicit
-      ``{"decision": "allow"}``.
+      (Antigravity CLI / ``agy``). Field names are top-level, and the shape is
+      **per-event**: on **PreToolUse** ``decision`` is **required** — a payload
+      with none (a bare ``{}``) is read as a *deny*, so allow/context emit an
+      explicit ``{"decision": "allow"}`` — but **PostToolUse** expects a bare
+      ``{}`` (no decision field), since the call already ran and cannot be gated.
 
     A deny exits non-zero (2) on every dialect **except** ``DECISION``, so the
     block is honored even by tools that ignore stdout and a security guard stays

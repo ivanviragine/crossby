@@ -491,23 +491,29 @@ def emit_decision(
     """Serialize a :class:`HookDecision` into a tool's stdout/stderr/exit contract.
 
     - ``allow`` → exit 0, no output (every tool treats exit 0 as allow), except
-      ``DECISION`` (agy), which gets an explicit ``{"decision": "allow"}``: agy
-      marks ``decision`` **required** on a tool-call hook and reads a payload
-      with none (a bare ``{}``) as a *deny*, so the allow must name itself.
+      ``DECISION`` (agy) on **PreToolUse**, which gets an explicit
+      ``{"decision": "allow"}``: agy marks ``decision`` **required** on a
+      PreToolUse hook and reads a payload with none (a bare ``{}``) as a *deny*,
+      so the allow must name itself.
     - ``deny`` → exit 2 plus the dialect's stdout JSON and the reason on stderr
       (human-readable, honored by ``EXIT_CODE`` tools) — except ``DECISION``
-      (agy), which denies at **exit 0** carrying ``{"decision": "deny",
-      "reason": …}``: agy reads a non-zero exit as a hook *crash* and surfaces
-      raw stderr instead of parsing the structured deny, so the block is carried
-      by stdout there, not the exit code.
+      (agy) on **PreToolUse**, which denies at **exit 0** carrying
+      ``{"decision": "deny", "reason": …}``: agy reads a non-zero exit as a hook
+      *crash* and surfaces raw stderr instead of parsing the structured deny, so
+      the block is carried by stdout there, not the exit code.
     - ``context`` → exit 0, with the injection key each tool actually reads:
       ``hookSpecificOutput.additionalContext`` for ``HOOK_SPECIFIC_OUTPUT``
       (Claude/Codex), a **flat** top-level ``additionalContext`` for
       ``PERMISSION_DECISION`` (Copilot), and a top-level ``additional_context``
       for ``PERMISSION`` (Cursor) — the last only on the events Cursor reads it
       on. ``DECISION`` (agy) has no verified context-injection channel, so it
-      degrades to an explicit ``{"decision": "allow"}`` proceed (a bare ``{}``
-      would read as a deny).
+      degrades to a proceed.
+
+    ``DECISION`` (agy) is gated by event: only **PreToolUse** carries a
+    ``decision`` (allow/deny) — its **PostToolUse** schema is a bare ``{}`` with
+    no decision field, so on PostToolUse every action collapses to ``{}`` at
+    exit 0 (the call already ran; there is nothing to gate). ``event=None``
+    defaults to the PreToolUse gate so a missing event can't silently deny.
 
       The shapes are deliberately *not* interchangeable. Claude validates
       PreToolUse output strictly and silently fails open on an unexpected
@@ -519,11 +525,20 @@ def emit_decision(
         decision: The tool-neutral decision.
         dialect: The tool's output dialect (from ``AIToolCapabilities``).
         event: Canonical event name, used for the ``hookEventName`` field and to
-            gate Cursor's context injection to the events that accept it.
+            gate Cursor's context injection to the events that accept it, and to
+            select agy's per-event ``DECISION`` shape (see below).
     """
+    # agy (DECISION) accepts a `decision` only on PreToolUse; its PostToolUse
+    # output schema is a bare {} (no decision field — the call already ran, there
+    # is nothing to gate), so on PostToolUse every action collapses to that
+    # no-op. agy fires no other tool-call event, and event=None defaults to the
+    # PreToolUse gate below so a missing event can never silently deny everything.
+    if dialect is HookOutputDialect.DECISION and _canonical_event(event) == "post_tool_use":
+        return HookEmission(stdout=json.dumps({}), exit_code=0)
+
     if decision.action == "allow":
         if dialect is HookOutputDialect.DECISION:
-            # agy requires an explicit decision; a bare {} reads as a deny.
+            # agy PreToolUse requires an explicit decision; a bare {} reads as a deny.
             return HookEmission(stdout=json.dumps({"decision": "allow"}), exit_code=0)
         return HookEmission(exit_code=0)
 
@@ -556,8 +571,10 @@ def emit_decision(
                 exit_code=0,
             )
         if dialect is HookOutputDialect.DECISION:
-            # agy has no verified context channel; degrade to an explicit allow
-            # (a bare {} would read as a deny).
+            # agy has no verified context channel. PostToolUse (where context
+            # normally fires) already returned {} above; anything reaching here
+            # is a non-Post event, so degrade to an explicit allow — a bare {}
+            # would read as a deny on PreToolUse.
             return HookEmission(stdout=json.dumps({"decision": "allow"}), exit_code=0)
         return HookEmission(exit_code=0)
 

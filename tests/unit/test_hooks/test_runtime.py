@@ -474,32 +474,56 @@ class TestEmitDecisionContext:
 
 
 class TestEmitDecisionAgyEventMatrix:
-    """agy's DECISION shape is uniform across the events it supports.
+    """agy's DECISION shape is per-event: PreToolUse carries a decision;
+    PostToolUse must be a bare {} (no decision field — the call already ran).
 
-    The issue's decision-required evidence is PreToolUse; agy also fires
-    PostToolUse. Both are non-blocking-agnostic here — emit_decision does not
-    special-case the event for DECISION — so the shape/exit must be identical.
-    session_start is N/A: the agy adapter does not support SessionStart hooks
-    (verified in AntigravityCliAdapter.capabilities), so it is not exercised.
+    Per agy's official hook schema (antigravity.google/docs/hooks): PreToolUse
+    requires `decision`; PostToolUse returns `{}`. session_start is N/A — the agy
+    adapter does not support SessionStart hooks (AntigravityCliAdapter.capabilities).
     """
 
-    @pytest.mark.parametrize("event", ["pre_tool_use", "post_tool_use"])
-    def test_allow_shape_uniform_across_events(self, event: str) -> None:
-        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event=event)
+    # --- PreToolUse: explicit decision required ---
+
+    @pytest.mark.parametrize(
+        ("decision", "expected"),
+        [
+            (HookDecision.allow(), {"decision": "allow"}),
+            (HookDecision.deny("nope"), {"decision": "deny", "reason": "nope"}),
+            (HookDecision.context("hi"), {"decision": "allow"}),
+        ],
+    )
+    def test_pre_tool_use_carries_decision(self, decision: HookDecision, expected: dict) -> None:
+        em = emit_decision(decision, HookOutputDialect.DECISION, event="pre_tool_use")
         assert em.exit_code == 0
+        assert json.loads(em.stdout) == expected
+
+    def test_pre_tool_use_accepts_pascalcase_event_name(self) -> None:
+        # wade may pass the tool-native casing; it is normalized before gating.
+        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event="PreToolUse")
         assert json.loads(em.stdout) == {"decision": "allow"}
 
-    @pytest.mark.parametrize("event", ["pre_tool_use", "post_tool_use"])
-    def test_deny_shape_uniform_across_events(self, event: str) -> None:
-        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.DECISION, event=event)
+    # --- PostToolUse: bare {}, never a decision field ---
+
+    @pytest.mark.parametrize(
+        "decision",
+        [HookDecision.allow(), HookDecision.deny("nope"), HookDecision.context("hi")],
+    )
+    def test_post_tool_use_is_bare_empty_object(self, decision: HookDecision) -> None:
+        # agy's PostToolUse schema is {} with no decision field; a {"decision":…}
+        # there is the wrong schema. Every action collapses to {} at exit 0.
+        em = emit_decision(decision, HookOutputDialect.DECISION, event="post_tool_use")
         assert em.exit_code == 0
+        assert json.loads(em.stdout) == {}
+
+    def test_post_tool_use_accepts_pascalcase_event_name(self) -> None:
+        em = emit_decision(HookDecision.allow(), HookOutputDialect.DECISION, event="PostToolUse")
+        assert json.loads(em.stdout) == {}
+
+    def test_missing_event_defaults_to_pre_tool_use_gate(self) -> None:
+        # event=None must not silently deny: it defaults to the PreToolUse gate,
+        # so a deny still emits the structured decision rather than a bare {}.
+        em = emit_decision(HookDecision.deny("nope"), HookOutputDialect.DECISION)
         assert json.loads(em.stdout) == {"decision": "deny", "reason": "nope"}
-
-    @pytest.mark.parametrize("event", ["pre_tool_use", "post_tool_use"])
-    def test_context_shape_uniform_across_events(self, event: str) -> None:
-        em = emit_decision(HookDecision.context("hi"), HookOutputDialect.DECISION, event=event)
-        assert em.exit_code == 0
-        assert json.loads(em.stdout) == {"decision": "allow"}
 
 
 class TestEmitStopDecision:
