@@ -45,6 +45,9 @@ class UpdateResult(BaseModel):
     """Success, but the probed version did not change — a known footgun when an
     updater touches a different install than the one on PATH. Informational; it
     never flips ``success``."""
+    updated: bool = False
+    """Success, and the probed version changed (before_version != after_version).
+    Informational; it never flips ``success``."""
     error: str | None = None
     """Always set on failure (``success is False``) so the report never shows a
     bare ✗ with no reason."""
@@ -133,12 +136,19 @@ def run_update(tool_id: AIToolID) -> UpdateResult:
         and after_version is not None
         and before_version == after_version
     )
+    updated = (
+        success
+        and before_version is not None
+        and after_version is not None
+        and before_version != after_version
+    )
     logger.debug(
         "tool_update.run",
         tool=str(tool_id),
         exit_code=exit_code,
         success=success,
         unchanged=unchanged,
+        updated=updated,
     )
     return UpdateResult(
         tool_id=tool_id,
@@ -150,6 +160,7 @@ def run_update(tool_id: AIToolID) -> UpdateResult:
         before_version=before_version,
         after_version=after_version,
         unchanged=unchanged,
+        updated=updated,
         error=error,
     )
 

@@ -117,6 +117,7 @@ class TestRunUpdateSuccess:
         assert result.before_version == "2.1.0"
         assert result.after_version == "2.2.0"
         assert result.unchanged is False
+        assert result.updated is True
         assert result.error is None
         assert result.command == ("claude", "update")
 
@@ -128,6 +129,7 @@ class TestRunUpdateSuccess:
         assert result.before_version is None
         assert result.after_version is None
         assert result.unchanged is False
+        assert result.updated is False
 
     def test_unchanged_when_version_static(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(tool_update, "detect_binary_version", lambda _b: (2, 1, 0))
@@ -136,6 +138,7 @@ class TestRunUpdateSuccess:
         assert result.success is True
         assert result.before_version == result.after_version == "2.1.0"
         assert result.unchanged is True
+        assert result.updated is False
 
 
 class TestRunUpdateFailures:

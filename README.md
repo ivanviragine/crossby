@@ -412,7 +412,7 @@ crossby tools update --dry-run
 crossby tools update --yes
 ```
 
-crossby lists the installed, updatable tools, runs each tool's own updater sequentially — continuing past any failure — and prints a report of `Tool · Version (before → after) · ✓/✗`.
+crossby lists the installed, updatable tools, runs each tool's own updater sequentially — continuing past any failure — and prints a report of `Tool · Version (before → after) · Status (updated / version unchanged / ✓ / ✗)`.
 
 **v1 limitations.** Each tool declares one **static** update command; there is no detection of the install method (npm / brew / standalone). A tool that updates a *different* installation than the one on `PATH` can report success without changing the active version (surfaced as a "version did not change" warning). GUI tools (the Antigravity IDE, VS Code) self-update through their IDE and are never offered. This updates the *managed AI tools*, not the crossby CLI itself.
 

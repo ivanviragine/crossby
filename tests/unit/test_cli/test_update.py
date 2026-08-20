@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.cli.main import app
+from crossby.cli.tools import _status_cell
 from crossby.models.ai import AIToolID
 from crossby.services.tool_update import UpdateResult
 
@@ -36,10 +37,21 @@ def _result(
     success: bool = True,
     before: str | None = "1.0.0",
     after: str | None = "1.1.0",
-    unchanged: bool = False,
+    unchanged: bool | None = None,
+    updated: bool | None = None,
     error: str | None = None,
     output_tail: str = "",
 ) -> UpdateResult:
+    is_unchanged = (
+        unchanged
+        if unchanged is not None
+        else (success and before is not None and after is not None and before == after)
+    )
+    is_updated = (
+        updated
+        if updated is not None
+        else (success and before is not None and after is not None and before != after)
+    )
     return UpdateResult(
         tool_id=tool_id,
         display_name=display_name,
@@ -49,7 +61,8 @@ def _result(
         output_tail=output_tail,
         before_version=before,
         after_version=after,
-        unchanged=unchanged,
+        unchanged=is_unchanged,
+        updated=is_updated,
         error=error,
     )
 
@@ -233,6 +246,7 @@ class TestReport:
         assert "Claude Code" in result.output
         assert "1.0.0" in result.output
         assert "1.1.0" in result.output
+        assert "updated" in result.output
 
     def test_unchanged_warning_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _pin_installed(monkeypatch, [AIToolID.CLAUDE])
@@ -252,7 +266,30 @@ class TestReport:
         result = runner.invoke(app, ["tools", "update"])
 
         assert result.exit_code == 0, result.output
+        assert "version unchanged" in result.output
         assert "version did not change" in result.output
+
+    def test_unknown_version_success_report_renders(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _pin_installed(monkeypatch, [AIToolID.CLAUDE])
+        _pin_tty(monkeypatch, False)
+
+        def fake_run(tool_id: AIToolID) -> UpdateResult:
+            return _result(
+                tool_id,
+                display_name="Claude Code",
+                command=("claude", "update"),
+                before=None,
+                after=None,
+            )
+
+        monkeypatch.setattr("crossby.services.tool_update.run_update", fake_run)
+        result = runner.invoke(app, ["tools", "update"])
+
+        assert result.exit_code == 0, result.output
+        assert "Claude Code" in result.output
+        assert "—" in result.output
+        assert "updated" not in result.output
+        assert "version unchanged" not in result.output
 
     def test_continue_after_failure_nonzero_exit_deterministic_order(
         self, monkeypatch: pytest.MonkeyPatch
@@ -288,3 +325,45 @@ class TestReport:
         assert result.exit_code == 1
         assert "Codex CLI update failed" in result.output
         assert "boom" in result.output
+
+
+class TestStatusCell:
+    def test_updated(self) -> None:
+        r = _result(
+            AIToolID.CLAUDE,
+            display_name="Claude Code",
+            command=("claude", "update"),
+            updated=True,
+        )
+        assert _status_cell(r) == "[success]✓ updated[/]"
+
+    def test_version_unchanged(self) -> None:
+        r = _result(
+            AIToolID.CLAUDE,
+            display_name="Claude Code",
+            command=("claude", "update"),
+            before="1.0.0",
+            after="1.0.0",
+            unchanged=True,
+        )
+        assert _status_cell(r) == "[dim]✓ version unchanged[/]"
+
+    def test_unknown_version_success(self) -> None:
+        r = _result(
+            AIToolID.CLAUDE,
+            display_name="Claude Code",
+            command=("claude", "update"),
+            before=None,
+            after=None,
+        )
+        assert _status_cell(r) == "[success]✓[/]"
+
+    def test_failed(self) -> None:
+        r = _result(
+            AIToolID.CLAUDE,
+            display_name="Claude Code",
+            command=("claude", "update"),
+            success=False,
+            error="failed",
+        )
+        assert _status_cell(r) == "[error]✗[/]"

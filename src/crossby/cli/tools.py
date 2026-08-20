@@ -175,8 +175,7 @@ def _render_report(results: list[UpdateResult]) -> None:
     table.add_column("Version")
     table.add_column("Status", justify="center")
     for r in results:
-        status = f"[success]{console.OK}[/]" if r.success else f"[error]{console.ERR}[/]"
-        table.add_row(r.display_name, _version_cell(r), status)
+        table.add_row(r.display_name, _version_cell(r), _status_cell(r))
     console.empty()
     console.out.print(table)
 
@@ -194,6 +193,17 @@ def _render_report(results: list[UpdateResult]) -> None:
                 f"{r.display_name} reported success but version did not change "
                 f"({r.before_version})."
             )
+
+
+def _status_cell(result: UpdateResult) -> str:
+    """Format the Status column: updated, version unchanged, unknown-version success, or failed."""
+    if not result.success:
+        return f"[error]{console.ERR}[/]"
+    if result.updated:
+        return f"[success]{console.OK} updated[/]"
+    if result.unchanged:
+        return f"[dim]{console.OK} version unchanged[/]"
+    return f"[success]{console.OK}[/]"
 
 
 def _version_cell(result: UpdateResult) -> str:
