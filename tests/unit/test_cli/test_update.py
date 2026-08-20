@@ -266,7 +266,7 @@ class TestReport:
         result = runner.invoke(app, ["tools", "update"])
 
         assert result.exit_code == 0, result.output
-        assert "up to date" in result.output
+        assert "version unchanged" in result.output
         assert "version did not change" in result.output
 
     def test_unknown_version_success_report_renders(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +289,7 @@ class TestReport:
         assert "Claude Code" in result.output
         assert "—" in result.output
         assert "updated" not in result.output
-        assert "up to date" not in result.output
+        assert "version unchanged" not in result.output
 
     def test_continue_after_failure_nonzero_exit_deterministic_order(
         self, monkeypatch: pytest.MonkeyPatch
@@ -337,7 +337,7 @@ class TestStatusCell:
         )
         assert _status_cell(r) == "[success]✓ updated[/]"
 
-    def test_up_to_date(self) -> None:
+    def test_version_unchanged(self) -> None:
         r = _result(
             AIToolID.CLAUDE,
             display_name="Claude Code",
@@ -346,7 +346,7 @@ class TestStatusCell:
             after="1.0.0",
             unchanged=True,
         )
-        assert _status_cell(r) == "[dim]✓ up to date[/]"
+        assert _status_cell(r) == "[dim]✓ version unchanged[/]"
 
     def test_unknown_version_success(self) -> None:
         r = _result(

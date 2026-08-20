@@ -196,13 +196,13 @@ def _render_report(results: list[UpdateResult]) -> None:
 
 
 def _status_cell(result: UpdateResult) -> str:
-    """Format the Status column: updated, up to date, unknown-version success, or failed."""
+    """Format the Status column: updated, version unchanged, unknown-version success, or failed."""
     if not result.success:
         return f"[error]{console.ERR}[/]"
     if result.updated:
         return f"[success]{console.OK} updated[/]"
     if result.unchanged:
-        return f"[dim]{console.OK} up to date[/]"
+        return f"[dim]{console.OK} version unchanged[/]"
     return f"[success]{console.OK}[/]"
 
 
