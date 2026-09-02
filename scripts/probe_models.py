@@ -44,8 +44,12 @@ _SCRAPE_PATTERNS: dict[str, str] = {
 }
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# Version part mirrors the family-anchored scrape pattern above, so a dated
+# snapshot collapses to its alias whether the docs publish a one-part version
+# (claude-sonnet-5-20260101), a dashed two-part one (claude-haiku-4-5-20251001),
+# or a dotted one (claude-haiku-4.5-20260101).
 _CLAUDE_DATED_ALIAS_RE = re.compile(
-    r"(claude-(?:opus|sonnet|haiku|fable)-\d-\d)-\d{8}(?:-v\d+)?"
+    r"(claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?)-\d{8}(?:-v\d+)?"
 )
 # Provider-agnostic: matches the model-ID column of `agy models` output
 # regardless of vendor prefix (gemini, claude, gpt, or a future mai/grok/o3
@@ -174,11 +178,15 @@ def parse_documented_models(tool: str, text: str) -> set[str]:
         if start < 0 or end < 0:
             return set()
         current_lineup = text[start:end]
-        models = _pattern_matches(pattern, current_lineup)
         # The current table may publish only a dated snapshot (currently Haiku
         # 4.5), while Crossby's Claude adapter stores and launches the stable
         # alias. Collapse that date here before adapter punctuation handling.
-        models.update(_CLAUDE_DATED_ALIAS_RE.findall(current_lineup))
+        models = set(_CLAUDE_DATED_ALIAS_RE.findall(current_lineup))
+        # Consume the dated tokens before the generic pass. Left in place, a
+        # dotted snapshot lets the generic pattern backtrack past the version's
+        # second component and emit a truncated ID (claude-haiku-4.5-20260101 ->
+        # "claude-haiku-4"), which would be reported as a new catalog model.
+        models.update(_pattern_matches(pattern, _CLAUDE_DATED_ALIAS_RE.sub(" ", current_lineup)))
         return models
 
     if tool == "codex":
