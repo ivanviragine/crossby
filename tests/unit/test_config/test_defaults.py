@@ -36,26 +36,29 @@ def _iter_tier_defaults() -> list[tuple[str, str, str]]:
 _ALL_DEFAULT_MODEL_IDS = sorted({model_id for _, _, model_id in _iter_tier_defaults()})
 
 # Expected tier for every distinct TOOL_DEFAULTS model ID, hand-derived from
-# classify_tier_universal's documented keyword rules (haiku/flash/mini -> FAST;
-# opus/pro/max -> POWERFUL; sonnet or no keyword -> BALANCED). Pins how the novel
-# effort-encoded IDs (composer-2.5-fast, claude-opus-5-high, gemini-3.6-flash-*)
+# classify_tier_universal's documented keyword rules (haiku/flash/mini/luna ->
+# FAST; opus/fable/pro/sol/max -> POWERFUL; sonnet/terra or no keyword ->
+# BALANCED). Pins how the novel effort-encoded IDs
+# (composer-2.5-fast, claude-opus-5-high, gemini-3.7-flash-*)
 # parse, so a regex/keyword regression fails the test instead of slipping through.
 _EXPECTED_TIERS: dict[str, ModelTier] = {
     "anthropic/claude-haiku-4.5": ModelTier.FAST,
     "anthropic/claude-opus-4.7": ModelTier.POWERFUL,
     "anthropic/claude-sonnet-4.6": ModelTier.BALANCED,
+    "claude-fable-5.1": ModelTier.POWERFUL,
     "claude-haiku-4.5": ModelTier.FAST,
-    "claude-opus-5": ModelTier.POWERFUL,
     "claude-opus-5-high": ModelTier.POWERFUL,
+    "claude-sonnet-4.6": ModelTier.BALANCED,
     "claude-sonnet-5": ModelTier.BALANCED,
     "composer-2.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
     "composer-2.5-fast": ModelTier.BALANCED,  # "fast" is not a classifier keyword
-    "gemini-3.6-flash-high": ModelTier.FAST,
-    "gemini-3.6-flash-low": ModelTier.FAST,
-    "gemini-3.6-flash-medium": ModelTier.FAST,
-    "gpt-5.4": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
-    "gpt-5.4-mini": ModelTier.FAST,
-    "gpt-5.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
+    "gemini-3.7-flash-high": ModelTier.FAST,
+    "gemini-3.7-flash-low": ModelTier.FAST,
+    "gemini-3.7-flash-medium": ModelTier.FAST,
+    "gpt-5.4": ModelTier.POWERFUL,
+    "gpt-5.6-luna": ModelTier.FAST,
+    "gpt-5.6-sol": ModelTier.POWERFUL,
+    "gpt-5.6-terra": ModelTier.BALANCED,
 }
 
 
@@ -118,6 +121,33 @@ class TestDefaultsRegistryGuard:
         # classifying by their family keyword rather than shifting tier.
         assert classify_tier_universal(model_id) == _EXPECTED_TIERS[model_id]
 
+    @pytest.mark.parametrize(
+        "tool_id",
+        [AIToolID.CLAUDE, AIToolID.COPILOT, AIToolID.CODEX, AIToolID.OPENCODE],
+    )
+    def test_provider_with_three_roles_assigns_each_slot_semantically(self, tool_id: str) -> None:
+        mapping = get_defaults(tool_id)
+        assert classify_tier_universal(mapping.easy) == ModelTier.FAST
+        assert classify_tier_universal(mapping.medium) == ModelTier.BALANCED
+        assert classify_tier_universal(mapping.complex) == ModelTier.BALANCED
+        assert classify_tier_universal(mapping.very_complex) == ModelTier.POWERFUL
+
+
+class TestDocumentedFamilyRoles:
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            ("gpt-5.6-luna-high", ModelTier.FAST),
+            ("gpt-5.6-terra-low", ModelTier.BALANCED),
+            ("gpt-5.6-sol-none", ModelTier.POWERFUL),
+            ("claude-fable-5.1-low", ModelTier.POWERFUL),
+        ],
+    )
+    def test_explicit_family_component_controls_tier(
+        self, model_id: str, expected: ModelTier
+    ) -> None:
+        assert classify_tier_universal(model_id) == expected
+
 
 class TestClaudeTierDefaults:
     """Claude fallback tiers track the current model generation (WADE #309 port)."""
@@ -127,4 +157,31 @@ class TestClaudeTierDefaults:
         assert mapping.easy == "claude-haiku-4.5"
         assert mapping.medium == "claude-sonnet-5"
         assert mapping.complex == "claude-sonnet-5"
-        assert mapping.very_complex == "claude-opus-5"
+        assert mapping.very_complex == "claude-fable-5.1"
+
+
+@pytest.mark.parametrize(
+    ("tool_id", "expected"),
+    [
+        (
+            AIToolID.COPILOT,
+            ("claude-haiku-4.5", "claude-sonnet-4.6", "claude-sonnet-4.6", "gpt-5.4"),
+        ),
+        (
+            AIToolID.ANTIGRAVITY_CLI,
+            (
+                "gemini-3.7-flash-low",
+                "gemini-3.7-flash-medium",
+                "gemini-3.7-flash-medium",
+                "gemini-3.7-flash-high",
+            ),
+        ),
+        (
+            AIToolID.CODEX,
+            ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-terra", "gpt-5.6-sol"),
+        ),
+    ],
+)
+def test_refreshed_provider_defaults(tool_id: AIToolID, expected: tuple[str, ...]) -> None:
+    mapping = get_defaults(tool_id)
+    assert tuple(getattr(mapping, tier) for tier in _TIERS) == expected

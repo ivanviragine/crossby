@@ -143,16 +143,13 @@ class TestAntigravityCLIEffort:
         assert _model_of(cmd) == model
         assert "--effort" not in cmd
 
-    def test_retired_gpt_oss_suffix_drops_to_bare_base(self) -> None:
-        # gpt-oss-120b takes no effort; the retired 'gpt-oss-120b-medium' catalog
-        # ID (renamed to bare 'gpt-oss-120b' in this PR) may linger in a stored
-        # config. It must resolve to bare 'gpt-oss-120b' — agy rejects the
-        # suffixed form — with a warning and no --effort flag.
-        with pytest.warns(UserWarning, match="does not accept a reasoning effort"):
-            cmd = AntigravityCLIAdapter().build_launch_command(
-                model="gpt-oss-120b-medium", effort=None
-            )
-        assert _model_of(cmd) == "gpt-oss-120b"
+    def test_fixed_gpt_oss_suffix_is_preserved_exactly(self) -> None:
+        # `agy models` reports this exact ID. Its suffix is part of the model
+        # name, so even a separately requested effort must not rewrite it.
+        cmd = AntigravityCLIAdapter().build_launch_command(
+            model="gpt-oss-120b-medium", effort=EffortLevel.HIGH
+        )
+        assert _model_of(cmd) == "gpt-oss-120b-medium"
         assert "--effort" not in cmd
 
 

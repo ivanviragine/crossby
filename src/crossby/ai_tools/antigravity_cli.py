@@ -29,6 +29,11 @@ _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
     "gemini-3.1-pro": (EffortLevel.LOW, EffortLevel.HIGH),
 }
 
+# These suffixes are part of the exact provider model ID, not a reasoning
+# effort that Crossby may rewrite. Keep this separate from the Gemini effort
+# table so a caller-supplied effort remains irrelevant for these fixed IDs.
+_ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS = frozenset({"gpt-oss-120b-medium"})
+
 # Effort suffixes that may appear on a stored model ID. agy only *emits* the
 # low/medium/high tiers, but a hand-written config could carry an ``-xhigh``/
 # ``-max`` suffix agy rejects; recognizing them lets resolve_effort_model
@@ -180,11 +185,9 @@ class AntigravityCLIAdapter(AbstractAITool):
 
         Covers, in one pass:
 
-        - **Bare models** (``claude-*``, ``gpt-oss-120b``): returned unchanged —
-          effort does not apply and agy launches them bare. A stored effort
-          suffix on such a base (the retired ``gpt-oss-120b-medium`` catalog ID)
-          is spurious and dropped, with a warning, so agy is never handed a
-          suffixed ID it rejects.
+        - **Fixed/bare models** (``claude-*``, ``gpt-oss-120b*``): returned
+          unchanged — effort does not apply. ``gpt-oss-120b-medium`` is an
+          exact provider ID whose suffix is part of its name, not an effort.
         - **Precedence**: an effort already baked into the ID wins over a
           separately supplied ``effort`` (agy would reject the two together).
         - **No effort anywhere**: a deterministic default is baked in so the
@@ -198,13 +201,15 @@ class AntigravityCLIAdapter(AbstractAITool):
             # No --model to bake effort into (e.g. effort supplied with no model).
             return model
 
+        if model in _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS:
+            return model
+
         base, suffix_effort = _split_effort_suffix(model)
         tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
         if tiers is None:
-            # Non-Gemini base: agy launches it bare and rejects a baked effort. A
-            # stored effort suffix on such a base (e.g. the retired
-            # ``gpt-oss-120b-medium`` catalog ID) is spurious — drop it so the
-            # command stays valid instead of passing an ID agy would reject.
+            # Unknown non-Gemini suffixes are treated as invalid stored effort
+            # values and repaired to their bare base. Exact fixed-suffix model
+            # IDs returned above never enter this compatibility path.
             if suffix_effort is not None:
                 dropped = f"-{suffix_effort.value}"
                 warnings.warn(

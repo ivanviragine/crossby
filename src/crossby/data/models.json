@@ -7,7 +7,8 @@
     "claude-opus-4.7",
     "claude-opus-4.8",
     "claude-opus-5",
-    "claude-fable-5"
+    "claude-fable-5",
+    "claude-fable-5.1"
   ],
   "cursor": [
     "auto",
@@ -25,6 +26,16 @@
     "claude-4.6-opus-max-thinking",
     "claude-4.6-sonnet-medium",
     "claude-4.6-sonnet-medium-thinking",
+    "claude-fable-5-1-high",
+    "claude-fable-5-1-low",
+    "claude-fable-5-1-max",
+    "claude-fable-5-1-medium",
+    "claude-fable-5-1-thinking-high",
+    "claude-fable-5-1-thinking-low",
+    "claude-fable-5-1-thinking-max",
+    "claude-fable-5-1-thinking-medium",
+    "claude-fable-5-1-thinking-xhigh",
+    "claude-fable-5-1-xhigh",
     "claude-fable-5-high",
     "claude-fable-5-low",
     "claude-fable-5-max",
@@ -265,6 +276,7 @@
     "gemini-3.1-pro-preview",
     "gemini-3.5-flash",
     "gemini-3.6-flash",
+    "gemini-3.7-flash",
     "gpt-4.1",
     "gpt-5-mini",
     "gpt-5.1",
@@ -284,7 +296,8 @@
     "gemini-3.1-pro",
     "claude-sonnet-4-6",
     "claude-opus-4-6-thinking",
-    "gpt-oss-120b"
+    "gpt-oss-120b",
+    "gpt-oss-120b-medium"
   ],
   "codex": [
     "gpt-5",
@@ -471,9 +484,11 @@
     "opencode/gpt-5-nano",
     "opencode/hy3-free",
     "opencode/laguna-s-2.1-free",
+    "opencode/ling-3.0-flash-fin-free",
     "opencode/ling-3.0-flash-free",
     "opencode/mimo-v2.5-free",
     "opencode/minimax-m2.5-free",
+    "opencode/muse-spark-1.2-contributor-free",
     "opencode/nemotron-3-ultra-free",
     "opencode/nemotron-3.5-lightning-free",
     "opencode/north-mini-code-free",

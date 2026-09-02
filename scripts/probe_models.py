@@ -44,6 +44,9 @@ _SCRAPE_PATTERNS: dict[str, str] = {
 }
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_CLAUDE_DATED_ALIAS_RE = re.compile(
+    r"(claude-(?:opus|sonnet|haiku|fable)-\d-\d)-\d{8}(?:-v\d+)?"
+)
 # Provider-agnostic: matches the model-ID column of `agy models` output
 # regardless of vendor prefix (gemini, claude, gpt, or a future mai/grok/o3
 # family), as long as it looks like a multi-segment identifier (e.g.
@@ -160,6 +163,23 @@ def parse_documented_models(tool: str, text: str) -> set[str]:
     the visible heading text to isolate the actual table.
     """
     pattern = _SCRAPE_PATTERNS[tool]
+
+    if tool == "claude":
+        # The model hub embeds legacy model metadata after the visible page.
+        # Restrict discovery to the current-lineup comparison so retired IDs
+        # do not appear as newly available merely because their model cards
+        # remain linked from the page payload.
+        start = text.find('id="latest-models-comparison"')
+        end = text.find('id="using-the-models-api"', start if start >= 0 else 0)
+        if start < 0 or end < 0:
+            return set()
+        current_lineup = text[start:end]
+        models = _pattern_matches(pattern, current_lineup)
+        # The current table may publish only a dated snapshot (currently Haiku
+        # 4.5), while Crossby's Claude adapter stores and launches the stable
+        # alias. Collapse that date here before adapter punctuation handling.
+        models.update(_CLAUDE_DATED_ALIAS_RE.findall(current_lineup))
+        return models
 
     if tool == "codex":
         full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", text)
