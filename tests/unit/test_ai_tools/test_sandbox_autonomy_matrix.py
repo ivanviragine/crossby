@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,30 @@ def test_unsupported_adapter_keeps_preexisting_trusted_dirs() -> None:
     sandboxed = adapter.build_launch_command(trusted_dirs=["/tmp/plan"], sandbox=True)
     unsandboxed = adapter.build_launch_command(trusted_dirs=["/tmp/plan"], sandbox=False)
     assert sandboxed == unsandboxed == ["claude", "--add-dir", "/tmp/plan"]
+
+
+def test_unsupported_adapter_preserves_legacy_sandbox_config_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = AbstractAITool.get("claude")
+
+    def legacy_sandbox_config_args(
+        *,
+        autonomy_args: list[str],
+        trusted_dirs: list[str] | None,
+        working_dir: Path | None,
+        network_access: bool,
+    ) -> list[str]:
+        return ["--legacy-trusted", *(trusted_dirs or [])]
+
+    monkeypatch.setattr(adapter, "sandbox_config_args", legacy_sandbox_config_args)
+
+    assert adapter.capabilities().supports_sandbox_toggle is False
+    assert adapter.build_launch_command(trusted_dirs=["/tmp/plan"], sandbox=False) == [
+        "claude",
+        "--legacy-trusted",
+        "/tmp/plan",
+    ]
 
 
 @pytest.mark.parametrize(

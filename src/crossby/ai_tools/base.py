@@ -694,13 +694,14 @@ class AbstractAITool(ABC):
                 sandbox=sandbox,
             )
         else:
-            sandbox_args = AbstractAITool.sandbox_config_args(
-                self,
+            # Preserve pre-toggle adapter overrides, whose signatures do not
+            # accept ``sandbox``. Capability-enabled overrides gate selection
+            # themselves when their capability is disabled dynamically.
+            sandbox_args = self.sandbox_config_args(
                 autonomy_args=autonomy_args,
                 trusted_dirs=trusted_dirs,
                 working_dir=working_dir,
                 network_access=network_access,
-                sandbox=sandbox,
             )
         cmd.extend(sandbox_args)
 

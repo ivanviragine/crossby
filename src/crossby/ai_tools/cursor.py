@@ -108,6 +108,13 @@ class CursorAdapter(AbstractAITool):
         sandbox: bool = True,
     ) -> list[str]:
         """Select Cursor's sandbox explicitly for every adapter launch."""
+        if not self.capabilities().supports_sandbox_toggle:
+            return super().sandbox_config_args(
+                autonomy_args=autonomy_args,
+                trusted_dirs=trusted_dirs,
+                working_dir=working_dir,
+                network_access=network_access,
+            )
         return ["--sandbox", "enabled" if sandbox else "disabled"]
 
     def initial_message_args(self, prompt: str) -> list[str]:
