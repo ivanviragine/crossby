@@ -29,13 +29,18 @@ class TestAcceptEditsArgs:
             "acceptEdits",
         ]
 
-    def test_codex_untrusted_approval_only(self) -> None:
-        # accept_edits_args() is now the approval half only; the
+    def test_codex_on_request_approval_only(self) -> None:
+        # accept_edits_args() is the approval half only; the
         # ``--sandbox workspace-write`` it needs is emitted once by the
-        # centralized sandbox composer. The removed --approval-mode auto-edit
-        # must NOT be used.
+        # centralized sandbox composer. Codex CLI 0.152 removed ``untrusted``
+        # from ``--ask-for-approval``, so accept-edits now uses ``-a on-request``
+        # (the surviving human-in-the-loop policy). ``--approve-for-me`` is NOT
+        # used (it drops the human prompt), nor is the removed --approval-mode
+        # auto-edit or a bare ``-s`` sandbox flag.
         args = AbstractAITool.get("codex").accept_edits_args()
-        assert args == ["-a", "untrusted"]
+        assert args == ["-a", "on-request"]
+        assert "untrusted" not in args
+        assert "--approve-for-me" not in args
         assert "--approval-mode" not in args
         assert "-s" not in args
 
@@ -92,17 +97,20 @@ class TestAcceptEditsComposition:
     def test_codex(self) -> None:
         # accept-edits (non-worktree): approval flag + a single
         # ``--sandbox workspace-write`` + an explicit network-off pin. No
-        # writable_roots without a worktree working_dir.
+        # writable_roots without a worktree working_dir. Codex CLI 0.152
+        # rejects ``-a untrusted``; accept-edits now uses ``-a on-request``.
         cmd = AbstractAITool.get("codex").build_launch_command(accept_edits=True)
         assert cmd == [
             "codex",
             "-a",
-            "untrusted",
+            "on-request",
             "--sandbox",
             "workspace-write",
             "-c",
             "sandbox_workspace_write.network_access=false",
         ]
+        assert "untrusted" not in cmd
+        assert "--approve-for-me" not in cmd
 
     def test_cursor_emits_no_extra_flag(self) -> None:
         adapter = AbstractAITool.get("cursor")
@@ -132,11 +140,12 @@ class TestAutoDowngrade:
         adapter = AbstractAITool.get("codex")
         with pytest.warns(UserWarning, match="downgrading to accept-edits"):
             cmd = adapter.build_launch_command(auto=True)
-        # auto downgrades to accept-edits, which resolves to ``-a untrusted`` and
-        # forces the single ``--sandbox workspace-write`` via the composer.
-        assert "untrusted" in cmd
+        # auto downgrades to accept-edits, which resolves to ``-a on-request``
+        # and forces the single ``--sandbox workspace-write`` via the composer.
+        assert "on-request" in cmd
+        assert "untrusted" not in cmd
         assert cmd.count("workspace-write") == 1
-        assert cmd.index("-a") < cmd.index("--sandbox")
+        assert cmd.index("on-request") < cmd.index("--sandbox")
 
     def test_cursor_downgrades_to_accept_edits_no_flag(self) -> None:
         adapter = AbstractAITool.get("cursor")
