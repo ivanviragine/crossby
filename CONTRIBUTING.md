@@ -105,7 +105,14 @@ The adapter pattern is designed so adding a tool is a single-file change.
 2. Create `src/crossby/ai_tools/<tool>.py` subclassing `AbstractAITool`:
    - Set `TOOL_ID = AIToolID.<TOOL>` (this auto-registers the adapter).
    - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, `supports_*` booleans.
-   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`, `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, `initial_message_args()`. A tool that can explicitly enable and disable its sandbox declares `supports_sandbox_toggle=True` and overrides `sandbox_config_args()`; Codex owns sandbox mode, writable roots, and network composition there, while Cursor maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this hook.
+   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`,
+     `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, and
+     `initial_message_args()`. A tool that can explicitly enable and disable its sandbox
+     declares `supports_sandbox_toggle=True` and overrides `sandbox_config_args()`;
+     Codex owns sandbox mode, writable roots, and network composition there, while Cursor
+     maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this
+     hook. Adapters without the capability may retain a pre-toggle
+     `build_launch_command()` override: `launch()` does not forward `sandbox` to it.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
