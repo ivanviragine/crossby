@@ -51,7 +51,9 @@ _EXPECTED_TIERS: dict[str, ModelTier] = {
     "claude-sonnet-4.6": ModelTier.BALANCED,
     "claude-sonnet-5": ModelTier.BALANCED,
     "composer-2.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
-    "composer-2.5-fast": ModelTier.BALANCED,  # "fast" is not a classifier keyword
+    # "fast" is not a FAST keyword (haiku/flash/spark/mini/luna are), so this
+    # falls through to the BALANCED default despite how the name reads.
+    "composer-2.5-fast": ModelTier.BALANCED,
     "gemini-3.7-flash-high": ModelTier.FAST,
     "gemini-3.7-flash-low": ModelTier.FAST,
     "gemini-3.7-flash-medium": ModelTier.FAST,

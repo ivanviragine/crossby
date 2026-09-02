@@ -376,13 +376,13 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI  |
-| ------------- | -------- | ------- | -------- | ------------------- | ---------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`    |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium` |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`   |
-| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI (Gemini only) |
+| ------------- | -------- | ------- | -------- | ------------------- | ----------------------------- |
+| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`                 |
+| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium`              |
+| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

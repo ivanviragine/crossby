@@ -144,13 +144,17 @@ class TestRegistryGetModels:
         models = adapter.get_models()
         model_ids = [m.id for m in models]
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
-        # Catalog lists base IDs only — effort is baked in at launch, not stored.
+        # The catalog mixes bare Gemini IDs (effort is baked in at launch, not
+        # stored) with fixed provider IDs whose suffix is part of the name.
         assert "gemini-3.7-flash" in model_ids
         assert "gemini-3.7-flash-high" not in model_ids
         assert "gemini-3.7-flash-medium" not in model_ids
         assert "gemini-3.7-flash-low" not in model_ids
         assert "gemini-3.6-flash" in model_ids
         assert "gemini-3.6-flash-high" not in model_ids
+        # Not an effort variant of gpt-oss-120b: `agy models` reports both as
+        # distinct fixed IDs, so the catalog stores the suffix verbatim.
+        assert "gpt-oss-120b" in model_ids
         assert "gpt-oss-120b-medium" in model_ids
 
     def test_codex_adapter_reads_registry(self) -> None:
