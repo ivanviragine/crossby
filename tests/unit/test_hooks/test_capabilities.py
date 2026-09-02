@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from crossby.ai_tools import AbstractAITool
-from crossby.models.ai import AIToolID, HookOutputDialect
+from crossby.models.ai import AIToolCapabilities, AIToolID, AIToolType, HookOutputDialect
 
 
 def _caps(tool: AIToolID):
@@ -58,6 +58,20 @@ class TestUserPromptSubmitHookSupport:
 
 
 class TestSandboxAndFailOpen:
+    def test_sandbox_toggle_is_codex_and_cursor_only(self) -> None:
+        supported = {AIToolID.CODEX, AIToolID.CURSOR}
+        for tool in AbstractAITool.available_tools():
+            assert _caps(tool).supports_sandbox_toggle is (tool in supported)
+
+    def test_sandbox_toggle_defaults_false(self) -> None:
+        caps = AIToolCapabilities(
+            tool_id=AIToolID.VSCODE,
+            display_name="test",
+            binary="test",
+            tool_type=AIToolType.GUI,
+        )
+        assert caps.supports_sandbox_toggle is False
+
     def test_codex_sandboxes_writes(self) -> None:
         assert _caps(AIToolID.CODEX).sandboxes_writes is True
 

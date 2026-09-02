@@ -104,19 +104,31 @@ class TestResumeContextNoTypeError:
             "opencode": ["opencode", "-s", "sid"],
             "antigravity-cli": ["agy", "--conversation", "sid"],
         }
-        for tool, want in expected.items():
-            adapter = AbstractAITool.get(tool)
-            # Passing working_dir (even a real worktree) + network must not raise
-            # and must not change the non-Codex command.
-            cmd = adapter.build_resume_command("sid", working_dir=tmp_path, network_access=True)
-            assert cmd == want
+        for sandbox in (True, False):
+            for tool, want in expected.items():
+                adapter = AbstractAITool.get(tool)
+                # Passing every sandbox context value must not raise or change
+                # the command for a non-supporting adapter.
+                cmd = adapter.build_resume_command(
+                    "sid",
+                    working_dir=tmp_path,
+                    network_access=True,
+                    sandbox=sandbox,
+                )
+                assert cmd == want
 
     def test_base_default_accepts_context(self) -> None:
         from crossby.ai_tools.base import AbstractAITool
         from crossby.models.ai import AIToolID
 
         adapter = AbstractAITool.get(AIToolID.VSCODE)
-        assert adapter.build_resume_command("x", working_dir=None, network_access=True) is None
+        for sandbox in (True, False):
+            assert (
+                adapter.build_resume_command(
+                    "x", working_dir=None, network_access=True, sandbox=sandbox
+                )
+                is None
+            )
 
 
 class TestGuiLaunchAcceptsNetwork:
@@ -131,7 +143,12 @@ class TestGuiLaunchAcceptsNetwork:
         for tool in (AIToolID.VSCODE, AIToolID.ANTIGRAVITY):
             adapter = AbstractAITool.get(tool)
             module = type(adapter).__module__
-            with patch(f"{module}.run_with_transcript", return_value=0) as mock_run:
-                rc = adapter.launch(working_dir=tmp_path, network_access=True)
-            assert rc == 0
-            mock_run.assert_called_once()
+            for sandbox in (True, False):
+                with patch(f"{module}.run_with_transcript", return_value=0) as mock_run:
+                    rc = adapter.launch(
+                        working_dir=tmp_path,
+                        network_access=True,
+                        sandbox=sandbox,
+                    )
+                assert rc == 0
+                mock_run.assert_called_once()

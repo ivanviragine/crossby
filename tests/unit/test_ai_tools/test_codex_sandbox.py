@@ -80,6 +80,53 @@ class TestNonWorktreeByteIdentity:
         assert CodexAdapter().build_launch_command(yolo=True) == ["codex", "-a", "never"]
 
 
+class TestDangerFullAccess:
+    def test_empty_context_is_explicitly_unsandboxed(self) -> None:
+        assert CodexAdapter().sandbox_config_args(
+            autonomy_args=[],
+            trusted_dirs=None,
+            working_dir=None,
+            network_access=False,
+            sandbox=False,
+        ) == ["--sandbox", "danger-full-access"]
+
+    def test_ignores_all_sandbox_only_context(self, wt: Worktree) -> None:
+        cmd = CodexAdapter().build_launch_command(
+            trusted_dirs=["/tmp/plan"],
+            working_dir=wt.path,
+            network_access=True,
+            sandbox=False,
+        )
+        assert cmd == ["codex", "--sandbox", "danger-full-access"]
+        assert "--add-dir" not in cmd
+        assert not any(arg.startswith("sandbox_workspace_write.") for arg in cmd)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "approval"),
+        [
+            ({}, []),
+            ({"accept_edits": True}, ["-a", "on-request"]),
+            ({"yolo": True}, ["-a", "never"]),
+        ],
+    )
+    def test_does_not_change_approval_policy(
+        self, kwargs: dict[str, bool], approval: list[str]
+    ) -> None:
+        cmd = CodexAdapter().build_launch_command(**kwargs, sandbox=False)
+        assert cmd == ["codex", *approval, "--sandbox", "danger-full-access"]
+
+    def test_auto_downgrade_stays_on_request(self) -> None:
+        with pytest.warns(UserWarning, match="downgrading to accept-edits"):
+            cmd = CodexAdapter().build_launch_command(auto=True, sandbox=False)
+        assert cmd == [
+            "codex",
+            "-a",
+            "on-request",
+            "--sandbox",
+            "danger-full-access",
+        ]
+
+
 class TestWorktreeLaunch:
     def test_plain_launch_in_worktree_grants_roots(self, wt: Worktree) -> None:
         cmd = CodexAdapter().build_launch_command(working_dir=wt.path)
@@ -178,4 +225,15 @@ class TestResume:
         cmd = CodexAdapter().build_resume_command("sid", working_dir=wt.path, network_access=True)
         assert cmd is not None
         assert "sandbox_workspace_write.network_access=true" in cmd
+        assert "-a" not in cmd
+
+    @pytest.mark.parametrize("working_dir", [None, "worktree"])
+    def test_unsandboxed_resume_is_approval_neutral(
+        self, working_dir: str | None, wt: Worktree
+    ) -> None:
+        cwd = wt.path if working_dir else None
+        cmd = CodexAdapter().build_resume_command(
+            "sid", working_dir=cwd, network_access=True, sandbox=False
+        )
+        assert cmd == ["codex", "resume", "sid", "--sandbox", "danger-full-access"]
         assert "-a" not in cmd

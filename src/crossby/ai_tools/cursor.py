@@ -65,6 +65,7 @@ class CursorAdapter(AbstractAITool):
             supports_yolo=True,
             supports_plan_mode=True,
             supports_accept_edits=True,
+            supports_sandbox_toggle=True,
             supports_stop_hook=True,
             supports_user_prompt_submit_hook=True,
             # Cursor does fire `sessionStart`, and its `additional_context` does
@@ -96,6 +97,25 @@ class CursorAdapter(AbstractAITool):
             # scene-only dir would launch Cursor unauthenticated. crossby falls
             # back to persistent ``scene use`` activation for Cursor instead.
         )
+
+    def sandbox_config_args(
+        self,
+        *,
+        autonomy_args: list[str],
+        trusted_dirs: list[str] | None,
+        working_dir: Path | None,
+        network_access: bool,
+        sandbox: bool = True,
+    ) -> list[str]:
+        """Select Cursor's sandbox explicitly for every adapter launch."""
+        if not self.capabilities().supports_sandbox_toggle:
+            return super().sandbox_config_args(
+                autonomy_args=autonomy_args,
+                trusted_dirs=trusted_dirs,
+                working_dir=working_dir,
+                network_access=network_access,
+            )
+        return ["--sandbox", "enabled" if sandbox else "disabled"]
 
     def initial_message_args(self, prompt: str) -> list[str]:
         """Cursor accepts the initial message as a positional argument."""

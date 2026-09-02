@@ -168,6 +168,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         *,
         working_dir: Path | None = None,
         network_access: bool = False,
+        sandbox: bool = True,
     ) -> list[str] | None:
         """Resume a specific Antigravity CLI conversation by ID.
 

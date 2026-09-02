@@ -63,6 +63,7 @@ class CodexAdapter(AbstractAITool):
             hook_output_dialect=HookOutputDialect.HOOK_SPECIFIC_OUTPUT,
             hook_stop_dialect=HookStopDialect.BLOCK_DECISION,
             sandboxes_writes=True,
+            supports_sandbox_toggle=True,
             supports_network_access=True,
             supports_usage_reporting=True,
             # Session-scoped scenes: Codex takes a named profile that layers a
@@ -78,6 +79,7 @@ class CodexAdapter(AbstractAITool):
         *,
         working_dir: Path | None = None,
         network_access: bool = False,
+        sandbox: bool = True,
     ) -> list[str] | None:
         """Resume a Codex session: ``codex resume <session_id>``.
 
@@ -99,6 +101,7 @@ class CodexAdapter(AbstractAITool):
                 trusted_dirs=None,
                 working_dir=working_dir,
                 network_access=network_access,
+                sandbox=sandbox,
             ),
         ]
 
@@ -128,6 +131,7 @@ class CodexAdapter(AbstractAITool):
         trusted_dirs: list[str] | None,
         working_dir: Path | None,
         network_access: bool,
+        sandbox: bool = True,
     ) -> list[str]:
         """Single owner of Codex's sandbox / writable-root / network argv.
 
@@ -160,7 +164,15 @@ class CodexAdapter(AbstractAITool):
         user's config: whenever crossby forces workspace-write it explicitly sets
         the flag (``true`` only with ``--network``, else ``false``), so ambient
         config can never silently enable networking in a crossby-managed sandbox.
+
+        When ``sandbox`` is false, this returns only
+        ``--sandbox danger-full-access`` before inspecting worktree metadata or
+        other sandbox context. Approval policy remains owned by the autonomy
+        composer and is therefore unchanged.
         """
+        if not sandbox:
+            return ["--sandbox", "danger-full-access"]
+
         trusted = list(trusted_dirs or [])
         metadata = outside_root_git_metadata_dirs(working_dir) if working_dir is not None else []
         accept_edits = "on-request" in autonomy_args

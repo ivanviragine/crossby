@@ -199,6 +199,11 @@ class AIToolCapabilities(BaseModel, frozen=True):
     redundant. Distinct from ``supports_trusted_dirs`` (which only means the tool
     accepts a trusted-dir flag; Claude adds dirs but still prompts rather than
     hard-blocks)."""
+    supports_sandbox_toggle: bool = False
+    """Tool can map the programmatic launch-time ``sandbox`` input to an
+    explicit enabled/disabled sandbox selection. This is independent of
+    ``sandboxes_writes`` (the adapter's normal confinement) and
+    ``supports_network_access`` (networking inside a sandbox)."""
     supports_network_access: bool = False
     """Tool exposes a launch-time opt-in to allow network access from inside its
     sandbox (``crossby launch --network``). Codex-only: it pins

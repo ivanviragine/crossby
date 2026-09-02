@@ -265,12 +265,12 @@ class TestBuildLaunchCommand:
     def test_cursor_basic_launch(self) -> None:
         adapter = AbstractAITool.get("cursor")
         cmd = adapter.build_launch_command(model="opus-4.6")
-        assert cmd == ["agent", "--model", "opus-4.6"]
+        assert cmd == ["agent", "--model", "opus-4.6", "--sandbox", "enabled"]
 
     def test_cursor_with_initial_message(self) -> None:
         adapter = AbstractAITool.get("cursor")
         cmd = adapter.build_launch_command(initial_message="Implement feature X")
-        assert cmd == ["agent", "Implement feature X"]
+        assert cmd == ["agent", "Implement feature X", "--sandbox", "enabled"]
 
     def test_cursor_plan_mode_launch(self) -> None:
         """Cursor plan mode uses --mode plan."""
@@ -285,13 +285,15 @@ class TestBuildLaunchCommand:
             "sonnet-4.6",
             "--mode",
             "plan",
+            "--sandbox",
+            "enabled",
         ]
 
     def test_cursor_model_passthrough(self) -> None:
         """Cursor uses its own model namespace — IDs pass through unchanged."""
         adapter = AbstractAITool.get("cursor")
         cmd = adapter.build_launch_command(model="gpt-5.3-codex")
-        assert cmd == ["agent", "--model", "gpt-5.3-codex"]
+        assert cmd == ["agent", "--model", "gpt-5.3-codex", "--sandbox", "enabled"]
 
     @pytest.mark.parametrize(
         ("tool_id", "model"),
