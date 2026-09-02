@@ -142,6 +142,9 @@
     "gemini-3.7-flash-high",
     "gemini-3.7-flash-low",
     "gemini-3.7-flash-medium",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
     "glm-5.2-high",
     "glm-5.2-max",
     "gpt-5-mini",
@@ -290,6 +293,7 @@
     "mai-code-1-flash"
   ],
   "antigravity-cli": [
+    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
@@ -436,6 +440,7 @@
     "google/gemini-3.5-live-translate-preview",
     "google/gemini-3.6-flash",
     "google/gemini-3.7-flash",
+    "google/gemini-3.8-flash",
     "google/gemini-embedding-001",
     "google/gemini-embedding-2",
     "google/gemini-flash-latest",

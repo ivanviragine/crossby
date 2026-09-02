@@ -197,9 +197,14 @@ def test_catalog_diff_preserves_exact_provider_spelling() -> None:
 
 
 class TestAntigravityModelParsing:
-    def test_extracts_gemini_3_7_and_deduplicates_effort_variants(self) -> None:
+    def test_extracts_current_gemini_flash_models_and_deduplicates_effort_variants(
+        self,
+    ) -> None:
         output = """
         Available models:
+          gemini-3.8-flash-low       Gemini 3.8 Flash (Low)
+          gemini-3.8-flash-medium    Gemini 3.8 Flash (Medium)
+          gemini-3.8-flash-high      Gemini 3.8 Flash (High)
           gemini-3.7-flash-low       Gemini 3.7 Flash (Low)
           gemini-3.7-flash-medium    Gemini 3.7 Flash (Medium)
           gemini-3.7-flash-high      Gemini 3.7 Flash (High)
@@ -209,6 +214,7 @@ class TestAntigravityModelParsing:
         """
 
         assert PROBE_MODULE.parse_antigravity_models(output) == {
+            "gemini-3.8-flash",
             "gemini-3.7-flash",
             "claude-opus-4-6-thinking",
             "gpt-oss-120b-medium",
@@ -217,6 +223,9 @@ class TestAntigravityModelParsing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
+            ("gemini-3.8-flash-low", "gemini-3.8-flash"),
+            ("gemini-3.8-flash-medium", "gemini-3.8-flash"),
+            ("gemini-3.8-flash-high", "gemini-3.8-flash"),
             ("gemini-3.7-flash-low", "gemini-3.7-flash"),
             ("gemini-3.7-flash-medium", "gemini-3.7-flash"),
             ("gemini-3.7-flash-high", "gemini-3.7-flash"),
