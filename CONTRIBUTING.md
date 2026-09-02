@@ -76,7 +76,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters are routed through the base trusted-directory composer.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -105,7 +105,7 @@ The adapter pattern is designed so adding a tool is a single-file change.
 2. Create `src/crossby/ai_tools/<tool>.py` subclassing `AbstractAITool`:
    - Set `TOOL_ID = AIToolID.<TOOL>` (this auto-registers the adapter).
    - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, `supports_*` booleans.
-   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`, `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, `initial_message_args()`. A tool that hard-confines writes to a sandbox can override `sandbox_config_args()` (Codex does) to own its sandbox-mode / writable-root / network composition in one place.
+   - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`, `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, `initial_message_args()`. A tool that can explicitly enable and disable its sandbox declares `supports_sandbox_toggle=True` and overrides `sandbox_config_args()`; Codex owns sandbox mode, writable roots, and network composition there, while Cursor maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this hook.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
@@ -355,7 +355,7 @@ Keep notes short and literal. Avoid Crossby-internal terminology in the message;
 
 ## Tool Reference
 
-Crossby translates its unified CLI flags into each tool's native syntax. A dash (—) means the tool does not support that feature; crossby raises an error if you pass an explicit flag that the target tool doesn't support (e.g. `--yolo` with OpenCode).
+Crossby translates its unified CLI flags into each tool's native syntax. A dash (—) means the tool does not support that feature; crossby raises an error if you pass an explicit flag that the target tool doesn't support (e.g. `--yolo` with OpenCode). The final two rows document the programmatic adapter contract rather than CLI flags.
 
 ### Launch Flags
 
@@ -363,7 +363,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | ------------- | ---------------------------------- | ----------------- | --------------------------------- | ------------------------------------------ | ----------------- | -------------------------- | ------- | --------------- |
 | Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
-| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval-skip, keeps sandbox) | —          | `--force`                  | —       | —               |
+| `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval only)                 | —          | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
 | `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
@@ -371,8 +371,10 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
 | `--trusted-dir` | `--add-dir`                      | `--add-dir`       | `--add-dir`                       | `--sandbox workspace-write --add-dir`      | —                 | —                          | —       | —               |
 | `--network`   | — (warn+ignore)                    | — (warn+ignore)   | — (warn+ignore)                   | `-c sandbox_workspace_write.network_access=true` | — (warn+ignore) | — (warn+ignore)     | — (warn+ignore) | — (warn+ignore) |
+| API `sandbox=True` | —                              | —                 | —                                 | conditional `--sandbox workspace-write`   | —                 | `--sandbox enabled`        | —       | —               |
+| API `sandbox=False` | —                             | —                 | —                                 | `--sandbox danger-full-access`             | —                 | `--sandbox disabled`       | —       | —               |
 
-Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin) is composed in **one** place — `CodexAdapter.sandbox_config_args`, reached from `build_launch_command` (the launch hook) and `build_resume_command`. It emits a single `--sandbox workspace-write` before any `--add-dir`, then one `--add-dir` per trusted dir and per out-of-root git-metadata dir (from `utils/git_worktree.outside_root_git_metadata_dirs`) so sandboxed git writes work in a linked worktree/submodule. `--add-dir` is used (not `-c sandbox_workspace_write.writable_roots=[...]`) because it *adds* to the writable roots rather than *replacing* any the user configured. It pins `network_access` (the replacing `-c` form, intentionally — an ambient `network_access = true` must not leak in) whenever crossby forces workspace-write, and never emits `--yolo` / a sandbox-bypass. `--network` is capability-gated by `supports_network_access` (Codex-only); every other tool warns and ignores it.
+Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin) is composed in **one** place — `CodexAdapter.sandbox_config_args`, reached from `build_launch_command` and `build_resume_command`. With `sandbox=False`, it returns `--sandbox danger-full-access` immediately, before resolving worktree metadata, and emits no `--add-dir` or workspace-write network pin. With `sandbox=True`, it preserves the conditional behavior: a single `--sandbox workspace-write` before any `--add-dir`, then one additive root per trusted dir and out-of-root git-metadata dir (from `utils/git_worktree.outside_root_git_metadata_dirs`), followed by an explicit network pin whenever crossby forces workspace-write. `--add-dir` deliberately adds rather than replaces user-configured writable roots. Approval flags remain owned by `_autonomy_launch_args`; neither sandbox value implies yolo. `--network` is separately capability-gated by `supports_network_access` (Codex-only).
 
 ### Effort Level Mapping
 
@@ -458,6 +460,9 @@ Available on each adapter for programmatic use:
 | Structured output | `--output-format json --json-schema …`   | —                   | —                | —            | —                  | —               |
 | Headless prompt via stdin | `--print`                        | —                   | —                | `exec`       | —                  | —               |
 | Model format      | dashed (`claude-haiku-4-5`)              | dotted (`claude-haiku-4.5`) | as-is     | as-is        | `provider/model`   | as-is           |
+| Sandbox toggle    | —                                        | —                   | —                | `workspace-write` / `danger-full-access` | — | `enabled` / `disabled` |
+
+The sandbox toggle is keyword-only on `launch()`, `build_launch_command()`, `build_resume_command()`, and `sandbox_config_args()`. It is a programmatic adapter contract, not a CLI/config option. Every resume override and GUI `launch()` override must accept the keyword even when it is inert, so polymorphic calls remain `TypeError`-free.
 
 ## Commit Conventions
 

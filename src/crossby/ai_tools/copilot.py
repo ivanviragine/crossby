@@ -73,6 +73,7 @@ class CopilotAdapter(AbstractAITool):
         *,
         working_dir: Path | None = None,
         network_access: bool = False,
+        sandbox: bool = True,
     ) -> list[str] | None:
         """Resume a Copilot session: ``copilot --resume=<session_id>``.
 

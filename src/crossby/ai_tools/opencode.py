@@ -72,6 +72,7 @@ class OpenCodeAdapter(AbstractAITool):
         *,
         working_dir: Path | None = None,
         network_access: bool = False,
+        sandbox: bool = True,
     ) -> list[str] | None:
         """Resume an OpenCode session: ``opencode -s <session_id>``.
 

@@ -343,6 +343,18 @@ The default preset produces a structured six-section handoff (current task, key 
 
 `crossby launch` runs any supported tool with one unified set of flags — crossby translates each into the target's native syntax (or degrades gracefully when the tool lacks it).
 
+### Programmatic sandbox selection
+
+Library consumers can choose sandbox confinement independently from autonomy by passing the keyword-only `sandbox=` argument to an adapter's `launch()`, `build_launch_command()`, or `build_resume_command()` method. This is an adapter API only; there is no `crossby launch` CLI flag or persisted config field for it.
+
+| Adapter | `sandbox=True` (default) | `sandbox=False` |
+| --- | --- | --- |
+| Codex | Preserves the existing conditional `workspace-write` composition described below | `--sandbox danger-full-access` |
+| Cursor | `--sandbox enabled` | `--sandbox disabled` |
+| All others | No sandbox-selection flag | No sandbox-selection flag |
+
+The setting never changes approval behavior: Codex `danger-full-access` does not imply `-a never`, and yolo does not imply an unrestricted sandbox. Cursor now explicitly enables its sandbox on the default adapter path instead of inheriting a potentially disabled user setting. The static `sandboxes_writes` capability still describes an adapter's normal confinement; it is not a guarantee for a particular invocation made with `sandbox=False`.
+
 ### Autonomy modes
 
 `crossby launch` exposes a four-tier **autonomy ladder** — how much the agent may do without asking. These are *permission* modes, not model selection:
@@ -388,9 +400,9 @@ Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for
 
 ### Codex sandbox: linked worktrees & `--network`
 
-Codex confines writes with an OS sandbox (`--sandbox workspace-write` — Seatbelt on macOS, Landlock on Linux). crossby **keeps that sandbox on every path** — it never emits `--yolo` / `--dangerously-bypass-approvals-and-sandbox`; Codex's yolo is approval-skipping only (`-a never`), and approval `never` appears **only** when you actually request `--yolo`.
+Codex can confine writes with an OS sandbox (`--sandbox workspace-write` — Seatbelt on macOS, Landlock on Linux). With the default programmatic `sandbox=True`, crossby preserves its existing conditional composition. An explicit `sandbox=False` emits only `--sandbox danger-full-access` from the sandbox composer: no trusted or Git-metadata `--add-dir` roots and no workspace-write network pin. This remains independent from approvals—crossby never emits `--dangerously-bypass-approvals-and-sandbox`; Codex yolo is approval-skipping only (`-a never`), and approval `never` appears only when yolo is requested.
 
-- **Linked worktrees & submodules just work.** In a linked worktree the working tree's `.git` is a *file* pointing at metadata that lives **outside** the working directory, which the sandbox would otherwise block. crossby detects this and grants only the real git-metadata dirs outside the root to the sandbox with `--add-dir` — which *adds* to the writable roots, preserving any `sandbox_workspace_write.writable_roots` you configured — so sandboxed git operations succeed while the sandbox stays on. A normal checkout grants nothing. This applies to launch, `--resume` (approval-neutral: no `-a` injected), and the headless handoff summarizer.
+- **Linked worktrees & submodules just work when sandboxed.** In a linked worktree the working tree's `.git` is a *file* pointing at metadata that lives **outside** the working directory, which the sandbox would otherwise block. crossby detects this and grants only the real git-metadata dirs outside the root to the sandbox with `--add-dir` — which *adds* to the writable roots, preserving any `sandbox_workspace_write.writable_roots` you configured — so sandboxed git operations succeed while the sandbox stays on. A normal checkout grants nothing. This applies to launch, `--resume` (approval-neutral: no `-a` injected), and the headless handoff summarizer.
 - **`--network` (Codex only).** `crossby launch --network` allows network access inside the sandbox (package installs, remote fetch/push). It is **security-sensitive** and off by default. On tools without a sandbox network opt-in it is **warned and ignored** on every path (launch, resume, GUI).
 - **Explicit network pin.** Whenever crossby forces `workspace-write` (a worktree, `--network`, `--accept-edits`, or `--trusted-dir`), it also emits an explicit `-c sandbox_workspace_write.network_access=<true|false>` (`true` only with `--network`) so an ambient `network_access = true` in your Codex config can never silently enable networking in a crossby-managed sandbox. A plain, unmanaged launch emits no sandbox flag and stays byte-identical.
 
