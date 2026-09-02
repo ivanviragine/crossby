@@ -39,14 +39,14 @@ _ALL_DEFAULT_MODEL_IDS = sorted({model_id for _, _, model_id in _iter_tier_defau
 # classify_tier_universal's documented keyword rules (haiku/flash/mini/luna ->
 # FAST; opus/fable/pro/sol/max -> POWERFUL; sonnet/terra or no keyword ->
 # BALANCED). Pins how the novel effort-encoded IDs
-# (composer-2.5-fast, claude-opus-5-high, gemini-3.7-flash-*)
+# (composer-2.5-fast, claude-opus-5-high, gemini-3.8-flash-*)
 # parse, so a regex/keyword regression fails the test instead of slipping through.
 _EXPECTED_TIERS: dict[str, ModelTier] = {
     "anthropic/claude-haiku-4.5": ModelTier.FAST,
     "anthropic/claude-opus-4.7": ModelTier.POWERFUL,
     "anthropic/claude-sonnet-4.6": ModelTier.BALANCED,
-    "claude-fable-5.1": ModelTier.POWERFUL,
     "claude-haiku-4.5": ModelTier.FAST,
+    "claude-opus-5": ModelTier.POWERFUL,
     "claude-opus-5-high": ModelTier.POWERFUL,
     "claude-sonnet-4.6": ModelTier.BALANCED,
     "claude-sonnet-5": ModelTier.BALANCED,
@@ -54,9 +54,9 @@ _EXPECTED_TIERS: dict[str, ModelTier] = {
     # "fast" is not a FAST keyword (haiku/flash/spark/mini/luna are), so this
     # falls through to the BALANCED default despite how the name reads.
     "composer-2.5-fast": ModelTier.BALANCED,
-    "gemini-3.7-flash-high": ModelTier.FAST,
-    "gemini-3.7-flash-low": ModelTier.FAST,
-    "gemini-3.7-flash-medium": ModelTier.FAST,
+    "gemini-3.8-flash-high": ModelTier.FAST,
+    "gemini-3.8-flash-low": ModelTier.FAST,
+    "gemini-3.8-flash-medium": ModelTier.FAST,
     "gpt-5.4": ModelTier.POWERFUL,
     "gpt-5.6-luna": ModelTier.FAST,
     "gpt-5.6-sol": ModelTier.POWERFUL,
@@ -190,7 +190,7 @@ class TestClaudeTierDefaults:
         assert mapping.easy == "claude-haiku-4.5"
         assert mapping.medium == "claude-sonnet-5"
         assert mapping.complex == "claude-sonnet-5"
-        assert mapping.very_complex == "claude-fable-5.1"
+        assert mapping.very_complex == "claude-opus-5"
 
 
 @pytest.mark.parametrize(
@@ -203,10 +203,10 @@ class TestClaudeTierDefaults:
         (
             AIToolID.ANTIGRAVITY_CLI,
             (
-                "gemini-3.7-flash-low",
-                "gemini-3.7-flash-medium",
-                "gemini-3.7-flash-medium",
-                "gemini-3.7-flash-high",
+                "gemini-3.8-flash-low",
+                "gemini-3.8-flash-medium",
+                "gemini-3.8-flash-medium",
+                "gemini-3.8-flash-high",
             ),
         ),
         (

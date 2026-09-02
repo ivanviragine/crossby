@@ -50,6 +50,9 @@ class TestModelRegistry:
             "gemini-3.7-flash-high",
             "gemini-3.7-flash-low",
             "gemini-3.7-flash-medium",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-low",
+            "gemini-3.8-flash-medium",
             "kimi-k3-high",
             "kimi-k3-low",
             "kimi-k3-max",
@@ -103,6 +106,7 @@ class TestModelRegistry:
             "google/antigravity-claude-opus-4-6-thinking",
             "google/antigravity-claude-sonnet-4-6",
             "google/gemini-3.7-flash",
+            "google/gemini-3.8-flash",
             "opencode/hy3-free",
             "opencode/ling-3.0-flash-fin-free",
             "opencode/muse-spark-1.2-contributor-free",
@@ -146,10 +150,10 @@ class TestRegistryGetModels:
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
         # The catalog mixes bare Gemini IDs (effort is baked in at launch, not
         # stored) with fixed provider IDs whose suffix is part of the name.
-        assert "gemini-3.7-flash" in model_ids
-        assert "gemini-3.7-flash-high" not in model_ids
-        assert "gemini-3.7-flash-medium" not in model_ids
-        assert "gemini-3.7-flash-low" not in model_ids
+        assert "gemini-3.8-flash" in model_ids
+        assert "gemini-3.8-flash-high" not in model_ids
+        assert "gemini-3.8-flash-medium" not in model_ids
+        assert "gemini-3.8-flash-low" not in model_ids
         assert "gemini-3.6-flash" in model_ids
         assert "gemini-3.6-flash-high" not in model_ids
         # Not an effort variant of gpt-oss-120b: `agy models` reports both as
