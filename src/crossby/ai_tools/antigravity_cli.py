@@ -23,6 +23,7 @@ from crossby.models.ai import (
 # probing); every other catalog model launches bare and ignores effort. Per-model
 # tiers differ: the flash families accept low/medium/high, gemini-3.1-pro only low/high.
 _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
+    "gemini-3.8-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.7-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.6-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.5-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
@@ -192,7 +193,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         - **Precedence**: an effort already baked into the ID wins over a
           separately supplied ``effort`` (agy would reject the two together).
         - **No effort anywhere**: a deterministic default is baked in so the
-          command is valid (``gemini-3.7-flash`` → ``…-medium``, ``gemini-3.1-pro``
+          command is valid (``gemini-3.8-flash`` → ``…-medium``, ``gemini-3.1-pro``
           → ``…-high``) rather than the rejected bare base model.
         - **xhigh/max**: normalized to ``high`` (agy rejects them), with a warning.
         - **Per-model gap / invalid stored suffix** (``gemini-3.1-pro-medium``):

@@ -388,8 +388,9 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed
-model). Only the Gemini families encode effort — `gemini-3.7-flash`,
-`gemini-3.6-flash`, and `gemini-3.5-flash` accept `low`/`medium`/`high`,
+model). Only the Gemini families encode effort — `gemini-3.8-flash`,
+`gemini-3.7-flash`, `gemini-3.6-flash`, and `gemini-3.5-flash` accept
+`low`/`medium`/`high`,
 `gemini-3.1-pro` accepts only
 `low`/`high` (a requested `medium` snaps to the nearest valid tier). `xhigh`/
 `max` normalize to `high`, and a Gemini model launched with no effort gets a

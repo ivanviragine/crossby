@@ -11,7 +11,7 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         easy="claude-haiku-4.5",
         medium="claude-sonnet-5",
         complex="claude-sonnet-5",
-        very_complex="claude-fable-5.1",
+        very_complex="claude-opus-5",
     ),
     AIToolID.COPILOT: ComplexityModelMapping(
         easy="claude-haiku-4.5",
@@ -20,10 +20,10 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         very_complex="gpt-5.4",
     ),
     AIToolID.ANTIGRAVITY_CLI: ComplexityModelMapping(
-        easy="gemini-3.7-flash-low",
-        medium="gemini-3.7-flash-medium",
-        complex="gemini-3.7-flash-medium",
-        very_complex="gemini-3.7-flash-high",
+        easy="gemini-3.8-flash-low",
+        medium="gemini-3.8-flash-medium",
+        complex="gemini-3.8-flash-medium",
+        very_complex="gemini-3.8-flash-high",
     ),
     AIToolID.CODEX: ComplexityModelMapping(
         easy="gpt-5.6-luna",
