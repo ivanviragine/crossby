@@ -148,9 +148,9 @@ class CodexAdapter(AbstractAITool):
         is deliberately the replacing form — see below.
 
         workspace-write is forced by any of: accept-edits/auto (detected as
-        ``-a untrusted`` in ``autonomy_args``), one or more ``trusted_dirs``,
+        ``-a on-request`` in ``autonomy_args``), one or more ``trusted_dirs``,
         out-of-root worktree metadata, or ``network_access``. YOLO alone
-        (``-a never``) does **not** force it. This never emits an ``-a`` flag
+        (``-a never``) does **not** force it. This never emits an approval flag
         itself: on launch the approval flag already sits in ``autonomy_args``;
         on resume it is intentionally absent (approval-neutral). Treating
         ``--sandbox``/``-s`` as one setting and owning the ordering here is what
@@ -163,7 +163,7 @@ class CodexAdapter(AbstractAITool):
         """
         trusted = list(trusted_dirs or [])
         metadata = outside_root_git_metadata_dirs(working_dir) if working_dir is not None else []
-        accept_edits = "untrusted" in autonomy_args
+        accept_edits = "on-request" in autonomy_args
 
         if not (accept_edits or trusted or metadata or network_access):
             return []
@@ -195,8 +195,27 @@ class CodexAdapter(AbstractAITool):
         return ["-c", f'model_reasoning_effort="{mapped}"']
 
     def accept_edits_args(self) -> list[str]:
-        """Codex accept-edits: auto-apply file edits, still escalate untrusted
-        shell commands for approval — the approval half only (``-a untrusted``).
+        """Codex accept-edits: the workspace-write + ``-a on-request`` posture —
+        the approval half only (``-a on-request``).
+
+        Codex CLI 0.152 removed ``untrusted`` from ``--ask-for-approval`` (it
+        now accepts only ``on-request``/``never``), so the old ``-a untrusted``
+        fails argument parsing before a headless agent can run. ``on-request``
+        is the closest surviving policy: it is Codex's native "Auto" posture,
+        where the model runs edits *and* commands freely inside the
+        workspace-write sandbox and escalates to a human only before anything
+        that would escape it (network access, writes outside the workspace).
+
+        This is deliberately **not** a byte-for-byte match of the old
+        ``untrusted`` policy, which prompted for essentially every command:
+        0.152 removed per-command prompting entirely, so no surviving policy
+        reproduces it. The workspace-write sandbox (owned by
+        :meth:`sandbox_config_args`) — not a per-command prompt — is therefore
+        the enforced safety boundary; see the README's "Codex sandbox" section.
+        ``--approve-for-me`` is deliberately avoided as the more-autonomous
+        option: it routes even those out-of-sandbox escalations through
+        automatic review with no human prompt at all. ``on-request`` also
+        predates 0.152, so this path needs no version gate.
 
         The workspace-write sandbox that accept-edits needs is emitted by
         :meth:`sandbox_config_args`, which owns sandbox-mode selection so the
@@ -205,7 +224,7 @@ class CodexAdapter(AbstractAITool):
         present. The old ``--approval-mode auto-edit`` flag was removed in the
         Rust CLI (v0.14x) and must not be used.
         """
-        return ["-a", "untrusted"]
+        return ["-a", "on-request"]
 
     def yolo_args(self) -> list[str]:
         """Codex skips approval prompts with ``-a never`` while keeping its

@@ -127,8 +127,11 @@ class TestWorktreeLaunch:
 
     def test_accept_edits_in_worktree(self, wt: Worktree) -> None:
         cmd = CodexAdapter().build_launch_command(accept_edits=True, working_dir=wt.path)
-        assert cmd[1:3] == ["-a", "untrusted"]
+        # Modern accept-edits approval policy (Codex CLI 0.152 rejects ``untrusted``).
+        assert cmd[1:3] == ["-a", "on-request"]
+        assert "untrusted" not in cmd
         assert cmd.count("--sandbox") == 1
+        assert cmd.index("on-request") < cmd.index("--sandbox")
         assert wt.metadata_add_dir_args[1] in cmd  # a granted metadata path
 
 

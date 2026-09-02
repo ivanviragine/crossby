@@ -354,7 +354,7 @@ read-only   auto-edit,        classifier-       skip all
 ```
 
 - `--plan` — read-only planning; the agent proposes but doesn't act.
-- `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of the 6 CLIs support it at launch; OpenCode falls back to default prompting).
+- `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of the 6 CLIs support it at launch; OpenCode falls back to default prompting). *(Codex is the exception — its accept-edits is sandbox-confined rather than per-command-prompted; see the note below the table.)*
 - `--auto` — Claude Code's classifier-mediated guarded autonomy (a separate model reviews each non-read action). **Claude-only** among the CLIs crossby drives; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
 - `--yolo` — skip all permission prompts.
 
@@ -365,14 +365,14 @@ Per-tool mapping (verified against official docs, July 2026; CLI flags can drift
 | Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
 | --------------- | ------------------------------------- | ----------------------------------------- |
 | Claude          | `--permission-mode acceptEdits`       | `--permission-mode auto`                  |
-| Codex           | `--sandbox workspace-write -a untrusted` | ↓ downgrades to accept-edits           |
+| Codex           | `-a on-request --sandbox workspace-write` | ↓ downgrades to accept-edits              |
 | Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | ↓ downgrades to accept-edits |
 | Copilot         | `--allow-tool write`                  | ↓ downgrades to accept-edits              |
 | Antigravity CLI | `--mode accept-edits`                 | ↓ downgrades to accept-edits              |
 | OpenCode        | ↓ default prompting (config-only)     | ↓ default prompting                       |
 | VS Code, Antigravity IDE | ↓ default prompting (GUI)    | ↓ default prompting                       |
 
-> Codex's old `--approval-mode auto-edit` was **removed** in the Rust CLI — crossby never emits it. Note Cursor CLI's default *is* accept-edits (the inverse of the Cursor IDE default), so `--accept-edits` is honored with no extra flag and no warning.
+> Codex's old `--approval-mode auto-edit` was **removed** in the Rust CLI — crossby never emits it. Codex CLI 0.152 also removed the per-command `untrusted` approval policy, so Codex accept-edits maps to `-a on-request` (Codex's native "Auto" posture): the agent runs edits **and** commands freely inside the `workspace-write` sandbox and prompts you only before an action that would **escape** it (network, writes outside the workspace). Unlike the other tools, Codex's safety boundary here is the OS sandbox, not a per-command prompt — see the "Codex sandbox: linked worktrees & `--network`" section below. `--approve-for-me` is deliberately avoided (it would route even those escapes through automatic review with no prompt at all). Note Cursor CLI's default *is* accept-edits (the inverse of the Cursor IDE default), so `--accept-edits` is honored with no extra flag and no warning.
 
 ### Cross-provider model translation
 
