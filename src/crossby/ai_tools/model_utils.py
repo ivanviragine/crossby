@@ -43,8 +43,10 @@ def classify_tier_universal(model_id: str) -> ModelTier:
        ``gpt-5.6-luna``, so it must not be read as the fast luna tier.
     2. A *family* marker otherwise decides the tier.
     3. ``max`` is checked last because it is an effort level far more often
-       than a family, so a family keyword outranks it: ``gpt-5.6-luna-max``
-       is luna at max effort, still the fast tier.
+       than a family, so any family keyword outranks it: ``gpt-5.6-luna-max``
+       is luna at max effort (fast) and ``gpt-5.6-terra-max`` is terra at max
+       effort (balanced). ``max`` only decides a tier on its own, for an ID
+       carrying no family keyword at all.
 
     Note: uses component-level matching to avoid false positives like
     "gemini" matching "mini". Keywords must appear as distinct components
@@ -57,9 +59,9 @@ def classify_tier_universal(model_id: str) -> ModelTier:
         return ModelTier.POWERFUL
     if any(_has_component(lower, kw) for kw in ("haiku", "flash", "spark", "mini", "luna")):
         return ModelTier.FAST
-    if _has_component(lower, "max"):
-        return ModelTier.POWERFUL
     if any(_has_component(lower, kw) for kw in ("sonnet", "terra")):
         return ModelTier.BALANCED
+    if _has_component(lower, "max"):
+        return ModelTier.POWERFUL
     # Default: unrecognized models go to balanced tier
     return ModelTier.BALANCED

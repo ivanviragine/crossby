@@ -159,9 +159,15 @@ class TestDocumentedFamilyRoles:
             ("openai/gpt-5.6-luna-pro", ModelTier.POWERFUL),
             ("gpt-5.6-luna-pro", ModelTier.POWERFUL),
             # ...but "max" is an effort level far more often than a family, so
-            # the family keyword outranks it: luna at max effort is still fast.
+            # any family keyword outranks it: luna at max effort is still fast
+            # and terra at max effort is still balanced. Both are registered
+            # catalog IDs, and every other effort variant of them already
+            # classifies by family.
             ("gpt-5.6-luna-max", ModelTier.FAST),
             ("gpt-5.6-luna-max-fast", ModelTier.FAST),
+            ("gpt-5.6-terra-max", ModelTier.BALANCED),
+            ("gpt-5.6-terra-max-fast", ModelTier.BALANCED),
+            ("claude-sonnet-4.6-max", ModelTier.BALANCED),
             # With no family keyword to outrank it, max still reads as powerful.
             ("some-model-max", ModelTier.POWERFUL),
             # Plain family markers keep their tier when no variant is present.
