@@ -35,16 +35,29 @@ def classify_tier_universal(model_id: str) -> ModelTier:
         very_complex — opus, fable, pro, sol, ultra, max, and the documented
                        bare Copilot complex-reasoning ID gpt-5.4
 
+    A model ID can carry more than one keyword, so the checks are ordered by
+    how strongly each keyword identifies the underlying model:
+
+    1. A *variant* marker (``pro``, ``sol``, …) upgrades the family it is
+       attached to — ``gpt-5.6-luna-pro`` is a more capable model than
+       ``gpt-5.6-luna``, so it must not be read as the fast luna tier.
+    2. A *family* marker otherwise decides the tier.
+    3. ``max`` is checked last because it is an effort level far more often
+       than a family, so a family keyword outranks it: ``gpt-5.6-luna-max``
+       is luna at max effort, still the fast tier.
+
     Note: uses component-level matching to avoid false positives like
     "gemini" matching "mini". Keywords must appear as distinct components
     separated by '-' or '.'.
     """
     lower = model_id.lower()
-    if any(_has_component(lower, kw) for kw in ("haiku", "flash", "spark", "mini", "luna")):
-        return ModelTier.FAST
     if lower == "gpt-5.4" or lower.endswith("/gpt-5.4"):
         return ModelTier.POWERFUL
-    if any(_has_component(lower, kw) for kw in ("opus", "fable", "pro", "sol", "ultra", "max")):
+    if any(_has_component(lower, kw) for kw in ("opus", "fable", "pro", "sol", "ultra")):
+        return ModelTier.POWERFUL
+    if any(_has_component(lower, kw) for kw in ("haiku", "flash", "spark", "mini", "luna")):
+        return ModelTier.FAST
+    if _has_component(lower, "max"):
         return ModelTier.POWERFUL
     if any(_has_component(lower, kw) for kw in ("sonnet", "terra")):
         return ModelTier.BALANCED

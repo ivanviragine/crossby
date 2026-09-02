@@ -150,6 +150,31 @@ class TestDocumentedFamilyRoles:
     ) -> None:
         assert classify_tier_universal(model_id) == expected
 
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            # A variant marker upgrades the family it is attached to: luna-pro
+            # is a more capable model than luna, not the fast tier. Regression
+            # for the registered openai/gpt-5.6-luna-pro catalog entry.
+            ("openai/gpt-5.6-luna-pro", ModelTier.POWERFUL),
+            ("gpt-5.6-luna-pro", ModelTier.POWERFUL),
+            # ...but "max" is an effort level far more often than a family, so
+            # the family keyword outranks it: luna at max effort is still fast.
+            ("gpt-5.6-luna-max", ModelTier.FAST),
+            ("gpt-5.6-luna-max-fast", ModelTier.FAST),
+            # With no family keyword to outrank it, max still reads as powerful.
+            ("some-model-max", ModelTier.POWERFUL),
+            # Plain family markers keep their tier when no variant is present.
+            ("openai/gpt-5.6-luna", ModelTier.FAST),
+            ("gemini-3.1-pro", ModelTier.POWERFUL),
+            ("claude-haiku-4.5", ModelTier.FAST),
+        ],
+    )
+    def test_variant_marker_outranks_family_but_effort_does_not(
+        self, model_id: str, expected: ModelTier
+    ) -> None:
+        assert classify_tier_universal(model_id) == expected
+
 
 class TestClaudeTierDefaults:
     """Claude fallback tiers track the current model generation (WADE #309 port)."""
