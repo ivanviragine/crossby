@@ -620,7 +620,8 @@ class AbstractAITool(ABC):
         ``working_dir``, ``network_access``, and ``sandbox`` are sandbox context
         forwarded to :meth:`sandbox_config_args`. Only adapters declaring
         ``supports_sandbox_toggle`` may translate ``sandbox`` into a selection
-        flag; unsupported adapters retain the base trusted-directory behavior.
+        flag; unsupported adapters retain their existing trusted-directory
+        composition, including legacy hook overrides.
         """
         caps = self.capabilities()
         cmd = [caps.binary]
