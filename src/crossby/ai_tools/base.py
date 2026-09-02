@@ -194,21 +194,25 @@ class AbstractAITool(ABC):
         # (argv) and the environment builder (env) so the artefacts are written a
         # single time per launch.
         scene_args = self.scene_launch_args(scene) if scene is not None else None
-        cmd = self.build_launch_command(
-            model=model,
-            initial_message=prompt,
-            plan_mode=plan_mode,
-            trusted_dirs=trusted_dirs,
-            effort=effort,
-            allowed_commands=allowed_commands,
-            yolo=yolo,
-            accept_edits=accept_edits,
-            auto=auto,
-            scene=scene_args,
-            working_dir=working_dir,
-            network_access=network_access,
-            sandbox=sandbox,
-        )
+        command_kwargs: dict[str, Any] = {
+            "model": model,
+            "initial_message": prompt,
+            "plan_mode": plan_mode,
+            "trusted_dirs": trusted_dirs,
+            "effort": effort,
+            "allowed_commands": allowed_commands,
+            "yolo": yolo,
+            "accept_edits": accept_edits,
+            "auto": auto,
+            "scene": scene_args,
+            "working_dir": working_dir,
+            "network_access": network_access,
+        }
+        # ``build_launch_command`` is a public adapter hook. Preserve
+        # pre-toggle overrides, which do not accept the new keyword.
+        if self.capabilities().supports_sandbox_toggle:
+            command_kwargs["sandbox"] = sandbox
+        cmd = self.build_launch_command(**command_kwargs)
         extra_env = self.build_launch_environment(scene=scene_args)
         child_env = {**os.environ, **extra_env} if extra_env else None
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
