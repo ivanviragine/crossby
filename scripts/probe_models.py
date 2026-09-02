@@ -44,6 +44,13 @@ _SCRAPE_PATTERNS: dict[str, str] = {
 }
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# Version part mirrors the family-anchored scrape pattern above, so a dated
+# snapshot collapses to its alias whether the docs publish a one-part version
+# (claude-sonnet-5-20260101), a dashed two-part one (claude-haiku-4-5-20251001),
+# or a dotted one (claude-haiku-4.5-20260101).
+_CLAUDE_DATED_ALIAS_RE = re.compile(
+    r"(claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?)-\d{8}(?:-v\d+)?"
+)
 # Provider-agnostic: matches the model-ID column of `agy models` output
 # regardless of vendor prefix (gemini, claude, gpt, or a future mai/grok/o3
 # family), as long as it looks like a multi-segment identifier (e.g.
@@ -160,6 +167,27 @@ def parse_documented_models(tool: str, text: str) -> set[str]:
     the visible heading text to isolate the actual table.
     """
     pattern = _SCRAPE_PATTERNS[tool]
+
+    if tool == "claude":
+        # The model hub embeds legacy model metadata after the visible page.
+        # Restrict discovery to the current-lineup comparison so retired IDs
+        # do not appear as newly available merely because their model cards
+        # remain linked from the page payload.
+        start = text.find('id="latest-models-comparison"')
+        end = text.find('id="using-the-models-api"', start if start >= 0 else 0)
+        if start < 0 or end < 0:
+            return set()
+        current_lineup = text[start:end]
+        # The current table may publish only a dated snapshot (currently Haiku
+        # 4.5), while Crossby's Claude adapter stores and launches the stable
+        # alias. Collapse that date here before adapter punctuation handling.
+        models = set(_CLAUDE_DATED_ALIAS_RE.findall(current_lineup))
+        # Consume the dated tokens before the generic pass. Left in place, a
+        # dotted snapshot lets the generic pattern backtrack past the version's
+        # second component and emit a truncated ID (claude-haiku-4.5-20260101 ->
+        # "claude-haiku-4"), which would be reported as a new catalog model.
+        models.update(_pattern_matches(pattern, _CLAUDE_DATED_ALIAS_RE.sub(" ", current_lineup)))
+        return models
 
     if tool == "codex":
         full_matches = re.findall(r"codex -m (gpt-[a-z0-9._-]+)", text)

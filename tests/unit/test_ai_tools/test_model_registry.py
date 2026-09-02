@@ -27,7 +27,13 @@ class TestModelRegistry:
     def test_claude_registry_includes_current_models(self) -> None:
         """The Claude catalog tracks the current generation (WADE #309 port)."""
         claude_models = get_models_for_tool("claude")
-        for model in ("claude-sonnet-5", "claude-opus-4.8", "claude-opus-5", "claude-fable-5"):
+        for model in (
+            "claude-sonnet-5",
+            "claude-opus-4.8",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-fable-5.1",
+        ):
             assert model in claude_models
 
     @pytest.mark.parametrize(
@@ -52,12 +58,32 @@ class TestModelRegistry:
     def test_cursor_registry_includes_live_cli_models(self, model: str) -> None:
         assert model in get_models_for_tool("cursor")
 
+    def test_cursor_registry_includes_all_fable_5_1_variants(self) -> None:
+        suffixes = {
+            "high",
+            "low",
+            "max",
+            "medium",
+            "thinking-high",
+            "thinking-low",
+            "thinking-max",
+            "thinking-medium",
+            "thinking-xhigh",
+            "xhigh",
+        }
+        assert {
+            model.removeprefix("claude-fable-5-1-")
+            for model in get_models_for_tool("cursor")
+            if model.startswith("claude-fable-5-1-")
+        } == suffixes
+
     @pytest.mark.parametrize(
         "model",
         [
             "gemini-3.1-pro-preview",
             "gemini-3.5-flash",
             "gemini-3.6-flash",
+            "gemini-3.7-flash",
             "gpt-5.4",
             "mai-code-1-flash",
         ],
@@ -78,6 +104,8 @@ class TestModelRegistry:
             "google/antigravity-claude-sonnet-4-6",
             "google/gemini-3.7-flash",
             "opencode/hy3-free",
+            "opencode/ling-3.0-flash-fin-free",
+            "opencode/muse-spark-1.2-contributor-free",
             "opencode/nemotron-3.5-lightning-free",
         ],
     )
@@ -116,14 +144,18 @@ class TestRegistryGetModels:
         models = adapter.get_models()
         model_ids = [m.id for m in models]
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
-        # Catalog lists base IDs only — effort is baked in at launch, not stored.
+        # The catalog mixes bare Gemini IDs (effort is baked in at launch, not
+        # stored) with fixed provider IDs whose suffix is part of the name.
         assert "gemini-3.7-flash" in model_ids
         assert "gemini-3.7-flash-high" not in model_ids
         assert "gemini-3.7-flash-medium" not in model_ids
         assert "gemini-3.7-flash-low" not in model_ids
         assert "gemini-3.6-flash" in model_ids
         assert "gemini-3.6-flash-high" not in model_ids
-        assert "gpt-oss-120b-medium" not in model_ids
+        # Not an effort variant of gpt-oss-120b: `agy models` reports both as
+        # distinct fixed IDs, so the catalog stores the suffix verbatim.
+        assert "gpt-oss-120b" in model_ids
+        assert "gpt-oss-120b-medium" in model_ids
 
     def test_codex_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)

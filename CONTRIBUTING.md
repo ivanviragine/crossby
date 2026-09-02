@@ -376,13 +376,13 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI  |
-| ------------- | -------- | ------- | -------- | ------------------- | ---------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`    |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium` |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`   |
-| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`   |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI (Gemini only) |
+| ------------- | -------- | ------- | -------- | ------------------- | ----------------------------- |
+| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`                 |
+| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium`              |
+| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed
@@ -391,10 +391,10 @@ model). Only the Gemini families encode effort — `gemini-3.7-flash`,
 `gemini-3.1-pro` accepts only
 `low`/`high` (a requested `medium` snaps to the nearest valid tier). `xhigh`/
 `max` normalize to `high`, and a Gemini model launched with no effort gets a
-deterministic default (`medium`, or the nearest tier). Non-Gemini models
-(`claude-*`, `gpt-oss-120b`) launch bare and ignore effort — a spurious effort
-suffix on one (e.g. the retired `gpt-oss-120b-medium` catalog ID) is dropped
-with a warning so `agy` is never handed a suffixed ID it rejects.
+deterministic default (`medium`, or the nearest tier). Non-Gemini models ignore
+a separately requested effort and keep their exact provider ID. In particular,
+`gpt-oss-120b-medium` is a fixed model ID reported by `agy models`; its
+`-medium` suffix is part of the name, not a reasoning tier Crossby may rewrite.
 
 ### Permission & Allowlist Configuration
 

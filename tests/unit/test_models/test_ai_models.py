@@ -357,8 +357,10 @@ class TestClassifyTierUniversal:
     def test_powerful_tier_keywords(self) -> None:
         assert classify_tier_universal("claude-opus-4-6") == ModelTier.POWERFUL
         assert classify_tier_universal("claude-opus-5") == ModelTier.POWERFUL
+        assert classify_tier_universal("claude-fable-5-1") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-2.5-pro") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-ultra") == ModelTier.POWERFUL
+        assert classify_tier_universal("gpt-5.4") == ModelTier.POWERFUL
 
     def test_balanced_tier_sonnet(self) -> None:
         assert classify_tier_universal("claude-sonnet-4-6") == ModelTier.BALANCED
@@ -367,12 +369,18 @@ class TestClassifyTierUniversal:
         assert classify_tier_universal("gpt-4o") == ModelTier.BALANCED
         assert classify_tier_universal("some-unknown-model") == ModelTier.BALANCED
 
-    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
-    def test_codex_gpt_5_6_classifies_balanced(self, model: str) -> None:
-        """luna/sol/terra carry no tier keyword, so they classify to BALANCED
-        like the existing gpt-5.4/gpt-5.5 entries — Issue #112. Guards against a
-        keyword-regex regression."""
-        assert classify_tier_universal(model) == ModelTier.BALANCED
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gpt-5.6-luna", ModelTier.FAST),
+            ("gpt-5.6-terra", ModelTier.BALANCED),
+            ("gpt-5.6-sol", ModelTier.POWERFUL),
+        ],
+    )
+    def test_codex_gpt_5_6_uses_documented_family_roles(
+        self, model: str, expected: ModelTier
+    ) -> None:
+        assert classify_tier_universal(model) == expected
 
 
 class TestTrustedDirsArgs:

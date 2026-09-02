@@ -37,6 +37,7 @@ class TestClaudeScrapePattern:
     def test_matches_single_number_versions(self) -> None:
         assert re.findall(CLAUDE_PATTERN, "claude-sonnet-5") == ["claude-sonnet-5"]
         assert re.findall(CLAUDE_PATTERN, "claude-fable-5") == ["claude-fable-5"]
+        assert re.findall(CLAUDE_PATTERN, "claude-fable-5-1") == ["claude-fable-5-1"]
         assert re.findall(CLAUDE_PATTERN, "claude-opus-5") == ["claude-opus-5"]
 
     def test_matches_dotted_versions(self) -> None:
@@ -71,13 +72,80 @@ def test_probe_claude_standardizes_dashed_docs_ids_to_registry_dotted_form(
     monkeypatch.setattr(
         PROBE_MODULE,
         "_scrape_models",
-        lambda _tool: {"claude-haiku-4-5", "claude-opus-4-6", "claude-sonnet-5"},
+        lambda _tool: {
+            "claude-fable-5-1",
+            "claude-haiku-4-5",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+        },
     )
     assert PROBE_MODULE.probe_claude() == {
+        "claude-fable-5.1",
         "claude-haiku-4.5",
         "claude-opus-4.6",
         "claude-sonnet-5",
     }
+
+
+def test_claude_docs_parser_uses_current_lineup_not_embedded_legacy_metadata() -> None:
+    page = """
+    <section id="latest-models-comparison">
+      claude-fable-5-1 claude-opus-5 claude-sonnet-5 claude-haiku-4-5-20251001
+    </section>
+    <section id="using-the-models-api"></section>
+    <script>claude-opus-3 claude-sonnet-3-5 claude-haiku-3</script>
+    """
+
+    assert PROBE_MODULE.parse_documented_models("claude", page) == {
+        "claude-fable-5-1",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+    }
+
+
+@pytest.mark.parametrize(
+    ("dated_id", "expected_alias"),
+    [
+        # One-part version: the alias regex must not require two components,
+        # or the model is dropped from discovery entirely.
+        ("claude-sonnet-5-20260101", "claude-sonnet-5"),
+        # Dashed two-part version — the shape the docs publish today.
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        # Dotted two-part version, with and without the -v<n> republish suffix.
+        ("claude-haiku-4.5-20260101", "claude-haiku-4.5"),
+        ("claude-opus-4.8-20260101-v2", "claude-opus-4.8"),
+    ],
+)
+def test_claude_docs_parser_collapses_every_dated_version_shape(
+    dated_id: str, expected_alias: str
+) -> None:
+    page = f'<section id="latest-models-comparison">{dated_id}</section>'
+    page += '<section id="using-the-models-api"></section>'
+
+    assert PROBE_MODULE.parse_documented_models("claude", page) == {expected_alias}
+
+
+def test_claude_docs_parser_does_not_truncate_dotted_dated_snapshots() -> None:
+    # Regression: the generic scrape pattern can backtrack past the version's
+    # second component when a date follows, yielding a bogus "claude-haiku-4"
+    # that the registry diff would report as a brand-new model to add.
+    page = """
+    <section id="latest-models-comparison">
+      claude-haiku-4.5-20260101 claude-sonnet-5-20260101 claude-opus-4.8
+    </section>
+    <section id="using-the-models-api"></section>
+    """
+
+    assert PROBE_MODULE.parse_documented_models("claude", page) == {
+        "claude-haiku-4.5",
+        "claude-sonnet-5",
+        "claude-opus-4.8",
+    }
+
+
+def test_claude_docs_parser_returns_empty_when_current_lineup_anchors_missing() -> None:
+    assert PROBE_MODULE.parse_documented_models("claude", "claude-fable-5-1") == set()
 
 
 def test_copilot_pattern_captures_mai_id_without_matching_prose() -> None:
