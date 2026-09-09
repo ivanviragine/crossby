@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from crossby.cli.main import app
 from crossby.models.ai import AIToolID
-from crossby.scenes.state import SCENE_STATE_PATH
+from crossby.scenes.state import SCENE_STATE_PATH, SceneState, SceneToolRecord, save_scene_state
 from tests.unit.test_scenes.conftest import populate_project, read_json
 
 runner = CliRunner()
@@ -269,6 +269,42 @@ class TestSwitching:
         assert "claude" not in state["tools"]
         assert set(state["tools"]) == {str(t) for t in remaining}
 
+    def test_unscoped_switch_retains_uninstalled_tool_revocation_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _project(tmp_path)
+        save_scene_state(
+            root,
+            SceneState(
+                scene="pr-review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="applied",
+                tools={
+                    "cursor": SceneToolRecord(
+                        mechanisms={"permissions": "project"},
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+        remaining = [tool for tool in INSTALLED if tool != AIToolID.CURSOR]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: list(remaining)),
+        )
+
+        result = _invoke(["scene", "use", "deploy"], root)
+
+        assert result.exit_code == 0, result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["scene"] == "deploy"
+        assert state["tools"]["cursor"] == {
+            "hashes": {},
+            "mechanisms": {},
+            "revoked_concerns": ["permissions"],
+            "status": "recovery",
+        }
+
 
 class TestPerToolScope:
     def test_use_tool_cursor_touches_only_cursor(self, tmp_path: Path) -> None:
@@ -341,6 +377,36 @@ class TestPerToolScope:
         assert "shared skills directory" in result.output
         state = read_json(root / SCENE_STATE_PATH)
         assert set(state["tools"]) == {"codex", "antigravity-cli"}
+
+    def test_clear_shared_only_tool_preserves_co_sharer_mcp_state(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        # Keep Codex config as the sole MCP discovery source so this test does
+        # not cache the readers conflict logger into later logging tests.
+        (root / ".mcp.json").unlink()
+        codex_config = root / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        codex_config.write_text(
+            """\
+[mcp_servers.github]
+command = "gh-mcp"
+
+[mcp_servers.linear]
+command = "lin-mcp"
+""",
+            encoding="utf-8",
+        )
+        assert _invoke(["scene", "use", "pr-review", "--tool", "codex"], root).exit_code == 0
+        assert "enabled = false" in codex_config.read_text(encoding="utf-8")
+
+        cleared = _invoke(["scene", "clear", "--tool", "antigravity-cli"], root)
+
+        assert cleared.exit_code == 0, cleared.output
+        assert "enabled = false" in codex_config.read_text(encoding="utf-8")
+        state = read_json(root / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"codex"}
+        assert "mcp" in state["tools"]["codex"]["mechanisms"]
+        assert "skills" not in state["tools"]["codex"]["mechanisms"]
+        assert ".agents/skills" not in state["tools"]["codex"]["hashes"]
 
     def test_scoped_switch_to_different_scene_is_rejected(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -658,6 +724,55 @@ class TestPartialFailure:
         state = read_json(root / SCENE_STATE_PATH)
         assert state["scene"] == "pr-review"
         assert state["status"] == "partial"
+
+    def test_apply_exception_retains_completed_revocations(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.scenes.engine import SceneApplyError
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        root = _project(tmp_path)
+        completed = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.PERMISSIONS,
+            action="updated",
+            revoked=1,
+        )
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise SceneApplyError(RuntimeError("later writer failed"), [completed])
+
+        monkeypatch.setattr("crossby.scenes.engine.apply_scene", _boom)
+        result = _invoke(["scene", "use", "pr-review"], root)
+
+        assert result.exit_code == 1
+        assert "crossby sync" in result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["tools"]["cursor"]["revoked_concerns"] == ["permissions"]
+
+    def test_clear_warns_before_discarding_retained_revocations(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        save_scene_state(
+            root,
+            SceneState(
+                scene="pr-review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="partial",
+                tools={
+                    "cursor": SceneToolRecord(
+                        status="recovery",
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 0, result.output
+        assert "does not restore them" in result.output
+        assert "crossby sync" in result.output
+        assert not (root / SCENE_STATE_PATH).exists()
 
     def test_failed_clear_preserves_state_for_retry(self, tmp_path: Path) -> None:
         # If the revert errors (e.g. a managed file is now malformed), the state

@@ -288,15 +288,13 @@ class CodexAdapter(AbstractAITool):
         generated-by header so pruning never deletes a hand-written profile.
 
         If that namespaced path is already occupied by a hand-written profile,
-        ``write_codex_profile`` raises :class:`FileExistsError` rather than
-        clobber it. Instead of letting that abort ``crossby launch --scene``, the
-        launch degrades to persistent ``scene use`` activation for Codex — the
-        same fallback taken when the CLI is too old for ``--profile``.
+        signal the top-level launch orchestrator before any child starts.  It
+        preserves the profile, runs the shared recoverable persistent lifecycle,
+        and retries the launch once without ``--profile``.
         """
-        import warnings
-
         from crossby.scenes.launch import (
             SceneLaunchArgs,
+            SceneLaunchFallbackError,
             codex_profile_name,
             write_codex_profile,
         )
@@ -307,16 +305,7 @@ class CodexAdapter(AbstractAITool):
         try:
             write_codex_profile(scene.project_root, scene.name, scene.deselected_mcp())
         except FileExistsError as exc:
-            from crossby.scenes.engine import apply_scene
-
-            warnings.warn(
-                f"{exc} Falling back to persistent 'scene use' activation for scene "
-                f"{scene.name!r}; this writes Codex config files.",
-                UserWarning,
-                stacklevel=2,
-            )
-            apply_scene(scene.resolved, scene.project_root, tools=(self.TOOL_ID,))
-            return SceneLaunchArgs()
+            raise SceneLaunchFallbackError(str(exc)) from exc
 
         flag = self.capabilities().scene_profile_flag or "--profile"
         return SceneLaunchArgs(args=(flag, codex_profile_name(scene.project_root, scene.name)))

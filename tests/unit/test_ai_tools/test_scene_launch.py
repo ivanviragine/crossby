@@ -280,16 +280,10 @@ class TestCodexSceneLaunch:
         with pytest.raises(FileExistsError):
             scene_launch.write_codex_profile(tmp_path, "pr-review", {"linear"})
 
-    def test_profile_collision_falls_back_to_persistent(
+    def test_profile_collision_signals_orchestrator_without_mutating(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A namespaced-profile collision degrades to persistent activation.
-
-        Rather than let ``FileExistsError`` abort ``crossby launch --scene``, the
-        adapter warns, applies the scene persistently for Codex, and emits no
-        ``--profile`` — leaving the hand-written profile untouched.
-        """
-        import crossby.scenes.engine as engine
+        """A collision returns control before any persistent mutation or spawn."""
 
         home = tmp_path / "codex_home"
         home.mkdir()
@@ -297,18 +291,12 @@ class TestCodexSceneLaunch:
         path = scene_launch.codex_profile_path(tmp_path, "pr-review")
         path.write_text("model = 'gpt-5'\n")  # hand-written, no crossby header
 
-        calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            engine, "apply_scene", lambda _resolved, _root, **kw: calls.append(kw) or []
-        )
-
         ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
-        with pytest.warns(UserWarning, match="Falling back to persistent"):
-            result = CodexAdapter().scene_launch_args(ctx)
+        with pytest.raises(scene_launch.SceneLaunchFallbackError, match="hand-written"):
+            CodexAdapter().scene_launch_args(ctx)
 
-        assert result.args == ()  # no --profile emitted
         assert path.read_text() == "model = 'gpt-5'\n"  # collision left intact
-        assert calls and calls[0]["tools"] == (AIToolID.CODEX,)
+        assert not (tmp_path / ".crossby" / "scene-state.json").exists()
 
 
 # ---------------------------------------------------------------------------

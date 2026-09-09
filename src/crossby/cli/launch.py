@@ -11,9 +11,10 @@ from crossby.ui.console import console
 
 if TYPE_CHECKING:
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.models.ai import AIToolCapabilities
+    from crossby.models.ai import AIToolCapabilities, AIToolID
     from crossby.models.config import CrossbyConfig, SceneConfig
     from crossby.scenes.launch import SceneLaunchContext
+    from crossby.services.scene_activation import SceneActivationOutcome
 
 
 def launch(
@@ -393,13 +394,8 @@ def launch(
             console.error(f"Cannot create transcript directory: {e}")
             raise typer.Exit(1) from e
 
-    # Launch. A scene artefact write that would escape the project root raises
-    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
-    # cleanly here rather than let it become a persistent-write fallback (the
-    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
-    # containment error already propagates untouched).
-    try:
-        exit_code = adapter.launch(
+    def _dispatch(scene_for_launch: SceneLaunchContext | None) -> int:
+        return adapter.launch(
             working_dir=work_dir,
             model=resolved_model,
             prompt=prompt if caps.supports_initial_message else None,
@@ -410,12 +406,44 @@ def launch(
             plan_mode=plan,
             accept_edits=resolved_accept_edits,
             auto=resolved_auto,
-            scene=scene_ctx,
+            scene=scene_for_launch,
             network_access=network_effective,
         )
+
+    # Launch. A scene artefact write that would escape the project root raises
+    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
+    # cleanly here rather than let it become a persistent-write fallback (the
+    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
+    # containment error already propagates untouched).
+    from crossby.scenes.launch import SceneLaunchFallbackError
+
+    try:
+        exit_code = _dispatch(scene_ctx)
     except PathContainmentError as exc:
         console.error(f"Refusing to launch scene {scene!r}: {exc}")
         raise typer.Exit(1) from exc
+    except SceneLaunchFallbackError as exc:
+        # The adapter signals before spawning.  Preserve the hand-written
+        # artefact, activate through the same recoverable lifecycle as every
+        # other fallback, then launch exactly once without the unusable profile.
+        if scene_ctx is None or scene_cfg is None or scene is None:
+            console.error(f"Could not prepare persistent scene fallback: {exc}")
+            raise typer.Exit(1) from exc
+        console.warn(
+            f"{exc} The hand-written profile was preserved; falling back to "
+            f"persistent activation for scene {scene!r}."
+        )
+        from crossby.models.ai import AIToolID
+
+        _activate_persistent_scene(
+            scene_name=scene,
+            scene_cfg=scene_cfg,
+            context=scene_ctx,
+            tool_id=AIToolID(resolved_tool),
+            installed=AbstractAITool.detect_installed(),
+            display_name=caps.display_name,
+        )
+        exit_code = _dispatch(None)
 
     if exit_code != 0:
         console.warn(f"AI tool exited with code {exit_code}")
@@ -493,7 +521,6 @@ def _prepare_scene_launch(
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.models.ai import AIToolID, AIToolType
-    from crossby.scenes.engine import apply_scene
     from crossby.scenes.launch import (
         SceneLaunchContext,
         prune_stale_artifacts,
@@ -551,13 +578,20 @@ def _prepare_scene_launch(
         f"{caps.display_name} {reason}; attempting persistent activation for scene "
         f"{scene_name!r} instead — results follow."
     )
-    results = apply_scene(resolved, scene_root, tools=[tool_id])
-    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
-    # lever for, e.g. deselected MCP servers that stay enabled). Benign skips
-    # (already linked / already applied) stay quiet.
-    for result in results:
-        if result.unsupported and result.message:
-            console.warn(result.message)
+    _activate_persistent_scene(
+        scene_name=scene_name,
+        scene_cfg=scene_cfg,
+        context=SceneLaunchContext(
+            name=scene_name,
+            resolved=resolved,
+            project_root=scene_root,
+            sync_data=build_sync_data(scene_root),
+            allow_tools=tuple(allow_tools),
+        ),
+        tool_id=tool_id,
+        installed=installed,
+        display_name=caps.display_name,
+    )
     # A concern the scene declares that this tool can scope neither at launch nor
     # persistently (its cell is UNSUPPORTED) produces no result at all, so it
     # would be silently ignored. Name it. ``mcp`` is excluded — it has its own
@@ -580,9 +614,92 @@ def _prepare_scene_launch(
             f"{scene_name!r} at launch or persistently; "
             f"{'those remain' if len(no_mechanism) > 1 else 'that remains'} unchanged."
         )
-    if any(r.action == "error" for r in results):
-        console.warn("Scene activation reported errors; launching anyway.")
     return None
+
+
+def _activate_persistent_scene(
+    *,
+    scene_name: str,
+    scene_cfg: SceneConfig,
+    context: SceneLaunchContext,
+    tool_id: AIToolID,
+    installed: list[AIToolID],
+    display_name: str,
+) -> SceneActivationOutcome:
+    """Run and render the shared persistent lifecycle for a launch fallback."""
+    from crossby.services.scene_activation import SceneActivationError, activate_scene
+
+    try:
+        outcome = activate_scene(
+            scene_name=scene_name,
+            scene=scene_cfg,
+            resolved=context.resolved,
+            project_root=context.project_root,
+            requested_tools=[tool_id],
+            installed_candidates=installed,
+            force=False,
+        )
+    except SceneActivationError as exc:
+        for warning in exc.warnings:
+            console.warn(warning)
+        for result in exc.results:
+            if result.message:
+                console.warn(result.message)
+        console.error(f"Persistent scene activation refused: {exc.message}")
+        for path in exc.drifted:
+            console.detail(path)
+        if exc.hint:
+            console.hint(exc.hint)
+        console.hint("The AI tool was not started.")
+        raise typer.Exit(1) from exc
+
+    for warning in outcome.warnings:
+        console.warn(warning)
+    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
+    # lever for, e.g. deselected MCP servers that stay enabled) and error rows.
+    # Benign skips (already linked / already applied) stay quiet. Keeping this
+    # rendering in the shared helper ensures a Codex profile-collision fallback
+    # cannot discard a partial activation's recovery guidance.
+    for result in outcome.results:
+        if (result.unsupported or result.action == "error") and result.message:
+            console.warn(result.message)
+    if outcome.has_errors:
+        console.warn(
+            "Scene activation is partial; launching anyway. Run 'crossby scene clear' "
+            "to retry recovery afterward."
+        )
+    extra = [tool for tool in outcome.scope if tool != tool_id]
+    if extra:
+        console.info(
+            f"Persistent activation also affects {', '.join(str(tool) for tool in extra)} "
+            "(shared skills directory)."
+        )
+    changed = any(
+        result.action in ("created", "updated")
+        or (result.action == "error" and (result.added > 0 or result.revoked > 0))
+        for result in outcome.results
+    )
+    if changed:
+        console.warn(
+            f"{display_name} is using persistent scene configuration recorded by crossby; "
+            "run 'crossby scene clear' when the session ends."
+        )
+    else:
+        console.warn(
+            "Crossby recorded this persistent scene fallback even though no tool "
+            "configuration changed; run 'crossby scene clear' when the session ends."
+        )
+    removed = [
+        result
+        for result in outcome.results
+        if result.concern.value in ("hooks", "permissions") and result.revoked > 0
+    ]
+    if removed:
+        console.warn(
+            "This fallback removed hook(s)/permission(s); 'crossby scene clear' does not "
+            "restore them. Re-run 'crossby sync' after clearing the scene."
+        )
+    return outcome
 
 
 def _warn_unsupported_scene_concerns(

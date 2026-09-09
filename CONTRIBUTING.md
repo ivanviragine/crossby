@@ -212,13 +212,15 @@ Rules that keep the matrix honest:
 
 ### Session-scoped scene launch
 
-`crossby launch --scene <name>` applies a scene to a **single session** without
-mutating any tracked file — the session-scoped counterpart to the persistent
-`scene use` above. The two share the resolver (`ResolvedScene`) but diverge on
-enactment: instead of writing tool config files, each adapter renders throwaway
-artefacts under `.crossby/scene/<name>/launch/` (kept out of git via
-`.git/info/exclude`, never a tracked `.gitignore` edit) and returns the
-flags/env that point its CLI at them. The code lives in `scenes/launch.py`
+`crossby launch --scene <name>` prefers a **single-session** scene without
+mutating tracked files — the session-scoped counterpart to persistent
+`scene use`. Adapters with a launch lever render throwaway artefacts under
+`.crossby/scene/<name>/launch/` (kept out of git via `.git/info/exclude`, never
+a tracked `.gitignore` edit) and return the flags/env that point their CLI at
+them. Tools without a usable lever enter the same recoverable persistent
+activation lifecycle as `scene use`; that policy is centralized in
+`services/scene_activation.py`, while UI wording and exit behavior stay in the
+two CLI modules. The session launch code lives in `scenes/launch.py`
 (the `SceneLaunchContext`/`SceneLaunchArgs` types plus rendering, the Codex
 profile helpers, and pruning), each adapter's `scene_launch_args`, the
 `scene_*` capability fields on `AIToolCapabilities`, and the `--scene` handling
@@ -230,7 +232,7 @@ in `cli/launch.py`.
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
 | Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
 | Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
-| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so nothing is narrowed and the project's `opencode.json` stays authoritative |
+| OpenCode | none — persistent fallback records lifecycle state but has no tool-config mechanism, so nothing is narrowed and the project's `opencode.json` stays authoritative |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |
 | VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
 
@@ -255,14 +257,38 @@ Rules that keep this honest:
   profile matching the naming pattern, or a hand-made directory under
   `.crossby/scene/`, is therefore never deleted — the filename/path alone is
   never sufficient.
-- **No silent no-op, no silent mutation.** A terminal tool with no launch lever
-  (Antigravity CLI) or a runtime gate that failed (Codex too old) falls back to
-  persistent `scene use` activation for that tool, warning that config was
-  written. A GUI tool warns that a scene cannot apply and launches without it.
+- **One persistent lifecycle.** A terminal tool with no launch lever
+  (Antigravity CLI, Cursor, OpenCode) or a runtime gate that failed (Codex too
+  old) calls `services.scene_activation.activate_scene`, just like `scene use`.
+  The service validates ownership provenance before any engine call, records
+  shared-directory effects only for the shared concern, enforces
+  single-active-scene switch rules, checks every outgoing path for primary tools
+  but only the shared skills path for skills-only co-sharers, reverts the
+  affected records, applies, hashes, merges scoped state, and atomically records
+  `applied` or `partial`. Preconditions and
+  exceptional apply/state failures abort before a child starts; error result
+  rows record `partial` and retain the historical launch-anyway policy. If the
+  state write fails after apply, the service clears reversible changes and stale
+  records for the rolled-back scope while retaining recovery state for untouched
+  tools; hook/permission revocations make that rollback explicitly incomplete
+  and require `crossby sync` for restoration. An apply exception preserves
+  prior revocations in partial recovery state and reports the same clear-then-
+  sync remediation.
+- **Codex collision is orchestration, not adapter mutation.** A colliding
+  hand-written namespaced profile makes `CodexAdapter.scene_launch_args` raise
+  `SceneLaunchFallbackError` before subprocess dispatch. `cli/launch.py`
+  preserves the file, invokes the shared persistent lifecycle, then dispatches
+  once with no `--profile`. `PathContainmentError` remains a separate hard
+  failure and never enters fallback.
+- **No silent no-op, no silent mutation.** A fallback with no persistent
+  mechanism reports the unsupported concern. Any successful or partial
+  fallback is visible to `scene status` and is removable with `scene clear`.
+  A GUI tool warns that a scene cannot apply and launches without it.
 - **Precedence** matches the profile rule: explicit CLI flags > scene > profile
   > `ai:` defaults. A scene may name a default `profile:`; an explicit
   `--profile` (or positional profile name) overrides it. `--scene` targets
-  exactly one tool and never fans out.
+  exactly one launch tool. A persistent fallback may expand its recorded skills
+  scope to an installed tool sharing the same physical skills directory.
 
 ### Scene authoring (writing `.crossby.yml`)
 

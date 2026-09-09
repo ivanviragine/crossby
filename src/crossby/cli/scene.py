@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from crossby.models.ai import AIToolID
     from crossby.models.config import CrossbyConfig, SceneConfig, SceneSelector
     from crossby.scenes.authoring import CrossChannelMove, SelectorEdit
-    from crossby.scenes.state import SceneState, SceneToolRecord
+    from crossby.scenes.state import SceneState
     from crossby.services.scene_resolution import ResolvedScene
     from crossby.sync.base import SyncResult
     from crossby.sync.readers import ProjectScan
@@ -215,24 +215,6 @@ def _scope_for(tool_id: AIToolID | None, installed: list[AIToolID]) -> list[AITo
     return [tool_id]
 
 
-def _expand_shared_scope(scope: list[AIToolID], candidates: list[AIToolID]) -> list[AIToolID]:
-    """Add any *candidate* that shares a skills directory with a scoped tool.
-
-    Codex and Antigravity CLI both resolve skills to ``.agents/skills``, so
-    re-pointing (or restoring) it for one necessarily affects the other. Scoping
-    to a single one of them would silently reach the other; expanding the scope
-    keeps the operation and the recorded state honest.
-    """
-    from crossby.config.skills import SKILLS_DIR
-
-    scoped_dirs = {SKILLS_DIR.get(tool) for tool in scope} - {None}
-    expanded = list(scope)
-    for tool in candidates:
-        if tool not in expanded and SKILLS_DIR.get(tool) in scoped_dirs:
-            expanded.append(tool)
-    return expanded
-
-
 def _inform_shared_expansion(base: list[AIToolID], expanded: list[AIToolID]) -> None:
     extra = [tool for tool in expanded if tool not in base]
     if extra:
@@ -253,6 +235,23 @@ def _warn_removed_hooks_permissions(results: list[SyncResult]) -> None:
             "This scene removed hook(s)/permission(s); 'crossby scene clear' does not restore them."
         )
         console.hint("Re-run 'crossby sync' to restore them after clearing the scene.")
+
+
+def _warn_retained_revocations(active: SceneState, scope: list[AIToolID]) -> None:
+    """Warn before clear discards state for removals it cannot reverse."""
+    retained = {
+        concern
+        for tool in scope
+        for concern in (
+            active.tools[str(tool)].revoked_concerns if str(tool) in active.tools else ()
+        )
+    }
+    if retained:
+        console.warn(
+            "This scene previously removed hook(s)/permission(s); "
+            "'crossby scene clear' does not restore them."
+        )
+        console.hint("Run 'crossby sync' after clearing to restore them.")
 
 
 def _confirm_scene_defaults(
@@ -432,12 +431,7 @@ def use_scene(
     path: Path = _PATH_OPTION,
 ) -> None:
     """Apply a scene — resolve it, switch off any active scene, and record state."""
-    from crossby.scenes.engine import apply_scene
-    from crossby.scenes.state import (
-        detect_drift,
-        load_scene_state,
-        save_scene_state,
-    )
+    from crossby.services.scene_activation import SceneActivationError, activate_scene
     from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
@@ -445,33 +439,35 @@ def use_scene(
     root = scene_root(project_root)
     tool_id = _validate_tool(tool)
     installed = _installed_or_exit()
-    scope = _scope_for(tool_id, installed)
-    if tool_id is not None:
-        expanded = _expand_shared_scope(scope, installed)
-        _inform_shared_expansion(scope, expanded)
-        scope = expanded
+    requested = None if tool_id is None else _scope_for(tool_id, installed)
 
     # Resolve the full union (every tool) so the disable sets stay anchored on the
-    # real inventory; the apply is narrowed to `scope` via the tools= argument.
+    # real inventory; the service narrows the apply to the finalized scope.
     resolved = _resolve(config, name, root, installed)
-
-    loaded = load_scene_state(root)
-    if loaded.warning:
-        console.warn(loaded.warning)
-    active = loaded.state
-
-    # Fail closed on a corrupt ledger before ANY engine call — covering first-time
-    # apply, a switch, and --plan uniformly. Reverting (or previewing a revert)
-    # from an empty-loaded ledger is misleading, and the engine's finally:
-    # save_ledger would overwrite the corrupt bytes with an empty valid ledger.
-    _refuse_if_ledger_corrupt(root)
+    scene = _get_scene_or_exit(config, name)
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = apply_scene(resolved, root, dry_run=True, force=force, tools=scope)
-        _display_results(results)
+        try:
+            outcome = activate_scene(
+                scene_name=name,
+                scene=scene,
+                resolved=resolved,
+                project_root=root,
+                requested_tools=requested,
+                installed_candidates=installed,
+                force=force,
+                dry_run=True,
+            )
+        except SceneActivationError as exc:
+            _render_activation_error(exc)
+            raise typer.Exit(1) from exc
+        _render_activation_warnings(outcome.warnings)
+        if requested is not None:
+            _inform_shared_expansion(requested, list(outcome.scope))
+        _display_results(list(outcome.results))
         console.info("(--plan) no changes written.")
-        if _has_error(results):
+        if outcome.has_errors:
             raise typer.Exit(1)
         return
 
@@ -482,127 +478,52 @@ def use_scene(
     )
     if new_tool_id != tool_id:
         tool_id = new_tool_id
-        scope = _scope_for(tool_id, installed)
-        if tool_id is not None:
-            scope = _expand_shared_scope(scope, installed)
-
-    scope_strs = {str(t) for t in scope}
-
-    # A scoped switch to a *different* scene would silently leave the other tools
-    # on the active scene — the single-active-scene state can't represent that.
-    if active is not None and active.scene != name and tool_id is not None:
-        others = [t for t in active.tool_ids if t not in scope_strs]
-        if others:
-            console.error(
-                f"Scene {active.scene!r} is active on {', '.join(sorted(others))}; "
-                f"switching to {name!r} with --tool would strand them on {active.scene!r}."
-            )
-            console.hint("Run 'crossby scene clear' first, or re-run without --tool.")
-            raise typer.Exit(1)
-
-    # Revert only the scope tools' current state (not the whole active scene), so
-    # a same-scene scoped re-apply repairs just those and leaves the rest alone.
-    # Drift on those tools is checked first (the revert would discard hand edits),
-    # and a failed revert aborts before applying, leaving the state intact.
-    if active is not None:
-        recorded = _recorded_tools(active)
-        # An unscoped use reverts every recorded tool, including one that is no
-        # longer installed — otherwise its owned keys stay applied but unrecorded.
-        revert = recorded if tool_id is None else [t for t in recorded if str(t) in scope_strs]
-        if revert:
-            drifted = detect_drift(root, active, tools=[str(t) for t in revert])
-            if drifted and not force:
-                _report_drift_refusal(active.scene, drifted, verb="switch from")
-                raise typer.Exit(1)
-            if not _revert_tools(root, revert):
-                console.error(f"Could not revert {active.scene!r} — aborting; state left intact.")
-                raise typer.Exit(1)
-
-    scene = _get_scene_or_exit(config, name)
+    requested = None if tool_id is None else _scope_for(tool_id, installed)
     try:
-        results = apply_scene(resolved, root, force=force, tools=scope)
-    except Exception as exc:
-        # apply_scene persists provenance in a finally, so anything already
-        # written is revertible via the ledger. Record a minimal recovery state
-        # so `clear` knows a scene is active and reverts those tools.
-        _save_recovery_state(root, name, scene, scope)
-        console.error(f"Scene apply failed: {exc}")
-        console.hint("'crossby scene clear' can revert changes crossby recorded.")
+        outcome = activate_scene(
+            scene_name=name,
+            scene=scene,
+            resolved=resolved,
+            project_root=root,
+            requested_tools=requested,
+            installed_candidates=installed,
+            force=force,
+        )
+    except SceneActivationError as exc:
+        _render_activation_error(exc)
         raise typer.Exit(1) from exc
+    _render_activation_warnings(outcome.warnings)
+    if requested is not None:
+        _inform_shared_expansion(requested, list(outcome.scope))
+    results = list(outcome.results)
     _display_results(results)
     _warn_removed_hooks_permissions(results)
 
-    state = _build_state(root, name, scene, scope, results)
-    # A same-scene re-apply keeps records for tools outside this scope.
-    if active is not None and active.scene == name:
-        merged = dict(active.tools)
-        merged.update(state.tools)
-        state.tools = merged
-    try:
-        save_scene_state(root, state)
-    except OSError as exc:
-        # The scene is applied (the ledger has provenance) but its state could
-        # not be recorded — surface it cleanly so the user can re-run rather than
-        # being left with an active-but-untracked scene.
-        console.error(f"Scene applied but its state could not be recorded: {exc}")
-        console.hint(f"Re-run 'crossby scene use {name}' once the path is writable.")
-        raise typer.Exit(1) from exc
-
-    if _has_error(results):
+    if outcome.has_errors:
         console.error("Scene applied partially — some tools failed (see rows above).")
         console.hint("'crossby scene clear' will revert exactly the tools that succeeded.")
         raise typer.Exit(1)
     console.success(f"Applied scene {name!r}.")
 
 
-def _recorded_tools(active: SceneState) -> list[AIToolID]:
-    """The recorded tools as :class:`AIToolID`, skipping any unknown id.
-
-    Guards against a corrupt-but-parseable state file carrying a tool key this
-    build doesn't recognise — a clear should never crash on that.
-    """
-    from crossby.models.ai import AIToolID
-
-    tools: list[AIToolID] = []
-    for tool in active.tool_ids:
-        try:
-            tools.append(AIToolID(tool))
-        except ValueError:
-            continue
-    return tools
+def _render_activation_warnings(warnings: tuple[str, ...]) -> None:
+    for warning in warnings:
+        console.warn(warning)
 
 
-def _revert_tools(project_root: Path, tools: list[AIToolID]) -> bool:
-    """Revert *tools* via the engine. Returns success (no ``error`` rows).
+def _render_activation_error(exc: object) -> None:
+    from crossby.services.scene_activation import SceneActivationError
 
-    An empty list is a no-op — never passed to the engine as ``None``, which it
-    reads as "every installed tool". A revert that errors returns ``False`` so a
-    switch can abort and keep the old state.
-    """
-    if not tools:
-        return True
-    from crossby.scenes.engine import clear_scene
-
-    return not _has_error(_call_engine_or_exit(clear_scene, project_root, tools=tools))
-
-
-def _save_recovery_state(
-    project_root: Path, name: str, scene: SceneConfig, scope: list[AIToolID]
-) -> None:
-    """Best-effort record of a scene whose apply raised part-way.
-
-    The ledger already holds provenance (``apply_scene`` saves it in a finally),
-    so recording the scope tools lets ``clear`` revert exactly what was written.
-    Failure here must not mask the original error, so it is suppressed.
-    """
-    import contextlib
-
-    from crossby.scenes.state import save_scene_state
-
-    with contextlib.suppress(Exception):
-        state = _build_state(project_root, name, scene, scope, [])
-        state.status = "partial"
-        save_scene_state(project_root, state)
+    if not isinstance(exc, SceneActivationError):
+        return
+    _render_activation_warnings(exc.warnings)
+    if exc.results:
+        _display_results(list(exc.results))
+    console.error(exc.message)
+    for path in exc.drifted:
+        console.detail(path)
+    if exc.hint:
+        console.hint(exc.hint)
 
 
 def _call_engine_or_exit(
@@ -622,69 +543,6 @@ def _call_engine_or_exit(
         console.error(f"Scene engine error: {exc}")
         console.hint("'crossby scene clear' can revert any partial changes crossby recorded.")
         raise typer.Exit(1) from exc
-
-
-def _build_state(
-    project_root: Path,
-    name: str,
-    scene: SceneConfig,
-    scope: list[AIToolID],
-    results: list[SyncResult],
-) -> SceneState:
-    from crossby.scenes.state import SceneState, compute_hashes, now_iso
-
-    tools = _tool_mechanisms(scene, scope)
-    hashes_by_tool = compute_hashes(project_root, results)
-    for tool_str, record in tools.items():
-        record.hashes = hashes_by_tool.get(tool_str, {})
-    _replicate_shared_hashes(tools, scope)
-    for r in results:
-        if r.action == "error" and r.tool_id is not None and str(r.tool_id) in tools:
-            tools[str(r.tool_id)].status = "failed"
-
-    status = "partial" if _has_error(results) else "applied"
-    return SceneState(scene=name, applied_at=now_iso(), status=status, tools=tools)
-
-
-def _replicate_shared_hashes(tools: dict[str, SceneToolRecord], scope: list[AIToolID]) -> None:
-    """Mirror a shared skills-dir hash onto every tool that resolves to it.
-
-    A shared re-point (Codex + Antigravity CLI on ``.agents/skills``) is reported
-    once, so its hash lands under a single tool. Copy it to the co-sharers so
-    ``status --tool <either>`` and a scoped drift check both see it.
-    """
-    from crossby.config.skills import SKILLS_DIR
-
-    for tool in scope:
-        shared_dir = SKILLS_DIR.get(tool)
-        if shared_dir is None or str(tool) not in tools:
-            continue
-        if shared_dir in tools[str(tool)].hashes:
-            continue
-        for other in scope:
-            other_hashes = tools.get(str(other))
-            if other_hashes is not None and shared_dir in other_hashes.hashes:
-                tools[str(tool)].hashes[shared_dir] = other_hashes.hashes[shared_dir]
-                break
-
-
-def _tool_mechanisms(scene: SceneConfig, scope: list[AIToolID]) -> dict[str, SceneToolRecord]:
-    """The mechanism each scope tool uses, per concern the scene declares.
-
-    Mirrors the engine's *installed-tools + matrix* model rather than the
-    resolver's per-source-directory attribution, so a PROJECT target with no
-    source directory of its own (e.g. Cursor's skills) is still recorded.
-    """
-    from crossby.scenes.mechanism import base_mechanism
-    from crossby.scenes.state import SceneToolRecord
-
-    declared = [concern for concern in _CONCERN_ORDER if getattr(scene, concern) is not None]
-    return {
-        str(tool): SceneToolRecord(
-            mechanisms={concern: base_mechanism(tool, concern).value for concern in declared}
-        )
-        for tool in scope
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +568,7 @@ def clear_active(
         load_scene_state,
         save_scene_state,
     )
+    from crossby.services.scene_activation import recorded_tools
     from crossby.services.scene_resolution import scene_root
 
     project_root = path.resolve()
@@ -724,7 +583,7 @@ def clear_active(
         console.info("No active scene — nothing to clear.")
         return
 
-    recorded = _recorded_tools(active)
+    recorded = recorded_tools(active)
     if not recorded:
         # The state exists but records only tool ids this build doesn't know —
         # we can't revert them, so leave the file in place rather than delete it
@@ -736,7 +595,7 @@ def clear_active(
         console.info(f"Tool {tool_id} is not part of the active scene {active.scene!r}.")
         console.hint(f"Recorded tools: {', '.join(str(t) for t in recorded) or '(none)'}")
         return
-    scope = _clear_scope(tool_id, recorded)
+    scope, shared_skill_scope = _clear_scope(tool_id, active)
 
     # Fail closed on a corrupt ledger before BOTH the --plan preview and the real
     # clear: an empty-loaded ledger reverts nothing yet the engine's finally:
@@ -753,8 +612,8 @@ def clear_active(
             raise typer.Exit(1)
         return
 
-    # Drift is scoped to the tools being reverted, so an unrelated tool's drift
-    # neither blocks nor is reported by a --tool clear.
+    # Drift is scoped to the requested tool. Its state carries the shared skills
+    # hash too, so a co-sharer's unrelated config drift cannot block this clear.
     drifted = detect_drift(root, active, tools=[str(t) for t in scope])
     if drifted and not force:
         _report_drift_refusal(active.scene, drifted, verb="clear")
@@ -766,8 +625,9 @@ def clear_active(
     )
     if new_tool_id != tool_id:
         tool_id = new_tool_id
-        scope = _clear_scope(tool_id, recorded)
+        scope, shared_skill_scope = _clear_scope(tool_id, active)
 
+    _warn_retained_revocations(active, scope)
     results = _call_engine_or_exit(clear_scene, root, tools=scope)
     _display_results(results)
 
@@ -791,6 +651,7 @@ def clear_active(
         else:
             for cleared in scope:
                 active.tools.pop(str(cleared), None)
+            _drop_shared_skill_state(active, shared_skill_scope)
             if active.tools:
                 save_scene_state(root, active)
             else:
@@ -803,12 +664,45 @@ def clear_active(
     console.success(f"Cleared scene {active.scene!r}.")
 
 
-def _clear_scope(tool_id: AIToolID | None, recorded: list[AIToolID]) -> list[AIToolID]:
-    """The recorded tools a clear targets: one tool (plus shared-dir co-sharers),
-    or every recorded tool."""
+def _clear_scope(
+    tool_id: AIToolID | None, active: SceneState
+) -> tuple[list[AIToolID], list[AIToolID]]:
+    """Return the whole-tool clear scope and skills-only co-sharers."""
+    from crossby.services.scene_activation import expand_shared_scope, recorded_tools
+
+    recorded = recorded_tools(active)
     if tool_id is None:
-        return recorded
-    return _expand_shared_scope([tool_id], recorded)
+        return recorded, []
+    record = active.tools.get(str(tool_id))
+    if record is None or "skills" not in record.mechanisms:
+        return [tool_id], []
+    shared = [
+        tool
+        for tool in expand_shared_scope([tool_id], recorded)
+        if tool != tool_id and "skills" in active.tools[str(tool)].mechanisms
+    ]
+    return [tool_id], shared
+
+
+def _drop_shared_skill_state(active: SceneState, tools: list[AIToolID]) -> None:
+    """Remove only the shared skills concern from co-sharer state records."""
+    from crossby.config.skills import SKILLS_DIR
+
+    for tool in tools:
+        tool_name = str(tool)
+        record = active.tools.get(tool_name)
+        if record is None:
+            continue
+        record.mechanisms.pop("skills", None)
+        shared_path = SKILLS_DIR.get(tool)
+        if shared_path is not None:
+            record.hashes.pop(shared_path, None)
+        if record.mechanisms or record.hashes:
+            continue
+        if record.revoked_concerns:
+            record.status = "recovery"
+        else:
+            active.tools.pop(tool_name, None)
 
 
 # ---------------------------------------------------------------------------
