@@ -693,6 +693,99 @@ class TestPersistentFallbackLifecycle:
         assert not (tmp_path / ".agents" / "mcp_config.json").exists()
         assert "shared skills directory" not in " ".join(result.output.split())
 
+    def test_scoped_switch_from_shared_skills_to_mcp_only_restores_co_sharer(
+        self, tmp_path: Path
+    ) -> None:
+        """An outgoing skills-only co-sharer is not stranded by the switch."""
+        _write_lifecycle_project(tmp_path)
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            first = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
+            )
+
+        # The outgoing state, rather than the current discovery result, records
+        # that Antigravity shares the skills directory which this clear restores.
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            switched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "mcp-only"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert switched.exit_code == 0, switched.output
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == "mcp-only"
+        assert set(state["tools"]) == {"codex"}
+        assert state["tools"]["codex"]["mechanisms"] == {"mcp": "declare"}
+        restored = {
+            child.name
+            for child in (tmp_path / ".agents" / "skills").iterdir()
+            if child.name != ".crossby-managed"
+        }
+        assert restored == {"review-skill", "knowledge", "deploy-prod"}
+
+    def test_shared_skills_switch_state_failure_drops_co_sharer_record(
+        self, tmp_path: Path
+    ) -> None:
+        """Rollback does not retain a record for the restored shared directory."""
+        from crossby.scenes.state import save_scene_state as real_save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            first = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
+            )
+        assert first.exit_code == 0, first.output
+
+        def save_then_fail(project_root: Path, state: Any) -> None:
+            real_save_scene_state(project_root, state)
+            raise OSError("gitignore update failed")
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.services.scene_activation.save_scene_state", side_effect=save_then_fail),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            switched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "mcp-only"]
+            )
+
+        assert switched.exit_code == 1, switched.output
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
     def test_shared_skills_reapply_ignores_and_preserves_co_sharer_mcp_drift(
         self, tmp_path: Path
     ) -> None:

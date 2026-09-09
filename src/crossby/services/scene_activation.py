@@ -110,6 +110,25 @@ def recorded_tools(active: SceneState) -> list[AIToolID]:
     return tools
 
 
+def _outgoing_shared_skill_scope(
+    active: SceneState, primary_scope: Sequence[AIToolID]
+) -> list[AIToolID]:
+    """Return active skills-only co-sharers restored by a scoped clear.
+
+    The incoming scene may not constrain skills, but clearing one tool still
+    restores an outgoing shared skills directory. Derive those co-sharers from
+    the active record rather than the incoming scene so the switch guard does
+    not mistake them for stranded tools.
+    """
+    primary = {str(tool) for tool in primary_scope}
+    return [
+        tool
+        for tool in expand_shared_scope(primary_scope, recorded_tools(active))
+        if str(tool) not in primary
+        and "skills" in active.tools.get(str(tool), SceneToolRecord()).mechanisms
+    ]
+
+
 def activate_scene(
     *,
     scene_name: str,
@@ -139,13 +158,21 @@ def activate_scene(
         else initial_scope
     )
     scope = list(dict.fromkeys([*initial_scope, *shared_skill_scope]))
-    scope_strings = {str(tool) for tool in scope}
     initial_scope_strings = {str(tool) for tool in initial_scope}
 
     loaded = load_scene_state(project_root)
     warnings = (loaded.warning,) if loaded.warning else ()
     active = loaded.state
     reverted_scope: list[AIToolID] = []
+    outgoing_shared_skill_scope = (
+        _outgoing_shared_skill_scope(active, initial_scope)
+        if active is not None and explicitly_scoped
+        else []
+    )
+    outgoing_scope_strings = {str(tool) for tool in (*initial_scope, *outgoing_shared_skill_scope)}
+    rollback_shared_skill_scope = list(
+        dict.fromkeys([*shared_skill_scope, *outgoing_shared_skill_scope])
+    )
 
     if load_ledger_checked(project_root).corrupt:
         raise SceneActivationError(
@@ -169,11 +196,11 @@ def activate_scene(
         return SceneActivationOutcome(tuple(scope), tuple(results), "preview", warnings)
 
     if active is not None and active.scene != scene_name and explicitly_scoped:
-        other_tools = [tool for tool in active.tool_ids if tool not in scope_strings]
+        other_tools = [tool for tool in active.tool_ids if tool not in outgoing_scope_strings]
         other_tools.extend(
             tool
             for tool, record in active.tools.items()
-            if tool in scope_strings
+            if tool in outgoing_scope_strings
             and tool not in initial_scope_strings
             and any(concern != "skills" for concern in record.mechanisms)
         )
@@ -194,7 +221,7 @@ def activate_scene(
         outgoing = (
             recorded
             if not explicitly_scoped
-            else [tool for tool in recorded if str(tool) in scope_strings]
+            else [tool for tool in recorded if str(tool) in outgoing_scope_strings]
         )
         if outgoing:
             drifted = (
@@ -289,7 +316,7 @@ def activate_scene(
                     project_root,
                     active,
                     reverted_scope,
-                    shared_skill_scope=shared_skill_scope,
+                    shared_skill_scope=rollback_shared_skill_scope,
                 )
             except Exception as cleanup_exc:
                 rollback_error = cleanup_exc
