@@ -207,11 +207,14 @@ def run_sync(
     # Ownership ledger — revocation is computed *here*, never inferred by a
     # writer. For each hooks/permissions/MCP writer we diff what crossby wrote
     # last time (the ledger) against the current sync data and hand the writer an
-    # explicit, provenance-bounded removal set. A missing/malformed ledger loads
-    # empty, so this degrades to purely additive behaviour.
-    from crossby.sync.ownership import LEDGER_PATH, load_ledger, save_ledger
+    # explicit, provenance-bounded removal set. A missing ledger degrades to
+    # purely additive behaviour. A corrupt ledger still permits the individual
+    # writers to run, but is never rewritten: its scene provenance could be the
+    # only record of a recoverable activation.
+    from crossby.sync.ownership import LEDGER_PATH, load_ledger_checked, save_ledger
 
-    ledger = load_ledger(project_root)
+    loaded_ledger = load_ledger_checked(project_root)
+    ledger = loaded_ledger.ledger
     current_hooks = {(h.event, h.command) for h in data.hooks}
     current_perms = set(data.allowed_commands)
     disabled_mcp = {name for name, s in data.mcp_servers.items() if not s.enabled}
@@ -368,45 +371,16 @@ def run_sync(
     # succeeded. ``dry_run`` computes revocations above but writes neither the
     # targets nor the ledger, matching the report-only contract of --plan.
     if (pending_hooks or pending_perms or pending_mcp) and not dry_run:
-        for hook_tool, hook_pairs in pending_hooks.items():
-            ledger.record_hooks(hook_tool, hook_pairs)
-        for perm_tool, perm_pats in pending_perms.items():
-            ledger.record_permissions(perm_tool, perm_pats)
-        for mcp_tool, mcp_names in pending_mcp.items():
-            ledger.record_mcp(mcp_tool, mcp_names)
-        # The ledger is advisory: a persistence failure (read-only dir, no
-        # permission, full disk) must not discard the SyncResults for writes
-        # that already succeeded, so mirror run_sync's per-writer isolation
-        # here. load_ledger already degrades to "own nothing" on a missing or
-        # malformed file, so a dropped save simply retries next run.
-        try:
-            save_ledger(project_root, ledger)
-            # Ensure the ledger is gitignored whenever the file exists on disk —
-            # decoupled from save_ledger's change detection so a prior transient
-            # .gitignore failure self-heals on the next sync (rather than being
-            # skipped forever because the unchanged ledger makes save_ledger
-            # return False). update_managed_block is itself a no-op when the
-            # block is already present, so this is cheap on the common path; an
-            # empty ledger is never materialised, so there's nothing to ignore.
-            if (project_root / LEDGER_PATH).is_file():
-                from crossby.sync.gitignore_utils import update_managed_block
-
-                update_managed_block(
-                    project_root,
-                    _LEDGER_GITIGNORE_BLOCK_ID,
-                    [LEDGER_PATH.as_posix()],
-                )
-        except OSError as exc:
-            logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
-        except SyncContainmentError as exc:
-            # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
-            # post-writer path: surface as an ``error`` row (the writes already
-            # succeeded) rather than escaping run_sync. Attribute the failure to
-            # the concern(s) whose ownership actually failed to persist — a
-            # hooks-only or permissions-only sync must not mis-report a ledger
-            # containment failure under MCP (the ledger holds all three, but only
-            # the concerns with pending ownership were being recorded this run).
-            logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
+        if loaded_ledger.corrupt:
+            # ``load_ledger_checked`` deliberately returns a usable additive
+            # view for ordinary sync.  Do not turn that view back into a clean
+            # file, though: doing so would discard valid scene-path entries next
+            # to a malformed one and strand a live scene without its baseline.
+            message = (
+                f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; "
+                "refusing to rewrite the ownership ledger"
+            )
+            logger.warning("ownership.persist_skipped_corrupt", path=str(project_root))
             for affected_concern, pending in (
                 (SyncConcern.HOOKS, pending_hooks),
                 (SyncConcern.PERMISSIONS, pending_perms),
@@ -418,9 +392,59 @@ def run_sync(
                             tool_id=None,
                             concern=affected_concern,
                             action="error",
-                            message=str(exc),
+                            message=message,
                         )
                     )
+        else:
+            for hook_tool, hook_pairs in pending_hooks.items():
+                ledger.record_hooks(hook_tool, hook_pairs)
+            for perm_tool, perm_pats in pending_perms.items():
+                ledger.record_permissions(perm_tool, perm_pats)
+            for mcp_tool, mcp_names in pending_mcp.items():
+                ledger.record_mcp(mcp_tool, mcp_names)
+            # The ledger is advisory: a persistence failure (read-only dir, no
+            # permission, full disk) must not discard the SyncResults for writes
+            # that already succeeded, so mirror run_sync's per-writer isolation
+            # here. A dropped save simply retries next run.
+            try:
+                save_ledger(project_root, ledger)
+                # Ensure the ledger is gitignored whenever the file exists on disk —
+                # decoupled from save_ledger's change detection so a prior transient
+                # .gitignore failure self-heals on the next sync (rather than being
+                # skipped forever because the unchanged ledger makes save_ledger
+                # return False). update_managed_block is itself a no-op when the
+                # block is already present, so this is cheap on the common path; an
+                # empty ledger is never materialised, so there's nothing to ignore.
+                if (project_root / LEDGER_PATH).is_file():
+                    from crossby.sync.gitignore_utils import update_managed_block
+
+                    update_managed_block(
+                        project_root,
+                        _LEDGER_GITIGNORE_BLOCK_ID,
+                        [LEDGER_PATH.as_posix()],
+                    )
+            except OSError as exc:
+                logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
+            except SyncContainmentError as exc:
+                # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
+                # post-writer path: surface as an ``error`` row (the writes already
+                # succeeded) rather than escaping run_sync. Attribute the failure to
+                # concern(s) whose ownership actually failed to persist.
+                logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
+                for affected_concern, pending in (
+                    (SyncConcern.HOOKS, pending_hooks),
+                    (SyncConcern.PERMISSIONS, pending_perms),
+                    (SyncConcern.MCP, pending_mcp),
+                ):
+                    if pending:
+                        results.append(
+                            SyncResult(
+                                tool_id=None,
+                                concern=affected_concern,
+                                action="error",
+                                message=str(exc),
+                            )
+                        )
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or
     # when the user explicitly asked for the plugins concern. We don't run

@@ -430,6 +430,37 @@ _HOOK = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
 
 
 class TestRunSyncLedgerGating:
+    def test_corrupt_scene_paths_are_not_rewritten_by_ordinary_sync(self, tmp_path: Path) -> None:
+        """A successful additive writer must not erase scene recovery authority."""
+        path = tmp_path / LEDGER_PATH
+        path.parent.mkdir(parents=True)
+        original = json.dumps(
+            {
+                "version": LEDGER_VERSION,
+                "owned": {},
+                "scene_paths": {
+                    ".cursor/skills": {"kind": "absent"},
+                    ".github/agents": {"kind": "unknown"},
+                },
+            }
+        )
+        path.write_text(original, encoding="utf-8")
+
+        results = run_sync(
+            SyncData(hooks=[_HOOK]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(_make_writer(SyncConcern.HOOKS, "updated")),
+        )
+
+        assert path.read_text(encoding="utf-8") == original
+        assert any(
+            result.concern == SyncConcern.HOOKS
+            and result.action == "error"
+            and "refusing to rewrite" in (result.message or "")
+            for result in results
+        )
+
     def test_success_records_ownership(self, tmp_path: Path) -> None:
         reg = _registry(_make_writer(SyncConcern.HOOKS, "updated"))
         run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)

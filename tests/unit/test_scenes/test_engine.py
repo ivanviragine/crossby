@@ -339,6 +339,45 @@ class TestExactPathRestoration:
             classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
         )
 
+    @pytest.mark.parametrize(
+        ("tool", "target_rel"),
+        [
+            ("codex", ".codex/agents"),
+            ("copilot", ".github/agents"),
+        ],
+    )
+    def test_legacy_managed_agent_projection_without_baseline_refuses_clear(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tool: str,
+        target_rel: str,
+    ) -> None:
+        """Never clear a marker-backed legacy projection without its baseline."""
+        from crossby.models.ai import AIToolID
+
+        tool_id = AIToolID(tool)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [tool_id]),
+        )
+        target = tmp_path / target_rel
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        projection_root = tmp_path / ".crossby" / "scene"
+        projection_root.mkdir(parents=True)
+
+        results = clear_scene(tmp_path)
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "legacy activation" in (result.message or "")
+            for result in results
+        )
+        assert target.is_dir() and (target / ".crossby-managed").is_file()
+        assert projection_root.is_dir()
+
     def test_force_restores_exact_cursor_directory_and_leaves_other_backups(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

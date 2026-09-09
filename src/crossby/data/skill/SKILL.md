@@ -209,12 +209,13 @@ record directly: never rediscover the original source, infer a baseline, or sele
 a neighboring `.bak*` path by filename. If the ledger exists but is unreadable or
 contains malformed/unsafe path provenance, `use` and `clear` (and `--plan`)
 **refuse** (exit 1) rather than revert from an empty view. An active legacy PROJECT
-scene with no path record also requires manual recovery. Restore the ledger from
-backup or revert by hand; never delete it (a missing ledger reads as "own nothing"
-and re-opens the gap). Drift compares a per-file content hash; a **symlinked**
-config is hashed by its resolved contents, so editing the link target counts as
-drift. Restore an active scene from the old discovery-based logic manually before
-retrying `use` or `clear`.
+scene with no path record also requires manual recovery. Ordinary `sync` reports a
+corrupt ledger and leaves it untouched rather than regenerating it from an
+incomplete view. Restore the ledger from backup or revert by hand; never delete it
+(a missing ledger reads as "own nothing" and re-opens the gap). Drift compares a
+per-file content hash; a **symlinked** config is hashed by its resolved contents,
+so editing the link target counts as drift. Restore an active scene from the old
+discovery-based logic manually before retrying `use` or `clear`.
 
 Author without hand-editing YAML. `create` runs a wizard on a TTY; pass
 selector flags to build a scene non-interactively (required when stdin is not a

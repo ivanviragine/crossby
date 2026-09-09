@@ -706,7 +706,15 @@ def _restore_paths(
         representative = path_tools[0] if path_tools else None
         if descriptor is None:
             kind = "skills" if concern == SyncConcern.SKILLS else "agents"
-            if projection.tool_points_at_projection(project_root, target_rel, kind):
+            # Legacy scenes did not record exact path baselines.  Most legacy
+            # projections are directory symlinks into ``.crossby/scene``, but
+            # Codex and Copilot agents can instead be materialised into a
+            # marker-backed directory.  Both shapes are active scene output;
+            # without provenance, clearing either one would orphan its
+            # pre-scene state while reporting a successful clear.
+            if projection.tool_points_at_projection(project_root, target_rel, kind) or (
+                target.is_dir() and not target.is_symlink() and has_managed_marker(target)
+            ):
                 results.append(
                     SyncResult(
                         tool_id=representative,
