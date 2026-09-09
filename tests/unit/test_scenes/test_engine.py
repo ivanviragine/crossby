@@ -418,6 +418,21 @@ class TestExactPathRestoration:
         target.mkdir(parents=True)
         (target / "user-notes.txt").write_text("mine", encoding="utf-8")
 
+        preview = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            dry_run=True,
+            force=True,
+        )
+        assert any(
+            result.action == "error"
+            and "drifted to a real directory" in (result.message or "")
+            for result in preview
+        )
+        assert not any(
+            "would preserve the directory" in (result.message or "") for result in preview
+        )
+
         results = apply_scene(
             resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
             tmp_path,
@@ -432,6 +447,39 @@ class TestExactPathRestoration:
         )
         assert (target / "user-notes.txt").read_text(encoding="utf-8") == "mine"
         assert not list(tmp_path.glob(".cursor/skills.bak*"))
+
+    def test_missing_recorded_backup_refuses_unrelated_real_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        shutil.rmtree(tmp_path / descriptor.backup_path)
+
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.mkdir()
+        (target / "unrelated").write_text("mine", encoding="utf-8")
+
+        results = clear_scene(tmp_path)
+
+        assert any(
+            result.action == "error" and "recorded backup is missing" in (result.message or "")
+            for result in results
+        )
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") == descriptor
+        assert (target / "unrelated").read_text(encoding="utf-8") == "mine"
+        assert (tmp_path / ".crossby/scene").exists()
 
     def test_projection_error_after_displacement_keeps_recoverable_descriptor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

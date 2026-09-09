@@ -459,7 +459,12 @@ def _repoint_path(
         )
     if ctx.dry_run:
         preview = projection.preview_repoint(tree, tools)
-        baseline = _describe_prospective_baseline(ctx.project_root, target_rel, ctx.force)
+        baseline = _describe_repoint_baseline(
+            ctx.project_root,
+            target_rel,
+            ctx.force,
+            ctx.ledger.scene_restore(target_rel),
+        )
         if baseline.startswith("error:"):
             preview.action = "error"
             preview.message = baseline.removeprefix("error:")
@@ -536,6 +541,36 @@ def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
     # changes. A save failure propagates with the target untouched.
     save_ledger(ctx.project_root, ctx.ledger)
     return descriptor
+
+
+def _describe_repoint_baseline(
+    project_root: Path,
+    target_rel: str,
+    force: bool,
+    descriptor: ScenePathRestore | None,
+) -> str:
+    """Describe the recovery authority a dry-run re-point would use."""
+    if descriptor is None:
+        return _describe_prospective_baseline(project_root, target_rel, force)
+
+    target = project_root / target_rel
+    if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
+        backup_rel = descriptor.backup_path
+        assert backup_rel is not None
+        backup = project_root / backup_rel
+        if target.is_dir() and not target.is_symlink() and os.path.lexists(backup):
+            return f"error:recorded backup is occupied: {backup_rel}"
+        return f"would retain the recorded directory baseline at {backup_rel}"
+
+    if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
+        return (
+            f"error:{target_rel} drifted to a real directory after its baseline was recorded; "
+            "restore the recorded baseline first"
+        )
+
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        return "would retain the recorded absent baseline"
+    return f"would retain the recorded literal symlink target {descriptor.link_target!r}"
 
 
 def _describe_prospective_baseline(project_root: Path, target_rel: str, force: bool) -> str:
@@ -843,10 +878,10 @@ def _validate_restore_one_path(
     assert_ancestors(scope, backup)
     backup_exists = os.path.lexists(backup)
     if not backup_exists:
-        # Descriptor cleanup may have been interrupted after os.replace. A real
-        # directory at the target is the only converged state in this boundary.
-        if target.is_dir() and not target.is_symlink():
-            return
+        # A real target directory cannot authenticate that the exact recorded
+        # backup reached it: the backup could have been lost while an unrelated
+        # directory was recreated at the target. Keep recovery authority intact
+        # until the recorded backup is available for an explicit restore.
         raise FileNotFoundError(f"recorded backup is missing: {backup_rel}")
     if backup.is_symlink() or not backup.is_dir():
         raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
