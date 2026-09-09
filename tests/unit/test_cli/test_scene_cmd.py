@@ -725,6 +725,55 @@ class TestPartialFailure:
         assert state["scene"] == "pr-review"
         assert state["status"] == "partial"
 
+    def test_apply_exception_retains_completed_revocations(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.scenes.engine import SceneApplyError
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        root = _project(tmp_path)
+        completed = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.PERMISSIONS,
+            action="updated",
+            revoked=1,
+        )
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            raise SceneApplyError(RuntimeError("later writer failed"), [completed])
+
+        monkeypatch.setattr("crossby.scenes.engine.apply_scene", _boom)
+        result = _invoke(["scene", "use", "pr-review"], root)
+
+        assert result.exit_code == 1
+        assert "crossby sync" in result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["tools"]["cursor"]["revoked_concerns"] == ["permissions"]
+
+    def test_clear_warns_before_discarding_retained_revocations(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        save_scene_state(
+            root,
+            SceneState(
+                scene="pr-review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="partial",
+                tools={
+                    "cursor": SceneToolRecord(
+                        status="recovery",
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 0, result.output
+        assert "does not restore them" in result.output
+        assert "crossby sync" in result.output
+        assert not (root / SCENE_STATE_PATH).exists()
+
     def test_failed_clear_preserves_state_for_retry(self, tmp_path: Path) -> None:
         # If the revert errors (e.g. a managed file is now malformed), the state
         # file must survive so the clear can be retried. --force bypasses the

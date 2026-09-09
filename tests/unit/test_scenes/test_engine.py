@@ -8,6 +8,8 @@ import pytest
 
 from crossby.models.config import SceneConfig, SceneSelector
 from crossby.scenes import apply_scene, clear_scene
+from crossby.scenes.engine import SceneApplyError
+from crossby.sync.base import SyncConcern, SyncResult
 from crossby.sync.ownership import SceneDeclareKey, load_ledger
 from tests.unit.test_scenes.conftest import populate_project, read_json, resolve
 
@@ -87,6 +89,31 @@ class TestApplyProject:
 
         skills_errors = [r for r in results if r.concern.value == "skills" and r.action == "error"]
         assert skills_errors, "expected a projection containment error row"
+
+
+class TestApplyException:
+    def test_retains_results_completed_before_a_later_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        populate_project(tmp_path)
+        completed = SyncResult(
+            tool_id=None,
+            concern=SyncConcern.HOOKS,
+            action="updated",
+            revoked=1,
+        )
+
+        def _fail_after_hooks(_ctx: object, _key: str, concern: SyncConcern) -> list[SyncResult]:
+            if concern == SyncConcern.HOOKS:
+                return [completed]
+            raise RuntimeError("permissions writer failed")
+
+        monkeypatch.setattr("crossby.scenes.engine._filter_removable", _fail_after_hooks)
+
+        with pytest.raises(SceneApplyError, match="permissions writer failed") as raised:
+            apply_scene(resolve(tmp_path, SCENE), tmp_path)
+
+        assert raised.value.results[-1] == completed
 
 
 class TestProvenance:

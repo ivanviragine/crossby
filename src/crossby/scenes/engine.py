@@ -20,7 +20,7 @@ switch-safe, and both entry points return ``list[SyncResult]`` so the CLI reuses
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import structlog
@@ -46,6 +46,14 @@ _MCP_DECLARE = {
 }
 
 
+class SceneApplyError(RuntimeError):
+    """An exceptional apply failure together with actions completed before it."""
+
+    def __init__(self, cause: Exception, results: Sequence[SyncResult]) -> None:
+        super().__init__(str(cause))
+        self.results = tuple(results)
+
+
 def apply_scene(
     resolved: ResolvedScene,
     project_root: Path,
@@ -65,36 +73,41 @@ def apply_scene(
     ctx = _context(project_root, resolved, dry_run=dry_run, force=force, tools=tools)
     results: list[SyncResult] = []
 
-    # 1. DECLARE surfaces. Each handler commits provenance for a (tool, key) into
-    #    the in-memory ledger only AFTER its file write succeeds, or inline on a
-    #    verified no-write path — so a handler that raises leaves that key's prior
-    #    ownership untouched, and the in-memory ledger only ever reflects writes
-    #    that actually landed. The provenance save runs in a finally so a writer
-    #    raising part-way still persists a ledger consistent with disk — `clear`
-    #    can always revert an on-disk setting crossby recorded. It also lands
-    #    BEFORE the hooks/permissions run_sync calls: those reload the ledger from
-    #    disk and re-save it (owned section), and load_ledger/to_json round-trip
-    #    the scene section, so this early save is preserved.
     try:
-        results.extend(_declare_skills(ctx))
-        results.extend(_declare_agents(ctx))
-        results.extend(_declare_mcp(ctx))
-    finally:
-        if not dry_run:
-            save_ledger(project_root, ctx.ledger)
+        # 1. DECLARE surfaces. Each handler commits provenance for a (tool, key) into
+        #    the in-memory ledger only AFTER its file write succeeds, or inline on a
+        #    verified no-write path — so a handler that raises leaves that key's prior
+        #    ownership untouched, and the in-memory ledger only ever reflects writes
+        #    that actually landed. The provenance save runs in a finally so a writer
+        #    raising part-way still persists a ledger consistent with disk — `clear`
+        #    can always revert an on-disk setting crossby recorded. It also lands
+        #    BEFORE the hooks/permissions run_sync calls: those reload the ledger from
+        #    disk and re-save it (owned section), and load_ledger/to_json round-trip
+        #    the scene section, so this early save is preserved.
+        try:
+            results.extend(_declare_skills(ctx))
+            results.extend(_declare_agents(ctx))
+            results.extend(_declare_mcp(ctx))
+        finally:
+            if not dry_run:
+                save_ledger(project_root, ctx.ledger)
 
-    # 2. PROJECT the skills/agents directories at the filtered source tree.
-    results.extend(_project_concern(ctx, "skills", ctx.base.skills_source))
-    results.extend(_project_concern(ctx, "agents", ctx.base.agents_source))
-    _ensure_scene_gitignore(ctx)
+        # 2. PROJECT the skills/agents directories at the filtered source tree.
+        results.extend(_project_concern(ctx, "skills", ctx.base.skills_source))
+        results.extend(_project_concern(ctx, "agents", ctx.base.agents_source))
+        _ensure_scene_gitignore(ctx)
 
-    # 3. hooks / permissions: revocable-sync removal channel, once each.
-    results.extend(_filter_removable(ctx, "hooks", SyncConcern.HOOKS))
-    results.extend(_filter_removable(ctx, "permissions", SyncConcern.PERMISSIONS))
+        # 3. hooks / permissions: revocable-sync removal channel, once each.
+        results.extend(_filter_removable(ctx, "hooks", SyncConcern.HOOKS))
+        results.extend(_filter_removable(ctx, "permissions", SyncConcern.PERMISSIONS))
 
-    # 4. Plugin-provided skills are reachable by neither mechanism.
-    results.extend(_report_plugin_skills(project_root))
-    return results
+        # 4. Plugin-provided skills are reachable by neither mechanism.
+        results.extend(_report_plugin_skills(project_root))
+        return results
+    except Exception as exc:
+        # The caller must retain both reversible provenance and irreversible
+        # revocations completed before a later phase failed.
+        raise SceneApplyError(exc, results) from exc
 
 
 def clear_scene(

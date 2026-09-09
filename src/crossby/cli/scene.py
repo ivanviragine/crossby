@@ -237,6 +237,23 @@ def _warn_removed_hooks_permissions(results: list[SyncResult]) -> None:
         console.hint("Re-run 'crossby sync' to restore them after clearing the scene.")
 
 
+def _warn_retained_revocations(active: SceneState, scope: list[AIToolID]) -> None:
+    """Warn before clear discards state for removals it cannot reverse."""
+    retained = {
+        concern
+        for tool in scope
+        for concern in (
+            active.tools[str(tool)].revoked_concerns if str(tool) in active.tools else ()
+        )
+    }
+    if retained:
+        console.warn(
+            "This scene previously removed hook(s)/permission(s); "
+            "'crossby scene clear' does not restore them."
+        )
+        console.hint("Run 'crossby sync' after clearing to restore them.")
+
+
 def _confirm_scene_defaults(
     *, action: str, scene: str | None, tool_id: AIToolID | None, installed: list[AIToolID]
 ) -> AIToolID | None:
@@ -610,6 +627,7 @@ def clear_active(
         tool_id = new_tool_id
         scope, shared_skill_scope = _clear_scope(tool_id, active)
 
+    _warn_retained_revocations(active, scope)
     results = _call_engine_or_exit(clear_scene, root, tools=scope)
     _display_results(results)
 

@@ -274,11 +274,14 @@ def activate_scene(
     try:
         results = engine.apply_scene(resolved, project_root, force=force, tools=initial_scope)
     except Exception as exc:
+        partial_results = exc.results if isinstance(exc, engine.SceneApplyError) else ()
+        recovery_revocations = retained_revocations | _revoked_concerns(partial_results)
         recovery_recorded = _save_recovery_state(
             project_root,
             scene_name,
             scene,
             initial_scope,
+            partial_results,
             shared_skill_scope=shared_skill_scope,
             active=active,
         )
@@ -288,13 +291,14 @@ def activate_scene(
             hint=(
                 "Run 'crossby scene clear' to revert changes crossby recorded, then "
                 "'crossby sync' to restore the previously removed hooks/permissions."
-                if recovery_recorded and retained_revocations
+                if recovery_recorded and recovery_revocations
                 else "'crossby scene clear' can revert changes crossby recorded."
                 if recovery_recorded
                 else "Recoverable scene state could not be recorded; inspect the ownership "
                 "ledger and tool files before retrying."
             ),
             warnings=warnings,
+            results=partial_results,
             recovery_recorded=recovery_recorded,
         ) from exc
 
@@ -329,11 +333,7 @@ def activate_scene(
                 )
             except Exception as cleanup_exc:
                 rollback_error = cleanup_exc
-        removed_concerns = outgoing_revocations | {
-            result.concern.value
-            for result in results
-            if result.concern.value in ("hooks", "permissions") and result.revoked > 0
-        }
+        removed_concerns = outgoing_revocations | _revoked_concerns(results)
         rolled_back = engine_rolled_back and rollback_error is None and not removed_concerns
         if removed_concerns and engine_rolled_back and rollback_error is None:
             remaining = "/".join(sorted(removed_concerns))
@@ -418,6 +418,15 @@ def _recorded_revocations(
         concern
         for tool in tools
         for concern in active.tools.get(str(tool), SceneToolRecord()).revoked_concerns
+    }
+
+
+def _revoked_concerns(results: Sequence[SyncResult]) -> set[str]:
+    """Return irreversible hook/permission removals completed in result rows."""
+    return {
+        result.concern.value
+        for result in results
+        if result.concern.value in ("hooks", "permissions") and result.revoked > 0
     }
 
 
@@ -531,6 +540,7 @@ def _save_recovery_state(
     scene_name: str,
     scene: SceneConfig,
     scope: list[AIToolID],
+    results: Sequence[SyncResult],
     *,
     shared_skill_scope: list[AIToolID],
     active: SceneState | None,
@@ -542,7 +552,7 @@ def _save_recovery_state(
             scene_name,
             scene,
             scope,
-            [],
+            results,
             shared_skill_scope=shared_skill_scope,
         )
         state.status = "partial"
