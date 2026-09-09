@@ -404,6 +404,35 @@ class TestExactPathRestoration:
         clear_scene(tmp_path)
         assert not (tmp_path / ".cursor/skills").exists()
 
+    def test_force_reapply_rejects_drifted_directory_without_directory_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        apply_scene(resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path)
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.mkdir(parents=True)
+        (target / "user-notes.txt").write_text("mine", encoding="utf-8")
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "drifted to a real directory" in (result.message or "")
+            for result in results
+        )
+        assert (target / "user-notes.txt").read_text(encoding="utf-8") == "mine"
+        assert not list(tmp_path.glob(".cursor/skills.bak*"))
+
     def test_projection_error_after_displacement_keeps_recoverable_descriptor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -497,6 +526,41 @@ class TestExactPathRestoration:
         assert load_ledger(tmp_path).scene_restore(".cursor/skills") == descriptor
         assert (neighbor / "unrelated").read_text(encoding="utf-8") == "mine"
         assert (tmp_path / ".crossby/scene").exists()
+
+    def test_dry_run_reports_missing_backup_and_nonremovable_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        shutil.rmtree(tmp_path / descriptor.backup_path)
+
+        missing_backup = clear_scene(tmp_path, dry_run=True)
+        assert any(
+            result.action == "error" and "recorded backup is missing" in (result.message or "")
+            for result in missing_backup
+        )
+
+        (tmp_path / descriptor.backup_path).mkdir(parents=True)
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.write_text("not a projection", encoding="utf-8")
+        nonremovable_target = clear_scene(tmp_path, dry_run=True)
+        assert any(
+            result.action == "error"
+            and "target is not removable scene-owned projection output" in (result.message or "")
+            for result in nonremovable_target
+        )
 
 
 class TestHooksPermissionsFilter:

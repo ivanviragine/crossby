@@ -490,6 +490,19 @@ def _repoint_path(
                 return _path_error(
                     tools, tree.concern, target, f"recorded backup is occupied: {backup_rel}"
                 )
+        elif target.is_dir() and not target.is_symlink():
+            # Some writers materialise a managed directory rather than a
+            # symlink. Re-run those without force; an unmarked directory is
+            # drift and must not be preserved at an unrecorded .bak path.
+            if not has_managed_marker(target):
+                return _path_error(
+                    tools,
+                    tree.concern,
+                    target,
+                    f"{target_rel} drifted to a real directory after its baseline was recorded; "
+                    "restore the recorded baseline first",
+                )
+            return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
         # The scene owns replacement only after the baseline is durable. A real
         # directory has already been displaced, so the generic writer cannot
         # allocate an independent .bak path.
@@ -646,6 +659,21 @@ def _restore_paths(
                 )
             continue
         if dry_run:
+            try:
+                _validate_restore_one_path(
+                    project_root, target_rel, concern, descriptor, force=force
+                )
+            except (OSError, ValueError, SyncContainmentError) as exc:
+                results.append(
+                    SyncResult(
+                        tool_id=representative,
+                        concern=concern,
+                        action="error",
+                        file_path=target,
+                        message=f"could not restore {target_rel}: {exc}",
+                    )
+                )
+                continue
             results.append(
                 SyncResult(
                     tool_id=representative,
@@ -750,13 +778,11 @@ def _restore_one_path(
 ) -> None:
     target = project_root / target_rel
     kind = "skills" if concern == SyncConcern.SKILLS else "agents"
-    scope = ProjectScope(project_root)
-    assert_ancestors(scope, target)
+    _validate_restore_one_path(project_root, target_rel, concern, descriptor, force=force)
 
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
-        if not os.path.lexists(target):
-            return
-        _remove_scene_output(project_root, target_rel, kind, force=force)
+        if os.path.lexists(target):
+            _remove_scene_output(project_root, target_rel, kind, force=force)
         return
 
     if descriptor.kind == ScenePathRestoreKind.SYMLINK:
@@ -773,6 +799,47 @@ def _restore_one_path(
     backup_rel = descriptor.backup_path
     assert backup_rel is not None
     backup = project_root / backup_rel
+    if not os.path.lexists(backup):
+        # Validation accepts the converged target state when descriptor cleanup
+        # was interrupted after os.replace, so there is nothing left to do.
+        return
+    if os.path.lexists(target):
+        _remove_scene_output(project_root, target_rel, kind, force=force)
+    os.replace(backup, target)
+
+
+def _validate_restore_one_path(
+    project_root: Path,
+    target_rel: str,
+    concern: SyncConcern,
+    descriptor: ScenePathRestore,
+    *,
+    force: bool,
+) -> None:
+    """Raise when restoring *descriptor* cannot safely succeed without writing."""
+    target = project_root / target_rel
+    kind = "skills" if concern == SyncConcern.SKILLS else "agents"
+    scope = ProjectScope(project_root)
+    assert_ancestors(scope, target)
+
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        if not os.path.lexists(target):
+            return
+        _validate_scene_output_removal(project_root, target_rel, kind, force=force)
+        return
+
+    if descriptor.kind == ScenePathRestoreKind.SYMLINK:
+        literal = descriptor.link_target
+        assert literal is not None
+        if target.is_symlink() and os.readlink(target) == literal:
+            return
+        if os.path.lexists(target):
+            _validate_scene_output_removal(project_root, target_rel, kind, force=force)
+        return
+
+    backup_rel = descriptor.backup_path
+    assert backup_rel is not None
+    backup = project_root / backup_rel
     assert_ancestors(scope, backup)
     backup_exists = os.path.lexists(backup)
     if not backup_exists:
@@ -784,22 +851,33 @@ def _restore_one_path(
     if backup.is_symlink() or not backup.is_dir():
         raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
     if os.path.lexists(target):
-        _remove_scene_output(project_root, target_rel, kind, force=force)
-    os.replace(backup, target)
+        _validate_scene_output_removal(project_root, target_rel, kind, force=force)
+
+
+def _validate_scene_output_removal(
+    project_root: Path, target_rel: str, kind: str, *, force: bool
+) -> None:
+    """Raise unless *target_rel* is a removable scene projection output."""
+    target = project_root / target_rel
+    if target.is_symlink():
+        if not force and not projection.tool_points_at_projection(project_root, target_rel, kind):
+            raise ValueError("target symlink drifted away from the active scene projection")
+        return
+    if target.is_dir() and has_managed_marker(target):
+        return
+    raise ValueError("target is not removable scene-owned projection output")
 
 
 def _remove_scene_output(project_root: Path, target_rel: str, kind: str, *, force: bool) -> None:
     target = project_root / target_rel
     scope = ProjectScope(project_root)
+    _validate_scene_output_removal(project_root, target_rel, kind, force=force)
     if target.is_symlink():
-        if not force and not projection.tool_points_at_projection(project_root, target_rel, kind):
-            raise ValueError("target symlink drifted away from the active scene projection")
         safe_unlink(scope, target, missing_ok=False)
         return
     if target.is_dir() and has_managed_marker(target):
         safe_rmtree(scope, target)
         return
-    raise ValueError("target is not removable scene-owned projection output")
 
 
 _SCENE_GITIGNORE_BLOCK = "scene projection"
