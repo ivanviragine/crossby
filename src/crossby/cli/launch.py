@@ -684,6 +684,11 @@ def _activate_persistent_scene(
             f"{display_name} is using persistent scene configuration recorded by crossby; "
             "run 'crossby scene clear' when the session ends."
         )
+    else:
+        console.warn(
+            "Crossby recorded this persistent scene fallback even though no tool "
+            "configuration changed; run 'crossby scene clear' when the session ends."
+        )
     removed = [
         result
         for result in outcome.results

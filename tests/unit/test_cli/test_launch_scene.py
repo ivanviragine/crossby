@@ -446,7 +446,11 @@ class TestFallbackReporting:
             )
         assert result.exit_code == 0, result.output
         # Collapse Rich's line-wrapping before matching the surfaced message.
-        assert "remain enabled" in " ".join(result.output.split())
+        normalized = " ".join(result.output.split())
+        assert "remain enabled" in normalized
+        assert "recorded this persistent scene fallback" in normalized
+        assert "crossby scene clear" in normalized
+        assert (tmp_path / SCENE_STATE_PATH).exists()
 
 
 class TestOpenCodeRealAdapterFallback:
@@ -1056,6 +1060,67 @@ class TestPersistentFallbackLifecycle:
         assert result.exit_code == 1, result.output
         assert spawned == []
         assert "removed hooks remain narrowed" in normalized
+        assert "crossby sync" in normalized
+        assert "persistent changes were rolled back" not in normalized
+
+    def test_state_write_failure_after_switch_reports_outgoing_revocations(
+        self, tmp_path: Path
+    ) -> None:
+        """An outgoing removal remains narrowed when replacement state cannot be saved."""
+        _write_lifecycle_project(tmp_path)
+        removed = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.PERMISSIONS,
+            action="updated",
+            revoked=1,
+        )
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[removed]),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            first = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert first.exit_code == 0, first.output
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["tools"]["cursor"]["revoked_concerns"] == ["permissions"]
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.clear_scene", return_value=[]),
+            patch("crossby.scenes.engine.apply_scene", return_value=[]),
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=OSError("read-only state path"),
+            ),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            switched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "deploy"]
+            )
+
+        normalized = " ".join(switched.output.lower().split())
+        assert switched.exit_code == 1, switched.output
+        assert len(spawned) == 1
+        assert "removed permissions remain narrowed" in normalized
         assert "crossby sync" in normalized
         assert "persistent changes were rolled back" not in normalized
 

@@ -206,6 +206,10 @@ def activate_scene(
                     warnings=warnings,
                     results=revert_results,
                 )
+    else:
+        outgoing = []
+
+    outgoing_revocations = _recorded_revocations(active, outgoing)
 
     try:
         results = engine.apply_scene(resolved, project_root, force=force, tools=scope)
@@ -235,6 +239,7 @@ def activate_scene(
         merged = dict(active.tools)
         merged.update(state.tools)
         state.tools = merged
+    _inherit_revocations(state, active)
     try:
         save_scene_state(project_root, state)
     except Exception as exc:
@@ -250,7 +255,7 @@ def activate_scene(
                 _restore_state_after_rollback(project_root, active, scope)
             except Exception as cleanup_exc:
                 rollback_error = cleanup_exc
-        removed_concerns = {
+        removed_concerns = outgoing_revocations | {
             result.concern.value
             for result in results
             if result.concern.value in ("hooks", "permissions") and result.revoked > 0
@@ -289,6 +294,29 @@ def activate_scene(
 
 def _has_error(results: Sequence[SyncResult]) -> bool:
     return any(result.action == "error" for result in results)
+
+
+def _recorded_revocations(active: SceneState | None, tools: Sequence[AIToolID]) -> set[str]:
+    """Return irreversible revocations carried by the outgoing tool scope."""
+    if active is None:
+        return set()
+    return {
+        concern
+        for tool in tools
+        for concern in active.tools.get(str(tool), SceneToolRecord()).revoked_concerns
+    }
+
+
+def _inherit_revocations(state: SceneState, active: SceneState | None) -> None:
+    """Carry still-unrestored outgoing removals into the replacement state."""
+    if active is None:
+        return
+    for tool, record in state.tools.items():
+        previous = active.tools.get(tool)
+        if previous is not None and previous.revoked_concerns:
+            record.revoked_concerns = tuple(
+                sorted({*record.revoked_concerns, *previous.revoked_concerns})
+            )
 
 
 def _restore_state_after_rollback(
@@ -356,8 +384,15 @@ def _build_state(
         record.hashes = hashes_by_tool.get(tool_name, {})
     _replicate_shared_hashes(tools, scope)
     for result in results:
-        if result.action == "error" and result.tool_id is not None and str(result.tool_id) in tools:
-            tools[str(result.tool_id)].status = "failed"
+        if result.tool_id is None or str(result.tool_id) not in tools:
+            continue
+        record = tools[str(result.tool_id)]
+        if result.action == "error":
+            record.status = "failed"
+        if result.concern.value in ("hooks", "permissions") and result.revoked > 0:
+            record.revoked_concerns = tuple(
+                sorted({*record.revoked_concerns, result.concern.value})
+            )
     status = "partial" if _has_error(results) else "applied"
     return SceneState(scene=scene_name, applied_at=now_iso(), status=status, tools=tools)
 
