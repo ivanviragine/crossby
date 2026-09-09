@@ -279,7 +279,9 @@ Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, loc
 
 ### Session-scoped scenes — `crossby launch --scene`
 
-`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one doesn't get session isolation. crossby warns and does what it can: a CLI tool with no launch lever falls back to persistent `scene use` activation — needing a later `clear` for whatever that actually writes, though for a tool like OpenCode whose every concern is unsupported it writes nothing and the deselected capabilities stay enabled — and a GUI tool just launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
+`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only**, pass `--scene` to `crossby launch`. Tools with a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot) use untracked launch artefacts and need no later `clear`. A terminal tool without one falls back to persistent activation; crossby warns, records successful or partial activation in `scene status`, and tells you to run `scene clear` afterward. A concern with no persistent mechanism remains a true no-op (and crossby warns that it was not narrowed), while a GUI tool launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
+
+Persistent launch fallback follows the same lifecycle as `scene use`: shared directories expand the recorded tool scope, active-scene switches cannot strand another tool, outgoing drift blocks replacement, and corrupt ownership provenance fails closed before mutation. Launch has no `--force` escape hatch, so any of those preconditions aborts before the child process starts. Error rows are recorded as `status: partial` and launch continues with a prominent recovery warning; an apply exception or inability to record recoverable state aborts launch instead. If writing the state record fails after mutation, crossby attempts to roll the persistent changes back rather than start a child with untracked restrictions.
 
 ```bash
 # Launch Claude with the pr-review scene for this session only.
@@ -295,7 +297,7 @@ crossby launch --scene pr-review
 crossby launch --scene pr-review --tool codex --model gpt-5.2
 ```
 
-`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out — that's what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one.
+`--scene` selects exactly **one** launch tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`). A persistent fallback may additionally record another installed tool that shares the same physical capability directory (currently Codex and Antigravity CLI share `.agents/skills`), because re-pointing that directory necessarily affects both. Rendered session artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one. If that exact path contains a hand-written profile, crossby preserves it byte-for-byte and routes the launch through the recoverable persistent fallback instead.
 
 **Not every tool has a session-scoped lever.** Where a tool can't scope a scene (or a specific concern) at launch, crossby warns rather than applying nothing silently — but the outcome varies: a CLI tool without a launch lever falls back to persistent activation, a concern with no lever at all can be left wide open, and a GUI tool just launches without the scene:
 
@@ -305,7 +307,7 @@ crossby launch --scene pr-review --tool codex --model gpt-5.2
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
 | Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
 | Cursor | none — falls back to persistent activation (its only knob relocates the whole config base including auth) |
-| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so deselected servers stay enabled and there's nothing to `clear` |
+| OpenCode | none — persistent fallback records the lifecycle but has no tool-config mechanism, so deselected servers stay enabled; `scene clear` removes the fallback state |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
 | VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |
 

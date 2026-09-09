@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
 from crossby.cli.main import app
 from crossby.models.ai import AIToolID, AIToolType
+from crossby.scenes.state import SCENE_STATE_PATH
 from crossby.sync.base import SyncConcern, SyncResult
+from tests.unit.test_scenes.conftest import populate_project, read_json
 
 runner = CliRunner()
 
@@ -523,3 +526,424 @@ class TestContainmentAbort:
         apply_mock.assert_not_called()
         # …and no partial artefact escaped into the symlink target.
         assert list(outside.iterdir()) == []
+
+
+def _write_lifecycle_project(root: Path) -> None:
+    populate_project(root)
+    (root / ".crossby.yml").write_text(
+        """\
+version: 1
+scenes:
+  review:
+    skills:
+      include: ["review-*"]
+    mcp:
+      include: ["github"]
+  deploy:
+    skills:
+      include: ["deploy-*"]
+    mcp:
+      include: ["linear"]
+""",
+        encoding="utf-8",
+    )
+
+
+class TestPersistentFallbackLifecycle:
+    """Real-filesystem regressions for the recoverable launch lifecycle."""
+
+    def test_cursor_fallback_status_then_clear_restores_all_skills(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        def fake_run(cmd: list[str], *_args: Any, **_kwargs: Any) -> int:
+            spawned.append(cmd)
+            return 0
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", side_effect=fake_run),
+        ):
+            launched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+            assert launched.exit_code == 0, launched.output
+            assert len(spawned) == 1
+
+            visible = {
+                child.name
+                for child in (tmp_path / ".cursor" / "skills").iterdir()
+                if child.name != ".crossby-managed"
+            }
+            assert visible == {"review-skill"}
+
+            status = runner.invoke(app, ["scene", "status", "--path", str(tmp_path)])
+            assert status.exit_code == 0, status.output
+            normalized = " ".join(status.output.split())
+            assert "Active scene: review" in normalized
+            assert "cursor skills project applied" in normalized
+
+            cleared = runner.invoke(app, ["scene", "clear", "--path", str(tmp_path)])
+            assert cleared.exit_code == 0, cleared.output
+
+        restored = {
+            child.name
+            for child in (tmp_path / ".cursor" / "skills").iterdir()
+            if child.name != ".crossby-managed"
+        }
+        assert restored == {"review-skill", "knowledge", "deploy-prod"}
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
+    def test_launch_scope_expands_for_shared_skills_directory(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
+            )
+
+        assert result.exit_code == 0, result.output
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"codex", "antigravity-cli"}
+        assert "shared skills directory" in " ".join(result.output.split())
+
+    def test_different_scene_scoped_fallback_refuses_to_strand_other_tools(
+        self, tmp_path: Path
+    ) -> None:
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CLAUDE, AIToolID.CURSOR],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(2, 1, 218)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            first = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+            switched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "deploy"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert switched.exit_code == 1, switched.output
+        assert "strand" in switched.output.lower()
+        assert spawned == []
+        assert read_json(tmp_path / SCENE_STATE_PATH)["scene"] == "review"
+
+    def test_allowed_scoped_switch_replaces_single_tool_scene(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            first = runner.invoke(
+                app,
+                ["scene", "use", "review", "--tool", "cursor", "--path", str(tmp_path)],
+            )
+            switched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "deploy"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert switched.exit_code == 0, switched.output
+        assert len(spawned) == 1
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == "deploy"
+        assert set(state["tools"]) == {"cursor"}
+
+    def test_same_scene_scoped_fallback_merges_other_tool_records(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CLAUDE, AIToolID.CURSOR],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(2, 1, 218)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            first = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+            reapplied = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert reapplied.exit_code == 0, reapplied.output
+        assert set(read_json(tmp_path / SCENE_STATE_PATH)["tools"]) == {"claude", "cursor"}
+
+    def test_fallback_refuses_outgoing_drift_without_starting_child(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            first = runner.invoke(
+                app,
+                ["scene", "use", "review", "--tool", "cursor", "--path", str(tmp_path)],
+            )
+            assert first.exit_code == 0, first.output
+            (tmp_path / ".cursor" / "skills" / "manual-change").mkdir()
+            refused = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert refused.exit_code == 1, refused.output
+        assert "drift" in refused.output.lower()
+        assert spawned == []
+
+    @pytest.mark.parametrize(
+        "ledger_body",
+        [
+            "{ not valid json",
+            json.dumps(
+                {
+                    "version": 2,
+                    "owned": {},
+                    "scene": {"cursor": {"unknown_scene_key": ["x"]}},
+                }
+            ),
+        ],
+    )
+    def test_corrupt_provenance_aborts_before_mutation_or_spawn(
+        self, tmp_path: Path, ledger_body: str
+    ) -> None:
+        _write_lifecycle_project(tmp_path)
+        ledger = tmp_path / ".crossby" / "owned.json"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(ledger_body, encoding="utf-8")
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert "unreadable" in result.output.lower()
+        assert ledger.read_text(encoding="utf-8") == ledger_body
+        assert not (tmp_path / ".cursor" / "skills").exists()
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+        assert spawned == []
+
+    def test_error_rows_record_partial_state_and_still_launch(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        error = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.SKILLS,
+            action="error",
+            message="cursor projection failed",
+        )
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[error]),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(spawned) == 1
+        assert "partial" in result.output.lower()
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["status"] == "partial"
+        assert state["tools"]["cursor"]["status"] == "failed"
+
+    def test_apply_exception_records_recovery_and_aborts_child(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        from crossby.scenes import engine
+
+        real_apply = engine.apply_scene
+        spawned: list[list[str]] = []
+
+        def apply_then_raise(*args: Any, **kwargs: Any) -> list[SyncResult]:
+            real_apply(*args, **kwargs)
+            raise RuntimeError("disk failed after provenance")
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", side_effect=apply_then_raise),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["status"] == "partial"
+
+        with patch(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            return_value=[AIToolID.CURSOR],
+        ):
+            cleared = runner.invoke(app, ["scene", "clear", "--path", str(tmp_path)])
+        assert cleared.exit_code == 0, cleared.output
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
+    def test_state_write_failure_rolls_back_and_aborts_child(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=OSError("read-only state path"),
+            ),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        assert "rolled back" in result.output.lower()
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+        restored = {
+            child.name
+            for child in (tmp_path / ".cursor" / "skills").iterdir()
+            if child.name != ".crossby-managed"
+        }
+        assert restored == {"review-skill", "knowledge", "deploy-prod"}
+
+    def test_codex_profile_collision_uses_recoverable_fallback_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_lifecycle_project(tmp_path)
+        # Make Codex's project config the sole MCP source so discovery has no
+        # duplicate-source warning (and the test does not cache a stdlib logger
+        # into the later logging-isolation suite).
+        (tmp_path / ".mcp.json").unlink()
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        project_config = tmp_path / ".codex" / "config.toml"
+        project_config.parent.mkdir()
+        project_config.write_text(
+            '[mcp_servers.github]\ncommand = "gh"\n\n[mcp_servers.linear]\ncommand = "linear"\n',
+            encoding="utf-8",
+        )
+        from crossby.scenes.launch import codex_profile_path
+
+        handwritten = codex_profile_path(tmp_path, "review")
+        handwritten.write_text("model = 'gpt-5'\n", encoding="utf-8")
+        original_profile = handwritten.read_bytes()
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 200, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert handwritten.read_bytes() == original_profile
+        assert len(spawned) == 1
+        assert "--profile" not in spawned[0]
+        assert "hand-written profile was preserved" in " ".join(result.output.split())
+        assert read_json(tmp_path / SCENE_STATE_PATH)["scene"] == "review"
+        assert "enabled = false" in project_config.read_text(encoding="utf-8")
+
+        with patch(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            return_value=[AIToolID.CODEX],
+        ):
+            status = runner.invoke(app, ["scene", "status", "--path", str(tmp_path)])
+            cleared = runner.invoke(app, ["scene", "clear", "--path", str(tmp_path)])
+        assert status.exit_code == 0, status.output
+        assert "Active scene: review" in " ".join(status.output.split())
+        assert cleared.exit_code == 0, cleared.output
+        assert "enabled = false" not in project_config.read_text(encoding="utf-8")
+        assert not (tmp_path / SCENE_STATE_PATH).exists()

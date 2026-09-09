@@ -1,8 +1,9 @@
-"""Scene activation state — the CLI-layer record of what scene is active.
+"""Scene activation state — the lifecycle record of what scene is active.
 
 ``.crossby/scene-state.json`` is a per-machine, gitignored bookkeeping file the
-``crossby scene`` command writes on ``use`` and reads on ``status`` / ``clear``
-/ a switch. It records the active scene name, when it was applied, the per-tool
+persistent activation service writes for ``scene use`` and launch fallbacks,
+and ``scene status`` / ``scene clear`` read. It records the active scene name,
+when it was applied, the per-tool
 mechanism, an applied/partial flag, and a normalised content hash per
 scene-managed file so ``status`` can detect drift.
 
