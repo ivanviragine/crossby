@@ -147,6 +147,7 @@ class TestLedgerRoundTrip:
         assert ledger.record_scene_absent(".cursor/skills") is True
         assert ledger.record_scene_symlink(".agents/skills", "../.claude/skills") is True
         assert ledger.record_scene_directory(".cursor/agents", ".cursor/agents.bak2") is True
+        ledger.record_scene_restore_directory_identity(".cursor/agents", device=42, inode=99)
         # A co-sharer cannot replace the first physical-path baseline.
         assert ledger.record_scene_absent(".agents/skills") is False
         save_ledger(tmp_path, ledger)
@@ -157,7 +158,7 @@ class TestLedgerRoundTrip:
             "../.claude/skills"
         )
         assert loaded.scene_restore(".cursor/agents") == ScenePathRestore.directory(
-            ".cursor/agents.bak2"
+            ".cursor/agents.bak2", device=42, inode=99
         )
         assert not loaded.is_empty()
 
@@ -390,6 +391,21 @@ class TestLoadLedgerChecked:
             {".cursor/skills": {"kind": "directory", "backup": "../skills.bak"}},
             {".cursor/skills": {"kind": "directory", "backup": ".agents/skills.bak"}},
             {".cursor/skills": {"kind": "directory", "backup": ".cursor/other.bak"}},
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "device": 5,
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "device": True,
+                    "inode": 9,
+                }
+            },
         ],
     )
     def test_malformed_scene_paths_fail_closed(self, tmp_path: Path, scene_paths: object) -> None:

@@ -473,11 +473,11 @@ command = "lin-mcp"
         real_restore = engine._restore_one_path
 
         def fail_cursor_skills(
-            project_root: Path, target_rel: str, *args: object, **kwargs: object
-        ) -> None:
+            project_root: Path, ledger: object, target_rel: str, *args: object, **kwargs: object
+        ) -> object:
             if target_rel == ".cursor/skills":
                 raise OSError("injected restore failure")
-            real_restore(project_root, target_rel, *args, **kwargs)  # type: ignore[arg-type]
+            return real_restore(project_root, ledger, target_rel, *args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(engine, "_restore_one_path", fail_cursor_skills)
         result = _invoke(["scene", "clear"], root)
@@ -556,6 +556,24 @@ class TestDrift:
         clear_plan = _invoke(["scene", "clear", "--plan"], root)
         assert clear_plan.exit_code == 0, clear_plan.output
         # Neither preview mutated the active scene.
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+
+    def test_force_clear_plan_previews_drifted_projection_symlink(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root).exit_code == 0
+        target = root / ".cursor/skills"
+        target.unlink()
+        external = root / "external-skills"
+        external.mkdir()
+        target.symlink_to(external, target_is_directory=True)
+
+        refused = _invoke(["scene", "clear", "--tool", "cursor", "--plan"], root)
+        preview = _invoke(["scene", "clear", "--tool", "cursor", "--plan", "--force"], root)
+
+        assert refused.exit_code == 1
+        assert preview.exit_code == 0, preview.output
+        assert target.is_symlink()
+        assert target.readlink() == external
         assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
 
     def test_clear_refuses_on_drift_without_force(self, tmp_path: Path) -> None:

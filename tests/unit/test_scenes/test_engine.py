@@ -11,7 +11,7 @@ from crossby.models.config import SceneConfig, SceneSelector
 from crossby.scenes import apply_scene, clear_scene, projection
 from crossby.scenes.engine import SceneApplyError
 from crossby.sync.base import SyncConcern, SyncResult
-from crossby.sync.ownership import OwnershipLedger, SceneDeclareKey, load_ledger
+from crossby.sync.ownership import OwnershipLedger, SceneDeclareKey, load_ledger, save_ledger
 from tests.unit.test_scenes.conftest import populate_project, read_json, resolve
 
 # A scene that keeps 2 of 3 skills, 1 of 2 agents, 1 of 2 MCP servers.
@@ -425,8 +425,7 @@ class TestExactPathRestoration:
             force=True,
         )
         assert any(
-            result.action == "error"
-            and "drifted to a real directory" in (result.message or "")
+            result.action == "error" and "drifted to a real directory" in (result.message or "")
             for result in preview
         )
         assert not any(
@@ -447,6 +446,48 @@ class TestExactPathRestoration:
         )
         assert (target / "user-notes.txt").read_text(encoding="utf-8") == "mine"
         assert not list(tmp_path.glob(".cursor/skills.bak*"))
+
+    def test_reapply_refuses_symlink_when_directory_baseline_was_not_displaced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        external = tmp_path / "external-skills"
+        external.mkdir()
+        target = tmp_path / ".cursor/skills"
+        target.parent.mkdir()
+        target.symlink_to(external, target_is_directory=True)
+
+        ledger = OwnershipLedger()
+        ledger.record_scene_directory(".cursor/skills", ".cursor/skills.bak")
+        save_ledger(tmp_path, ledger)
+
+        preview = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            dry_run=True,
+            force=True,
+        )
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        for operation in (preview, results):
+            assert any(
+                result.action == "error" and "baseline was not displaced" in (result.message or "")
+                for result in operation
+            )
+        assert target.is_symlink()
+        assert target.readlink() == external
+        assert not (tmp_path / ".cursor/skills.bak").exists()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") == ledger.scene_restore(
+            ".cursor/skills"
+        )
 
     def test_missing_recorded_backup_refuses_unrelated_real_target(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -545,6 +586,51 @@ class TestExactPathRestoration:
         second = clear_scene(tmp_path)
         assert not any(result.action == "error" for result in second)
         assert load_ledger(tmp_path).scene_restores() == {}
+
+    def test_directory_restore_retries_after_cleanup_save_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.scenes import engine
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        real_save = engine.save_ledger
+        failed = False
+
+        def fail_cleanup(project_root: Path, ledger: OwnershipLedger) -> bool:
+            nonlocal failed
+            if not failed and ledger.scene_restore(".cursor/skills") is None:
+                failed = True
+                raise OSError("injected cleanup save failure")
+            return real_save(project_root, ledger)
+
+        monkeypatch.setattr(engine, "save_ledger", fail_cleanup)
+        first = clear_scene(tmp_path)
+
+        target = tmp_path / ".cursor/skills"
+        assert any(result.action == "error" for result in first)
+        assert target.is_dir() and not target.is_symlink()
+        assert (target / "cursor-only/SKILL.md").is_file()
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None
+        assert descriptor.directory_device is not None and descriptor.directory_inode is not None
+        assert not (tmp_path / descriptor.backup_path).exists()  # type: ignore[arg-type]
+
+        monkeypatch.setattr(engine, "save_ledger", real_save)
+        second = clear_scene(tmp_path)
+
+        assert not any(result.action == "error" for result in second)
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+        assert (target / "cursor-only/SKILL.md").is_file()
 
     def test_missing_recorded_backup_fails_without_adopting_neighbor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

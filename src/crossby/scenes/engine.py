@@ -488,12 +488,30 @@ def _repoint_path(
             assert backup_rel is not None
             backup = ctx.project_root / backup_rel
             # A retry after the durable descriptor write may find either side of
-            # the displacement. Move only in the unambiguous pre-mutation state.
-            if target.is_dir() and not target.is_symlink() and not os.path.lexists(backup):
+            # the displacement. Move only in the unambiguous pre-mutation state;
+            # a missing backup otherwise does not prove the directory was ever
+            # displaced and must not authorize replacing a new target.
+            if os.path.lexists(backup):
+                if backup.is_symlink() or not backup.is_dir():
+                    return _path_error(
+                        tools,
+                        tree.concern,
+                        target,
+                        f"recorded backup is not the displaced real directory: {backup_rel}",
+                    )
+                if target.is_dir() and not target.is_symlink():
+                    return _path_error(
+                        tools, tree.concern, target, f"recorded backup is occupied: {backup_rel}"
+                    )
+            elif target.is_dir() and not target.is_symlink():
                 projection.displace_directory(ctx.project_root, target_rel, backup_rel)
-            elif target.is_dir() and not target.is_symlink() and os.path.lexists(backup):
+            else:
                 return _path_error(
-                    tools, tree.concern, target, f"recorded backup is occupied: {backup_rel}"
+                    tools,
+                    tree.concern,
+                    target,
+                    f"recorded directory baseline was not displaced: {backup_rel}; "
+                    "refusing to replace the target",
                 )
         elif target.is_dir() and not target.is_symlink():
             # Some writers materialise a managed directory rather than a
@@ -558,8 +576,18 @@ def _describe_repoint_baseline(
         backup_rel = descriptor.backup_path
         assert backup_rel is not None
         backup = project_root / backup_rel
-        if target.is_dir() and not target.is_symlink() and os.path.lexists(backup):
-            return f"error:recorded backup is occupied: {backup_rel}"
+        if os.path.lexists(backup):
+            if backup.is_symlink() or not backup.is_dir():
+                return f"error:recorded backup is not the displaced real directory: {backup_rel}"
+            if target.is_dir() and not target.is_symlink():
+                return f"error:recorded backup is occupied: {backup_rel}"
+        elif target.is_dir() and not target.is_symlink():
+            return f"would displace the recorded directory baseline at {backup_rel}"
+        else:
+            return (
+                f"error:recorded directory baseline was not displaced: {backup_rel}; "
+                "refusing to replace the target"
+            )
         return f"would retain the recorded directory baseline at {backup_rel}"
 
     if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
@@ -722,11 +750,14 @@ def _restore_paths(
             )
             continue
         try:
-            _restore_one_path(project_root, target_rel, concern, descriptor, force=force)
+            descriptor = _restore_one_path(
+                project_root, ledger, target_rel, concern, descriptor, force=force
+            )
             ledger.clear_scene_restore(target_rel)
             # Cleanup is commit-like: descriptor removal becomes authoritative
-            # only after the exact baseline is on disk. If this save fails, the
-            # on-disk descriptor remains and the next retry confirms the baseline.
+            # only after the exact baseline is on disk. A directory descriptor
+            # persists the moved directory's identity before its rename, so a
+            # later retry can authenticate a completed rename if this save fails.
             try:
                 save_ledger(project_root, ledger)
             except Exception:
@@ -805,12 +836,13 @@ def _restore_description(descriptor: ScenePathRestore) -> str:
 
 def _restore_one_path(
     project_root: Path,
+    ledger: OwnershipLedger,
     target_rel: str,
     concern: SyncConcern,
     descriptor: ScenePathRestore,
     *,
     force: bool,
-) -> None:
+) -> ScenePathRestore:
     target = project_root / target_rel
     kind = "skills" if concern == SyncConcern.SKILLS else "agents"
     _validate_restore_one_path(project_root, target_rel, concern, descriptor, force=force)
@@ -818,29 +850,39 @@ def _restore_one_path(
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
         if os.path.lexists(target):
             _remove_scene_output(project_root, target_rel, kind, force=force)
-        return
+        return descriptor
 
     if descriptor.kind == ScenePathRestoreKind.SYMLINK:
         literal = descriptor.link_target
         assert literal is not None
         if target.is_symlink() and os.readlink(target) == literal:
-            return
+            return descriptor
         if os.path.lexists(target):
             _remove_scene_output(project_root, target_rel, kind, force=force)
         target.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(literal, target)
-        return
+        return descriptor
 
     backup_rel = descriptor.backup_path
     assert backup_rel is not None
     backup = project_root / backup_rel
     if not os.path.lexists(backup):
-        # Validation accepts the converged target state when descriptor cleanup
-        # was interrupted after os.replace, so there is nothing left to do.
-        return
+        # Validation accepts only a target that matches the durable identity
+        # captured immediately before the backup's rename, so there is nothing
+        # left to do when cleanup persistence was interrupted after os.replace.
+        return descriptor
+    stat = backup.stat()
+    descriptor = ledger.record_scene_restore_directory_identity(
+        target_rel, device=stat.st_dev, inode=stat.st_ino
+    )
+    # This identity must be durable before the rename: a retry can then prove
+    # that the backup reached its target instead of adopting a recreated path.
+    save_ledger(project_root, ledger)
+    _validate_restore_one_path(project_root, target_rel, concern, descriptor, force=force)
     if os.path.lexists(target):
         _remove_scene_output(project_root, target_rel, kind, force=force)
     os.replace(backup, target)
+    return descriptor
 
 
 def _validate_restore_one_path(
@@ -878,6 +920,8 @@ def _validate_restore_one_path(
     assert_ancestors(scope, backup)
     backup_exists = os.path.lexists(backup)
     if not backup_exists:
+        if _matches_directory_restore_identity(target, descriptor):
+            return
         # A real target directory cannot authenticate that the exact recorded
         # backup reached it: the backup could have been lost while an unrelated
         # directory was recreated at the target. Keep recovery authority intact
@@ -887,6 +931,19 @@ def _validate_restore_one_path(
         raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
     if os.path.lexists(target):
         _validate_scene_output_removal(project_root, target_rel, kind, force=force)
+
+
+def _matches_directory_restore_identity(target: Path, descriptor: ScenePathRestore) -> bool:
+    """Whether *target* is the directory moved from the recorded backup."""
+    device = descriptor.directory_device
+    inode = descriptor.directory_inode
+    if device is None or inode is None or target.is_symlink() or not target.is_dir():
+        return False
+    try:
+        identity = target.stat()
+    except OSError:
+        return False
+    return (identity.st_dev, identity.st_ino) == (device, inode)
 
 
 def _validate_scene_output_removal(

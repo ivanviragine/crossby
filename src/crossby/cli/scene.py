@@ -608,7 +608,7 @@ def clear_active(
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = clear_scene(root, dry_run=True, tools=scope)
+        results = clear_scene(root, dry_run=True, tools=scope, force=force)
         _display_results(results)
         console.info("(--plan) no changes written.")
         if _has_error(results):
