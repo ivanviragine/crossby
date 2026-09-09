@@ -269,6 +269,7 @@ def activate_scene(
         outgoing = []
 
     outgoing_revocations = _recorded_revocations(active, outgoing)
+    retained_revocations = _recorded_revocations(active)
 
     try:
         results = engine.apply_scene(resolved, project_root, force=force, tools=initial_scope)
@@ -287,7 +288,7 @@ def activate_scene(
             hint=(
                 "Run 'crossby scene clear' to revert changes crossby recorded, then "
                 "'crossby sync' to restore the previously removed hooks/permissions."
-                if recovery_recorded and outgoing_revocations
+                if recovery_recorded and retained_revocations
                 else "'crossby scene clear' can revert changes crossby recorded."
                 if recovery_recorded
                 else "Recoverable scene state could not be recorded; inspect the ownership "
@@ -405,10 +406,14 @@ def _detect_scoped_drift(
     return sorted(set(drifted))
 
 
-def _recorded_revocations(active: SceneState | None, tools: Sequence[AIToolID]) -> set[str]:
-    """Return irreversible revocations carried by the outgoing tool scope."""
+def _recorded_revocations(
+    active: SceneState | None, tools: Sequence[AIToolID] | None = None
+) -> set[str]:
+    """Return irreversible revocations for a tool scope, or every active record."""
     if active is None:
         return set()
+    if tools is None:
+        return {concern for record in active.tools.values() for concern in record.revoked_concerns}
     return {
         concern
         for tool in tools

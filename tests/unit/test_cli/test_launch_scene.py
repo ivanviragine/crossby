@@ -1505,6 +1505,47 @@ class TestPersistentFallbackLifecycle:
         assert state["status"] == "partial"
         assert state["tools"]["cursor"]["revoked_concerns"] == ["permissions"]
 
+    def test_apply_exception_sync_guidance_includes_retained_recovery_revocation(
+        self, tmp_path: Path
+    ) -> None:
+        """An out-of-scope recovery record still requires sync after a failed switch."""
+        from crossby.scenes.state import SceneState, SceneToolRecord, save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        save_scene_state(
+            tmp_path,
+            SceneState(
+                scene="review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="partial",
+                tools={
+                    "claude": SceneToolRecord(
+                        status="recovery",
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", side_effect=RuntimeError("disk full")),
+        ):
+            failed = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "mcp-only"]
+            )
+
+        normalized = " ".join(failed.output.lower().split())
+        assert failed.exit_code == 1, failed.output
+        assert "crossby scene clear" in normalized
+        assert "crossby sync" in normalized
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["tools"]["claude"]["revoked_concerns"] == ["permissions"]
+
     def test_codex_profile_collision_uses_recoverable_fallback_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
