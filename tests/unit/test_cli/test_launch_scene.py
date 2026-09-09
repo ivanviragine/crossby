@@ -868,6 +868,56 @@ class TestPersistentFallbackLifecycle:
         assert spawned == []
         assert read_json(tmp_path / SCENE_STATE_PATH)["scene"] == "review"
 
+    def test_scoped_fallback_ignores_uninstalled_recovery_only_tool(self, tmp_path: Path) -> None:
+        """A retained revocation record does not make a later fallback unsafe."""
+        from crossby.scenes.state import SceneState, SceneToolRecord, save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        save_scene_state(
+            tmp_path,
+            SceneState(
+                scene="review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="applied",
+                tools={
+                    "claude": SceneToolRecord(
+                        mechanisms={"permissions": "project"},
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            replaced = runner.invoke(app, ["scene", "use", "deploy", "--path", str(tmp_path)])
+            launched = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "mcp-only"]
+            )
+
+        assert replaced.exit_code == 0, replaced.output
+        assert launched.exit_code == 0, launched.output
+        assert len(spawned) == 1
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == "mcp-only"
+        assert state["tools"]["claude"] == {
+            "hashes": {},
+            "mechanisms": {},
+            "revoked_concerns": ["permissions"],
+            "status": "recovery",
+        }
+
     def test_allowed_scoped_switch_replaces_single_tool_scene(self, tmp_path: Path) -> None:
         _write_lifecycle_project(tmp_path)
         spawned: list[list[str]] = []

@@ -196,7 +196,15 @@ def activate_scene(
         return SceneActivationOutcome(tuple(scope), tuple(results), "preview", warnings)
 
     if active is not None and active.scene != scene_name and explicitly_scoped:
-        other_tools = [tool for tool in active.tool_ids if tool not in outgoing_scope_strings]
+        other_tools = [
+            tool
+            for tool in active.tool_ids
+            if tool not in outgoing_scope_strings
+            # A mechanism-free recovery record carries only irreversible removals
+            # from an earlier replacement. It has no active scene state to strand;
+            # _inherit_revocations preserves it in the incoming state instead.
+            and not (active.tools[tool].status == "recovery" and not active.tools[tool].mechanisms)
+        ]
         other_tools.extend(
             tool
             for tool, record in active.tools.items()
