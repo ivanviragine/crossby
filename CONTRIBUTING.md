@@ -269,7 +269,9 @@ Rules that keep this honest:
   state write fails after apply, the service clears reversible changes and stale
   records for the rolled-back scope while retaining recovery state for untouched
   tools; hook/permission revocations make that rollback explicitly incomplete
-  and require `crossby sync` for restoration.
+  and require `crossby sync` for restoration. An exceptional apply preserves
+  prior revocations in partial recovery state and reports the same clear-then-
+  sync remediation.
 - **Codex collision is orchestration, not adapter mutation.** A colliding
   hand-written namespaced profile makes `CodexAdapter.scene_launch_args` raise
   `SceneLaunchFallbackError` before subprocess dispatch. `cli/launch.py`
