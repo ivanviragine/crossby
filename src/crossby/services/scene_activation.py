@@ -225,7 +225,10 @@ def activate_scene(
             ActivationFailureKind.APPLY_EXCEPTION,
             f"Scene apply failed: {exc}",
             hint=(
-                "'crossby scene clear' can revert changes crossby recorded."
+                "Run 'crossby scene clear' to revert changes crossby recorded, then "
+                "'crossby sync' to restore the previously removed hooks/permissions."
+                if recovery_recorded and outgoing_revocations
+                else "'crossby scene clear' can revert changes crossby recorded."
                 if recovery_recorded
                 else "Recoverable scene state could not be recorded; inspect the ownership "
                 "ledger and tool files before retrying."
@@ -365,6 +368,7 @@ def _save_recovery_state(
             merged = dict(active.tools)
             merged.update(state.tools)
             state.tools = merged
+        _inherit_revocations(state, active)
         save_scene_state(project_root, state)
     except Exception:
         return False

@@ -1124,6 +1124,60 @@ class TestPersistentFallbackLifecycle:
         assert "crossby sync" in normalized
         assert "persistent changes were rolled back" not in normalized
 
+    @pytest.mark.parametrize("next_scene", ["review", "deploy"])
+    def test_apply_exception_preserves_outgoing_revocations(
+        self, tmp_path: Path, next_scene: str
+    ) -> None:
+        """Recovery must retain removals across a reapply or scene switch."""
+        _write_lifecycle_project(tmp_path)
+        removed = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.PERMISSIONS,
+            action="updated",
+            revoked=1,
+        )
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[removed]),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            first = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert read_json(tmp_path / SCENE_STATE_PATH)["tools"]["cursor"]["revoked_concerns"] == [
+            "permissions"
+        ]
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.clear_scene", return_value=[]),
+            patch("crossby.scenes.engine.apply_scene", side_effect=RuntimeError("disk full")),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            failed = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", next_scene]
+            )
+
+        normalized = " ".join(failed.output.lower().split())
+        assert failed.exit_code == 1, failed.output
+        assert "crossby scene clear" in normalized
+        assert "crossby sync" in normalized
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == next_scene
+        assert state["status"] == "partial"
+        assert state["tools"]["cursor"]["revoked_concerns"] == ["permissions"]
+
     def test_codex_profile_collision_uses_recoverable_fallback_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
