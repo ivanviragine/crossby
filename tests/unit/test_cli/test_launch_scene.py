@@ -236,6 +236,46 @@ class TestPersistentFallback:
         _, kwargs = adapter.launch.call_args
         assert kwargs["scene"] is None
 
+    def test_profile_collision_surfaces_partial_activation_before_launch(
+        self, tmp_path: Path
+    ) -> None:
+        from crossby.scenes.launch import SceneLaunchFallbackError
+        from crossby.services.scene_activation import SceneActivationOutcome
+
+        _write_config(tmp_path)
+        adapter = _scene_adapter(display_name="Codex CLI")
+        adapter.launch.side_effect = [SceneLaunchFallbackError("profile collision"), 0]
+        error = SyncResult(
+            tool_id=AIToolID.CODEX,
+            concern=SyncConcern.MCP,
+            action="error",
+            message="codex restriction failed",
+        )
+        outcome = SceneActivationOutcome(
+            scope=(AIToolID.CODEX,),
+            results=(error,),
+            status="partial",
+        )
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.services.scene_activation.activate_scene", return_value=outcome),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "pr-review"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "codex restriction failed" in " ".join(result.output.split())
+        assert "activation is partial" in " ".join(result.output.lower().split())
+        assert adapter.launch.call_count == 2
+        assert adapter.launch.call_args_list[0].kwargs["scene"] is not None
+        assert adapter.launch.call_args_list[1].kwargs["scene"] is None
+
     def test_subdir_launch_resolves_and_applies_against_config_root(self, tmp_path: Path) -> None:
         """Run from a subdirectory: resolve/apply must root at the config's dir.
 
@@ -885,6 +925,77 @@ class TestPersistentFallbackLifecycle:
             if child.name != ".crossby-managed"
         }
         assert restored == {"review-skill", "knowledge", "deploy-prod"}
+
+    def test_state_write_failure_after_record_write_removes_stale_state(
+        self, tmp_path: Path
+    ) -> None:
+        from crossby.scenes.state import save_scene_state as real_save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        spawned: list[list[str]] = []
+
+        def save_then_fail(project_root: Path, state: Any) -> None:
+            real_save_scene_state(project_root, state)
+            raise OSError("gitignore update failed")
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.services.scene_activation.save_scene_state", side_effect=save_then_fail),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        assert "rolled back" in result.output.lower()
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
+    def test_state_write_failure_reports_revocations_need_sync(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        removed = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.HOOKS,
+            action="updated",
+            revoked=1,
+        )
+        spawned: list[list[str]] = []
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.apply_scene", return_value=[removed]),
+            patch("crossby.scenes.engine.clear_scene", return_value=[]),
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=OSError("read-only state path"),
+            ),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        normalized = " ".join(result.output.lower().split())
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        assert "removed hooks remain narrowed" in normalized
+        assert "crossby sync" in normalized
+        assert "persistent changes were rolled back" not in normalized
 
     def test_codex_profile_collision_uses_recoverable_fallback_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

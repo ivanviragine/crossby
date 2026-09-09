@@ -265,7 +265,10 @@ Rules that keep this honest:
   outgoing drift, reverts the affected records, applies, hashes, merges scoped
   state, and atomically records `applied` or `partial`. Preconditions and
   exceptional apply/state failures abort before a child starts; error result
-  rows record `partial` and retain the historical launch-anyway policy.
+  rows record `partial` and retain the historical launch-anyway policy. If the
+  state write fails after apply, the service clears reversible changes and any
+  stale state record; hook/permission revocations make that rollback explicitly
+  incomplete and require `crossby sync` for restoration.
 - **Codex collision is orchestration, not adapter mutation.** A colliding
   hand-written namespaced profile makes `CodexAdapter.scene_launch_args` raise
   `SceneLaunchFallbackError` before subprocess dispatch. `cli/launch.py`

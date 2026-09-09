@@ -578,7 +578,7 @@ def _prepare_scene_launch(
         f"{caps.display_name} {reason}; attempting persistent activation for scene "
         f"{scene_name!r} instead — results follow."
     )
-    outcome = _activate_persistent_scene(
+    _activate_persistent_scene(
         scene_name=scene_name,
         scene_cfg=scene_cfg,
         context=SceneLaunchContext(
@@ -592,13 +592,6 @@ def _prepare_scene_launch(
         installed=installed,
         display_name=caps.display_name,
     )
-    results = list(outcome.results)
-    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
-    # lever for, e.g. deselected MCP servers that stay enabled). Benign skips
-    # (already linked / already applied) stay quiet.
-    for result in results:
-        if (result.unsupported or result.action == "error") and result.message:
-            console.warn(result.message)
     # A concern the scene declares that this tool can scope neither at launch nor
     # persistently (its cell is UNSUPPORTED) produces no result at all, so it
     # would be silently ignored. Name it. ``mcp`` is excluded — it has its own
@@ -620,11 +613,6 @@ def _prepare_scene_launch(
             f"{caps.display_name} cannot scope {', '.join(no_mechanism)} for scene "
             f"{scene_name!r} at launch or persistently; "
             f"{'those remain' if len(no_mechanism) > 1 else 'that remains'} unchanged."
-        )
-    if any(r.action == "error" for r in results):
-        console.warn(
-            "Scene activation is partial; launching anyway. Run 'crossby scene clear' "
-            "to retry recovery afterward."
         )
     return None
 
@@ -667,6 +655,19 @@ def _activate_persistent_scene(
 
     for warning in outcome.warnings:
         console.warn(warning)
+    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
+    # lever for, e.g. deselected MCP servers that stay enabled) and error rows.
+    # Benign skips (already linked / already applied) stay quiet. Keeping this
+    # rendering in the shared helper ensures a Codex profile-collision fallback
+    # cannot discard a partial activation's recovery guidance.
+    for result in outcome.results:
+        if (result.unsupported or result.action == "error") and result.message:
+            console.warn(result.message)
+    if outcome.has_errors:
+        console.warn(
+            "Scene activation is partial; launching anyway. Run 'crossby scene clear' "
+            "to retry recovery afterward."
+        )
     extra = [tool for tool in outcome.scope if tool != tool_id]
     if extra:
         console.info(

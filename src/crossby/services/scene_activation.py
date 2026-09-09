@@ -25,6 +25,7 @@ from crossby.scenes.mechanism import base_mechanism
 from crossby.scenes.state import (
     SceneState,
     SceneToolRecord,
+    clear_scene_state,
     compute_hashes,
     detect_drift,
     load_scene_state,
@@ -243,23 +244,46 @@ def activate_scene(
             rollback_results = engine.clear_scene(project_root, tools=scope)
         except Exception as rollback_exc:
             rollback_error = rollback_exc
-        rolled_back = rollback_error is None and not _has_error(rollback_results)
+        engine_rolled_back = rollback_error is None and not _has_error(rollback_results)
+        if engine_rolled_back:
+            try:
+                # save_scene_state writes the record before updating .gitignore,
+                # so an exception may leave either the new record or an older,
+                # now-stale active-scene record behind. The tool changes were
+                # reverted, therefore the record must be removed as part of the
+                # same rollback before it can be reported as complete.
+                clear_scene_state(project_root)
+            except Exception as cleanup_exc:
+                rollback_error = cleanup_exc
+        removed_concerns = {
+            result.concern.value
+            for result in results
+            if result.concern.value in ("hooks", "permissions") and result.revoked > 0
+        }
+        rolled_back = engine_rolled_back and rollback_error is None and not removed_concerns
+        if removed_concerns and engine_rolled_back and rollback_error is None:
+            remaining = "/".join(sorted(removed_concerns))
+            rollback_message = (
+                f"The automatic rollback restored reversible changes, but removed {remaining} "
+                "remain narrowed."
+            )
+            rollback_hint = (
+                "The launch was aborted. Run 'crossby sync' to restore the removed "
+                "hooks/permissions, then fix the state path before retrying."
+            )
+        elif rolled_back:
+            rollback_message = "Persistent changes were rolled back."
+            rollback_hint = "The launch was aborted; fix the state path before retrying."
+        else:
+            rollback_message = "The automatic rollback did not complete."
+            rollback_hint = (
+                "The launch was aborted. Inspect .crossby/owned.json, "
+                ".crossby/scene-state.json, and the tool files before retrying recovery."
+            )
         raise SceneActivationError(
             ActivationFailureKind.STATE_PERSISTENCE,
-            (
-                f"Scene recoverable state could not be recorded: {exc}. "
-                + (
-                    "Persistent changes were rolled back."
-                    if rolled_back
-                    else "The automatic rollback did not complete."
-                )
-            ),
-            hint=(
-                "The launch was aborted; fix the state path before retrying."
-                if rolled_back
-                else "The launch was aborted. Inspect .crossby/owned.json and the tool files "
-                "before retrying recovery."
-            ),
+            f"Scene recoverable state could not be recorded: {exc}. {rollback_message}",
+            hint=rollback_hint,
             warnings=warnings,
             results=(*results, *rollback_results),
         ) from exc
