@@ -247,12 +247,7 @@ def activate_scene(
         engine_rolled_back = rollback_error is None and not _has_error(rollback_results)
         if engine_rolled_back:
             try:
-                # save_scene_state writes the record before updating .gitignore,
-                # so an exception may leave either the new record or an older,
-                # now-stale active-scene record behind. The tool changes were
-                # reverted, therefore the record must be removed as part of the
-                # same rollback before it can be reported as complete.
-                clear_scene_state(project_root)
+                _restore_state_after_rollback(project_root, active, scope)
             except Exception as cleanup_exc:
                 rollback_error = cleanup_exc
         removed_concerns = {
@@ -294,6 +289,36 @@ def activate_scene(
 
 def _has_error(results: Sequence[SyncResult]) -> bool:
     return any(result.action == "error" for result in results)
+
+
+def _restore_state_after_rollback(
+    project_root: Path, active: SceneState | None, scope: Sequence[AIToolID]
+) -> None:
+    """Restore the prior state without the scope whose changes were reverted."""
+    if active is None:
+        clear_scene_state(project_root)
+        return
+
+    rolled_back_tools = {str(tool) for tool in scope}
+    remaining_tools = {
+        tool: record for tool, record in active.tools.items() if tool not in rolled_back_tools
+    }
+    if not remaining_tools:
+        clear_scene_state(project_root)
+        return
+
+    # ``save_scene_state`` writes before updating .gitignore, so a failed save
+    # may have replaced the prior record already. Restore the unaffected tools
+    # rather than deleting their recovery state along with the rolled-back scope.
+    save_scene_state(
+        project_root,
+        SceneState(
+            scene=active.scene,
+            applied_at=active.applied_at,
+            status=active.status,
+            tools=remaining_tools,
+        ),
+    )
 
 
 def _save_recovery_state(

@@ -959,6 +959,68 @@ class TestPersistentFallbackLifecycle:
         assert "rolled back" in result.output.lower()
         assert not (tmp_path / SCENE_STATE_PATH).exists()
 
+    def test_scoped_reapply_state_failure_preserves_unaffected_tool_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Rollback must retain state that still represents untouched tools."""
+        from crossby.scenes.state import save_scene_state as real_save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        common_patches = (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CLAUDE, AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+        )
+        with common_patches[0], common_patches[1], common_patches[2]:
+            initial = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+        assert initial.exit_code == 0, initial.output
+
+        save_calls = 0
+        spawned: list[list[str]] = []
+
+        def save_then_fail_once(project_root: Path, state: Any) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            real_save_scene_state(project_root, state)
+            if save_calls == 1:
+                raise OSError("gitignore update failed")
+
+        with (
+            common_patches[0],
+            common_patches[1],
+            common_patches[2],
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=save_then_fail_once,
+            ),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        assert "rolled back" in result.output.lower()
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == "review"
+        assert set(state["tools"]) == {"claude"}
+
+        with common_patches[0], common_patches[1], common_patches[2]:
+            status = runner.invoke(app, ["scene", "status", "--path", str(tmp_path)])
+            cleared = runner.invoke(app, ["scene", "clear", "--path", str(tmp_path)])
+
+        assert status.exit_code == 0, status.output
+        assert "Active scene: review" in " ".join(status.output.split())
+        assert cleared.exit_code == 0, cleared.output
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
     def test_state_write_failure_reports_revocations_need_sync(self, tmp_path: Path) -> None:
         _write_lifecycle_project(tmp_path)
         removed = SyncResult(
