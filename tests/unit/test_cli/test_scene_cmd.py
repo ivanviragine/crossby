@@ -223,6 +223,44 @@ class TestSwitching:
         assert not (root / SCENE_STATE_PATH).exists()
         assert not (root / ".crossby" / "scene").exists()
 
+    def test_force_switch_then_clear_restores_pre_first_scene_directory(
+        self, tmp_path: Path
+    ) -> None:
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+
+        first = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+        switched = _invoke(["scene", "use", "deploy", "--tool", "cursor", "--force"], root)
+        cleared = _invoke(["scene", "clear"], root)
+
+        assert first.exit_code == 0, first.output
+        assert switched.exit_code == 0, switched.output
+        assert cleared.exit_code == 0, cleared.output
+        assert (root / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert not list(root.glob(".cursor/skills.bak*"))
+
+    def test_state_write_failure_restores_displaced_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+
+        def fail_state(*_args: object, **_kwargs: object) -> None:
+            raise OSError("state path is unwritable")
+
+        monkeypatch.setattr("crossby.services.scene_activation.save_scene_state", fail_state)
+        result = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+
+        assert result.exit_code == 1
+        assert "rolled back" in result.output.lower()
+        assert (root / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert not list(root.glob(".cursor/skills.bak*"))
+        assert not (root / SCENE_STATE_PATH).exists()
+
     def test_reapply_active_scene_repairs_state(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
         assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
@@ -328,10 +366,9 @@ class TestPerToolScope:
         assert _invoke(["scene", "clear"], root).exit_code == 0
         assert not (root / ".claude" / "settings.json").exists()
         assert not (root / SCENE_STATE_PATH).exists()
-        # Cursor's dir is restored to the unfiltered source.
-        cursor_skills = root / ".cursor" / "skills"
-        names = {p.name for p in cursor_skills.iterdir() if p.name != ".crossby-managed"}
-        assert names == {"review-skill", "knowledge", "deploy-prod"}
+        # Cursor's target did not exist before activation, so it returns to
+        # absence instead of being redirected to the discovered source.
+        assert not (root / ".cursor" / "skills").exists()
 
     def test_switch_after_partial_apply_reverts_only_cursor(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -424,6 +461,33 @@ command = "lin-mcp"
         # Re-applying the SAME scene scoped to the same tool is fine (repair).
         result = _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root)
         assert result.exit_code == 0, result.output
+
+    def test_failed_clear_keeps_only_unrestored_path_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.scenes import engine
+        from crossby.sync.ownership import load_ledger
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        real_restore = engine._restore_one_path
+
+        def fail_cursor_skills(
+            project_root: Path, target_rel: str, *args: object, **kwargs: object
+        ) -> None:
+            if target_rel == ".cursor/skills":
+                raise OSError("injected restore failure")
+            real_restore(project_root, target_rel, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(engine, "_restore_one_path", fail_cursor_skills)
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        state = read_json(root / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"cursor"}, state["tools"].get("claude")
+        assert state["tools"]["cursor"]["mechanisms"] == {"skills": "project"}
+        assert set(load_ledger(root).scene_restores()) == {".cursor/skills"}
+        assert (root / ".crossby/scene").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1000,41 @@ class TestCorruptLedger:
         assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
         assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
         assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_malformed_scene_path_provenance_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene_paths"][".cursor/skills"] = {
+            "kind": "directory",
+            "backup": "../unsafe.bak",
+        }
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert (root / SCENE_STATE_PATH).exists()
+
+    def test_legacy_active_projection_without_path_provenance_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data.pop("scene_paths")
+        (root / LEDGER).write_text(json.dumps(data), encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        normalized = " ".join(result.output.lower().split())
+        assert "legacy activation" in normalized
+        assert "will not infer" in normalized
+        assert (root / SCENE_STATE_PATH).exists()
+        assert (root / ".agents/skills").is_symlink()
 
     def test_typo_scene_key_refuses(self, tmp_path: Path) -> None:
         # A scene entry under a key no revert handler recognises (a typo'd

@@ -5,7 +5,8 @@ least-invasive mechanism per concern: write a DECLARE key (disabling the
 deselected remainder), re-point a tool directory at a projected filtered source,
 drive the revocable-sync removal channel (hooks / permissions), or report an
 unsupported cell. :func:`clear_scene` reverts every crossby-owned DECLARE key,
-removes the projection, and re-points each tool back at its unfiltered source.
+restores each PROJECT path from its exact ownership-ledger baseline, and removes
+the projection once nothing still depends on it.
 
 The engine is driven by *installed tools + the mechanism matrix + the union of
 selected names* (``ResolvedScene.names``), not by the resolver's per-directory
@@ -20,6 +21,7 @@ switch-safe, and both entry points return ``list[SyncResult]`` so the CLI reuses
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -33,9 +35,23 @@ from crossby.services.scene_resolution import ResolvedScene
 from crossby.sync import run_sync
 from crossby.sync.agents import _AGENT_TARGET_PATHS
 from crossby.sync.base import SyncConcern, SyncData, SyncResult
-from crossby.sync.ownership import OwnershipLedger, load_ledger, save_ledger
+from crossby.sync.file_utils import has_managed_marker
+from crossby.sync.ownership import (
+    LEDGER_PATH,
+    OwnershipLedger,
+    ScenePathRestore,
+    ScenePathRestoreKind,
+    load_ledger_checked,
+    save_ledger,
+)
 from crossby.sync.readers import build_sync_data
-from crossby.sync.safe_write import SyncContainmentError
+from crossby.sync.safe_write import (
+    ProjectScope,
+    SyncContainmentError,
+    assert_ancestors,
+    safe_rmtree,
+    safe_unlink,
+)
 
 logger = structlog.get_logger()
 
@@ -111,15 +127,19 @@ def apply_scene(
 
 
 def clear_scene(
-    project_root: Path, *, dry_run: bool = False, tools: Iterable[AIToolID] | None = None
+    project_root: Path,
+    *,
+    dry_run: bool = False,
+    tools: Iterable[AIToolID] | None = None,
+    force: bool = False,
 ) -> list[SyncResult]:
     """Revert to the pre-scene state — nothing crossby didn't write is touched.
 
     Every crossby-owned DECLARE key is reverted (``disable`` is the empty set, so
-    the provenance diff removes all owned entries), the projection is removed,
-    and each tool's skills/agents directory is re-pointed at its unfiltered
-    source. A human-authored ``skillOverrides`` / ``deny`` / MCP ``disabled``
-    entry crossby never recorded survives untouched.
+    the provenance diff removes all owned entries), each PROJECT target returns
+    to its recorded absent/symlink/directory state, and the projection is removed.
+    A human-authored ``skillOverrides`` / ``deny`` / MCP ``disabled`` entry
+    crossby never recorded survives untouched.
 
     ``tools`` narrows the revert to a subset of the installed tools
     (``crossby scene clear --tool``, and the per-tool revert of a switch): only
@@ -127,8 +147,12 @@ def clear_scene(
     projection tree is removed only once no out-of-scope tool still points at it.
     ``None`` reverts every installed tool.
     """
-    base = build_sync_data(project_root)
-    ledger = load_ledger(project_root)
+    loaded = load_ledger_checked(project_root)
+    if loaded.corrupt:
+        raise ValueError(
+            f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; refusing to clear"
+        )
+    ledger = loaded.ledger
     version = versioning.detect_tool_version(AIToolID.CLAUDE)
     scope = set(tools) if tools is not None else None
     results: list[SyncResult] = []
@@ -171,9 +195,12 @@ def clear_scene(
         if not dry_run:
             save_ledger(project_root, ledger)
 
-    # 2. Re-point skills/agents back at the unfiltered source (before removing the
-    #    projection, so the tools never briefly resolve to a deleted tree).
-    restore_results = _restore_sources(project_root, base, dry_run=dry_run, tools=scope)
+    # 2. Restore exact physical-path baselines from the ownership ledger. Never
+    #    rediscover a source after activation: projected targets can outrank the
+    #    original source and a forced directory backup cannot be inferred safely.
+    restore_results = _restore_paths(
+        project_root, ledger, dry_run=dry_run, tools=scope, force=force
+    )
     results.extend(restore_results)
 
     # 3. Remove the projection tree, but only when (a) every in-scope tool was
@@ -277,10 +304,16 @@ def _context(
         scope = set(tools)
         installed = [tool for tool in installed if tool in scope]
 
+    loaded = load_ledger_checked(project_root)
+    if loaded.corrupt:
+        raise ValueError(
+            f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; refusing to apply a scene"
+        )
+
     return _Context(
         project_root=project_root,
         base=build_sync_data(project_root),
-        ledger=load_ledger(project_root),
+        ledger=loaded.ledger,
         installed=installed,
         selected={concern: set(resolved.names(concern)) for concern in SCENE_CONCERNS},
         claude_version=versioning.detect_tool_version(AIToolID.CLAUDE),
@@ -425,12 +458,97 @@ def _repoint_path(
             ),
         )
     if ctx.dry_run:
-        return projection.preview_repoint(tree, tools)
-    # crossby's own symlink (or a missing dir) always re-points; a real,
-    # non-crossby directory honours the user's --force (refused otherwise).
+        preview = projection.preview_repoint(tree, tools)
+        baseline = _describe_prospective_baseline(ctx.project_root, target_rel, ctx.force)
+        if baseline.startswith("error:"):
+            preview.action = "error"
+            preview.message = baseline.removeprefix("error:")
+        else:
+            preview.message = f"{preview.message}; {baseline}"
+        return preview
+
     target = ctx.project_root / target_rel
-    force = True if (target.is_symlink() or not target.exists()) else ctx.force
-    return projection.repoint(ctx.project_root, tree, tools[0], tools, force=force)
+    descriptor = ctx.ledger.scene_restore(target_rel)
+    if descriptor is None:
+        # Capturing and durably persisting the exact baseline is a prerequisite,
+        # not a recoverable per-writer error. Escalate so launch fallbacks abort
+        # instead of starting a child with a path whose baseline is unrecorded.
+        try:
+            descriptor = _capture_path_baseline(ctx, target_rel)
+        except ValueError as exc:
+            return _path_error(tools, tree.concern, target, str(exc))
+    try:
+        if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
+            backup_rel = descriptor.backup_path
+            assert backup_rel is not None
+            backup = ctx.project_root / backup_rel
+            # A retry after the durable descriptor write may find either side of
+            # the displacement. Move only in the unambiguous pre-mutation state.
+            if target.is_dir() and not target.is_symlink() and not os.path.lexists(backup):
+                projection.displace_directory(ctx.project_root, target_rel, backup_rel)
+            elif target.is_dir() and not target.is_symlink() and os.path.lexists(backup):
+                return _path_error(
+                    tools, tree.concern, target, f"recorded backup is occupied: {backup_rel}"
+                )
+        # The scene owns replacement only after the baseline is durable. A real
+        # directory has already been displaced, so the generic writer cannot
+        # allocate an independent .bak path.
+        return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+    except (OSError, ValueError, SyncContainmentError) as exc:
+        return _path_error(tools, tree.concern, target, str(exc))
+
+
+def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
+    """Durably record a target's first pre-scene state before mutating it."""
+    target = ctx.project_root / target_rel
+    if target.is_symlink():
+        descriptor = ScenePathRestore.symlink(os.readlink(target))
+    elif not os.path.lexists(target):
+        descriptor = ScenePathRestore.absent()
+    elif target.is_dir():
+        contents = [child for child in target.iterdir() if child.name != ".crossby-managed"]
+        if contents and not has_managed_marker(target) and not ctx.force:
+            raise ValueError(
+                f"{target_rel} exists as a directory; migrate its contents first, "
+                "or use --force to preserve it at a recorded backup"
+            )
+        backup_rel = projection.allocate_directory_backup(ctx.project_root, target_rel)
+        descriptor = ScenePathRestore.directory(backup_rel)
+    else:
+        raise ValueError(
+            f"{target_rel} exists but is not a directory or symlink; refusing scene projection"
+        )
+    ctx.ledger.record_scene_restore(target_rel, descriptor)
+    # The descriptor must reach durable storage before the corresponding path
+    # changes. A save failure propagates with the target untouched.
+    save_ledger(ctx.project_root, ctx.ledger)
+    return descriptor
+
+
+def _describe_prospective_baseline(project_root: Path, target_rel: str, force: bool) -> str:
+    target = project_root / target_rel
+    if target.is_symlink():
+        return f"would record literal symlink target {os.readlink(target)!r}"
+    if not os.path.lexists(target):
+        return "would record that the target was absent"
+    if target.is_dir():
+        contents = [child for child in target.iterdir() if child.name != ".crossby-managed"]
+        if contents and not has_managed_marker(target) and not force:
+            return (
+                f"error:{target_rel} exists as a directory; migrate its contents first, "
+                "or use --force to preserve it at a recorded backup"
+            )
+        backup_rel = projection.allocate_directory_backup(project_root, target_rel)
+        return f"would preserve the directory at {backup_rel}"
+    return f"error:{target_rel} is not a directory or symlink"
+
+
+def _path_error(
+    tools: tuple[AIToolID, ...], concern: SyncConcern, target: Path, message: str
+) -> SyncResult:
+    return SyncResult(
+        tool_id=tools[0], concern=concern, action="error", file_path=target, message=message
+    )
 
 
 def _project_paths(installed: list[AIToolID], kind: str) -> dict[str, list[AIToolID]]:
@@ -494,59 +612,194 @@ def _filter_removable(ctx: _Context, concern_key: str, concern: SyncConcern) -> 
 # ---------------------------------------------------------------------------
 
 
-def _restore_sources(
+def _restore_paths(
     project_root: Path,
-    base: SyncData,
+    ledger: OwnershipLedger,
     *,
     dry_run: bool,
-    tools: set[AIToolID] | None = None,
+    tools: set[AIToolID] | None,
+    force: bool,
 ) -> list[SyncResult]:
-    """Re-point every installed tool's skills/agents dir at the unfiltered source.
-
-    ``tools`` names the exact tools to restore (the recorded scope). Those are
-    re-pointed directly rather than intersected with the currently-installed set:
-    a tool that was applied but has since been uninstalled still has a scene
-    symlink on disk that must be re-pointed before the projection is removed, or
-    it would dangle. ``None`` restores every installed tool.
-    """
-    from crossby.ai_tools.base import AbstractAITool
-
-    installed = list(tools) if tools is not None else AbstractAITool.detect_installed()
+    """Restore each in-scope physical path from durable pre-scene provenance."""
+    candidates = _restore_candidates(ledger, tools)
     results: list[SyncResult] = []
-    for concern, source_rel in (
-        (SyncConcern.SKILLS, base.skills_source),
-        (SyncConcern.AGENTS, base.agents_source),
-    ):
-        if source_rel is None:
+    for target_rel, path_tools in candidates.items():
+        descriptor = ledger.scene_restore(target_rel)
+        concern = _concern_for_target(target_rel)
+        target = project_root / target_rel
+        representative = path_tools[0] if path_tools else None
+        if descriptor is None:
+            kind = "skills" if concern == SyncConcern.SKILLS else "agents"
+            if projection.tool_points_at_projection(project_root, target_rel, kind):
+                results.append(
+                    SyncResult(
+                        tool_id=representative,
+                        concern=concern,
+                        action="error",
+                        file_path=target,
+                        message=(
+                            f"{target_rel} has an active scene projection but no exact path "
+                            "provenance (legacy activation); restore it manually and retry. "
+                            "Crossby will not infer a source or adopt a nearby .bak path."
+                        ),
+                    )
+                )
             continue
         if dry_run:
             results.append(
                 SyncResult(
-                    tool_id=None,
+                    tool_id=representative,
                     concern=concern,
                     action="updated",
-                    message=f"(dry-run) would restore {concern.value} to {source_rel}",
+                    file_path=target,
+                    message=(
+                        f"(dry-run) would restore {target_rel} {_restore_description(descriptor)}"
+                    ),
                 )
             )
             continue
-        seen: set[str] = set()
-        for tool in installed:
-            target = _target_for(tool, concern)
-            if target is None or target in seen:
-                continue
-            seen.add(target)
-            if projection.is_source_dir(project_root, target, source_rel):
-                continue
-            # Mirror the apply-path gate (_repoint_path): re-point only crossby's
-            # own symlink or a missing target. A real, non-crossby directory is
-            # refused here too — clear must not back up and replace a user's own
-            # directory without an explicit opt-in.
-            target_path = project_root / target
-            force = target_path.is_symlink() or not target_path.exists()
+        try:
+            _restore_one_path(project_root, target_rel, concern, descriptor, force=force)
+            ledger.clear_scene_restore(target_rel)
+            # Cleanup is commit-like: descriptor removal becomes authoritative
+            # only after the exact baseline is on disk. If this save fails, the
+            # on-disk descriptor remains and the next retry confirms the baseline.
+            try:
+                save_ledger(project_root, ledger)
+            except Exception:
+                # Keep the shared in-memory ledger consistent too; a later path
+                # may save it successfully during this same partial clear.
+                ledger.record_scene_restore(target_rel, descriptor)
+                raise
+        except (OSError, ValueError, SyncContainmentError) as exc:
             results.append(
-                projection.restore_source(project_root, concern, source_rel, tool, force=force)
+                SyncResult(
+                    tool_id=representative,
+                    concern=concern,
+                    action="error",
+                    file_path=target,
+                    message=f"could not restore {target_rel}: {exc}",
+                )
             )
+            continue
+        shared = ""
+        if len(path_tools) > 1:
+            shared = f" (shared by {', '.join(sorted(str(tool) for tool in path_tools))})"
+        results.append(
+            SyncResult(
+                tool_id=representative,
+                concern=concern,
+                action="updated",
+                file_path=target,
+                message=f"restored exact pre-scene baseline{shared}",
+                revoked=1,
+            )
+        )
     return results
+
+
+def _restore_candidates(
+    ledger: OwnershipLedger, tools: set[AIToolID] | None
+) -> dict[str, list[AIToolID]]:
+    if tools is None:
+        candidates = {path: _tools_for_target(path) for path in ledger.scene_restores()}
+        # Legacy records have no descriptors, so also inspect currently-installed
+        # PROJECT paths for a projection that requires manual recovery.
+        from crossby.ai_tools.base import AbstractAITool
+
+        scoped_tools = AbstractAITool.detect_installed()
+    else:
+        candidates = {}
+        scoped_tools = sorted(tools, key=str)
+    for kind in ("skills", "agents"):
+        for path, path_tools in _project_paths(scoped_tools, kind).items():
+            candidates.setdefault(path, path_tools)
+    return dict(sorted(candidates.items()))
+
+
+def _tools_for_target(target_rel: str) -> list[AIToolID]:
+    return sorted(
+        [
+            tool
+            for tool in _scene_tools()
+            if _target_for(tool, _concern_for_target(target_rel)) == target_rel
+        ],
+        key=str,
+    )
+
+
+def _concern_for_target(target_rel: str) -> SyncConcern:
+    return SyncConcern.SKILLS if target_rel in set(SKILLS_DIR.values()) else SyncConcern.AGENTS
+
+
+def _restore_description(descriptor: ScenePathRestore) -> str:
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        return "to absence"
+    if descriptor.kind == ScenePathRestoreKind.SYMLINK:
+        return f"to literal symlink {descriptor.link_target!r}"
+    return f"from recorded backup {descriptor.backup_path}"
+
+
+def _restore_one_path(
+    project_root: Path,
+    target_rel: str,
+    concern: SyncConcern,
+    descriptor: ScenePathRestore,
+    *,
+    force: bool,
+) -> None:
+    target = project_root / target_rel
+    kind = "skills" if concern == SyncConcern.SKILLS else "agents"
+    scope = ProjectScope(project_root)
+    assert_ancestors(scope, target)
+
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        if not os.path.lexists(target):
+            return
+        _remove_scene_output(project_root, target_rel, kind, force=force)
+        return
+
+    if descriptor.kind == ScenePathRestoreKind.SYMLINK:
+        literal = descriptor.link_target
+        assert literal is not None
+        if target.is_symlink() and os.readlink(target) == literal:
+            return
+        if os.path.lexists(target):
+            _remove_scene_output(project_root, target_rel, kind, force=force)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(literal, target)
+        return
+
+    backup_rel = descriptor.backup_path
+    assert backup_rel is not None
+    backup = project_root / backup_rel
+    assert_ancestors(scope, backup)
+    backup_exists = os.path.lexists(backup)
+    if not backup_exists:
+        # Descriptor cleanup may have been interrupted after os.replace. A real
+        # directory at the target is the only converged state in this boundary.
+        if target.is_dir() and not target.is_symlink():
+            return
+        raise FileNotFoundError(f"recorded backup is missing: {backup_rel}")
+    if backup.is_symlink() or not backup.is_dir():
+        raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
+    if os.path.lexists(target):
+        _remove_scene_output(project_root, target_rel, kind, force=force)
+    os.replace(backup, target)
+
+
+def _remove_scene_output(project_root: Path, target_rel: str, kind: str, *, force: bool) -> None:
+    target = project_root / target_rel
+    scope = ProjectScope(project_root)
+    if target.is_symlink():
+        if not force and not projection.tool_points_at_projection(project_root, target_rel, kind):
+            raise ValueError("target symlink drifted away from the active scene projection")
+        safe_unlink(scope, target, missing_ok=False)
+        return
+    if target.is_dir() and has_managed_marker(target):
+        safe_rmtree(scope, target)
+        return
+    raise ValueError("target is not removable scene-owned projection output")
 
 
 _SCENE_GITIGNORE_BLOCK = "scene projection"

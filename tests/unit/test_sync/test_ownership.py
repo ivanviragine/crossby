@@ -32,6 +32,7 @@ from crossby.sync.ownership import (
     LEDGER_VERSION,
     OwnershipLedger,
     SceneDeclareKey,
+    ScenePathRestore,
     load_ledger,
     load_ledger_checked,
     save_ledger,
@@ -140,6 +141,31 @@ class TestLedgerRoundTrip:
     def test_empty_ledger_is_not_materialised(self, tmp_path: Path) -> None:
         assert save_ledger(tmp_path, OwnershipLedger()) is False
         assert not (tmp_path / LEDGER_PATH).exists()
+
+    def test_scene_path_descriptors_round_trip_and_are_path_keyed(self, tmp_path: Path) -> None:
+        ledger = OwnershipLedger()
+        assert ledger.record_scene_absent(".cursor/skills") is True
+        assert ledger.record_scene_symlink(".agents/skills", "../.claude/skills") is True
+        assert ledger.record_scene_directory(".cursor/agents", ".cursor/agents.bak2") is True
+        # A co-sharer cannot replace the first physical-path baseline.
+        assert ledger.record_scene_absent(".agents/skills") is False
+        save_ledger(tmp_path, ledger)
+
+        loaded = load_ledger(tmp_path)
+        assert loaded.scene_restore(".cursor/skills") == ScenePathRestore.absent()
+        assert loaded.scene_restore(".agents/skills") == ScenePathRestore.symlink(
+            "../.claude/skills"
+        )
+        assert loaded.scene_restore(".cursor/agents") == ScenePathRestore.directory(
+            ".cursor/agents.bak2"
+        )
+        assert not loaded.is_empty()
+
+    def test_clearing_last_scene_path_descriptor_makes_ledger_empty(self) -> None:
+        ledger = OwnershipLedger()
+        ledger.record_scene_absent(".cursor/skills")
+        ledger.clear_scene_restore(".cursor/skills")
+        assert ledger.is_empty()
 
 
 class TestLedgerDegradesGracefully:
@@ -347,6 +373,37 @@ class TestLoadLedgerChecked:
             json.dumps({"version": 2, "owned": {}, "scene": {"claude": {"bogus_key": ["x"]}}}),
         )
         assert load_ledger_checked(tmp_path).corrupt is True
+
+    @pytest.mark.parametrize(
+        "scene_paths",
+        [
+            None,
+            [],
+            {"/absolute/skills": {"kind": "absent"}},
+            {"../escape": {"kind": "absent"}},
+            {".unknown/skills": {"kind": "absent"}},
+            {".cursor/skills": {"kind": "unknown"}},
+            {".cursor/skills": {"kind": "absent", "target": "extra"}},
+            {".cursor/skills": {"kind": "symlink"}},
+            {".cursor/skills": {"kind": "symlink", "target": 5}},
+            {".cursor/skills": {"kind": "directory", "backup": "/tmp/stolen"}},
+            {".cursor/skills": {"kind": "directory", "backup": "../skills.bak"}},
+            {".cursor/skills": {"kind": "directory", "backup": ".agents/skills.bak"}},
+            {".cursor/skills": {"kind": "directory", "backup": ".cursor/other.bak"}},
+        ],
+    )
+    def test_malformed_scene_paths_fail_closed(self, tmp_path: Path, scene_paths: object) -> None:
+        self._write(
+            tmp_path,
+            json.dumps({"version": LEDGER_VERSION, "owned": {}, "scene_paths": scene_paths}),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_absent_scene_paths_section_is_backward_compatible(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps({"version": 2, "owned": {}}))
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.scene_restores() == {}
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 """Provenance ledger — a record of what crossby wrote, so it can revoke it later.
 
 ``.crossby/owned.json`` is a per-machine, gitignored record of the items crossby
-has written to each tool, keyed by ``(tool_id, concern)``. :func:`run_sync
+has written to each tool, keyed by ``(tool_id, concern)``, plus exact PROJECT
+path baselines used by scenes. :func:`run_sync
 <crossby.sync.run_sync>` diffs this ledger against the current sync data to
 compute what to revoke, so a writer never removes an entry a human authored.
 
@@ -11,11 +12,12 @@ Item identities per concern:
 - **permissions** — canonical command patterns (strings, e.g. ``"git diff:*"``).
 - **mcp** — server names (strings).
 
-A missing or malformed ledger degrades to "own nothing" — purely additive
-behaviour, never a crash. Because the file is gitignored it is per-machine: a
-fresh clone starts with an empty ledger and can only *add* until it catches up
-with what is already on disk (it never revokes an entry it has no record of
-writing).
+A missing or malformed ledger degrades to "own nothing" for ordinary sync —
+purely additive behaviour, never a crash. Scene operations use the checked load
+and fail closed on malformed restore authority. Because the file is gitignored
+it is per-machine: a fresh clone starts with an empty ledger and can only *add*
+until it catches up with what is already on disk (it never revokes an entry it
+has no record of writing).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import structlog
@@ -38,10 +40,10 @@ logger = structlog.get_logger()
 
 # Sits beside ``.crossby/sync-report.md`` (see ``sync/report.py``).
 LEDGER_PATH = Path(".crossby") / "owned.json"
-# v2 adds the ``scene`` section (DECLARE-key provenance). Bumped from 1; older
-# v1 files load unchanged because the version is advisory (never gates a read)
-# and a missing ``scene`` section degrades to "own no DECLARE keys".
-LEDGER_VERSION = 2
+# v2 added the ``scene`` section (DECLARE-key provenance); v3 adds
+# ``scene_paths`` (exact PROJECT-path restore provenance). The version remains
+# advisory, and older files without either section remain readable.
+LEDGER_VERSION = 3
 
 # Only these three concerns carry revocation semantics.
 _HOOKS = SyncConcern.HOOKS.value
@@ -51,6 +53,44 @@ _MCP = SyncConcern.MCP.value
 # Sentinel distinguishing an *absent* ``scene`` key (fine) from an explicit
 # ``null`` (corrupt) in corruption classification — ``dict.get`` conflates them.
 _MISSING_SCENE: object = object()
+_MISSING_SCENE_PATHS: object = object()
+
+
+class ScenePathRestoreKind(StrEnum):
+    """The supported pre-scene states of a PROJECT target path."""
+
+    ABSENT = "absent"
+    SYMLINK = "symlink"
+    DIRECTORY = "directory"
+
+
+@dataclass(frozen=True)
+class ScenePathRestore:
+    """Exact baseline needed to restore one physical PROJECT target."""
+
+    kind: ScenePathRestoreKind
+    link_target: str | None = None
+    backup_path: str | None = None
+
+    @classmethod
+    def absent(cls) -> ScenePathRestore:
+        return cls(ScenePathRestoreKind.ABSENT)
+
+    @classmethod
+    def symlink(cls, literal_target: str) -> ScenePathRestore:
+        return cls(ScenePathRestoreKind.SYMLINK, link_target=literal_target)
+
+    @classmethod
+    def directory(cls, backup_path: str) -> ScenePathRestore:
+        return cls(ScenePathRestoreKind.DIRECTORY, backup_path=backup_path)
+
+    def to_json(self) -> dict[str, str]:
+        out = {"kind": self.kind.value}
+        if self.link_target is not None:
+            out["target"] = self.link_target
+        if self.backup_path is not None:
+            out["backup"] = self.backup_path
+        return out
 
 
 class SceneDeclareKey(StrEnum):
@@ -91,6 +131,8 @@ class OwnershipLedger:
     # collides with the revocable-sync concerns above (a concern name and a
     # DECLARE-key name could otherwise clash in one namespace).
     _scene: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # Normalised project-relative physical target path → exact pre-scene state.
+    _scene_paths: dict[str, ScenePathRestore] = field(default_factory=dict)
 
     # -- read ----------------------------------------------------------------
 
@@ -183,9 +225,47 @@ class OwnershipLedger:
             if not tool:
                 self._scene.pop(tool_key, None)
 
+    # -- scene PROJECT path provenance --------------------------------------
+
+    def scene_restore(self, target_path: str | Path) -> ScenePathRestore | None:
+        """Return the recorded baseline for a registered physical target."""
+        return self._scene_paths.get(_normalise_scene_target(target_path))
+
+    def scene_restores(self) -> dict[str, ScenePathRestore]:
+        """Return a copy of every path-keyed restore descriptor."""
+        return dict(self._scene_paths)
+
+    def record_scene_restore(self, target_path: str | Path, descriptor: ScenePathRestore) -> bool:
+        """Record the first baseline for *target_path*; never overwrite it.
+
+        Returns ``True`` when a descriptor was added and ``False`` when that
+        physical path already had recovery authority.
+        """
+        target = _normalise_scene_target(target_path)
+        _validate_scene_restore(target, descriptor)
+        if target in self._scene_paths:
+            return False
+        self._scene_paths[target] = descriptor
+        return True
+
+    def record_scene_absent(self, target_path: str | Path) -> bool:
+        return self.record_scene_restore(target_path, ScenePathRestore.absent())
+
+    def record_scene_symlink(self, target_path: str | Path, literal_target: str) -> bool:
+        return self.record_scene_restore(target_path, ScenePathRestore.symlink(literal_target))
+
+    def record_scene_directory(self, target_path: str | Path, backup_path: str | Path) -> bool:
+        return self.record_scene_restore(
+            target_path, ScenePathRestore.directory(PurePosixPath(backup_path).as_posix())
+        )
+
+    def clear_scene_restore(self, target_path: str | Path) -> None:
+        """Drop a descriptor only after its baseline is confirmed restored."""
+        self._scene_paths.pop(_normalise_scene_target(target_path), None)
+
     def is_empty(self) -> bool:
         """True when crossby owns nothing anywhere (revocable or scene DECLARE)."""
-        return not self._data and not self._scene
+        return not self._data and not self._scene and not self._scene_paths
 
     def to_json(self) -> dict[str, Any]:
         """Serialisable form written to ``owned.json``.
@@ -196,6 +276,10 @@ class OwnershipLedger:
         out: dict[str, Any] = {"version": LEDGER_VERSION, "owned": self._data}
         if self._scene:
             out["scene"] = self._scene
+        if self._scene_paths:
+            out["scene_paths"] = {
+                path: descriptor.to_json() for path, descriptor in sorted(self._scene_paths.items())
+            }
         return out
 
 
@@ -232,9 +316,9 @@ def load_ledger_checked(project_root: Path) -> LoadedLedger:
       ``dict``. ``os.path.lexists`` (not ``Path.is_file``) is deliberate so a
       broken symlink at ``owned.json`` is caught rather than mistaken for missing.
 
-    Lenient sub-parsing of malformed ``owned`` / ``scene`` *entries* is preserved
-    (they degrade to empty, never corrupt) — only a whole-file/root failure fails
-    closed, so a partially-garbage-but-readable ledger is not a false positive.
+    Lenient sub-parsing of malformed additive ``owned`` entries is preserved.
+    Malformed ``scene`` or ``scene_paths`` entries fail closed because they are
+    restore authority.
     """
     path = project_root / LEDGER_PATH
     if not os.path.lexists(path):
@@ -270,12 +354,20 @@ def load_ledger_checked(project_root: Path) -> LoadedLedger:
     # sub-entries are dropped, not treated as corruption. A sentinel distinguishes
     # an *absent* scene key (older v1 ledgers — fine) from an explicit ``null``.
     scene_corrupt = _scene_section_corrupt(raw.get("scene", _MISSING_SCENE))
+    scene_paths_raw = raw.get("scene_paths", _MISSING_SCENE_PATHS)
+    scene_paths_corrupt = _scene_paths_section_corrupt(scene_paths_raw)
 
     owned = raw.get("owned")
     if not isinstance(owned, dict):
         # Root is a dict but ``owned`` is missing/malformed — leniently empty
-        # (mirrors the historical degradation); still fail closed on a bad scene.
-        return LoadedLedger(OwnershipLedger(), corrupt=scene_corrupt)
+        # (mirrors the historical degradation), while valid scene provenance
+        # remains available for exact recovery.
+        scene = _load_scene_section(raw.get("scene"))
+        scene_paths = _load_scene_paths_section(scene_paths_raw)
+        return LoadedLedger(
+            OwnershipLedger({}, scene, scene_paths),
+            corrupt=scene_corrupt or scene_paths_corrupt,
+        )
 
     data: dict[str, dict[str, list[Any]]] = {}
     for tool, concerns in owned.items():
@@ -289,7 +381,11 @@ def load_ledger_checked(project_root: Path) -> LoadedLedger:
             data[tool] = clean
 
     scene = _load_scene_section(raw.get("scene"))
-    return LoadedLedger(OwnershipLedger(data, scene), corrupt=scene_corrupt)
+    scene_paths = _load_scene_paths_section(scene_paths_raw)
+    return LoadedLedger(
+        OwnershipLedger(data, scene, scene_paths),
+        corrupt=scene_corrupt or scene_paths_corrupt,
+    )
 
 
 def _scene_section_corrupt(raw_scene: object) -> bool:
@@ -350,6 +446,128 @@ def _load_scene_section(raw_scene: object) -> dict[str, dict[str, list[str]]]:
     return scene
 
 
+def _registered_scene_targets() -> frozenset[str]:
+    """Every physical path a built-in PROJECT mechanism may mutate."""
+    # Local imports avoid making the low-level ownership module part of the
+    # sync writer import cycle during module initialisation.
+    from crossby.config.skills import SKILLS_DIR
+    from crossby.sync.agents import _AGENT_TARGET_PATHS
+
+    return frozenset({*SKILLS_DIR.values(), *_AGENT_TARGET_PATHS.values()})
+
+
+def _normalise_relative_path(path: str | Path) -> str:
+    raw = str(path)
+    pure = PurePosixPath(raw)
+    if not raw or raw == "." or pure.is_absolute() or ".." in pure.parts:
+        raise ValueError(f"unsafe project-relative path: {raw!r}")
+    normalised = pure.as_posix()
+    if normalised.startswith("./") or "\\" in normalised:
+        raise ValueError(f"path is not normalized POSIX project-relative form: {raw!r}")
+    return normalised
+
+
+def _normalise_scene_target(path: str | Path) -> str:
+    target = _normalise_relative_path(path)
+    if target not in _registered_scene_targets():
+        raise ValueError(f"unregistered scene target path: {target!r}")
+    return target
+
+
+def _normalise_backup_path(target: str, backup: str | Path) -> str:
+    value = _normalise_relative_path(backup)
+    target_path = PurePosixPath(target)
+    backup_path = PurePosixPath(value)
+    # A scene displacement is always allocated beside the exact target using
+    # backup_path's ``<name>.bak[2...]`` convention. This rejects a plausible
+    # but unsafe reference elsewhere in the project.
+    prefix = target_path.name + ".bak"
+    suffix = backup_path.name[len(prefix) :] if backup_path.name.startswith(prefix) else None
+    if (
+        backup_path.parent != target_path.parent
+        or suffix is None
+        or (suffix and (not suffix.isdigit() or int(suffix) < 2))
+    ):
+        raise ValueError(f"unsafe scene backup path {value!r} for target {target!r}")
+    return value
+
+
+def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
+    if not isinstance(descriptor, ScenePathRestore):
+        raise ValueError("scene restore descriptor has an invalid type")
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        if descriptor.link_target is not None or descriptor.backup_path is not None:
+            raise ValueError("absent scene restore descriptor has unexpected fields")
+        return
+    if descriptor.kind == ScenePathRestoreKind.SYMLINK:
+        if not isinstance(descriptor.link_target, str) or descriptor.backup_path is not None:
+            raise ValueError("symlink scene restore descriptor requires only a literal target")
+        return
+    if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
+        if descriptor.link_target is not None or not isinstance(descriptor.backup_path, str):
+            raise ValueError("directory scene restore descriptor requires only a backup path")
+        if _normalise_backup_path(target, descriptor.backup_path) != descriptor.backup_path:
+            raise ValueError("scene backup path is not normalized")
+        return
+    raise ValueError(f"unknown scene restore descriptor kind: {descriptor.kind!r}")
+
+
+def _parse_scene_restore(target: str, raw: object) -> ScenePathRestore:
+    if not isinstance(raw, dict) or any(not isinstance(key, str) for key in raw):
+        raise ValueError("scene restore descriptor must be an object")
+    kind = raw.get("kind")
+    if kind == ScenePathRestoreKind.ABSENT.value and set(raw) == {"kind"}:
+        descriptor = ScenePathRestore.absent()
+    elif kind == ScenePathRestoreKind.SYMLINK.value and set(raw) == {"kind", "target"}:
+        literal = raw.get("target")
+        if not isinstance(literal, str):
+            raise ValueError("symlink target must be a string")
+        descriptor = ScenePathRestore.symlink(literal)
+    elif kind == ScenePathRestoreKind.DIRECTORY.value and set(raw) == {"kind", "backup"}:
+        backup = raw.get("backup")
+        if not isinstance(backup, str):
+            raise ValueError("directory backup must be a string")
+        descriptor = ScenePathRestore.directory(backup)
+    else:
+        raise ValueError("unknown or malformed scene restore descriptor")
+    _validate_scene_restore(target, descriptor)
+    return descriptor
+
+
+def _scene_paths_section_corrupt(raw_scene_paths: object) -> bool:
+    """True when present PROJECT restore authority is malformed or unsafe."""
+    if raw_scene_paths is _MISSING_SCENE_PATHS:
+        return False
+    if not isinstance(raw_scene_paths, dict):
+        return True
+    try:
+        for raw_target, raw_descriptor in raw_scene_paths.items():
+            if not isinstance(raw_target, str):
+                return True
+            target = _normalise_scene_target(raw_target)
+            if target != raw_target:
+                return True
+            _parse_scene_restore(target, raw_descriptor)
+    except ValueError:
+        return True
+    return False
+
+
+def _load_scene_paths_section(raw_scene_paths: object) -> dict[str, ScenePathRestore]:
+    if not isinstance(raw_scene_paths, dict):
+        return {}
+    out: dict[str, ScenePathRestore] = {}
+    try:
+        for raw_target, raw_descriptor in raw_scene_paths.items():
+            if not isinstance(raw_target, str):
+                return {}
+            target = _normalise_scene_target(raw_target)
+            out[target] = _parse_scene_restore(target, raw_descriptor)
+    except ValueError:
+        return {}
+    return out
+
+
 def save_ledger(project_root: Path, ledger: OwnershipLedger) -> bool:
     """Write the ledger to ``.crossby/owned.json``.
 
@@ -396,6 +614,8 @@ __all__ = [
     "LoadedLedger",
     "OwnershipLedger",
     "SceneDeclareKey",
+    "ScenePathRestore",
+    "ScenePathRestoreKind",
     "load_ledger",
     "load_ledger_checked",
     "save_ledger",

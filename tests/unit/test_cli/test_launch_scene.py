@@ -637,12 +637,7 @@ class TestPersistentFallbackLifecycle:
             cleared = runner.invoke(app, ["scene", "clear", "--path", str(tmp_path)])
             assert cleared.exit_code == 0, cleared.output
 
-        restored = {
-            child.name
-            for child in (tmp_path / ".cursor" / "skills").iterdir()
-            if child.name != ".crossby-managed"
-        }
-        assert restored == {"review-skill", "knowledge", "deploy-prod"}
+        assert not (tmp_path / ".cursor" / "skills").exists()
         assert not (tmp_path / SCENE_STATE_PATH).exists()
 
     def test_launch_scope_expands_for_shared_skills_directory(self, tmp_path: Path) -> None:
@@ -1079,6 +1074,44 @@ class TestPersistentFallbackLifecycle:
         assert state["status"] == "partial"
         assert state["tools"]["cursor"]["status"] == "failed"
 
+    def test_baseline_persistence_failure_aborts_child_before_target_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        from crossby.scenes import engine
+
+        _write_lifecycle_project(tmp_path)
+        real_save = engine.save_ledger
+        calls = 0
+        spawned: list[list[str]] = []
+
+        def fail_capture(project_root: Path, ledger: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("ownership ledger became unwritable")
+            return real_save(project_root, ledger)
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.scenes.engine.save_ledger", side_effect=fail_capture),
+            patch(
+                "crossby.utils.process.run_with_transcript",
+                side_effect=lambda cmd, *_a, **_kw: spawned.append(cmd) or 0,
+            ),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "cursor", "--scene", "review"]
+            )
+
+        assert result.exit_code == 1, result.output
+        assert spawned == []
+        assert "apply failed" in result.output.lower()
+        assert not (tmp_path / ".cursor/skills").exists()
+
     def test_apply_exception_records_recovery_and_aborts_child(self, tmp_path: Path) -> None:
         _write_lifecycle_project(tmp_path)
         from crossby.scenes import engine
@@ -1146,12 +1179,7 @@ class TestPersistentFallbackLifecycle:
         assert spawned == []
         assert "rolled back" in result.output.lower()
         assert not (tmp_path / SCENE_STATE_PATH).exists()
-        restored = {
-            child.name
-            for child in (tmp_path / ".cursor" / "skills").iterdir()
-            if child.name != ".crossby-managed"
-        }
-        assert restored == {"review-skill", "knowledge", "deploy-prod"}
+        assert not (tmp_path / ".cursor" / "skills").exists()
 
     def test_state_write_failure_after_record_write_removes_stale_state(
         self, tmp_path: Path
