@@ -1097,6 +1097,110 @@ class TestPersistentFallbackLifecycle:
         assert cleared.exit_code == 0, cleared.output
         assert not (tmp_path / SCENE_STATE_PATH).exists()
 
+    def test_unscoped_switch_state_failure_drops_reverted_uninstalled_tool(
+        self, tmp_path: Path
+    ) -> None:
+        """Rollback state must not claim a reverted, uninstalled tool is active."""
+        from crossby.scenes.state import save_scene_state as real_save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CLAUDE, AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+        ):
+            initial = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+        assert initial.exit_code == 0, initial.output
+
+        save_calls = 0
+
+        def save_then_fail_once(project_root: Path, state: Any) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            real_save_scene_state(project_root, state)
+            if save_calls == 1:
+                raise OSError("gitignore update failed")
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=save_then_fail_once,
+            ),
+        ):
+            switched = runner.invoke(app, ["scene", "use", "deploy", "--path", str(tmp_path)])
+
+        assert switched.exit_code == 1, switched.output
+        assert "rolled back" in switched.output.lower()
+        assert not (tmp_path / SCENE_STATE_PATH).exists()
+
+    def test_unscoped_switch_state_failure_keeps_uninstalled_revocation_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        """Irreversible removals remain recorded without stale mechanisms."""
+        from crossby.scenes.state import SceneState, SceneToolRecord
+        from crossby.scenes.state import save_scene_state as real_save_scene_state
+
+        _write_lifecycle_project(tmp_path)
+        real_save_scene_state(
+            tmp_path,
+            SceneState(
+                scene="review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="applied",
+                tools={
+                    "claude": SceneToolRecord(
+                        mechanisms={"mcp": "declare", "permissions": "project"},
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+        save_calls = 0
+
+        def save_then_fail_once(project_root: Path, state: Any) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            real_save_scene_state(project_root, state)
+            if save_calls == 1:
+                raise OSError("gitignore update failed")
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CURSOR],
+            ),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch("crossby.scenes.engine.clear_scene", return_value=[]),
+            patch("crossby.scenes.engine.apply_scene", return_value=[]),
+            patch(
+                "crossby.services.scene_activation.save_scene_state",
+                side_effect=save_then_fail_once,
+            ),
+        ):
+            switched = runner.invoke(app, ["scene", "use", "deploy", "--path", str(tmp_path)])
+
+        assert switched.exit_code == 1, switched.output
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["scene"] == "review"
+        assert state["tools"] == {
+            "claude": {
+                "hashes": {},
+                "mechanisms": {},
+                "revoked_concerns": ["permissions"],
+                "status": "recovery",
+            }
+        }
+
     def test_state_write_failure_reports_revocations_need_sync(self, tmp_path: Path) -> None:
         _write_lifecycle_project(tmp_path)
         removed = SyncResult(

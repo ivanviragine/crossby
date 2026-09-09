@@ -378,6 +378,36 @@ class TestPerToolScope:
         state = read_json(root / SCENE_STATE_PATH)
         assert set(state["tools"]) == {"codex", "antigravity-cli"}
 
+    def test_clear_shared_only_tool_preserves_co_sharer_mcp_state(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        # Keep Codex config as the sole MCP discovery source so this test does
+        # not cache the readers conflict logger into later logging tests.
+        (root / ".mcp.json").unlink()
+        codex_config = root / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        codex_config.write_text(
+            """\
+[mcp_servers.github]
+command = "gh-mcp"
+
+[mcp_servers.linear]
+command = "lin-mcp"
+""",
+            encoding="utf-8",
+        )
+        assert _invoke(["scene", "use", "pr-review", "--tool", "codex"], root).exit_code == 0
+        assert "enabled = false" in codex_config.read_text(encoding="utf-8")
+
+        cleared = _invoke(["scene", "clear", "--tool", "antigravity-cli"], root)
+
+        assert cleared.exit_code == 0, cleared.output
+        assert "enabled = false" in codex_config.read_text(encoding="utf-8")
+        state = read_json(root / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"codex"}
+        assert "mcp" in state["tools"]["codex"]["mechanisms"]
+        assert "skills" not in state["tools"]["codex"]["mechanisms"]
+        assert ".agents/skills" not in state["tools"]["codex"]["hashes"]
+
     def test_scoped_switch_to_different_scene_is_rejected(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
         assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0

@@ -578,7 +578,7 @@ def clear_active(
         console.info(f"Tool {tool_id} is not part of the active scene {active.scene!r}.")
         console.hint(f"Recorded tools: {', '.join(str(t) for t in recorded) or '(none)'}")
         return
-    scope = _clear_scope(tool_id, recorded)
+    scope, shared_skill_scope = _clear_scope(tool_id, active)
 
     # Fail closed on a corrupt ledger before BOTH the --plan preview and the real
     # clear: an empty-loaded ledger reverts nothing yet the engine's finally:
@@ -595,8 +595,8 @@ def clear_active(
             raise typer.Exit(1)
         return
 
-    # Drift is scoped to the tools being reverted, so an unrelated tool's drift
-    # neither blocks nor is reported by a --tool clear.
+    # Drift is scoped to the requested tool. Its state carries the shared skills
+    # hash too, so a co-sharer's unrelated config drift cannot block this clear.
     drifted = detect_drift(root, active, tools=[str(t) for t in scope])
     if drifted and not force:
         _report_drift_refusal(active.scene, drifted, verb="clear")
@@ -608,7 +608,7 @@ def clear_active(
     )
     if new_tool_id != tool_id:
         tool_id = new_tool_id
-        scope = _clear_scope(tool_id, recorded)
+        scope, shared_skill_scope = _clear_scope(tool_id, active)
 
     results = _call_engine_or_exit(clear_scene, root, tools=scope)
     _display_results(results)
@@ -633,6 +633,7 @@ def clear_active(
         else:
             for cleared in scope:
                 active.tools.pop(str(cleared), None)
+            _drop_shared_skill_state(active, shared_skill_scope)
             if active.tools:
                 save_scene_state(root, active)
             else:
@@ -645,14 +646,45 @@ def clear_active(
     console.success(f"Cleared scene {active.scene!r}.")
 
 
-def _clear_scope(tool_id: AIToolID | None, recorded: list[AIToolID]) -> list[AIToolID]:
-    """The recorded tools a clear targets: one tool (plus shared-dir co-sharers),
-    or every recorded tool."""
-    if tool_id is None:
-        return recorded
-    from crossby.services.scene_activation import expand_shared_scope
+def _clear_scope(
+    tool_id: AIToolID | None, active: SceneState
+) -> tuple[list[AIToolID], list[AIToolID]]:
+    """Return the whole-tool clear scope and skills-only co-sharers."""
+    from crossby.services.scene_activation import expand_shared_scope, recorded_tools
 
-    return expand_shared_scope([tool_id], recorded)
+    recorded = recorded_tools(active)
+    if tool_id is None:
+        return recorded, []
+    record = active.tools.get(str(tool_id))
+    if record is None or "skills" not in record.mechanisms:
+        return [tool_id], []
+    shared = [
+        tool
+        for tool in expand_shared_scope([tool_id], recorded)
+        if tool != tool_id and "skills" in active.tools[str(tool)].mechanisms
+    ]
+    return [tool_id], shared
+
+
+def _drop_shared_skill_state(active: SceneState, tools: list[AIToolID]) -> None:
+    """Remove only the shared skills concern from co-sharer state records."""
+    from crossby.config.skills import SKILLS_DIR
+
+    for tool in tools:
+        tool_name = str(tool)
+        record = active.tools.get(tool_name)
+        if record is None:
+            continue
+        record.mechanisms.pop("skills", None)
+        shared_path = SKILLS_DIR.get(tool)
+        if shared_path is not None:
+            record.hashes.pop(shared_path, None)
+        if record.mechanisms or record.hashes:
+            continue
+        if record.revoked_concerns:
+            record.status = "recovery"
+        else:
+            active.tools.pop(tool_name, None)
 
 
 # ---------------------------------------------------------------------------

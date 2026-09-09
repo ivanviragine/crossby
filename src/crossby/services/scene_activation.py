@@ -144,6 +144,7 @@ def activate_scene(
     loaded = load_scene_state(project_root)
     warnings = (loaded.warning,) if loaded.warning else ()
     active = loaded.state
+    reverted_scope: list[AIToolID] = []
 
     if load_ledger_checked(project_root).corrupt:
         raise SceneActivationError(
@@ -208,8 +209,8 @@ def activate_scene(
                     drifted=drifted,
                 )
             try:
-                revert_scope = outgoing if not explicitly_scoped else initial_scope
-                revert_results = engine.clear_scene(project_root, tools=revert_scope)
+                reverted_scope = outgoing if not explicitly_scoped else initial_scope
+                revert_results = engine.clear_scene(project_root, tools=reverted_scope)
             except Exception as exc:
                 raise SceneActivationError(
                     ActivationFailureKind.FAILED_REVERT,
@@ -282,7 +283,7 @@ def activate_scene(
                 _restore_state_after_rollback(
                     project_root,
                     active,
-                    initial_scope,
+                    reverted_scope,
                     shared_skill_scope=shared_skill_scope,
                 )
             except Exception as cleanup_exc:
@@ -302,6 +303,16 @@ def activate_scene(
             rollback_hint = (
                 "The launch was aborted. Run 'crossby sync' to restore the removed "
                 "hooks/permissions, then fix the state path before retrying."
+            )
+        elif removed_concerns:
+            remaining = "/".join(sorted(removed_concerns))
+            rollback_message = (
+                f"The automatic rollback did not complete, and removed {remaining} remain narrowed."
+            )
+            rollback_hint = (
+                "The launch was aborted. Run 'crossby sync' to restore removed "
+                "hooks/permissions, then inspect .crossby/owned.json, "
+                ".crossby/scene-state.json, and the tool files before retrying recovery."
             )
         elif rolled_back:
             rollback_message = "Persistent changes were rolled back."
@@ -384,7 +395,7 @@ def _merge_same_scene_tools(
 def _restore_state_after_rollback(
     project_root: Path,
     active: SceneState | None,
-    scope: Sequence[AIToolID],
+    reverted_scope: Sequence[AIToolID],
     *,
     shared_skill_scope: Sequence[AIToolID],
 ) -> None:
@@ -395,7 +406,7 @@ def _restore_state_after_rollback(
 
     from crossby.config.skills import SKILLS_DIR
 
-    rolled_back_tools = {str(tool) for tool in scope}
+    rolled_back_tools = {str(tool) for tool in reverted_scope}
     shared_only = {
         str(tool): SKILLS_DIR.get(tool)
         for tool in shared_skill_scope
@@ -404,6 +415,11 @@ def _restore_state_after_rollback(
     remaining_tools: dict[str, SceneToolRecord] = {}
     for tool, record in active.tools.items():
         if tool in rolled_back_tools:
+            if record.revoked_concerns:
+                remaining_tools[tool] = SceneToolRecord(
+                    status="recovery",
+                    revoked_concerns=record.revoked_concerns,
+                )
             continue
         shared_path = shared_only.get(tool)
         if tool not in shared_only:
