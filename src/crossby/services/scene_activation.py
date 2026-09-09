@@ -123,15 +123,23 @@ def activate_scene(
     """Apply a persistent scene through the recoverable lifecycle.
 
     ``requested_tools=None`` means an unscoped ``scene use`` and targets every
-    installed candidate.  A concrete iterable is a scoped activation (including
-    a launch fallback) and is expanded for installed tools sharing a skills
-    directory with the requested tool.
+    installed candidate. A concrete iterable is a scoped activation (including
+    a launch fallback). When the scene narrows skills, installed tools sharing
+    the requested tool's skills directory are additionally recorded for that
+    shared concern; they are deliberately not passed to the engine's whole-tool
+    scope, which would also apply unrelated concerns to them.
     """
     candidates = list(dict.fromkeys(installed_candidates))
     explicitly_scoped = requested_tools is not None
     initial_scope = candidates if requested_tools is None else list(requested_tools)
-    scope = expand_shared_scope(initial_scope, candidates)
+    shared_skill_scope = (
+        expand_shared_scope(initial_scope, candidates)
+        if scene.skills is not None
+        else initial_scope
+    )
+    scope = list(dict.fromkeys([*initial_scope, *shared_skill_scope]))
     scope_strings = {str(tool) for tool in scope}
+    initial_scope_strings = {str(tool) for tool in initial_scope}
 
     loaded = load_scene_state(project_root)
     warnings = (loaded.warning,) if loaded.warning else ()
@@ -153,11 +161,20 @@ def activate_scene(
     # it writes nothing and historically remains useful for inspecting the next
     # apply even while the outgoing scene has drifted.
     if dry_run:
-        results = engine.apply_scene(resolved, project_root, dry_run=True, force=force, tools=scope)
+        results = engine.apply_scene(
+            resolved, project_root, dry_run=True, force=force, tools=initial_scope
+        )
         return SceneActivationOutcome(tuple(scope), tuple(results), "preview", warnings)
 
     if active is not None and active.scene != scene_name and explicitly_scoped:
         other_tools = [tool for tool in active.tool_ids if tool not in scope_strings]
+        other_tools.extend(
+            tool
+            for tool, record in active.tools.items()
+            if tool in scope_strings
+            and tool not in initial_scope_strings
+            and any(concern != "skills" for concern in record.mechanisms)
+        )
         if other_tools:
             raise SceneActivationError(
                 ActivationFailureKind.UNSAFE_SWITCH,
@@ -191,7 +208,8 @@ def activate_scene(
                     drifted=drifted,
                 )
             try:
-                revert_results = engine.clear_scene(project_root, tools=outgoing)
+                revert_scope = outgoing if not explicitly_scoped else initial_scope
+                revert_results = engine.clear_scene(project_root, tools=revert_scope)
             except Exception as exc:
                 raise SceneActivationError(
                     ActivationFailureKind.FAILED_REVERT,
@@ -212,13 +230,14 @@ def activate_scene(
     outgoing_revocations = _recorded_revocations(active, outgoing)
 
     try:
-        results = engine.apply_scene(resolved, project_root, force=force, tools=scope)
+        results = engine.apply_scene(resolved, project_root, force=force, tools=initial_scope)
     except Exception as exc:
         recovery_recorded = _save_recovery_state(
             project_root,
             scene_name,
             scene,
-            scope,
+            initial_scope,
+            shared_skill_scope=shared_skill_scope,
             active=active,
         )
         raise SceneActivationError(
@@ -237,11 +256,16 @@ def activate_scene(
             recovery_recorded=recovery_recorded,
         ) from exc
 
-    state = _build_state(project_root, scene_name, scene, scope, results)
+    state = _build_state(
+        project_root,
+        scene_name,
+        scene,
+        initial_scope,
+        results,
+        shared_skill_scope=shared_skill_scope,
+    )
     if active is not None and active.scene == scene_name:
-        merged = dict(active.tools)
-        merged.update(state.tools)
-        state.tools = merged
+        _merge_same_scene_tools(state, active, initial_scope)
     _inherit_revocations(state, active)
     try:
         save_scene_state(project_root, state)
@@ -249,13 +273,18 @@ def activate_scene(
         rollback_results: list[SyncResult] = []
         rollback_error: Exception | None = None
         try:
-            rollback_results = engine.clear_scene(project_root, tools=scope)
+            rollback_results = engine.clear_scene(project_root, tools=initial_scope)
         except Exception as rollback_exc:
             rollback_error = rollback_exc
         engine_rolled_back = rollback_error is None and not _has_error(rollback_results)
         if engine_rolled_back:
             try:
-                _restore_state_after_rollback(project_root, active, scope)
+                _restore_state_after_rollback(
+                    project_root,
+                    active,
+                    initial_scope,
+                    shared_skill_scope=shared_skill_scope,
+                )
             except Exception as cleanup_exc:
                 rollback_error = cleanup_exc
         removed_concerns = outgoing_revocations | {
@@ -314,26 +343,84 @@ def _inherit_revocations(state: SceneState, active: SceneState | None) -> None:
     """Carry still-unrestored outgoing removals into the replacement state."""
     if active is None:
         return
+    for tool, previous in active.tools.items():
+        if not previous.revoked_concerns:
+            continue
+        record = state.tools.get(tool)
+        if record is None:
+            state.tools[tool] = SceneToolRecord(
+                status="recovery",
+                revoked_concerns=previous.revoked_concerns,
+            )
+            continue
+        record.revoked_concerns = tuple(
+            sorted({*record.revoked_concerns, *previous.revoked_concerns})
+        )
+
+
+def _merge_same_scene_tools(
+    state: SceneState,
+    active: SceneState,
+    primary_scope: Sequence[AIToolID],
+) -> None:
+    """Merge shared-skill records without replacing their unrelated concerns."""
+    primary = {str(tool) for tool in primary_scope}
+    merged = dict(active.tools)
     for tool, record in state.tools.items():
         previous = active.tools.get(tool)
-        if previous is not None and previous.revoked_concerns:
-            record.revoked_concerns = tuple(
-                sorted({*record.revoked_concerns, *previous.revoked_concerns})
-            )
+        if tool in primary or previous is None:
+            merged[tool] = record
+            continue
+        unaffected = set(previous.mechanisms) - set(record.mechanisms)
+        merged[tool] = SceneToolRecord(
+            mechanisms={**previous.mechanisms, **record.mechanisms},
+            status=("failed" if previous.status == "failed" and unaffected else record.status),
+            hashes={**previous.hashes, **record.hashes},
+            revoked_concerns=tuple(sorted({*previous.revoked_concerns, *record.revoked_concerns})),
+        )
+    state.tools = merged
 
 
 def _restore_state_after_rollback(
-    project_root: Path, active: SceneState | None, scope: Sequence[AIToolID]
+    project_root: Path,
+    active: SceneState | None,
+    scope: Sequence[AIToolID],
+    *,
+    shared_skill_scope: Sequence[AIToolID],
 ) -> None:
-    """Restore the prior state without the scope whose changes were reverted."""
+    """Restore unaffected prior state after rolling back the attempted apply."""
     if active is None:
         clear_scene_state(project_root)
         return
 
+    from crossby.config.skills import SKILLS_DIR
+
     rolled_back_tools = {str(tool) for tool in scope}
-    remaining_tools = {
-        tool: record for tool, record in active.tools.items() if tool not in rolled_back_tools
+    shared_only = {
+        str(tool): SKILLS_DIR.get(tool)
+        for tool in shared_skill_scope
+        if str(tool) not in rolled_back_tools
     }
+    remaining_tools: dict[str, SceneToolRecord] = {}
+    for tool, record in active.tools.items():
+        if tool in rolled_back_tools:
+            continue
+        shared_path = shared_only.get(tool)
+        if tool not in shared_only:
+            remaining_tools[tool] = record
+            continue
+        mechanisms = dict(record.mechanisms)
+        mechanisms.pop("skills", None)
+        hashes = dict(record.hashes)
+        if shared_path is not None:
+            hashes.pop(shared_path, None)
+        if mechanisms or hashes or record.revoked_concerns:
+            remaining_tools[tool] = SceneToolRecord(
+                mechanisms=mechanisms,
+                status="recovery" if not mechanisms and record.revoked_concerns else record.status,
+                hashes=hashes,
+                revoked_concerns=record.revoked_concerns,
+            )
     if not remaining_tools:
         clear_scene_state(project_root)
         return
@@ -358,16 +445,22 @@ def _save_recovery_state(
     scene: SceneConfig,
     scope: list[AIToolID],
     *,
+    shared_skill_scope: list[AIToolID],
     active: SceneState | None,
 ) -> bool:
     """Best-effort partial state after an exceptional engine failure."""
     try:
-        state = _build_state(project_root, scene_name, scene, scope, [])
+        state = _build_state(
+            project_root,
+            scene_name,
+            scene,
+            scope,
+            [],
+            shared_skill_scope=shared_skill_scope,
+        )
         state.status = "partial"
         if active is not None and active.scene == scene_name:
-            merged = dict(active.tools)
-            merged.update(state.tools)
-            state.tools = merged
+            _merge_same_scene_tools(state, active, scope)
         _inherit_revocations(state, active)
         save_scene_state(project_root, state)
     except Exception:
@@ -381,12 +474,14 @@ def _build_state(
     scene: SceneConfig,
     scope: list[AIToolID],
     results: Sequence[SyncResult],
+    *,
+    shared_skill_scope: list[AIToolID] | None = None,
 ) -> SceneState:
-    tools = _tool_mechanisms(scene, scope)
+    tools = _tool_mechanisms(scene, scope, shared_skill_scope=shared_skill_scope)
     hashes_by_tool = compute_hashes(project_root, results)
     for tool_name, record in tools.items():
         record.hashes = hashes_by_tool.get(tool_name, {})
-    _replicate_shared_hashes(tools, scope)
+    _replicate_shared_hashes(tools, shared_skill_scope or scope)
     for result in results:
         if result.tool_id is None or str(result.tool_id) not in tools:
             continue
@@ -416,14 +511,25 @@ def _replicate_shared_hashes(tools: dict[str, SceneToolRecord], scope: list[AITo
                 break
 
 
-def _tool_mechanisms(scene: SceneConfig, scope: list[AIToolID]) -> dict[str, SceneToolRecord]:
+def _tool_mechanisms(
+    scene: SceneConfig,
+    scope: list[AIToolID],
+    *,
+    shared_skill_scope: list[AIToolID] | None = None,
+) -> dict[str, SceneToolRecord]:
     declared = [concern for concern in SCENE_CONCERNS if getattr(scene, concern) is not None]
-    return {
+    tools = {
         str(tool): SceneToolRecord(
             mechanisms={concern: base_mechanism(tool, concern).value for concern in declared}
         )
         for tool in scope
     }
+    if scene.skills is not None:
+        for tool in shared_skill_scope or scope:
+            tools.setdefault(str(tool), SceneToolRecord()).mechanisms["skills"] = base_mechanism(
+                tool, "skills"
+            ).value
+    return tools
 
 
 __all__ = [

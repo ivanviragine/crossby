@@ -3,9 +3,10 @@
 ``.crossby/scene-state.json`` is a per-machine, gitignored bookkeeping file the
 persistent activation service writes for ``scene use`` and launch fallbacks,
 and ``scene status`` / ``scene clear`` read. It records the active scene name,
-when it was applied, the per-tool
-mechanism, an applied/partial flag, and a normalised content hash per
-scene-managed file so ``status`` can detect drift.
+when it was applied, an applied/partial scene flag, and each tool's mechanism,
+status, and normalised content hash per scene-managed file so ``status`` can
+detect drift. A recovery-only tool record retains irreversible hook/permission
+removals after that tool is no longer an installed activation candidate.
 
 It is deliberately **not** the revert authority: :func:`clear_scene
 <crossby.scenes.engine.clear_scene>` reverts from the ownership ledger
@@ -52,8 +53,9 @@ class SceneToolRecord:
     """What one tool carried under the active scene.
 
     ``mechanisms`` maps each participating concern to the mechanism used
-    (``declare`` / ``project`` / ``unsupported``); ``status`` is ``applied`` or
-    ``failed`` (the tool produced an ``error`` row during apply). ``hashes`` maps
+    (``declare`` / ``project`` / ``unsupported``); ``status`` is ``applied``,
+    ``failed`` (the tool produced an ``error`` row during apply), or ``recovery``
+    when only irreversible-removal recovery remains. ``hashes`` maps
     each file this tool wrote to a normalised content hash — kept per-tool so a
     scoped clear that drops a tool also drops exactly its drift baseline.
     ``revoked_concerns`` records hook/permission removals that ``clear`` cannot

@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from crossby.cli.main import app
 from crossby.models.ai import AIToolID
-from crossby.scenes.state import SCENE_STATE_PATH
+from crossby.scenes.state import SCENE_STATE_PATH, SceneState, SceneToolRecord, save_scene_state
 from tests.unit.test_scenes.conftest import populate_project, read_json
 
 runner = CliRunner()
@@ -268,6 +268,42 @@ class TestSwitching:
         state = read_json(root / SCENE_STATE_PATH)
         assert "claude" not in state["tools"]
         assert set(state["tools"]) == {str(t) for t in remaining}
+
+    def test_unscoped_switch_retains_uninstalled_tool_revocation_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _project(tmp_path)
+        save_scene_state(
+            root,
+            SceneState(
+                scene="pr-review",
+                applied_at="2026-09-09T12:00:00Z",
+                status="applied",
+                tools={
+                    "cursor": SceneToolRecord(
+                        mechanisms={"permissions": "project"},
+                        revoked_concerns=("permissions",),
+                    )
+                },
+            ),
+        )
+        remaining = [tool for tool in INSTALLED if tool != AIToolID.CURSOR]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: list(remaining)),
+        )
+
+        result = _invoke(["scene", "use", "deploy"], root)
+
+        assert result.exit_code == 0, result.output
+        state = read_json(root / SCENE_STATE_PATH)
+        assert state["scene"] == "deploy"
+        assert state["tools"]["cursor"] == {
+            "hashes": {},
+            "mechanisms": {},
+            "revoked_concerns": ["permissions"],
+            "status": "recovery",
+        }
 
 
 class TestPerToolScope:

@@ -260,16 +260,17 @@ Rules that keep this honest:
 - **One persistent lifecycle.** A terminal tool with no launch lever
   (Antigravity CLI, Cursor, OpenCode) or a runtime gate that failed (Codex too
   old) calls `services.scene_activation.activate_scene`, just like `scene use`.
-  The service validates ownership provenance before any engine call, expands
-  shared-directory scope, enforces single-active-scene switch rules, checks
-  outgoing drift, reverts the affected records, applies, hashes, merges scoped
-  state, and atomically records `applied` or `partial`. Preconditions and
+  The service validates ownership provenance before any engine call, records
+  shared-directory effects only for the shared concern, enforces
+  single-active-scene switch rules, checks outgoing drift, reverts the affected
+  records, applies, hashes, merges scoped state, and atomically records `applied`
+  or `partial`. Preconditions and
   exceptional apply/state failures abort before a child starts; error result
   rows record `partial` and retain the historical launch-anyway policy. If the
   state write fails after apply, the service clears reversible changes and stale
   records for the rolled-back scope while retaining recovery state for untouched
   tools; hook/permission revocations make that rollback explicitly incomplete
-  and require `crossby sync` for restoration. An exceptional apply preserves
+  and require `crossby sync` for restoration. An apply exception preserves
   prior revocations in partial recovery state and reports the same clear-then-
   sync remediation.
 - **Codex collision is orchestration, not adapter mutation.** A colliding
@@ -285,8 +286,8 @@ Rules that keep this honest:
 - **Precedence** matches the profile rule: explicit CLI flags > scene > profile
   > `ai:` defaults. A scene may name a default `profile:`; an explicit
   `--profile` (or positional profile name) overrides it. `--scene` targets
-  exactly one launch tool. A persistent fallback may expand its recorded scope
-  to an installed tool sharing the same physical capability directory.
+  exactly one launch tool. A persistent fallback may expand its recorded skills
+  scope to an installed tool sharing the same physical skills directory.
 
 ### Scene authoring (writing `.crossby.yml`)
 

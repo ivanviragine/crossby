@@ -588,6 +588,9 @@ scenes:
       include: ["deploy-*"]
     mcp:
       include: ["linear"]
+  mcp-only:
+    mcp:
+      include: ["github"]
 """,
         encoding="utf-8",
     )
@@ -662,7 +665,76 @@ class TestPersistentFallbackLifecycle:
         assert result.exit_code == 0, result.output
         state = read_json(tmp_path / SCENE_STATE_PATH)
         assert set(state["tools"]) == {"codex", "antigravity-cli"}
+        assert state["tools"]["antigravity-cli"]["mechanisms"] == {"skills": "project"}
+        assert not (tmp_path / ".agents" / "mcp_config.json").exists()
         assert "shared skills directory" in " ".join(result.output.split())
+
+    def test_shared_skills_tool_is_not_added_for_mcp_only_fallback(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "mcp-only"]
+            )
+
+        assert result.exit_code == 0, result.output
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"codex"}
+        assert state["tools"]["codex"]["mechanisms"] == {"mcp": "declare"}
+        assert not (tmp_path / ".agents" / "mcp_config.json").exists()
+        assert "shared skills directory" not in " ".join(result.output.split())
+
+    def test_shared_skills_reapply_preserves_co_sharer_mcp_state(self, tmp_path: Path) -> None:
+        _write_lifecycle_project(tmp_path)
+        # Keep Antigravity's config as the sole discovery source so this test
+        # does not emit a duplicate-source warning and cache the readers logger.
+        (tmp_path / ".mcp.json").unlink()
+        (tmp_path / ".agents" / "mcp_config.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "github": {"command": "gh-mcp"},
+                        "linear": {"command": "lin-mcp"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch(
+                "crossby.ai_tools.base.AbstractAITool.detect_installed",
+                return_value=[AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI],
+            ),
+            patch("crossby.scenes.versioning.detect_tool_version", return_value=(0, 133, 0)),
+            patch("crossby.scenes.trust.codex_trusts_project", return_value=True),
+            patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+            patch("crossby.ui.prompts.is_tty", return_value=False),
+            patch("crossby.utils.process.run_with_transcript", return_value=0),
+        ):
+            first = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+            reapplied = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
+            )
+
+        assert first.exit_code == 0, first.output
+        assert reapplied.exit_code == 0, reapplied.output
+        antigravity_mcp = read_json(tmp_path / ".agents" / "mcp_config.json")
+        assert antigravity_mcp["mcpServers"]["linear"]["disabled"] is True
+        state = read_json(tmp_path / SCENE_STATE_PATH)
+        assert state["tools"]["antigravity-cli"]["mechanisms"] == {
+            "mcp": "declare",
+            "skills": "project",
+        }
 
     def test_different_scene_scoped_fallback_refuses_to_strand_other_tools(
         self, tmp_path: Path
