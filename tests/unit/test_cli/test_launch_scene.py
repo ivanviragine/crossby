@@ -693,7 +693,9 @@ class TestPersistentFallbackLifecycle:
         assert not (tmp_path / ".agents" / "mcp_config.json").exists()
         assert "shared skills directory" not in " ".join(result.output.split())
 
-    def test_shared_skills_reapply_preserves_co_sharer_mcp_state(self, tmp_path: Path) -> None:
+    def test_shared_skills_reapply_ignores_and_preserves_co_sharer_mcp_drift(
+        self, tmp_path: Path
+    ) -> None:
         _write_lifecycle_project(tmp_path)
         # Keep Antigravity's config as the sole discovery source so this test
         # does not emit a duplicate-source warning and cache the readers logger.
@@ -722,6 +724,11 @@ class TestPersistentFallbackLifecycle:
             patch("crossby.utils.process.run_with_transcript", return_value=0),
         ):
             first = runner.invoke(app, ["scene", "use", "review", "--path", str(tmp_path)])
+            antigravity_mcp = read_json(tmp_path / ".agents" / "mcp_config.json")
+            antigravity_mcp["mcpServers"]["linear"]["command"] = "manual-edit"
+            (tmp_path / ".agents" / "mcp_config.json").write_text(
+                json.dumps(antigravity_mcp), encoding="utf-8"
+            )
             reapplied = runner.invoke(
                 app, ["launch", str(tmp_path), "--tool", "codex", "--scene", "review"]
             )
@@ -729,6 +736,7 @@ class TestPersistentFallbackLifecycle:
         assert first.exit_code == 0, first.output
         assert reapplied.exit_code == 0, reapplied.output
         antigravity_mcp = read_json(tmp_path / ".agents" / "mcp_config.json")
+        assert antigravity_mcp["mcpServers"]["linear"]["command"] == "manual-edit"
         assert antigravity_mcp["mcpServers"]["linear"]["disabled"] is True
         state = read_json(tmp_path / SCENE_STATE_PATH)
         assert state["tools"]["antigravity-cli"]["mechanisms"] == {

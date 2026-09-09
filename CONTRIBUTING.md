@@ -262,9 +262,10 @@ Rules that keep this honest:
   old) calls `services.scene_activation.activate_scene`, just like `scene use`.
   The service validates ownership provenance before any engine call, records
   shared-directory effects only for the shared concern, enforces
-  single-active-scene switch rules, checks outgoing drift, reverts the affected
-  records, applies, hashes, merges scoped state, and atomically records `applied`
-  or `partial`. Preconditions and
+  single-active-scene switch rules, checks every outgoing path for primary tools
+  but only the shared skills path for skills-only co-sharers, reverts the
+  affected records, applies, hashes, merges scoped state, and atomically records
+  `applied` or `partial`. Preconditions and
   exceptional apply/state failures abort before a child starts; error result
   rows record `partial` and retain the historical launch-anyway policy. If the
   state write fails after apply, the service clears reversible changes and stale

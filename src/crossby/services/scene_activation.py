@@ -27,6 +27,7 @@ from crossby.scenes.state import (
     SceneToolRecord,
     clear_scene_state,
     compute_hashes,
+    content_hash,
     detect_drift,
     load_scene_state,
     now_iso,
@@ -196,7 +197,11 @@ def activate_scene(
             else [tool for tool in recorded if str(tool) in scope_strings]
         )
         if outgoing:
-            drifted = detect_drift(project_root, active, tools=[str(tool) for tool in outgoing])
+            drifted = (
+                _detect_scoped_drift(project_root, active, outgoing, initial_scope)
+                if explicitly_scoped
+                else detect_drift(project_root, active, tools=[str(tool) for tool in outgoing])
+            )
             if drifted and not force:
                 raise SceneActivationError(
                     ActivationFailureKind.DRIFT,
@@ -337,6 +342,32 @@ def activate_scene(
 
 def _has_error(results: Sequence[SyncResult]) -> bool:
     return any(result.action == "error" for result in results)
+
+
+def _detect_scoped_drift(
+    project_root: Path,
+    active: SceneState,
+    outgoing: Sequence[AIToolID],
+    primary_scope: Sequence[AIToolID],
+) -> list[str]:
+    """Check primary tools fully and shared-only co-sharers for skills drift."""
+    from crossby.config.skills import SKILLS_DIR
+
+    primary = {str(tool) for tool in primary_scope}
+    primary_outgoing = [str(tool) for tool in outgoing if str(tool) in primary]
+    drifted = detect_drift(project_root, active, tools=primary_outgoing)
+
+    for tool in outgoing:
+        tool_name = str(tool)
+        if tool_name in primary:
+            continue
+        shared_path = SKILLS_DIR.get(tool)
+        if shared_path is None:
+            continue
+        expected = active.tools[tool_name].hashes.get(shared_path)
+        if expected is not None and content_hash(project_root / shared_path) != expected:
+            drifted.append(shared_path)
+    return sorted(set(drifted))
 
 
 def _recorded_revocations(active: SceneState | None, tools: Sequence[AIToolID]) -> set[str]:
