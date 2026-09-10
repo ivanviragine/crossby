@@ -80,6 +80,14 @@ def launch(
             "Warned and ignored on tools without a sandbox network opt-in."
         ),
     ),
+    plan_output_dir: Path | None = typer.Option(
+        None,
+        "--plan-output-dir",
+        help=(
+            "Require native plan artifacts to be writable in this directory. "
+            "Requires --plan; non-routable artifact harnesses reject it."
+        ),
+    ),
 ) -> None:
     """Launch an AI tool with resolved configuration.
 
@@ -122,6 +130,13 @@ def launch(
         work_dir = Path(".").resolve()
     else:
         work_dir = path.resolve()
+
+    if resume is not None and (plan or plan_output_dir is not None):
+        console.error("--resume cannot be combined with --plan or --plan-output-dir.")
+        raise typer.Exit(1)
+
+    if plan_output_dir is not None and not plan_output_dir.is_absolute():
+        plan_output_dir = work_dir / plan_output_dir
 
     try:
         config = load_config(work_dir)
@@ -301,6 +316,22 @@ def launch(
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
+    from crossby.ai_tools.plan_mode import PlanModeLaunchError
+
+    try:
+        adapter.validate_plan_mode_request(
+            plan_mode=plan,
+            yolo=resolved_yolo,
+            auto=resolved_auto,
+            accept_edits=resolved_accept_edits,
+            initial_message=prompt,
+            plan_output_dir=plan_output_dir,
+            working_dir=work_dir,
+        )
+    except PlanModeLaunchError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
+
     normalized_trusted_dirs = list(trusted_dirs) if trusted_dirs else None
     if normalized_trusted_dirs and not caps.supports_trusted_dirs:
         console.error(f"{caps.display_name} does not support --trusted-dir.")
@@ -330,32 +361,22 @@ def launch(
         )
         resolved_accept_edits = False
 
-    # A higher autonomy tier (yolo/auto/accept-edits) supersedes plan_mode in
-    # build_launch_command(), so don't error on tools that lack plan mode when
-    # any of those flags are also set.
-    if (
-        plan
-        and not caps.supports_plan_mode
-        and not (resolved_yolo or resolved_auto or resolved_accept_edits)
-    ):
-        console.error(f"{caps.display_name} does not support --plan.")
-        raise typer.Exit(1)
-
-    # Display the effective selection. Autonomy tiers are shown in ladder order;
-    # the builder resolves precedence (yolo > auto > accept-edits > plan) at launch.
-    # The highest requested tier is the effective one ("on"); any lower tier the
-    # user also requested is shown as "superseded" so the summary never implies a
-    # moot tier is active.
+    # Display the effective selection. Native plan mode is exclusive, so a plan
+    # summary is always truthful; the remaining autonomy ladder retains its
+    # existing yolo > auto > accept-edits precedence when plan was not requested.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
         console.kv("Model", resolved_model)
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
     autonomy_tiers = (
-        ("YOLO mode", resolved_yolo),
-        ("Auto mode", resolved_auto),
-        ("Accept-edits mode", resolved_accept_edits),
-        ("Plan mode", plan),
+        (("Plan mode", plan),)
+        if plan
+        else (
+            ("YOLO mode", resolved_yolo),
+            ("Auto mode", resolved_auto),
+            ("Accept-edits mode", resolved_accept_edits),
+        )
     )
     effective_shown = False
     for label, requested in autonomy_tiers:
@@ -408,6 +429,7 @@ def launch(
             auto=resolved_auto,
             scene=scene_for_launch,
             network_access=network_effective,
+            plan_output_dir=plan_output_dir,
         )
 
     # Launch. A scene artefact write that would escape the project root raises
@@ -444,6 +466,9 @@ def launch(
             display_name=caps.display_name,
         )
         exit_code = _dispatch(None)
+    except PlanModeLaunchError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
 
     if exit_code != 0:
         console.warn(f"AI tool exited with code {exit_code}")

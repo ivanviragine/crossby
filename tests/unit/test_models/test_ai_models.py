@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -275,9 +276,12 @@ class TestBuildLaunchCommand:
     def test_cursor_plan_mode_launch(self) -> None:
         """Cursor plan mode uses --mode plan."""
         adapter = AbstractAITool.get("cursor")
-        cmd = adapter.build_launch_command(
-            model="sonnet-4.6", initial_message="Do stuff", plan_mode=True
-        )
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2026, 9, 2)):
+            cmd = adapter.build_launch_command(
+                model="sonnet-4.6",
+                initial_message="Do stuff",
+                plan_mode=True,
+            )
         assert cmd == [
             "agent",
             "Do stuff",
@@ -417,9 +421,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("codex")
         assert adapter.plan_mode_args() == []
 
-    def test_opencode_no_plan_mode(self) -> None:
+    def test_opencode_plan_mode(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--agent", "plan"]
 
     def test_cursor_plan_mode(self) -> None:
         adapter = AbstractAITool.get("cursor")
@@ -427,7 +431,8 @@ class TestPlanModeArgs:
 
     def test_plan_mode_in_launch_command(self) -> None:
         adapter = AbstractAITool.get("claude")
-        cmd = adapter.build_launch_command(plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 263)):
+            cmd = adapter.build_launch_command(plan_mode=True)
         assert "--permission-mode" in cmd
         assert "plan" in cmd
 

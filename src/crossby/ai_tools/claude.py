@@ -19,6 +19,9 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 
@@ -58,7 +61,19 @@ class ClaudeAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --permission-mode plan before the first user turn.",
+                version_requirement="Claude Code exposing --permission-mode plan.",
+                verified_version="2.1.263",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.REQUESTED_PATH,
+                artifact_location_detail=(
+                    "Claude defaults to ~/.claude/plans and supports a per-launch plansDirectory "
+                    "setting for a requested path inside the project."
+                ),
+                artifact_path_template="~/.claude/plans/<generated-name>.md",
+            ),
             supports_accept_edits=True,
             supports_auto=True,
             supports_stop_hook=True,
@@ -118,6 +133,69 @@ class ClaudeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Claude supports --permission-mode plan."""
         return ["--permission-mode", "plan"]
+
+    def plan_output_args(self, plan_output_dir: Path, *, working_dir: Path) -> list[str]:
+        """Select Claude's documented project-relative ``plansDirectory``."""
+        relative = plan_output_dir.resolve().relative_to(working_dir.resolve())
+        value = "." if relative == Path(".") else f"./{relative}"
+        settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
+        return ["--settings", settings]
+
+    def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
+        """Collapse Crossby's Claude settings fragments into one settings source.
+
+        Claude treats repeated ``--settings`` options as replacement, not a
+        merge. Plan-output routing is emitted before scene arguments, so keep
+        earlier keys authoritative while folding a generated scene settings
+        file (for example ``skillOverrides``) into the same inline JSON value.
+        """
+        settings_flag = self.capabilities().scene_settings_flag or "--settings"
+        settings_pairs = [
+            (index, cmd[index + 1])
+            for index, token in enumerate(cmd[:-1])
+            if token == settings_flag
+            and (cmd[index + 1].lstrip().startswith("{") or Path(cmd[index + 1]).is_file())
+        ]
+        if len(settings_pairs) < 2:
+            return cmd
+
+        sources: list[dict[str, Any]] = []
+        try:
+            for _, value in settings_pairs:
+                raw = value if value.lstrip().startswith("{") else Path(value).read_text()
+                parsed = json.loads(raw)
+                if not isinstance(parsed, dict):
+                    raise TypeError("Claude settings must be a JSON object")
+                sources.append(parsed)
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            from crossby.ai_tools.plan_mode import PlanModeAdapterContractError
+
+            raise PlanModeAdapterContractError(
+                f"Claude Code could not combine plan and scene settings: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            ) from exc
+
+        merged: dict[str, Any] = {}
+        for source in sources:
+            for key, value in source.items():
+                merged.setdefault(key, value)
+
+        combined = json.dumps(merged, separators=(",", ":"), sort_keys=True)
+        result: list[str] = []
+        emitted = False
+        settings_indexes = {index for index, _ in settings_pairs}
+        index = 0
+        while index < len(cmd):
+            if index in settings_indexes:
+                if not emitted:
+                    result.extend((settings_flag, combined))
+                    emitted = True
+                index += 2
+                continue
+            result.append(cmd[index])
+            index += 1
+        return result
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Claude uses --add-dir for plan directory access."""

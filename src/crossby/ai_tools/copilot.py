@@ -14,6 +14,9 @@ from crossby.models.ai import (
     AIToolType,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 
@@ -40,7 +43,22 @@ class CopilotAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --plan before the first interactive prompt.",
+                version_requirement="GitHub Copilot CLI exposing --plan.",
+                verified_version="1.0.83",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.PRIVATE,
+                artifact_location_detail=(
+                    "Copilot protects project files in plan mode and writes the draft in its own "
+                    "private planning workspace; --add-dir does not relocate that plan."
+                ),
+                remediation=(
+                    "Review or copy the plan from Copilot's planning workspace, or use Claude "
+                    "when a specific filesystem output directory is required."
+                ),
+            ),
             supports_accept_edits=True,
             supports_session_start_hook=True,
             supports_stop_hook=True,

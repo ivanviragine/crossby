@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class EffortLevel(StrEnum):
@@ -36,6 +36,23 @@ class AIToolType(StrEnum):
 
     TERMINAL = "terminal"
     GUI = "gui"
+
+
+class PlanModeActivation(StrEnum):
+    """How an adapter activates a harness's native planning mode."""
+
+    CLI_ARGUMENT = "cli_argument"
+    UNSUPPORTED = "unsupported"
+
+
+class PlanArtifactLocation(StrEnum):
+    """Where a harness can persist artifacts created by native plan mode."""
+
+    REQUESTED_PATH = "requested_path"
+    WORKSPACE_MANAGED = "workspace_managed"
+    PRIVATE = "private"
+    SESSION = "session"
+    UNAVAILABLE = "unavailable"
 
 
 class ModelTier(StrEnum):
@@ -144,8 +161,49 @@ class AIModel(BaseModel, frozen=True):
         return self.id
 
 
-class AIToolCapabilities(BaseModel, frozen=True):
+class PlanModeCapability(BaseModel, frozen=True):
+    """Truthful, consumer-facing contract for native plan-mode activation.
+
+    ``version_requirement`` deliberately accepts a human-readable selector
+    requirement instead of pretending every upstream publishes a reliable
+    numeric introduction version. ``verified_version`` records the oldest
+    concrete CLI build Crossby verified and is the conservative runtime floor
+    for native plan-mode launches.
+    """
+
+    activation: PlanModeActivation
+    activation_detail: str
+    version_requirement: str
+    verified_version: str | None = None
+    initial_prompt_after_activation: bool
+    artifact_location: PlanArtifactLocation
+    artifact_location_detail: str
+    artifact_path_template: str | None = None
+    export_command: tuple[str, ...] | None = None
+    import_command: tuple[str, ...] | None = None
+    remediation: str | None = None
+
+    @property
+    def supported(self) -> bool:
+        """Whether the adapter can guarantee native activation."""
+        return self.activation is not PlanModeActivation.UNSUPPORTED
+
+
+_UNSUPPORTED_PLAN_MODE = PlanModeCapability(
+    activation=PlanModeActivation.UNSUPPORTED,
+    activation_detail="No native plan-mode activation strategy is declared.",
+    version_requirement="No supported version is declared.",
+    initial_prompt_after_activation=False,
+    artifact_location=PlanArtifactLocation.UNAVAILABLE,
+    artifact_location_detail="Native plan artifacts are unavailable.",
+    remediation="Use an adapter that declares native plan-mode support.",
+)
+
+
+class AIToolCapabilities(BaseModel):
     """What an AI tool can do — declared by each adapter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_id: AIToolID
     display_name: str
@@ -175,7 +233,9 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_yolo: bool = False
     supports_resume: bool = False
     supports_trusted_dirs: bool = False
-    supports_plan_mode: bool = False
+    plan_mode: PlanModeCapability = _UNSUPPORTED_PLAN_MODE
+    """Typed native plan-mode contract. Adapters must explicitly declare this
+    for supported activation; the default fails closed."""
     supports_accept_edits: bool = False
     """Tool can auto-approve file edits at launch while still prompting for
     shell/commands (the accept-edits autonomy tier)."""
@@ -183,6 +243,11 @@ class AIToolCapabilities(BaseModel, frozen=True):
     """Tool exposes a classifier-mediated ``auto`` mode at launch (a separate
     model reviews each non-read action). Claude-only among the CLIs crossby
     drives; ``auto`` downgrades to accept-edits elsewhere."""
+
+    @property
+    def supports_plan_mode(self) -> bool:
+        """Compatibility view over the typed plan-mode capability."""
+        return self.plan_mode.supported
 
     # --- Hook lifecycle & runtime I/O (consumed by crossby.hooks.runtime) ---
     supports_stop_hook: bool = False

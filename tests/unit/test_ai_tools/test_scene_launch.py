@@ -132,6 +132,40 @@ class TestClaudeSceneLaunch:
         body = json.loads(settings_path.read_text())
         assert body == {"skillOverrides": {"deploy": "off"}}
 
+    def test_plan_output_and_skill_scene_use_one_merged_settings_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _make_skills(tmp_path, ("review", "deploy"))
+        monkeypatch.setattr(
+            "crossby.scenes.versioning.detect_tool_version", lambda _tool: (2, 1, 263)
+        )
+        monkeypatch.setattr(
+            "crossby.utils.versioning.detect_binary_version", lambda _binary: (2, 1, 263)
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], transcript_path: object, cwd: object, env: object) -> int:
+            captured["cmd"] = cmd
+            return 0
+
+        monkeypatch.setattr("crossby.utils.process.run_with_transcript", fake_run)
+        ctx = _context(tmp_path, selected_skills=("review",))
+
+        ClaudeAdapter().launch(
+            working_dir=tmp_path,
+            plan_mode=True,
+            plan_output_dir=tmp_path / ".wade" / "plans",
+            scene=ctx,
+        )
+
+        cmd = captured["cmd"]
+        assert cmd.count("--settings") == 1
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        assert settings == {
+            "plansDirectory": "./.wade/plans",
+            "skillOverrides": {"deploy": "off"},
+        }
+
     def test_skill_overrides_gated_on_old_claude(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

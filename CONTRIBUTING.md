@@ -76,7 +76,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning is a separate fail-closed contract: `validate_plan_mode_request()` is shared by the builder, launcher, and CLI, probes the installed binary version for supported adapters, and rejects unknown or older-than-verified builds. `AIToolCapabilities.plan_mode` describes the selector, conservative verified-version floor, initial-prompt ordering, artifact location, and remediation; capability models forbid unknown fields so the removed `supports_plan_mode=` constructor keyword fails loudly instead of being ignored.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -104,7 +104,7 @@ The adapter pattern is designed so adding a tool is a single-file change.
 1. Add the tool ID to `AIToolID` in `src/crossby/models/ai.py`.
 2. Create `src/crossby/ai_tools/<tool>.py` subclassing `AbstractAITool`:
    - Set `TOOL_ID = AIToolID.<TOOL>` (this auto-registers the adapter).
-   - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, `supports_*` booleans.
+   - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, and applicable `supports_*` booleans. Declare `plan_mode=PlanModeCapability(...)` explicitly: use `CLI_ARGUMENT` only when a native selector is verified before the first turn, provide the oldest parseable `verified_version` Crossby supports as its conservative runtime floor, and otherwise use `UNSUPPORTED` with actionable remediation.
    - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`,
      `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, and
      `initial_message_args()`. A tool that can explicitly enable and disable its sandbox
@@ -113,6 +113,14 @@ The adapter pattern is designed so adding a tool is a single-file change.
      maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this
      hook. Adapters without the capability may retain a pre-toggle
      `build_launch_command()` override: `launch()` does not forward `sandbox` to it.
+   - If native plan mode is supported, override `plan_mode_args()` with the real
+     selector. Never synthesize a slash-command prompt. The shared validator
+     compares the installed `--version` result with `verified_version`, so add
+     old/unknown-version no-spawn tests alongside command-composition coverage.
+     If plan artifacts live
+     outside ordinary workspace paths, describe the private path and any
+     export/import command in the typed capability; reject `plan_output_dir`
+     when the requested location cannot be guaranteed.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
@@ -405,7 +413,8 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
 | `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval only)                 | —          | `--force`                  | —       | —               |
-| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
+| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan` (private artifacts) | unsupported                                | `--agent plan`    | `--mode plan`              | unsupported | unsupported   |
+| `--plan-output-dir` | `--settings` with project-relative `plansDirectory` | rejected (private store) | rejected (private store) | rejected with `--plan` | rejected (managed plan path) | rejected (session only) | rejected | rejected |
 | `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
