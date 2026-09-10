@@ -339,6 +339,64 @@ class TestExactPathRestoration:
             classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
         )
 
+    def test_symlinked_target_ancestor_does_not_record_a_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / ".cursor").symlink_to(outside, target_is_directory=True)
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path
+        )
+
+        assert any(
+            result.action == "error"
+            and result.file_path == tmp_path / ".cursor" / "skills"
+            and "symlinked directory" in (result.message or "")
+            for result in results
+        )
+        assert not (outside / "skills").exists()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+
+    def test_reapply_allows_marker_backed_target_beside_directory_backup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CODEX]),
+        )
+        populate_project(tmp_path)
+        target = tmp_path / ".codex" / "agents"
+        target.mkdir(parents=True)
+        (target / "user-agent.toml").write_text("name = 'user-agent'", encoding="utf-8")
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CODEX])
+
+        apply_scene(resolved, tmp_path, force=True)
+        descriptor = load_ledger(tmp_path).scene_restore(".codex/agents")
+        assert descriptor is not None and descriptor.backup_path is not None
+        backup = tmp_path / descriptor.backup_path
+        assert backup.is_dir() and (backup / "user-agent.toml").is_file()
+        assert (target / ".crossby-managed").is_file()
+
+        preview = apply_scene(resolved, tmp_path, dry_run=True)
+        results = apply_scene(resolved, tmp_path)
+
+        for operation in (preview, results):
+            assert not any(
+                result.action == "error" and "recorded backup is occupied" in (result.message or "")
+                for result in operation
+            )
+        assert backup.is_dir() and (backup / "user-agent.toml").is_file()
+        assert (target / ".crossby-managed").is_file()
+
     @pytest.mark.parametrize(
         ("tool", "target_rel"),
         [

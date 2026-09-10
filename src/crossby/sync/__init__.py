@@ -223,6 +223,7 @@ def run_sync(
     pending_hooks: dict[AIToolID, set[tuple[str, str]]] = {}
     pending_perms: dict[AIToolID, set[str]] = {}
     pending_mcp: dict[AIToolID, set[str]] = {}
+    ownership_concerns = frozenset((SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP))
 
     results: list[SyncResult] = []
     agents_writers_ran = False
@@ -268,6 +269,24 @@ def run_sync(
         hooks_owned: frozenset[tuple[str, str]] = frozenset()
         perms_owned: frozenset[str] = frozenset()
         mcp_owned: frozenset[str] = frozenset()
+        if loaded_ledger.corrupt and writer.concern in ownership_concerns:
+            # These writers can both add and revoke target entries, but each
+            # successful mutation must be paired with a durable ownership update
+            # so a later sync can revoke only what Crossby created. A corrupt
+            # scene section makes that persistence unsafe; refuse before invoking
+            # the writer rather than leave untracked target mutations behind.
+            results.append(
+                SyncResult(
+                    tool_id=writer.tool_id,
+                    concern=writer.concern,
+                    action="error",
+                    message=(
+                        f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; "
+                        "refusing to sync because ownership cannot be persisted"
+                    ),
+                )
+            )
+            continue
         if writer.concern == SyncConcern.HOOKS:
             hooks_owned = ledger.hooks(writer.tool_id)
             writer_data = replace(
@@ -371,16 +390,41 @@ def run_sync(
     # succeeded. ``dry_run`` computes revocations above but writes neither the
     # targets nor the ledger, matching the report-only contract of --plan.
     if (pending_hooks or pending_perms or pending_mcp) and not dry_run:
-        if loaded_ledger.corrupt:
-            # ``load_ledger_checked`` deliberately returns a usable additive
-            # view for ordinary sync.  Do not turn that view back into a clean
-            # file, though: doing so would discard valid scene-path entries next
-            # to a malformed one and strand a live scene without its baseline.
-            message = (
-                f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; "
-                "refusing to rewrite the ownership ledger"
-            )
-            logger.warning("ownership.persist_skipped_corrupt", path=str(project_root))
+        for hook_tool, hook_pairs in pending_hooks.items():
+            ledger.record_hooks(hook_tool, hook_pairs)
+        for perm_tool, perm_pats in pending_perms.items():
+            ledger.record_permissions(perm_tool, perm_pats)
+        for mcp_tool, mcp_names in pending_mcp.items():
+            ledger.record_mcp(mcp_tool, mcp_names)
+        # The ledger is advisory: a persistence failure (read-only dir, no
+        # permission, full disk) must not discard the SyncResults for writes
+        # that already succeeded, so mirror run_sync's per-writer isolation
+        # here. A dropped save simply retries next run.
+        try:
+            save_ledger(project_root, ledger)
+            # Ensure the ledger is gitignored whenever the file exists on disk —
+            # decoupled from save_ledger's change detection so a prior transient
+            # .gitignore failure self-heals on the next sync (rather than being
+            # skipped forever because the unchanged ledger makes save_ledger
+            # return False). update_managed_block is itself a no-op when the
+            # block is already present, so this is cheap on the common path; an
+            # empty ledger is never materialised, so there's nothing to ignore.
+            if (project_root / LEDGER_PATH).is_file():
+                from crossby.sync.gitignore_utils import update_managed_block
+
+                update_managed_block(
+                    project_root,
+                    _LEDGER_GITIGNORE_BLOCK_ID,
+                    [LEDGER_PATH.as_posix()],
+                )
+        except OSError as exc:
+            logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
+        except SyncContainmentError as exc:
+            # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
+            # post-writer path: surface as an ``error`` row (the writes already
+            # succeeded) rather than escaping run_sync. Attribute the failure to
+            # concern(s) whose ownership actually failed to persist.
+            logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
             for affected_concern, pending in (
                 (SyncConcern.HOOKS, pending_hooks),
                 (SyncConcern.PERMISSIONS, pending_perms),
@@ -392,59 +436,9 @@ def run_sync(
                             tool_id=None,
                             concern=affected_concern,
                             action="error",
-                            message=message,
+                            message=str(exc),
                         )
                     )
-        else:
-            for hook_tool, hook_pairs in pending_hooks.items():
-                ledger.record_hooks(hook_tool, hook_pairs)
-            for perm_tool, perm_pats in pending_perms.items():
-                ledger.record_permissions(perm_tool, perm_pats)
-            for mcp_tool, mcp_names in pending_mcp.items():
-                ledger.record_mcp(mcp_tool, mcp_names)
-            # The ledger is advisory: a persistence failure (read-only dir, no
-            # permission, full disk) must not discard the SyncResults for writes
-            # that already succeeded, so mirror run_sync's per-writer isolation
-            # here. A dropped save simply retries next run.
-            try:
-                save_ledger(project_root, ledger)
-                # Ensure the ledger is gitignored whenever the file exists on disk —
-                # decoupled from save_ledger's change detection so a prior transient
-                # .gitignore failure self-heals on the next sync (rather than being
-                # skipped forever because the unchanged ledger makes save_ledger
-                # return False). update_managed_block is itself a no-op when the
-                # block is already present, so this is cheap on the common path; an
-                # empty ledger is never materialised, so there's nothing to ignore.
-                if (project_root / LEDGER_PATH).is_file():
-                    from crossby.sync.gitignore_utils import update_managed_block
-
-                    update_managed_block(
-                        project_root,
-                        _LEDGER_GITIGNORE_BLOCK_ID,
-                        [LEDGER_PATH.as_posix()],
-                    )
-            except OSError as exc:
-                logger.warning("ownership.persist_failed", path=str(project_root), error=str(exc))
-            except SyncContainmentError as exc:
-                # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
-                # post-writer path: surface as an ``error`` row (the writes already
-                # succeeded) rather than escaping run_sync. Attribute the failure to
-                # concern(s) whose ownership actually failed to persist.
-                logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
-                for affected_concern, pending in (
-                    (SyncConcern.HOOKS, pending_hooks),
-                    (SyncConcern.PERMISSIONS, pending_perms),
-                    (SyncConcern.MCP, pending_mcp),
-                ):
-                    if pending:
-                        results.append(
-                            SyncResult(
-                                tool_id=None,
-                                concern=affected_concern,
-                                action="error",
-                                message=str(exc),
-                            )
-                        )
 
     # Plugin discovery — append manual-fix rows when scoped to all tools or
     # when the user explicitly asked for the plugins concern. We don't run

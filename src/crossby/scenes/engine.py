@@ -480,7 +480,7 @@ def _repoint_path(
         # instead of starting a child with a path whose baseline is unrecorded.
         try:
             descriptor = _capture_path_baseline(ctx, target_rel)
-        except ValueError as exc:
+        except (ValueError, SyncContainmentError) as exc:
             return _path_error(tools, tree.concern, target, str(exc))
     try:
         if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
@@ -500,9 +500,19 @@ def _repoint_path(
                         f"recorded backup is not the displaced real directory: {backup_rel}",
                     )
                 if target.is_dir() and not target.is_symlink():
-                    return _path_error(
-                        tools, tree.concern, target, f"recorded backup is occupied: {backup_rel}"
-                    )
+                    # Translate/copy writers (notably Codex and Copilot agents)
+                    # materialise their scene output as a marker-backed directory.
+                    # That active target legitimately coexists with the saved
+                    # pre-scene directory, and can be re-synced without replacing
+                    # either path. An unmarked directory is still drift.
+                    if not has_managed_marker(target):
+                        return _path_error(
+                            tools,
+                            tree.concern,
+                            target,
+                            f"recorded backup is occupied: {backup_rel}",
+                        )
+                    return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
             elif target.is_dir() and not target.is_symlink():
                 projection.displace_directory(ctx.project_root, target_rel, backup_rel)
             else:
@@ -537,6 +547,11 @@ def _repoint_path(
 def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
     """Durably record a target's first pre-scene state before mutating it."""
     target = ctx.project_root / target_rel
+    # Baseline inspection itself establishes durable recovery authority, so it
+    # must obey the same ancestor-containment policy as the later writer. Without
+    # this check, a symlinked target ancestor could leak an outside-tree state
+    # into the ledger even though the writer would refuse to mutate it.
+    assert_ancestors(ProjectScope(ctx.project_root), target)
     if target.is_symlink():
         descriptor = ScenePathRestore.symlink(os.readlink(target))
     elif not os.path.lexists(target):
@@ -579,7 +594,7 @@ def _describe_repoint_baseline(
         if os.path.lexists(backup):
             if backup.is_symlink() or not backup.is_dir():
                 return f"error:recorded backup is not the displaced real directory: {backup_rel}"
-            if target.is_dir() and not target.is_symlink():
+            if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
                 return f"error:recorded backup is occupied: {backup_rel}"
         elif target.is_dir() and not target.is_symlink():
             return f"would displace the recorded directory baseline at {backup_rel}"

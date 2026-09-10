@@ -431,8 +431,13 @@ _HOOK = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
 
 
 class TestRunSyncLedgerGating:
-    def test_corrupt_scene_paths_are_not_rewritten_by_ordinary_sync(self, tmp_path: Path) -> None:
-        """A successful additive writer must not erase scene recovery authority."""
+    @pytest.mark.parametrize(
+        "concern", [SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP]
+    )
+    def test_corrupt_scene_paths_refuse_ownership_writers_before_mutation(
+        self, tmp_path: Path, concern: SyncConcern
+    ) -> None:
+        """Corrupt scene provenance must block all ownership-bearing writes."""
         path = tmp_path / LEDGER_PATH
         path.parent.mkdir(parents=True)
         original = json.dumps(
@@ -447,18 +452,38 @@ class TestRunSyncLedgerGating:
         )
         path.write_text(original, encoding="utf-8")
 
+        touched = tmp_path / "writer-ran"
+
+        class _MutatingWriter(AbstractSyncWriter):
+            tool_id = AIToolID.CLAUDE
+
+            def __init__(self, writer_concern: SyncConcern) -> None:
+                self.concern = writer_concern
+
+            def sync(
+                self,
+                data: SyncData,
+                project_root: Path,
+                *,
+                dry_run: bool = False,
+                force: bool = False,
+            ) -> SyncResult:
+                touched.write_text("mutated", encoding="utf-8")
+                return SyncResult(tool_id=self.tool_id, concern=self.concern, action="updated")
+
         results = run_sync(
             SyncData(hooks=[_HOOK]),
             tmp_path,
             tool_id=AIToolID.CLAUDE,
-            registry=_registry(_make_writer(SyncConcern.HOOKS, "updated")),
+            registry=_registry(_MutatingWriter(concern)),
         )
 
         assert path.read_text(encoding="utf-8") == original
+        assert not touched.exists()
         assert any(
-            result.concern == SyncConcern.HOOKS
+            result.concern == concern
             and result.action == "error"
-            and "refusing to rewrite" in (result.message or "")
+            and "refusing to sync" in (result.message or "")
             for result in results
         )
 
