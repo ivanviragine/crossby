@@ -342,6 +342,13 @@ class PlanSessionResult(BaseModel, frozen=True):
             raise ValueError("successful plan-session text and provenance must be non-blank")
         return value
 
+    @field_validator("thread_id", "turn_id", "artifact_id")
+    @classmethod
+    def _optional_provenance_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provided plan-session provenance IDs must be non-blank")
+        return value
+
     @model_validator(mode="after")
     def _provenance_is_consistent(self) -> Self:
         if self.exit_code != 0:
@@ -402,6 +409,7 @@ class PlanModeCapability(BaseModel, frozen=True):
     interaction: PlanInteractionSupport = PlanInteractionSupport.NONE
     sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
     approval_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
+    supported_approval_policies: tuple[PlanApprovalPolicy, ...] = (PlanApprovalPolicy.ON_REQUEST,)
 
     @property
     def activation_supported(self) -> bool:

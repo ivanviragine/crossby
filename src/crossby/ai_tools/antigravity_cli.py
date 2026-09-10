@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import warnings
 from pathlib import Path
 from typing import Any, ClassVar
@@ -221,12 +222,21 @@ class AntigravityCLIAdapter(AbstractAITool):
 
         conversation_id: str | None = None
         response: dict[str, Any] | None = None
+        deadline = time.monotonic() + request.timeout_seconds
         for _continuation in range(9):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "Antigravity CLI plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=conversation_id,
+                )
             try:
                 run = run_captured(
                     command,
                     cwd=request.working_dir,
-                    timeout=request.timeout_seconds,
+                    timeout=remaining,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PlanTransportError(
@@ -323,6 +333,10 @@ class AntigravityCLIAdapter(AbstractAITool):
                 "--json-schema",
                 json.dumps(schema, separators=(",", ":")),
             ]
+            if effective_model:
+                command.extend(("--model", effective_model))
+            for path in request.trusted_dirs:
+                command.extend(("--add-dir", str(path)))
         else:
             raise PlanTransportError(
                 "Antigravity CLI exceeded the bounded question-continuation limit.",

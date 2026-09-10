@@ -102,6 +102,10 @@ class CursorAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
+                supported_approval_policies=(
+                    PlanApprovalPolicy.ON_REQUEST,
+                    PlanApprovalPolicy.NEVER,
+                ),
             ),
             supports_accept_edits=True,
             supports_sandbox_toggle=True,

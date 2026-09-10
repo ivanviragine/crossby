@@ -242,13 +242,14 @@ class OpenCodeAdapter(AbstractAITool):
             continuation_command = [
                 "opencode",
                 "run",
-                *answers,
                 "--session",
                 session_id,
                 "--format",
                 "json",
                 "--agent",
                 "plan",
+                "--",
+                *answers,
             ]
             try:
                 continued = run_captured(
@@ -427,13 +428,12 @@ def _session_ids(value: Any) -> list[str]:
 
 
 def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
-    """Return explicit plan messages, or the final assistant text as fallback."""
+    """Return only assistant messages containing explicit plan parts."""
     info = payload.get("info")
     messages = payload.get("messages")
     if not isinstance(info, dict) or not isinstance(messages, list):
         return []
     explicit_plans: list[tuple[str, str | None]] = []
-    assistant_text: list[tuple[str, str | None]] = []
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -451,21 +451,11 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
             and isinstance(part.get("text"), str)
             and str(part.get("text")).strip()
         ]
-        text_parts = [
-            str(part.get("text"))
-            for part in parts
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-            and str(part.get("text")).strip()
-        ]
         artifact_id = message_info.get("id")
         candidate_id = str(artifact_id) if artifact_id is not None else None
         if plan_parts:
             explicit_plans.append(("\n".join(plan_parts), candidate_id))
-        elif text_parts:
-            assistant_text.append(("\n".join(text_parts), candidate_id))
-    return explicit_plans or assistant_text[-1:]
+    return explicit_plans
 
 
 def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[PlanInteraction]:

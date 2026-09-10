@@ -32,7 +32,6 @@ from crossby.models.ai import (
     AIToolID,
     EffortLevel,
     ModelTier,
-    PlanApprovalPolicy,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanModeActivation,
@@ -312,10 +311,7 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        if (
-            request.approval_policy is not PlanApprovalPolicy.ON_REQUEST
-            and capability.approval_behavior is not PlanRequestBehavior.PRESERVED
-        ):
+        if request.approval_policy not in capability.supported_approval_policies:
             raise PlanSessionUnsupportedError(
                 f"{caps.display_name} cannot preserve approval_policy="
                 f"{request.approval_policy.value!r} for collected plan sessions.",

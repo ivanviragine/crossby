@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -84,6 +85,10 @@ class CopilotAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
+                supported_approval_policies=(
+                    PlanApprovalPolicy.ON_REQUEST,
+                    PlanApprovalPolicy.NEVER,
+                ),
             ),
             supports_accept_edits=True,
             supports_session_start_hook=True,
@@ -190,13 +195,23 @@ class CopilotAdapter(AbstractAITool):
 
         command = [*base, "--prompt", request.prompt]
         seen_questions: set[str] = set()
+        deadline = time.monotonic() + request.timeout_seconds
         try:
             for _continuation in range(9):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PlanTransportError(
+                        "GitHub Copilot plan session exceeded its timeout.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    )
                 try:
                     run = run_captured(
                         command,
                         cwd=request.working_dir,
-                        timeout=request.timeout_seconds,
+                        timeout=remaining,
                     )
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PlanTransportError(
@@ -367,11 +382,10 @@ class CopilotAdapter(AbstractAITool):
                 binding=PlanSessionBinding.SESSION_ID,
                 exit_code=0,
                 artifact_id=export_path.name,
-                artifact_path=export_path,
             )
         finally:
-            # The normalized result retains provenance, but the local share is a
-            # run-owned transport artifact rather than caller-owned output.
+            # The local share is a run-owned transport artifact rather than
+            # caller-owned output; artifact_id retains its provenance name.
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:

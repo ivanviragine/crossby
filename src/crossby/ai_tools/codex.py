@@ -18,6 +18,7 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanApprovalPolicy,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanInteraction,
@@ -99,6 +100,7 @@ class CodexAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
+                supported_approval_policies=tuple(PlanApprovalPolicy),
             ),
             supports_accept_edits=True,
             supports_stop_hook=True,
@@ -333,7 +335,11 @@ class CodexAdapter(AbstractAITool):
                         )
                     artifact_id = item.get("id")
                     text = item.get("text")
-                    if not isinstance(artifact_id, str) or not isinstance(text, str):
+                    if (
+                        not isinstance(artifact_id, str)
+                        or not artifact_id.strip()
+                        or not isinstance(text, str)
+                    ):
                         raise PlanArtifactMalformedError(
                             "Codex completed plan item omitted its ID or text.",
                             tool_id=self.TOOL_ID,

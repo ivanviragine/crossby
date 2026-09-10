@@ -17,6 +17,7 @@ from crossby.ai_tools import (
     PlanApprovalPolicy,
     PlanArtifactAmbiguousError,
     PlanArtifactMalformedError,
+    PlanArtifactMissingError,
     PlanArtifactSource,
     PlanBindingMismatchError,
     PlanInteractionOutcome,
@@ -142,6 +143,17 @@ class TestNormalizedContract:
                     "artifact_path": None,
                 },
             )
+        with pytest.raises(ValidationError, match="provenance IDs must be non-blank"):
+            PlanSessionResult(
+                plan="# Plan",
+                **{
+                    **common,
+                    "artifact_source": PlanArtifactSource.PROTOCOL_EVENT,
+                    "binding": PlanSessionBinding.SESSION_ID,
+                    "artifact_id": " ",
+                    "artifact_path": None,
+                },
+            )
 
     def test_gui_adapters_fail_before_collection(self, tmp_path: Path) -> None:
         for tool_id in (AIToolID.VSCODE, AIToolID.ANTIGRAVITY):
@@ -197,6 +209,20 @@ class TestNormalizedContract:
             pytest.raises(PlanSessionUnsupportedError, match="approval_policy"),
         ):
             adapter.run_plan_session(_request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER))
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("tool_id", [AIToolID.CURSOR, AIToolID.COPILOT])
+    def test_untrusted_policy_is_rejected_before_collection(
+        self, tool_id: AIToolID, tmp_path: Path
+    ) -> None:
+        adapter = AbstractAITool.get(tool_id)
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanSessionUnsupportedError, match="untrusted"),
+        ):
+            adapter.run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.UNTRUSTED)
+            )
         run.assert_not_called()
 
     def test_error_excerpt_redacts_and_bounds_secrets(self) -> None:
@@ -308,6 +334,84 @@ class TestExactSessionCliCollectors:
         with pytest.raises(PlanBindingMismatchError):
             AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
+    def test_opencode_continuation_separates_option_like_answers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        question = json.dumps(
+            {
+                "type": "question",
+                "id": "question-1",
+                "sessionID": "ses_exact_123",
+                "question": "Which compatibility target?",
+            }
+        )
+        runs = iter(
+            [
+                CapturedProcess(0, question, ""),
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                ),
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_export_success.json").read_text(),
+                    "",
+                ),
+            ]
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            return next(runs)
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
+            _request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="--keep-compatibility",
+            ),
+        )
+
+        assert result.session_id == "ses_exact_123"
+        assert commands[1] == [
+            "opencode",
+            "run",
+            "--session",
+            "ses_exact_123",
+            "--format",
+            "json",
+            "--agent",
+            "plan",
+            "--",
+            "--keep-compatibility",
+        ]
+
+    def test_opencode_rejects_assistant_text_without_plan_part(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exported = json.loads((FIXTURES / "opencode_export_success.json").read_text())
+        exported["messages"][1]["parts"][0]["type"] = "text"
+        runs = iter(
+            [
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                ),
+                CapturedProcess(0, json.dumps(exported), ""),
+            ]
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        with pytest.raises(PlanArtifactMissingError, match="no assistant plan"):
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
+
     def test_antigravity_requires_exact_schema_echo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -348,10 +452,12 @@ class TestExactSessionCliCollectors:
             ]
         )
         commands: list[list[str]] = []
+        timeouts: list[float] = []
         questions: list[str] = []
 
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
             commands.append(command)
+            timeouts.append(kwargs["timeout"])
             return next(runs)
 
         def answer(interaction: Any) -> PlanInteractionResponse:
@@ -362,13 +468,24 @@ class TestExactSessionCliCollectors:
             )
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        clock = iter((100.0, 101.0, 103.0, 105.0))
+        monkeypatch.setattr("crossby.ai_tools.antigravity_cli.time.monotonic", lambda: next(clock))
         result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
-            _request(tmp_path), answer
+            _request(
+                tmp_path,
+                model="claude-sonnet-4-6",
+                trusted_dirs=(tmp_path / "reference",),
+                timeout_seconds=10,
+            ),
+            answer,
         )
         assert result.session_id == "conv-exact-123"
         assert questions == ["scope", "tests"]
+        assert timeouts == [9.0, 7.0, 5.0]
         for command in commands[1:]:
             assert command[command.index("--conversation") + 1] == "conv-exact-123"
+            assert command[command.index("--model") + 1] == "claude-sonnet-4-6"
+            assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
 
     def test_copilot_uuid_share_is_local_and_cleaned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -399,7 +516,45 @@ class TestExactSessionCliCollectors:
         assert "--no-remote" in commands[0]
         assert "--no-remote-export" in commands[0]
         assert "--deny-tool=*" in commands[0]
-        assert result.artifact_path is not None and not result.artifact_path.exists()
+        assert result.artifact_path is None
+
+    def test_copilot_continuations_share_one_timeout_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        question = json.dumps(
+            {
+                "type": "ask_user",
+                "id": "question-1",
+                "session_id": str(exact_uuid),
+                "data": {"id": "scope", "question": "Include compatibility?"},
+            }
+        )
+        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = FIXTURES / "copilot_share_success.md"
+        runs = iter((question, success))
+        timeouts: list[float] = []
+
+        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
+            timeouts.append(kwargs["timeout"])
+            export_arg = next(value for value in command if value.startswith("--share="))
+            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
+            return CapturedProcess(0, next(runs), "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        clock = iter((100.0, 101.0, 104.0))
+        monkeypatch.setattr("crossby.ai_tools.copilot.time.monotonic", lambda: next(clock))
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, timeout_seconds=10),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Yes",
+            ),
+        )
+
+        assert result.session_id == str(exact_uuid)
+        assert timeouts == [9.0, 6.0]
 
 
 class TestProtocolCollectors:
@@ -469,6 +624,19 @@ class TestProtocolCollectors:
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
         with pytest.raises(PlanBindingMismatchError):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+        assert FakeRpc.instances[0].closed
+
+    def test_codex_rejects_blank_completed_plan_item_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        messages[4]["params"]["item"]["id"] = " "
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanArtifactMalformedError, match="omitted its ID"):
             AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
         assert FakeRpc.instances[0].closed
 

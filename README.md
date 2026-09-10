@@ -382,16 +382,16 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; ambiguous, symlinked, blank, or missing output fails |
 | Codex CLI | `collaborationMode.mode = "plan"` | App-server; exact thread + turn + completed plan-item IDs | Callback | Preserved / preserved | 0.153.4 | Use `run_plan_session()`; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
-| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
-| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + unique local `--share` export | Resumable callback | Tool-managed / preserved | 1.0.83 | Collection disables remote sharing and removes only its temporary export after normalization |
+| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
+| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + unique local `--share` export | Resumable callback | Tool-managed / preserved (`on-request`, `never`) | 1.0.83 | Collection disables remote sharing and removes only its temporary export after normalization |
 | OpenCode | `run --agent plan` | Headless JSONL; emitted session ID + `export <exact-id>` | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Missing, multiple, or mismatched embedded session IDs fail; no latest-session lookup is used |
 | Antigravity CLI | `--mode plan` | Headless JSON; exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
 | VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
 | Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
-its safe default is accepted. `preserved` means Crossby sends the caller's
-choice through explicitly. Protocol and resumable collectors never invent an
+its safe default is accepted. `preserved` means Crossby enforces the listed caller
+choices explicitly; an unlisted approval policy is rejected before collection. Protocol and resumable collectors never invent an
 answer or auto-approve implementation. A missing handler produces
 `PlanInteractionRequiredError`; final plan approval is represented separately
 and an `APPROVED` response is refused by collectors where it would transition
