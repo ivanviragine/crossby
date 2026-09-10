@@ -16,9 +16,8 @@ from crossby.models.ai import (
 
 PlanInteractionHandler = Callable[[PlanInteraction], PlanInteractionResponse]
 
-_SECRET_RE = re.compile(
-    r"(?i)\b(token|password|secret|api[_ -]?key|authorization|bearer)\b\s*[:=]?\s*\S+"
-)
+_AUTHORIZATION_RE = re.compile(r"(?i)\b(authorization)\b\s*[:=]?\s*(?:[a-z][a-z0-9._~+/-]*\s+)?\S+")
+_SECRET_RE = re.compile(r"(?i)\b(token|password|secret|api[_ -]?key|bearer)\b\s*[:=]?\s*\S+")
 
 
 def safe_error_excerpt(text: str | None, *, limit: int = 500) -> str | None:
@@ -26,7 +25,8 @@ def safe_error_excerpt(text: str | None, *, limit: int = 500) -> str | None:
     if not text:
         return None
     compact = " ".join(text.split())
-    redacted = _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", compact)
+    redacted = _AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}=<redacted>", compact)
+    redacted = _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", redacted)
     return redacted[:limit] or None
 
 
@@ -43,6 +43,38 @@ class PlanModeLaunchError(RuntimeError):
         super().__init__(message)
         self.tool_id = tool_id
         self.capability = capability
+
+
+class PlanSessionError(RuntimeError):
+    """Base failure for a complete collected planning lifecycle."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_id: AIToolID,
+        capability: PlanModeCapability,
+        exit_code: int | None = None,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        artifact_id: str | None = None,
+        paths: tuple[Path, ...] = (),
+        stderr: str | None = None,
+    ) -> None:
+        excerpt = safe_error_excerpt(stderr)
+        if excerpt:
+            message = f"{message} Diagnostic: {excerpt}"
+        super().__init__(message)
+        self.tool_id = tool_id
+        self.capability = capability
+        self.exit_code = exit_code
+        self.session_id = session_id
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.artifact_id = artifact_id
+        self.paths = paths
+        self.stderr_excerpt = excerpt
 
 
 class PlanModeUnsupportedError(PlanModeLaunchError):
@@ -111,8 +143,22 @@ class PlanModeConflictError(PlanModeLaunchError):
         )
 
 
-class PlanArtifactLocationError(PlanModeLaunchError):
+class PlanArtifactLocationError(PlanModeLaunchError, PlanSessionError):
     """The requested filesystem plan output conflicts with harness storage."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_id: AIToolID,
+        capability: PlanModeCapability,
+    ) -> None:
+        PlanSessionError.__init__(
+            self,
+            message,
+            tool_id=tool_id,
+            capability=capability,
+        )
 
     @classmethod
     def for_tool(
@@ -134,38 +180,6 @@ class PlanArtifactLocationError(PlanModeLaunchError):
 
 class PlanModeAdapterContractError(PlanModeLaunchError):
     """An adapter's typed declaration and activation implementation disagree."""
-
-
-class PlanSessionError(RuntimeError):
-    """Base failure for a complete collected planning lifecycle."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        tool_id: AIToolID,
-        capability: PlanModeCapability,
-        exit_code: int | None = None,
-        session_id: str | None = None,
-        thread_id: str | None = None,
-        turn_id: str | None = None,
-        artifact_id: str | None = None,
-        paths: tuple[Path, ...] = (),
-        stderr: str | None = None,
-    ) -> None:
-        excerpt = safe_error_excerpt(stderr)
-        if excerpt:
-            message = f"{message} Diagnostic: {excerpt}"
-        super().__init__(message)
-        self.tool_id = tool_id
-        self.capability = capability
-        self.exit_code = exit_code
-        self.session_id = session_id
-        self.thread_id = thread_id
-        self.turn_id = turn_id
-        self.artifact_id = artifact_id
-        self.paths = paths
-        self.stderr_excerpt = excerpt
 
 
 class PlanSessionUnsupportedError(PlanSessionError):

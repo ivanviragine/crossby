@@ -16,6 +16,7 @@ from crossby.ai_tools import (
     AbstractAITool,
     PlanApprovalPolicy,
     PlanArtifactAmbiguousError,
+    PlanArtifactLocationError,
     PlanArtifactMalformedError,
     PlanArtifactMissingError,
     PlanArtifactSource,
@@ -24,6 +25,7 @@ from crossby.ai_tools import (
     PlanInteractionRequiredError,
     PlanInteractionResponse,
     PlanSessionBinding,
+    PlanSessionError,
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionUnsupportedError,
@@ -231,6 +233,38 @@ class TestNormalizedContract:
         assert "super-secret" not in excerpt
         assert len(excerpt) == 500
 
+    def test_error_excerpt_redacts_authorization_scheme_and_credential(self) -> None:
+        excerpt = safe_error_excerpt(
+            "request failed: Authorization: Bearer ghp_abcdef; retry denied"
+        )
+
+        assert excerpt == "request failed: Authorization=<redacted> retry denied"
+
+    @pytest.mark.parametrize(
+        ("tool_id", "outside_workspace"),
+        [
+            (AIToolID.OPENCODE, False),
+            (AIToolID.CLAUDE, True),
+        ],
+    )
+    def test_plan_output_location_errors_are_session_errors(
+        self,
+        tool_id: AIToolID,
+        outside_workspace: bool,
+        tmp_path: Path,
+    ) -> None:
+        adapter = AbstractAITool.get(tool_id)
+        output_dir = tmp_path.parent / "external-plans" if outside_workspace else tmp_path / "plans"
+
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanSessionError) as raised,
+        ):
+            adapter.run_plan_session(_request(tmp_path, plan_output_dir=output_dir))
+
+        assert isinstance(raised.value, PlanArtifactLocationError)
+        run.assert_not_called()
+
 
 class TestClaudeCollector:
     def test_exact_isolated_directory_ignores_decoy(
@@ -388,6 +422,53 @@ class TestExactSessionCliCollectors:
             "--",
             "--keep-compatibility",
         ]
+
+    def test_opencode_continuation_and_export_share_one_timeout_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        question = json.dumps(
+            {
+                "type": "question",
+                "id": "question-1",
+                "sessionID": "ses_exact_123",
+                "question": "Which compatibility target?",
+            }
+        )
+        runs = iter(
+            [
+                CapturedProcess(0, question, ""),
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                ),
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_export_success.json").read_text(),
+                    "",
+                ),
+            ]
+        )
+        timeouts: list[float] = []
+
+        def fake_run(_command: list[str], **kwargs: Any) -> CapturedProcess:
+            timeouts.append(kwargs["timeout"])
+            return next(runs)
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        clock = iter((100.0, 101.0, 104.0, 107.0))
+        monkeypatch.setattr("crossby.ai_tools.opencode.time.monotonic", lambda: next(clock))
+
+        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
+            _request(tmp_path, timeout_seconds=10),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Keep compatibility",
+            ),
+        )
+
+        assert result.session_id == "ses_exact_123"
+        assert timeouts == [9.0, 6.0, 3.0]
 
     def test_opencode_rejects_assistant_text_without_plan_part(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

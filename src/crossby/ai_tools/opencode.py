@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -151,11 +152,24 @@ class OpenCodeAdapter(AbstractAITool):
             command.extend(("--model", request.model))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
+        deadline = time.monotonic() + request.timeout_seconds
+
+        def remaining_timeout(*, session_id: str | None = None) -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "OpenCode plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            return remaining
+
         try:
             run = run_captured(
                 command,
                 cwd=request.working_dir,
-                timeout=request.timeout_seconds,
+                timeout=remaining_timeout(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise PlanTransportError(
@@ -255,7 +269,7 @@ class OpenCodeAdapter(AbstractAITool):
                 continued = run_captured(
                     continuation_command,
                     cwd=request.working_dir,
-                    timeout=request.timeout_seconds,
+                    timeout=remaining_timeout(session_id=session_id),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PlanTransportError(
@@ -304,7 +318,7 @@ class OpenCodeAdapter(AbstractAITool):
             exported = run_captured(
                 ["opencode", "export", session_id],
                 cwd=request.working_dir,
-                timeout=request.timeout_seconds,
+                timeout=remaining_timeout(session_id=session_id),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise PlanTransportError(
