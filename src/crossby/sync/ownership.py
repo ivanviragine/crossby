@@ -46,9 +46,12 @@ LEDGER_PATH = Path(".crossby") / "owned.json"
 # retry to authenticate a completed rename after cleanup persistence failed.
 # v5 records canonical PROJECT sources that a scene deliberately left untouched,
 # so their managed markers are never mistaken for legacy scene output on clear.
+# v6 records whether a directory baseline has actually been displaced and its
+# identity at capture time. This prevents a missing backup from making generated
+# scene output look like the original directory captured before displacement.
 # The version remains advisory, and older files without either section remain
 # readable.
-LEDGER_VERSION = 5
+LEDGER_VERSION = 6
 
 # Only these three concerns carry revocation semantics.
 _HOOKS = SyncConcern.HOOKS.value
@@ -77,6 +80,7 @@ class ScenePathRestore:
     kind: ScenePathRestoreKind
     link_target: str | None = None
     backup_path: str | None = None
+    directory_displaced: bool | None = None
     directory_device: int | None = None
     directory_inode: int | None = None
 
@@ -93,12 +97,14 @@ class ScenePathRestore:
         cls,
         backup_path: str,
         *,
+        displaced: bool | None = None,
         device: int | None = None,
         inode: int | None = None,
     ) -> ScenePathRestore:
         return cls(
             ScenePathRestoreKind.DIRECTORY,
             backup_path=backup_path,
+            directory_displaced=displaced,
             directory_device=device,
             directory_inode=inode,
         )
@@ -112,7 +118,23 @@ class ScenePathRestore:
         """Return a directory descriptor authenticated for an attempted restore."""
         if self.kind != ScenePathRestoreKind.DIRECTORY or self.backup_path is None:
             raise ValueError("only a directory restore descriptor has a directory identity")
-        return self.directory(self.backup_path, device=device, inode=inode)
+        return self.directory(
+            self.backup_path,
+            displaced=self.directory_displaced,
+            device=device,
+            inode=inode,
+        )
+
+    def with_directory_displaced(self) -> ScenePathRestore:
+        """Return a directory descriptor whose displacement is durable."""
+        if self.kind != ScenePathRestoreKind.DIRECTORY or self.backup_path is None:
+            raise ValueError("only a directory restore descriptor has displacement state")
+        return self.directory(
+            self.backup_path,
+            displaced=True,
+            device=self.directory_device,
+            inode=self.directory_inode,
+        )
 
     def to_json(self) -> dict[str, str | int]:
         out: dict[str, str | int] = {"kind": self.kind.value}
@@ -120,6 +142,8 @@ class ScenePathRestore:
             out["target"] = self.link_target
         if self.backup_path is not None:
             out["backup"] = self.backup_path
+        if self.directory_displaced is not None:
+            out["displaced"] = self.directory_displaced
         if self.directory_device is not None:
             out["device"] = self.directory_device
             # Validation requires device and inode to appear as a pair.
@@ -297,11 +321,10 @@ class OwnershipLedger:
     def record_scene_restore_directory_identity(
         self, target_path: str | Path, *, device: int, inode: int
     ) -> ScenePathRestore:
-        """Persist the identity of a directory immediately before restoring it.
+        """Persist the identity of a directory before moving or restoring it.
 
-        A matching target identity on a later retry proves that the exact backup
-        was moved into place even if the following descriptor-cleanup save failed.
-        The baseline itself is never replaceable.
+        A matching path identity on a later retry proves that the exact baseline
+        was moved. The baseline itself is never replaceable.
         """
         target = _normalise_scene_target(target_path)
         descriptor = self._scene_paths.get(target)
@@ -312,6 +335,19 @@ class OwnershipLedger:
                 raise ValueError("directory restore identity is already recorded")
             return descriptor
         updated = descriptor.with_directory_identity(device=device, inode=inode)
+        _validate_scene_restore(target, updated)
+        self._scene_paths[target] = updated
+        return updated
+
+    def record_scene_directory_displaced(self, target_path: str | Path) -> ScenePathRestore:
+        """Mark a recorded directory baseline as having reached its backup."""
+        target = _normalise_scene_target(target_path)
+        descriptor = self._scene_paths.get(target)
+        if descriptor is None or descriptor.kind != ScenePathRestoreKind.DIRECTORY:
+            raise ValueError("directory displacement requires an existing directory descriptor")
+        if descriptor.directory_displaced is True:
+            return descriptor
+        updated = descriptor.with_directory_displaced()
         _validate_scene_restore(target, updated)
         self._scene_paths[target] = updated
         return updated
@@ -556,6 +592,7 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
         if (
             descriptor.link_target is not None
             or descriptor.backup_path is not None
+            or descriptor.directory_displaced is not None
             or descriptor.directory_device is not None
             or descriptor.directory_inode is not None
         ):
@@ -565,6 +602,7 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
         if (
             descriptor.link_target is not None
             or descriptor.backup_path is not None
+            or descriptor.directory_displaced is not None
             or descriptor.directory_device is not None
             or descriptor.directory_inode is not None
         ):
@@ -576,6 +614,7 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
             or not descriptor.link_target
             or "\x00" in descriptor.link_target
             or descriptor.backup_path is not None
+            or descriptor.directory_displaced is not None
             or descriptor.directory_device is not None
             or descriptor.directory_inode is not None
         ):
@@ -584,9 +623,15 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
     if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
         if descriptor.link_target is not None or not isinstance(descriptor.backup_path, str):
             raise ValueError("directory scene restore descriptor requires only a backup path")
+        if descriptor.directory_displaced is not None and not isinstance(
+            descriptor.directory_displaced, bool
+        ):
+            raise ValueError("directory displacement state must be a boolean")
         if _normalise_backup_path(target, descriptor.backup_path) != descriptor.backup_path:
             raise ValueError("scene backup path is not normalized")
         identity = (descriptor.directory_device, descriptor.directory_inode)
+        if descriptor.directory_displaced is False and identity == (None, None):
+            raise ValueError("pending directory displacement requires a directory identity")
         if identity != (None, None) and (
             any(
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
@@ -615,21 +660,28 @@ def _parse_scene_restore(target: str, raw: object) -> ScenePathRestore:
         descriptor = ScenePathRestore.symlink(literal)
     elif kind == ScenePathRestoreKind.DIRECTORY.value and set(raw) in (
         {"kind", "backup"},
+        {"kind", "backup", "displaced"},
         {"kind", "backup", "device", "inode"},
+        {"kind", "backup", "displaced", "device", "inode"},
     ):
         backup = raw.get("backup")
         if not isinstance(backup, str):
             raise ValueError("directory backup must be a string")
         device = raw.get("device")
         inode = raw.get("inode")
-        if set(raw) == {"kind", "backup", "device", "inode"} and (
+        displaced = raw.get("displaced")
+        if "displaced" in raw and not isinstance(displaced, bool):
+            raise ValueError("directory displacement state must be a boolean")
+        if "device" in raw and (
             not isinstance(device, int)
             or isinstance(device, bool)
             or not isinstance(inode, int)
             or isinstance(inode, bool)
         ):
             raise ValueError("directory restore identity must contain integer device and inode")
-        descriptor = ScenePathRestore.directory(backup, device=device, inode=inode)
+        descriptor = ScenePathRestore.directory(
+            backup, displaced=displaced, device=device, inode=inode
+        )
     else:
         raise ValueError("unknown or malformed scene restore descriptor")
     _validate_scene_restore(target, descriptor)

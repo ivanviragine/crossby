@@ -465,14 +465,18 @@ def _repoint_path(
         )
     if ctx.dry_run:
         preview = projection.preview_repoint(tree, tools)
-        baseline = _describe_repoint_baseline(
-            ctx.project_root,
-            target_rel,
-            ctx.force,
-            ctx.ledger.scene_restore(target_rel),
-        )
+        try:
+            baseline = _describe_repoint_baseline(
+                ctx.project_root,
+                target_rel,
+                ctx.force,
+                ctx.ledger.scene_restore(target_rel),
+            )
+        except (ValueError, SyncContainmentError) as exc:
+            baseline = f"error:{exc}"
         if baseline.startswith("error:"):
             preview.action = "error"
+            preview.file_path = ctx.project_root / target_rel
             preview.message = baseline.removeprefix("error:")
         else:
             preview.message = f"{preview.message}; {baseline}"
@@ -505,6 +509,19 @@ def _repoint_path(
                         target,
                         f"recorded backup is not the displaced real directory: {backup_rel}",
                     )
+                if (
+                    descriptor.directory_device is not None
+                    and not _matches_recorded_directory_identity(backup, descriptor)
+                ):
+                    return _path_error(
+                        tools,
+                        tree.concern,
+                        target,
+                        f"recorded backup is not the displaced real directory: {backup_rel}",
+                    )
+                if descriptor.directory_displaced is not True:
+                    descriptor = ctx.ledger.record_scene_directory_displaced(target_rel)
+                    save_ledger(ctx.project_root, ctx.ledger)
                 if target.is_dir() and not target.is_symlink():
                     # Translate/copy writers (notably Codex and Copilot agents)
                     # materialise their scene output as a marker-backed directory.
@@ -519,9 +536,15 @@ def _repoint_path(
                             f"recorded backup is occupied: {backup_rel}",
                         )
                     return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
-            elif target.is_dir() and not target.is_symlink():
-                projection.displace_directory(ctx.project_root, target_rel, backup_rel)
-            else:
+            elif descriptor.directory_displaced is True:
+                return _path_error(
+                    tools,
+                    tree.concern,
+                    target,
+                    f"recorded directory backup is missing: {backup_rel}; "
+                    "refusing to replace the target",
+                )
+            elif not (target.is_dir() and not target.is_symlink()):
                 return _path_error(
                     tools,
                     tree.concern,
@@ -529,6 +552,26 @@ def _repoint_path(
                     f"recorded directory baseline was not displaced: {backup_rel}; "
                     "refusing to replace the target",
                 )
+            elif descriptor.directory_displaced is None:
+                return _path_error(
+                    tools,
+                    tree.concern,
+                    target,
+                    f"legacy directory displacement state is unknown for {backup_rel}; "
+                    "refusing to replace the target",
+                )
+            elif not _matches_recorded_directory_identity(target, descriptor):
+                return _path_error(
+                    tools,
+                    tree.concern,
+                    target,
+                    f"recorded directory baseline changed before displacement: {target_rel}; "
+                    "refusing to replace the target",
+                )
+            else:
+                projection.displace_directory(ctx.project_root, target_rel, backup_rel)
+                descriptor = ctx.ledger.record_scene_directory_displaced(target_rel)
+                save_ledger(ctx.project_root, ctx.ledger)
         elif target.is_dir() and not target.is_symlink():
             # Some writers materialise a managed directory rather than a
             # symlink. Re-run those without force; an unmarked directory is
@@ -570,7 +613,13 @@ def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
                 "or use --force to preserve it at a recorded backup"
             )
         backup_rel = projection.allocate_directory_backup(ctx.project_root, target_rel)
-        descriptor = ScenePathRestore.directory(backup_rel)
+        identity = target.stat()
+        descriptor = ScenePathRestore.directory(
+            backup_rel,
+            displaced=False,
+            device=identity.st_dev,
+            inode=identity.st_ino,
+        )
     else:
         raise ValueError(
             f"{target_rel} exists but is not a directory or symlink; refusing scene projection"
@@ -589,10 +638,11 @@ def _describe_repoint_baseline(
     descriptor: ScenePathRestore | None,
 ) -> str:
     """Describe the recovery authority a dry-run re-point would use."""
+    target = project_root / target_rel
+    assert_ancestors(ProjectScope(project_root), target)
     if descriptor is None:
         return _describe_prospective_baseline(project_root, target_rel, force)
 
-    target = project_root / target_rel
     if descriptor.kind == ScenePathRestoreKind.DIRECTORY:
         backup_rel = descriptor.backup_path
         assert backup_rel is not None
@@ -600,15 +650,34 @@ def _describe_repoint_baseline(
         if os.path.lexists(backup):
             if backup.is_symlink() or not backup.is_dir():
                 return f"error:recorded backup is not the displaced real directory: {backup_rel}"
+            if descriptor.directory_device is not None and not _matches_recorded_directory_identity(
+                backup, descriptor
+            ):
+                return f"error:recorded backup is not the displaced real directory: {backup_rel}"
             if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
                 return f"error:recorded backup is occupied: {backup_rel}"
-        elif target.is_dir() and not target.is_symlink():
-            return f"would displace the recorded directory baseline at {backup_rel}"
-        else:
+        elif descriptor.directory_displaced is True:
+            return (
+                f"error:recorded directory backup is missing: {backup_rel}; "
+                "refusing to replace the target"
+            )
+        elif not (target.is_dir() and not target.is_symlink()):
             return (
                 f"error:recorded directory baseline was not displaced: {backup_rel}; "
                 "refusing to replace the target"
             )
+        elif descriptor.directory_displaced is None:
+            return (
+                f"error:legacy directory displacement state is unknown for {backup_rel}; "
+                "refusing to replace the target"
+            )
+        elif not _matches_recorded_directory_identity(target, descriptor):
+            return (
+                f"error:recorded directory baseline changed before displacement: {target_rel}; "
+                "refusing to replace the target"
+            )
+        else:
+            return f"would displace the recorded directory baseline at {backup_rel}"
         return f"would retain the recorded directory baseline at {backup_rel}"
 
     if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
@@ -960,7 +1029,7 @@ def _validate_restore_one_path(
     assert_ancestors(scope, backup)
     backup_exists = os.path.lexists(backup)
     if not backup_exists:
-        if _matches_directory_restore_identity(target, descriptor):
+        if _matches_recorded_directory_identity(target, descriptor):
             return
         # A real target directory cannot authenticate that the exact recorded
         # backup reached it: the backup could have been lost while an unrelated
@@ -973,14 +1042,14 @@ def _validate_restore_one_path(
         _validate_scene_output_removal(project_root, target_rel, kind, force=force)
 
 
-def _matches_directory_restore_identity(target: Path, descriptor: ScenePathRestore) -> bool:
-    """Whether *target* is the directory moved from the recorded backup."""
+def _matches_recorded_directory_identity(path: Path, descriptor: ScenePathRestore) -> bool:
+    """Whether *path* is the exact directory authenticated by the descriptor."""
     device = descriptor.directory_device
     inode = descriptor.directory_inode
-    if device is None or inode is None or target.is_symlink() or not target.is_dir():
+    if device is None or inode is None or path.is_symlink() or not path.is_dir():
         return False
     try:
-        identity = target.stat()
+        identity = path.stat()
     except OSError:
         return False
     return (identity.st_dev, identity.st_ino) == (device, inode)
