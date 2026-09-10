@@ -19,6 +19,9 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 
@@ -58,7 +61,19 @@ class ClaudeAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --permission-mode plan before the first user turn.",
+                version_requirement="Claude Code exposing --permission-mode plan.",
+                verified_version="2.1.263",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.REQUESTED_PATH,
+                artifact_location_detail=(
+                    "Claude defaults to ~/.claude/plans and supports a per-launch plansDirectory "
+                    "setting for a requested path inside the project."
+                ),
+                artifact_path_template="~/.claude/plans/<generated-name>.md",
+            ),
             supports_accept_edits=True,
             supports_auto=True,
             supports_stop_hook=True,
@@ -118,6 +133,13 @@ class ClaudeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Claude supports --permission-mode plan."""
         return ["--permission-mode", "plan"]
+
+    def plan_output_args(self, plan_output_dir: Path, *, working_dir: Path) -> list[str]:
+        """Select Claude's documented project-relative ``plansDirectory``."""
+        relative = plan_output_dir.resolve().relative_to(working_dir.resolve())
+        value = "." if relative == Path(".") else f"./{relative}"
+        settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
+        return ["--settings", settings]
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Claude uses --add-dir for plan directory access."""

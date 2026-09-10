@@ -19,6 +19,9 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
 )
 
 logger = structlog.get_logger()
@@ -63,7 +66,22 @@ class CursorAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_yolo=True,
-            supports_plan_mode=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --mode plan before the first user turn.",
+                version_requirement="Cursor Agent exposing --mode plan.",
+                verified_version="2026.09.02-c22c1a3",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.SESSION,
+                artifact_location_detail=(
+                    "Cursor returns its plan in the interactive session and exposes no launch "
+                    "option that guarantees an on-disk plan file at a requested path."
+                ),
+                remediation=(
+                    "Review or copy the plan from the Cursor session, or use Claude when a "
+                    "specific filesystem output directory is required."
+                ),
+            ),
             supports_accept_edits=True,
             supports_sandbox_toggle=True,
             supports_stop_hook=True,

@@ -128,6 +128,7 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
             resume=None,
             trusted_dirs=None,
             network=False,
+            plan_output_dir=None,
         )
     elif label == "Sync":
         sync(

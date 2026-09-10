@@ -13,5 +13,20 @@ import crossby.ai_tools.cursor
 import crossby.ai_tools.opencode
 import crossby.ai_tools.vscode  # noqa: F401
 from crossby.ai_tools.base import AbstractAITool, pick_best_model
+from crossby.ai_tools.plan_mode import (
+    PlanArtifactLocationError,
+    PlanModeAdapterContractError,
+    PlanModeConflictError,
+    PlanModeLaunchError,
+    PlanModeUnsupportedError,
+)
 
-__all__ = ["AbstractAITool", "pick_best_model"]
+__all__ = [
+    "AbstractAITool",
+    "PlanArtifactLocationError",
+    "PlanModeAdapterContractError",
+    "PlanModeConflictError",
+    "PlanModeLaunchError",
+    "PlanModeUnsupportedError",
+    "pick_best_model",
+]

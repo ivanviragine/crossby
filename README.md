@@ -343,7 +343,9 @@ The default preset produces a structured six-section handoff (current task, key 
 
 ## Launch options
 
-`crossby launch` runs any supported tool with one unified set of flags — crossby translates each into the target's native syntax (or degrades gracefully when the tool lacks it).
+`crossby launch` runs any supported tool with one unified set of flags. Ordinary
+autonomy options may degrade when a tool lacks an exact equivalent; native plan
+mode is stricter and fails before launch when Crossby cannot guarantee it.
 
 ### Programmatic sandbox selection
 
@@ -357,22 +359,57 @@ Library consumers can choose sandbox confinement independently from autonomy by 
 
 The setting never changes approval behavior: Codex `danger-full-access` does not imply `-a never`, and yolo does not imply an unrestricted sandbox. Cursor now explicitly enables its sandbox on the default adapter path instead of inheriting a potentially disabled user setting. The static `sandboxes_writes` capability still describes an adapter's normal confinement; it is not a guarantee for a particular invocation made with `sandbox=False`.
 
+### Native plan mode
+
+`--plan` is a strict adapter contract, not prompt text and not the bottom of an
+autonomy ladder. A successful launch means the harness selected its native plan
+mode before processing the initial task. `--plan` is therefore mutually
+exclusive with `--yolo`, `--auto`, and `--accept-edits`; contradictory CLI or
+adapter API input is rejected instead of silently starting an editing mode.
+
+Consumers should call `adapter.launch(..., plan_mode=True)` or
+`adapter.build_launch_command(..., plan_mode=True)` and handle
+`PlanModeLaunchError`. Do not prepend `/plan` to a prompt or treat an empty
+`plan_mode_args()` result as success: positional prompt text does not run a TUI
+slash-command dispatcher. The typed `capabilities().plan_mode` object exposes
+activation, version, initial-prompt, artifact-location, and remediation details;
+`supports_plan_mode` remains a derived compatibility property.
+
+Support matrix (selectors verified against the listed CLI help on 2026-09-10):
+
+| Tool | Native activation | Supported-version requirement | Initial prompt after activation | Plan artifacts / remediation |
+| --- | --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | CLI exposing that selector (verified 2.1.263) | Yes, positional prompt | Defaults to `~/.claude/plans`; `--plan-output-dir` supplies a project-relative `plansDirectory` setting |
+| Cursor CLI | `--mode plan` | CLI exposing that selector (verified 2026.09.02-c22c1a3) | Yes, positional prompt | Session output only; no launch-time on-disk destination guarantee |
+| GitHub Copilot CLI | `--plan` | CLI exposing that selector (verified 1.0.83) | Yes, `-i <prompt>` | **Private only:** Copilot's planning workspace; `--add-dir` does not relocate the plan |
+| OpenCode | `--agent plan` | Built-in `plan` agent plus `--agent` (verified 1.18.29) | Yes, `--prompt <prompt>` | OpenCode-managed plan files such as `.opencode/plans/*.md`, not an arbitrary output directory |
+| Antigravity CLI | `--mode plan` | CLI exposing that selector (verified 1.2.0) | Yes, `--prompt-interactive <prompt>` | **Private only:** `~/.gemini/antigravity-cli/brain/<conversation-id>/`; `--add-dir` does not relocate it and `agy` exposes no export/import command |
+| Codex CLI | Unsupported | No public interactive launch-time Plan selector in verified 0.153.4; `/plan` as a positional prompt is not activation | No guaranteed path | Upgrade when Codex adds an interactive selector/app-server-to-TUI path, or choose a supported terminal harness |
+| VS Code | Unsupported | No programmatic native selector in verified 1.136.1 | No | Select plan mode manually, or use a supported terminal harness |
+| Antigravity IDE | Unsupported | No programmatic native selector | No | Select plan mode manually, or use a supported terminal harness |
+
+Use `--plan-output-dir <dir>` when a consumer requires filesystem-backed plan
+artifacts in a particular project-relative directory. It requires `--plan` and
+is accepted only when the adapter can route the native plan there; currently
+Claude does so with its documented `plansDirectory` setting. Session-only,
+harness-managed, and private-artifact tools reject the request. Without this
+option, those tools' native plan modes remain available with their storage
+constraints exposed in capability metadata.
+
 ### Autonomy modes
 
-`crossby launch` exposes a four-tier **autonomy ladder** — how much the agent may do without asking. These are *permission* modes, not model selection:
+The remaining flags form the autonomy ladder (how much the agent may do without
+asking). They are permission modes, not model selection:
 
-```text
---plan  <  --accept-edits  <  --auto  <  --yolo
-read-only   auto-edit,        classifier-       skip all
-            ask shell         guarded           prompts
-```
-
-- `--plan` — read-only planning; the agent proposes but doesn't act.
 - `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of the 6 CLIs support it at launch; OpenCode falls back to default prompting). *(Codex is the exception — its accept-edits is sandbox-confined rather than per-command-prompted; see the note below the table.)*
 - `--auto` — Claude Code's classifier-mediated guarded autonomy (a separate model reviews each non-read action). **Claude-only** among the CLIs crossby drives; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
 - `--yolo` — skip all permission prompts.
 
-**Precedence (most permissive wins):** `yolo > auto > accept-edits > plan`. If you pass several, the highest applies. A requested tier a tool doesn't support downgrades to the next lower *autonomy* tier it does support (emitting a `UserWarning`), stopping at default prompting — it never escalates.
+**Precedence (most permissive wins):** `yolo > auto > accept-edits`. If you pass
+several of these three, the highest applies. A requested tier a tool doesn't
+support downgrades to the next lower autonomy tier it does support (emitting a
+`UserWarning`), stopping at default prompting — it never escalates. None can be
+combined with `--plan`.
 
 Per-tool mapping (verified against official docs, July 2026; CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
 

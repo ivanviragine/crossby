@@ -20,12 +20,15 @@ if TYPE_CHECKING:
 
 import structlog
 
+from crossby.ai_tools.plan_mode import PlanModeAdapterContractError
 from crossby.models.ai import (
     AIModel,
     AIToolCapabilities,
     AIToolID,
     EffortLevel,
     ModelTier,
+    PlanArtifactLocation,
+    PlanModeActivation,
     TokenUsage,
 )
 from crossby.models.config import ComplexityModelMapping
@@ -143,6 +146,7 @@ class AbstractAITool(ABC):
         auto: bool = False,
         scene: SceneLaunchContext | None = None,
         network_access: bool = False,
+        plan_output_dir: Path | None = None,
         *,
         sandbox: bool = True,
     ) -> int:
@@ -181,6 +185,9 @@ class AbstractAITool(ABC):
                 sandbox. Only Codex acts on it (it pins
                 ``sandbox_workspace_write.network_access``); other tools warn and
                 ignore it upstream via the ``supports_network_access`` capability.
+            plan_output_dir: Optional filesystem directory in which native plan
+                artifacts must be writable. Session-only, harness-managed, and
+                private-artifact tools reject this requirement before launch.
             sandbox: Whether to launch with the tool's sandbox enabled. Only
                 adapters declaring ``supports_sandbox_toggle`` translate this
                 programmatic input into a sandbox-selection flag.
@@ -189,6 +196,16 @@ class AbstractAITool(ABC):
             Exit code from the tool process (0 for detached).
         """
         from crossby.utils.process import run_with_transcript
+
+        self.validate_plan_mode_request(
+            plan_mode=plan_mode,
+            yolo=yolo,
+            auto=auto,
+            accept_edits=accept_edits,
+            initial_message=prompt,
+            plan_output_dir=plan_output_dir,
+            working_dir=working_dir,
+        )
 
         # Render the scene once, then split its result across the command builder
         # (argv) and the environment builder (env) so the artefacts are written a
@@ -208,6 +225,8 @@ class AbstractAITool(ABC):
             "working_dir": working_dir,
             "network_access": network_access,
         }
+        if plan_output_dir is not None:
+            command_kwargs["plan_output_dir"] = plan_output_dir
         # ``build_launch_command`` is a public adapter hook. Preserve
         # pre-toggle overrides, which do not accept the new keyword.
         if self.capabilities().supports_sandbox_toggle:
@@ -265,6 +284,109 @@ class AbstractAITool(ABC):
     def plan_mode_args(self) -> list[str]:
         """Get extra CLI args for native plan/approval mode."""
         return []  # Default: no plan mode support
+
+    def plan_output_args(self, plan_output_dir: Path, *, working_dir: Path) -> list[str]:
+        """Route native plan artifacts to a requested workspace directory.
+
+        Only adapters whose typed capability advertises
+        :attr:`PlanArtifactLocation.REQUESTED_PATH` may override this hook.
+        """
+        return []
+
+    def validate_plan_mode_request(
+        self,
+        *,
+        plan_mode: bool,
+        yolo: bool = False,
+        auto: bool = False,
+        accept_edits: bool = False,
+        initial_message: str | None = None,
+        plan_output_dir: Path | None = None,
+        working_dir: Path | None = None,
+    ) -> None:
+        """Reject any plan request the adapter cannot honor truthfully.
+
+        This shared pre-launch gate is called by :meth:`launch`,
+        :meth:`build_launch_command`, and ``crossby launch``. GUI adapters that
+        override ``launch`` call it explicitly before constructing their
+        workspace-open command.
+        """
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactLocationError,
+            PlanModeConflictError,
+            PlanModeLaunchError,
+            PlanModeUnsupportedError,
+        )
+
+        caps = self.capabilities()
+        capability = caps.plan_mode
+
+        if plan_output_dir is not None and not plan_mode:
+            raise PlanModeLaunchError(
+                f"{caps.display_name} received plan_output_dir={plan_output_dir} "
+                "without plan_mode=True. Enable native plan mode or remove the output request.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if not plan_mode:
+            return
+
+        conflicts = tuple(
+            name
+            for name, requested in (
+                ("yolo", yolo),
+                ("auto", auto),
+                ("accept_edits", accept_edits),
+            )
+            if requested
+        )
+        if conflicts:
+            raise PlanModeConflictError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+                conflicts=conflicts,
+            )
+
+        if not capability.supported:
+            raise PlanModeUnsupportedError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+            )
+
+        if initial_message and not capability.initial_prompt_after_activation:
+            raise PlanModeUnsupportedError(
+                f"{caps.display_name} cannot deliver an initial prompt after native plan-mode "
+                "activation. Remediation: launch without an initial prompt, then submit the task "
+                "after selecting plan mode manually.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
+        if plan_output_dir is not None:
+            output_is_in_workspace = (
+                working_dir is not None
+                and plan_output_dir.resolve().is_relative_to(working_dir.resolve())
+            )
+            if (
+                capability.artifact_location is not PlanArtifactLocation.REQUESTED_PATH
+                or not output_is_in_workspace
+            ):
+                raise PlanArtifactLocationError.for_tool(
+                    tool_id=self.TOOL_ID,
+                    display_name=caps.display_name,
+                    capability=capability,
+                    requested_dir=plan_output_dir,
+                )
+
+        if capability.activation is PlanModeActivation.CLI_ARGUMENT and not self.plan_mode_args():
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} declares native CLI plan mode but its adapter emitted no "
+                "activation arguments. Update Crossby before retrying.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Get extra CLI args to grant write access to a plan output directory."""
@@ -540,14 +662,12 @@ class AbstractAITool(ABC):
         """Resolve the autonomy/permission-mode CLI args via one precedence chain.
 
         Ladder, most permissive first: ``yolo`` > ``auto`` > ``accept_edits`` >
-        default prompting > ``plan`` (read-only). The highest *requested* tier
-        that the tool supports wins. When the tool lacks a requested tier the
-        request downgrades to the next lower *autonomy* tier it supports (never
-        escalating), emitting a one-line warning. Downgrades stop at default
-        prompting — an unmet autonomy request never crosses into read-only plan
-        mode. Plan mode is emitted only when explicitly requested and no
-        autonomy tier applies (preserving the historical ``--yolo --plan``
-        fallback).
+        default prompting. Native plan mode is a separate, exclusive contract;
+        :meth:`validate_plan_mode_request` rejects combinations with this ladder.
+        The highest requested autonomy tier that the tool supports wins. When
+        the tool lacks a requested tier the request downgrades to the next lower
+        autonomy tier it supports (never escalating), emitting a one-line
+        warning. Downgrades stop at default prompting.
 
         The cascade collapses the requested flags to the single highest tier and
         walks *down* from there, so it relies on the capability invariant that a
@@ -585,15 +705,15 @@ class AbstractAITool(ABC):
                     )
                 return args_fns[tier]()
 
-        # No autonomy tier is supported. Honor an explicit plan request as the
-        # documented lower fallback; otherwise degrade to default prompting.
-        landing = "falling back to plan mode" if plan_mode else "using default prompting"
+        # No autonomy tier is supported. Degrade to default prompting; plan mode
+        # cannot be a fallback because it is mutually exclusive with this ladder.
         warnings.warn(
-            f"{caps.display_name} does not support {_tier_labels[requested]} mode; {landing}.",
+            f"{caps.display_name} does not support {_tier_labels[requested]} mode; "
+            "using default prompting.",
             UserWarning,
             stacklevel=3,
         )
-        return self.plan_mode_args() if plan_mode else []
+        return []
 
     def build_launch_command(
         self,
@@ -611,6 +731,7 @@ class AbstractAITool(ABC):
         scene: SceneLaunchArgs | None = None,
         working_dir: Path | None = None,
         network_access: bool = False,
+        plan_output_dir: Path | None = None,
         *,
         sandbox: bool = True,
     ) -> list[str]:
@@ -627,6 +748,16 @@ class AbstractAITool(ABC):
         flag; unsupported adapters retain their existing trusted-directory
         composition, including legacy hook overrides.
         """
+        self.validate_plan_mode_request(
+            plan_mode=plan_mode,
+            yolo=yolo,
+            auto=auto,
+            accept_edits=accept_edits,
+            initial_message=initial_message or prompt,
+            plan_output_dir=plan_output_dir,
+            working_dir=working_dir,
+        )
+
         caps = self.capabilities()
         cmd = [caps.binary]
 
@@ -684,6 +815,25 @@ class AbstractAITool(ABC):
         )
         cmd.extend(autonomy_args)
 
+        if plan_output_dir is not None:
+            if working_dir is None:
+                raise PlanModeAdapterContractError(
+                    f"{caps.display_name} requires working_dir to route native plan artifacts.",
+                    tool_id=self.TOOL_ID,
+                    capability=caps.plan_mode,
+                )
+            output_args = self.plan_output_args(plan_output_dir, working_dir=working_dir)
+            if not output_args:
+                raise PlanModeAdapterContractError(
+                    f"{caps.display_name} advertises requested-path plan artifacts but emitted no "
+                    "routing arguments. Update Crossby before retrying.",
+                    tool_id=self.TOOL_ID,
+                    capability=caps.plan_mode,
+                )
+            cmd.extend(output_args)
+
+        effective_trusted_dirs = list(trusted_dirs or [])
+
         if json_schema:
             cmd.extend(self.structured_output_args(json_schema))
 
@@ -693,7 +843,7 @@ class AbstractAITool(ABC):
         if caps.supports_sandbox_toggle:
             sandbox_args = self.sandbox_config_args(
                 autonomy_args=autonomy_args,
-                trusted_dirs=trusted_dirs,
+                trusted_dirs=effective_trusted_dirs or None,
                 working_dir=working_dir,
                 network_access=network_access,
                 sandbox=sandbox,
@@ -704,7 +854,7 @@ class AbstractAITool(ABC):
             # themselves when their capability is disabled dynamically.
             sandbox_args = self.sandbox_config_args(
                 autonomy_args=autonomy_args,
-                trusted_dirs=trusted_dirs,
+                trusted_dirs=effective_trusted_dirs or None,
                 working_dir=working_dir,
                 network_access=network_access,
             )

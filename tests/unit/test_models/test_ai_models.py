@@ -417,9 +417,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("codex")
         assert adapter.plan_mode_args() == []
 
-    def test_opencode_no_plan_mode(self) -> None:
+    def test_opencode_plan_mode(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--agent", "plan"]
 
     def test_cursor_plan_mode(self) -> None:
         adapter = AbstractAITool.get("cursor")

@@ -13,6 +13,9 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 
@@ -45,6 +48,23 @@ class OpenCodeAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_resume=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Selects OpenCode's built-in plan agent with --agent plan.",
+                version_requirement="OpenCode exposing the built-in plan agent and --agent.",
+                verified_version="1.18.29",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.WORKSPACE_MANAGED,
+                artifact_location_detail=(
+                    "The built-in agent denies ordinary edits and permits OpenCode-managed plan "
+                    "files rather than an arbitrary requested output directory."
+                ),
+                artifact_path_template="{workspace}/.opencode/plans/*.md",
+                remediation=(
+                    "Read or copy the managed OpenCode plan after the session, or use Claude "
+                    "when a specific filesystem output directory is required."
+                ),
+            ),
             # No session-scoped scene lever. OpenCode loads the OPENCODE_CONFIG
             # file *between* its global and project config layers, so a project
             # opencode.json can re-enable an MCP server the scene deselected —
@@ -84,6 +104,10 @@ class OpenCodeAdapter(AbstractAITool):
     def initial_message_args(self, prompt: str) -> list[str]:
         """OpenCode uses --prompt for the initial message."""
         return ["--prompt", prompt]
+
+    def plan_mode_args(self) -> list[str]:
+        """Select OpenCode's built-in, read-only ``plan`` agent."""
+        return ["--agent", "plan"]
 
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         return TokenUsage()
