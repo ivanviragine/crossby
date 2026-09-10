@@ -712,9 +712,13 @@ def _restore_paths(
             # marker-backed directory.  Both shapes are active scene output;
             # without provenance, clearing either one would orphan its
             # pre-scene state while reporting a successful clear.
-            if projection.tool_points_at_projection(project_root, target_rel, kind) or (
+            legacy_projection = projection.tool_points_at_projection(
+                project_root, target_rel, kind
+            ) or projection.tool_symlink_points_into_projection(project_root, target_rel)
+            marker_projection = (
                 target.is_dir() and not target.is_symlink() and has_managed_marker(target)
-            ):
+            )
+            if legacy_projection or marker_projection:
                 results.append(
                     SyncResult(
                         tool_id=representative,

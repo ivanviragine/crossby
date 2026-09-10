@@ -8,6 +8,8 @@ pinned for determinism, and each subcommand is invoked through ``CliRunner``.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1036,6 +1038,37 @@ class TestCorruptLedger:
         assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
         assert (root / SCENE_STATE_PATH).exists()
 
+    def test_nul_symlink_restore_path_refuses_without_mutating_scene(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene_paths"][".cursor/skills"] = {"kind": "symlink", "target": "foo\x00bar"}
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+        managed_paths = {
+            target_rel: (
+                os.path.lexists(root / target_rel),
+                (root / target_rel).is_symlink(),
+                (root / target_rel).readlink() if (root / target_rel).is_symlink() else None,
+            )
+            for target_rel in data["scene_paths"]
+        }
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert (root / SCENE_STATE_PATH).exists()
+        assert {
+            target_rel: (
+                os.path.lexists(root / target_rel),
+                (root / target_rel).is_symlink(),
+                (root / target_rel).readlink() if (root / target_rel).is_symlink() else None,
+            )
+            for target_rel in data["scene_paths"]
+        } == managed_paths
+
     def test_legacy_active_projection_without_path_provenance_fails_closed(
         self, tmp_path: Path
     ) -> None:
@@ -1053,6 +1086,27 @@ class TestCorruptLedger:
         assert "will not infer" in normalized
         assert (root / SCENE_STATE_PATH).exists()
         assert (root / ".agents/skills").is_symlink()
+
+    def test_legacy_dangling_projection_without_path_provenance_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data.pop("scene_paths")
+        (root / LEDGER).write_text(json.dumps(data), encoding="utf-8")
+        target = root / ".agents" / "skills"
+        literal = target.readlink()
+        shutil.rmtree(root / ".crossby" / "scene")
+        assert target.is_symlink() and not target.exists()
+
+        result = _invoke(["scene", "clear", "--force"], root)
+
+        assert result.exit_code == 1
+        assert "legacy activation" in " ".join(result.output.lower().split())
+        assert (root / SCENE_STATE_PATH).exists()
+        assert target.is_symlink()
+        assert target.readlink() == literal
 
     def test_typo_scene_key_refuses(self, tmp_path: Path) -> None:
         # A scene entry under a key no revert handler recognises (a typo'd

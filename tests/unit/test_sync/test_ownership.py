@@ -387,6 +387,7 @@ class TestLoadLedgerChecked:
             {".cursor/skills": {"kind": "absent", "target": "extra"}},
             {".cursor/skills": {"kind": "symlink"}},
             {".cursor/skills": {"kind": "symlink", "target": 5}},
+            {".cursor/skills": {"kind": "symlink", "target": "foo\x00bar"}},
             {".cursor/skills": {"kind": "directory", "backup": "/tmp/stolen"}},
             {".cursor/skills": {"kind": "directory", "backup": "../skills.bak"}},
             {".cursor/skills": {"kind": "directory", "backup": ".agents/skills.bak"}},

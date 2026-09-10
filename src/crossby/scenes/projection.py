@@ -250,6 +250,28 @@ def tool_points_at_projection(project_root: Path, target_rel: str, kind: str) ->
     return is_same_path(project_root / target_rel, project_root / _kind_dir(kind))
 
 
+def tool_symlink_points_into_projection(project_root: Path, target_rel: str) -> bool:
+    """Whether a target's literal symlink destination is in the scene tree.
+
+    ``is_same_path`` intentionally requires both endpoints to resolve.  A
+    legacy target can instead be a dangling link after ``.crossby/scene`` was
+    removed, so inspect its literal destination as a fail-closed recovery
+    guard without requiring that destination to exist.
+    """
+    target = project_root / target_rel
+    if not target.is_symlink():
+        return False
+    try:
+        literal = target.readlink()
+        destination = literal if literal.is_absolute() else target.parent / literal
+        projection_root = project_root / SCENE_PROJECTION_ROOT
+        return destination.resolve(strict=False).is_relative_to(
+            projection_root.resolve(strict=False)
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
 def allocate_directory_backup(project_root: Path, target_rel: str) -> str:
     """Return the exact free sibling backup path for a scene displacement."""
     target = project_root / target_rel
