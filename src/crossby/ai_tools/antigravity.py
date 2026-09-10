@@ -27,6 +27,9 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 from crossby.utils.process import run_with_transcript
@@ -53,6 +56,23 @@ class AntigravityAdapter(AbstractAITool):
             supports_headless=False,
             supports_initial_message=False,
             blocks_until_exit=False,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.UNSUPPORTED,
+                activation_detail=(
+                    "The Antigravity IDE launcher exposes neither a native plan-mode selector nor "
+                    "initial-message delivery to an agent session."
+                ),
+                version_requirement=(
+                    "An Antigravity IDE CLI/API with a programmatic native plan selector."
+                ),
+                initial_prompt_after_activation=False,
+                artifact_location=PlanArtifactLocation.UNAVAILABLE,
+                artifact_location_detail="No programmatic native plan session is available.",
+                remediation=(
+                    "Open Antigravity normally and select plan mode manually, or use a supported "
+                    "terminal harness for programmatic planning."
+                ),
+            ),
         )
 
     def launch(
@@ -71,6 +91,7 @@ class AntigravityAdapter(AbstractAITool):
         auto: bool = False,
         scene: SceneLaunchContext | None = None,
         network_access: bool = False,
+        plan_output_dir: Path | None = None,
         *,
         sandbox: bool = True,
     ) -> int:
@@ -81,6 +102,15 @@ class AntigravityAdapter(AbstractAITool):
         # `antigravity <path>` opens the workspace, mirroring the VS Code-family
         # launcher convention (`code <path>` / `cursor <path>`). Pass the working
         # dir explicitly rather than "." so the target is unambiguous.
+        self.validate_plan_mode_request(
+            plan_mode=plan_mode,
+            yolo=yolo,
+            auto=auto,
+            accept_edits=accept_edits,
+            initial_message=prompt,
+            plan_output_dir=plan_output_dir,
+            working_dir=working_dir,
+        )
         cmd = [self.capabilities().binary, str(working_dir)]
         logger.info("ai_tool.launch", tool="antigravity", cwd=str(working_dir))
         return run_with_transcript(cmd, transcript_path, cwd=working_dir)

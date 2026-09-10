@@ -14,6 +14,9 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
     TokenUsage,
 )
 
@@ -104,7 +107,23 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --mode plan before the first user turn.",
+                version_requirement="Antigravity CLI exposing --mode plan.",
+                verified_version="1.2.0",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.PRIVATE,
+                artifact_location_detail=(
+                    "agy confines native plan artifacts to its per-conversation brain directory; "
+                    "--add-dir does not relocate them into the requested workspace."
+                ),
+                artifact_path_template=("~/.gemini/antigravity-cli/brain/<conversation-id>/"),
+                remediation=(
+                    "Use the private brain artifact after the session, or choose Claude when a "
+                    "specific filesystem output directory is required."
+                ),
+            ),
             supports_accept_edits=True,
             # agy exposes a Claude-style hook system (PreToolUse/PostToolUse/
             # Pre/PostInvocation/Stop). It reads decisions as a top-level

@@ -27,12 +27,13 @@ def test_sandbox_is_orthogonal_to_autonomy(sandbox: bool) -> None:
     suffix = ["--sandbox", "enabled" if sandbox else "disabled"]
 
     assert adapter.build_launch_command(accept_edits=True, sandbox=sandbox) == ["agent", *suffix]
-    assert adapter.build_launch_command(plan_mode=True, sandbox=sandbox) == [
-        "agent",
-        "--mode",
-        "plan",
-        *suffix,
-    ]
+    with patch("crossby.utils.versioning.detect_binary_version", return_value=(2026, 9, 2)):
+        assert adapter.build_launch_command(plan_mode=True, sandbox=sandbox) == [
+            "agent",
+            "--mode",
+            "plan",
+            *suffix,
+        ]
     assert adapter.build_launch_command(yolo=True, sandbox=sandbox) == [
         "agent",
         "--force",

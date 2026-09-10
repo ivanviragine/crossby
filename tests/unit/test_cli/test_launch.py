@@ -6,10 +6,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
+from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
 from crossby.cli.main import app
+from crossby.models.ai import (
+    AIToolID,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
+)
 
 runner = CliRunner()
 
@@ -521,6 +529,21 @@ class TestPlanFlag:
             supports_trusted_dirs=False,
             supports_plan_mode=supports_plan_mode,
         )
+        if not supports_plan_mode:
+            capability = PlanModeCapability(
+                activation=PlanModeActivation.UNSUPPORTED,
+                activation_detail="No native selector is available.",
+                version_requirement="A CLI release exposing a native selector.",
+                initial_prompt_after_activation=False,
+                artifact_location=PlanArtifactLocation.UNAVAILABLE,
+                artifact_location_detail="Native plan artifacts are unavailable.",
+                remediation="Use a supported planning harness.",
+            )
+            adapter.validate_plan_mode_request.side_effect = PlanModeUnsupportedError.for_tool(
+                tool_id=AIToolID(tool),
+                display_name=tool.title(),
+                capability=capability,
+            )
         adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
 
         with (
@@ -579,6 +602,96 @@ class TestPlanFlag:
         assert result.exit_code == 0, result.output
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("plan_mode") is False
+
+
+class TestNativePlanContractCLI:
+    @pytest.mark.parametrize("tool", ["codex", "vscode", "antigravity"])
+    def test_unsupported_tools_fail_before_launch(self, tmp_path: Path, tool: str) -> None:
+        (tmp_path / ".crossby.yml").write_text(f"version: 1\nai:\n  default_tool: {tool}\n")
+        with (
+            patch("crossby.utils.process.run_with_transcript") as base_run,
+            patch("crossby.ai_tools.vscode.run_with_transcript") as vscode_run,
+            patch("crossby.ai_tools.antigravity.run_with_transcript") as antigravity_run,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", tool, "--plan", "--prompt", "Plan this"],
+            )
+        assert result.exit_code == 1, result.output
+        assert "cannot guarantee native plan mode" in result.output
+        assert "Remediation:" in result.output
+        base_run.assert_not_called()
+        vscode_run.assert_not_called()
+        antigravity_run.assert_not_called()
+
+    def test_unverified_installed_version_fails_before_launch(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 17, 0)),
+            patch("crossby.utils.process.run_with_transcript") as run,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "opencode", "--plan"],
+            )
+        assert result.exit_code == 1, result.output
+        assert "oldest release verified by this adapter is 1.18.29" in result.output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("flag", ["--yolo", "--auto", "--accept-edits"])
+    def test_plan_conflicts_are_rejected_before_launch(self, tmp_path: Path, flag: str) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "claude", "--plan", flag],
+            )
+        assert result.exit_code == 1, result.output
+        assert "cannot be combined" in result.output
+        run.assert_not_called()
+
+    def test_opencode_summary_and_process_command_report_native_plan(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 18, 29)),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "opencode",
+                    "--plan",
+                    "--prompt",
+                    "Plan this",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Plan mode" in result.output
+        assert "on" in result.output
+        cmd = run.call_args.args[0]
+        assert cmd[:5] == ["opencode", "--prompt", "Plan this", "--agent", "plan"]
+
+    def test_antigravity_workspace_output_request_fails_before_launch(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: antigravity-cli\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "antigravity-cli",
+                    "--plan",
+                    "--plan-output-dir",
+                    "plans",
+                ],
+            )
+        assert result.exit_code == 1, result.output
+        assert "brain directory" in result.output
+        run.assert_not_called()
 
 
 class TestAcceptEditsAutoFlags:

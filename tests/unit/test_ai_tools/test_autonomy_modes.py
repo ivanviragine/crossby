@@ -1,16 +1,18 @@
 """Accept-edits and auto (classifier) autonomy tiers.
 
 Covers per-adapter ``accept_edits_args()`` / ``auto_args()``, capability flags,
-``build_launch_command()`` composition, the precedence chain
-(``yolo > auto > accept_edits > plan``), and the downgrade/fallback warning
-paths.
+``build_launch_command()`` composition, the autonomy precedence chain, native
+plan-mode exclusivity, and the downgrade/fallback warning paths.
 """
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import PlanModeConflictError
 
 
 def _permission_mode(cmd: list[str]) -> str | None:
@@ -179,35 +181,23 @@ class TestAcceptEditsFallback:
         with pytest.warns(UserWarning, match="does not support accept-edits"):
             adapter.build_launch_command(accept_edits=True)
 
-    def test_explicit_plan_is_honored_as_lower_fallback(self) -> None:
-        # accept_edits unsupported + explicit plan requested → warn about plan.
+    def test_explicit_plan_conflicts_instead_of_becoming_a_fallback(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        with pytest.warns(UserWarning, match="falling back to plan mode"):
+        with pytest.raises(PlanModeConflictError, match="--accept-edits"):
             adapter.build_launch_command(accept_edits=True, plan_mode=True)
 
 
 class TestPrecedence:
-    """yolo > auto > accept_edits > plan (most permissive wins)."""
+    """Native plan mode is exclusive; autonomy precedence applies without it."""
 
-    def test_yolo_supersedes_all(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(
-            yolo=True, auto=True, accept_edits=True, plan_mode=True
-        )
-        assert "--dangerously-skip-permissions" in cmd
-        assert _permission_mode(cmd) is None  # no acceptEdits/auto/plan value
-
-    def test_auto_supersedes_accept_edits_and_plan(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(
-            auto=True, accept_edits=True, plan_mode=True
-        )
-        assert _permission_mode(cmd) == "auto"
-
-    def test_accept_edits_supersedes_plan(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(accept_edits=True, plan_mode=True)
-        assert _permission_mode(cmd) == "acceptEdits"
+    @pytest.mark.parametrize("flag", ["yolo", "auto", "accept_edits"])
+    def test_autonomy_conflicts_with_plan(self, flag: str) -> None:
+        with pytest.raises(PlanModeConflictError, match=flag.replace("_", "-")):
+            AbstractAITool.get("claude").build_launch_command(plan_mode=True, **{flag: True})
 
     def test_plan_alone(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 263)):
+            cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
         assert _permission_mode(cmd) == "plan"
 
     def test_no_autonomy_flags_is_bare(self) -> None:
@@ -244,7 +234,7 @@ class TestYoloFallbackUnchangedTools:
             cmd = adapter.build_launch_command(yolo=True)
         assert cmd == base
 
-    def test_opencode_yolo_with_plan_falls_back_to_plan(self) -> None:
+    def test_opencode_yolo_with_plan_is_rejected(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        with pytest.warns(UserWarning, match="falling back to plan mode"):
+        with pytest.raises(PlanModeConflictError, match="--yolo"):
             adapter.build_launch_command(yolo=True, plan_mode=True)

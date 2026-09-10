@@ -16,6 +16,9 @@ from crossby.models.ai import (
     EffortLevel,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
 )
 from crossby.utils.git_worktree import outside_root_git_metadata_dirs
 
@@ -54,6 +57,29 @@ class CodexAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            plan_mode=PlanModeCapability(
+                activation=PlanModeActivation.UNSUPPORTED,
+                activation_detail=(
+                    "Codex has a native Plan collaboration mode, but its interactive CLI has no "
+                    "public launch-time selector that applies before a positional prompt. A "
+                    "positional /plan prefix is ordinary prompt text, not mode activation."
+                ),
+                version_requirement=(
+                    "A Codex CLI release with a public interactive launch-time collaboration-mode "
+                    "selector, or a supported app-server-to-TUI activation path."
+                ),
+                verified_version="0.153.4",
+                initial_prompt_after_activation=False,
+                artifact_location=PlanArtifactLocation.UNAVAILABLE,
+                artifact_location_detail=(
+                    "Crossby cannot start a guaranteed native Codex plan session, so it makes no "
+                    "plan-artifact claim."
+                ),
+                remediation=(
+                    "Upgrade when Codex publishes an interactive plan-mode launch interface, or "
+                    "use Claude, Cursor, Copilot, or OpenCode for programmatic planning."
+                ),
+            ),
             supports_accept_edits=True,
             supports_stop_hook=True,
             supports_session_start_hook=True,
