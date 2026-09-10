@@ -122,9 +122,10 @@ interactive sessions. A complete collector must:
    single version probe, native-mode evidence, and all available binding IDs.
    Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
    cases use the typed errors in `ai_tools/plan_mode.py`.
-6. Bound waits, always terminate protocol children, redact/truncate stderr, and
-   remove only run-owned temporary artifacts. Caller-owned Claude plan files are
-   preserved.
+6. Apply one request-wide deadline to the initial invocation, every protocol or
+   continuation wait, and any subprocess-backed export. Always terminate
+   protocol children, redact/truncate stderr, and remove only run-owned
+   temporary artifacts. Caller-owned Claude plan files are preserved.
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, and line-delimited JSON-RPC. Keep progress/transcript parsing out

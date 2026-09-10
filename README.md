@@ -445,7 +445,11 @@ else:
 
 Crossby returns Markdown and the available session, turn, item, conversation,
 or path evidence. It does not impose WADE validation and does not require the
-harness itself to create `PLAN.md`.
+harness itself to create `PLAN.md`. `timeout_seconds` is one collector deadline
+shared by the initial invocation, question continuations, protocol waits, and
+subprocess-backed export. Caller-supplied artifact-location failures remain
+`PlanArtifactLocationError` and are also caught by the collected API's
+`PlanSessionError` integration boundary.
 
 For activation-only CLI use, continue calling `adapter.launch(...,
 plan_mode=True)` or `adapter.build_launch_command(..., plan_mode=True)` and
