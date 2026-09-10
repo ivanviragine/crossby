@@ -200,7 +200,16 @@ class ClaudeAdapter(AbstractAITool):
             ) from exc
         session_id = str(uuid.uuid4())
         run_dir = root / session_id
-        run_dir.mkdir(parents=False, exist_ok=False)
+        try:
+            run_dir.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            raise PlanTransportError(
+                f"Claude Code isolated plan directory could not be created: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(run_dir,),
+            ) from exc
 
         command = self.build_launch_command(
             model=request.model,

@@ -466,7 +466,7 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
             and str(part.get("text")).strip()
         ]
         artifact_id = message_info.get("id")
-        candidate_id = str(artifact_id) if artifact_id is not None else None
+        candidate_id = (str(artifact_id).strip() or None) if artifact_id is not None else None
         if plan_parts:
             explicit_plans.append(("\n".join(plan_parts), candidate_id))
     return explicit_plans

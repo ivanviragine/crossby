@@ -29,6 +29,7 @@ from crossby.ai_tools import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionUnsupportedError,
+    PlanTransportError,
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import CapturedProcess, parse_jsonl
@@ -267,6 +268,36 @@ class TestNormalizedContract:
 
 
 class TestClaudeCollector:
+    def test_isolated_directory_creation_errors_are_session_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output_dir = tmp_path / "plans"
+        output_dir.mkdir()
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        run_dir = output_dir / str(session_id)
+        original_mkdir = Path.mkdir
+
+        def fake_mkdir(
+            path: Path,
+            mode: int = 0o777,
+            parents: bool = False,
+            exist_ok: bool = False,
+        ) -> None:
+            if path == run_dir:
+                raise PermissionError("read-only plan root")
+            original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+        monkeypatch.setattr("crossby.ai_tools.claude.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+
+        with pytest.raises(PlanTransportError, match="isolated plan directory") as raised:
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(
+                _request(tmp_path, plan_output_dir=output_dir)
+            )
+
+        assert raised.value.session_id == str(session_id)
+        assert raised.value.paths == (run_dir,)
+
     def test_exact_isolated_directory_ignores_decoy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -493,6 +524,30 @@ class TestExactSessionCliCollectors:
         with pytest.raises(PlanArtifactMissingError, match="no assistant plan"):
             AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
+    def test_opencode_normalizes_blank_plan_artifact_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exported = json.loads((FIXTURES / "opencode_export_success.json").read_text())
+        exported["messages"][1]["info"]["id"] = "   "
+        runs = iter(
+            [
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                ),
+                CapturedProcess(0, json.dumps(exported), ""),
+            ]
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
+
+        assert result.artifact_id is None
+
     def test_antigravity_requires_exact_schema_echo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -598,6 +653,50 @@ class TestExactSessionCliCollectors:
         assert "--no-remote-export" in commands[0]
         assert "--deny-tool=*" in commands[0]
         assert result.artifact_path is None
+
+    def test_copilot_preserves_nested_plan_headings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = "\n".join(
+            [
+                f"session_id: {exact_uuid}",
+                "",
+                "# Plan",
+                "",
+                "## Summary",
+                "Keep the complete plan.",
+                "",
+                "## Steps",
+                "1. Inspect.",
+                "2. Implement.",
+                "",
+                "# Notes",
+                "Exclude this section.",
+            ]
+        )
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            export_arg = next(value for value in command if value.startswith("--share="))
+            Path(export_arg.removeprefix("--share=")).write_text(share, encoding="utf-8")
+            return CapturedProcess(0, events, "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+
+        assert result.plan == "\n".join(
+            [
+                "## Summary",
+                "Keep the complete plan.",
+                "",
+                "## Steps",
+                "1. Inspect.",
+                "2. Implement.",
+            ]
+        )
 
     def test_copilot_continuations_share_one_timeout_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -555,7 +555,15 @@ def _copilot_export_plan(exported: str, session_id: str) -> str | None:
     if metadata_ids != {session_id}:
         raise ValueError("GitHub Copilot share metadata did not match the assigned session UUID.")
     marked = re.findall(r"(?is)<!--\s*plan:start\s*-->(.*?)<!--\s*plan:end\s*-->", exported)
-    headed = re.findall(r"(?ims)^#{1,3}\s+Plan\s*$\n(.*?)(?=^#{1,3}\s+|\Z)", exported)
+    headed: list[str] = []
+    for heading in re.finditer(r"(?im)^(#{1,3})[ \t]+Plan[ \t]*$", exported):
+        remainder = exported[heading.end() :]
+        next_peer = re.search(
+            rf"(?m)^#{{1,{len(heading.group(1))}}}(?:[ \t]+|$)",
+            remainder,
+        )
+        end = next_peer.start() if next_peer is not None else len(remainder)
+        headed.append(remainder[:end])
     candidates = [candidate.strip() for candidate in [*marked, *headed] if candidate.strip()]
     unique = list(dict.fromkeys(candidates))
     if len(unique) > 1:
