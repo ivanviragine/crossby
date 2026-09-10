@@ -44,9 +44,11 @@ LEDGER_PATH = Path(".crossby") / "owned.json"
 # ``scene_paths`` (exact PROJECT-path restore provenance). v4 records the
 # device/inode of a directory immediately before its restore rename, allowing a
 # retry to authenticate a completed rename after cleanup persistence failed.
+# v5 records canonical PROJECT sources that a scene deliberately left untouched,
+# so their managed markers are never mistaken for legacy scene output on clear.
 # The version remains advisory, and older files without either section remain
 # readable.
-LEDGER_VERSION = 4
+LEDGER_VERSION = 5
 
 # Only these three concerns carry revocation semantics.
 _HOOKS = SyncConcern.HOOKS.value
@@ -65,6 +67,7 @@ class ScenePathRestoreKind(StrEnum):
     ABSENT = "absent"
     SYMLINK = "symlink"
     DIRECTORY = "directory"
+    UNCHANGED = "unchanged"
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,11 @@ class ScenePathRestore:
             directory_device=device,
             directory_inode=inode,
         )
+
+    @classmethod
+    def unchanged(cls) -> ScenePathRestore:
+        """Record a canonical source a scene intentionally did not mutate."""
+        return cls(ScenePathRestoreKind.UNCHANGED)
 
     def with_directory_identity(self, *, device: int, inode: int) -> ScenePathRestore:
         """Return a directory descriptor authenticated for an attempted restore."""
@@ -553,6 +561,15 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
         ):
             raise ValueError("absent scene restore descriptor has unexpected fields")
         return
+    if descriptor.kind == ScenePathRestoreKind.UNCHANGED:
+        if (
+            descriptor.link_target is not None
+            or descriptor.backup_path is not None
+            or descriptor.directory_device is not None
+            or descriptor.directory_inode is not None
+        ):
+            raise ValueError("unchanged scene restore descriptor has unexpected fields")
+        return
     if descriptor.kind == ScenePathRestoreKind.SYMLINK:
         if (
             not isinstance(descriptor.link_target, str)
@@ -589,6 +606,8 @@ def _parse_scene_restore(target: str, raw: object) -> ScenePathRestore:
     kind = raw.get("kind")
     if kind == ScenePathRestoreKind.ABSENT.value and set(raw) == {"kind"}:
         descriptor = ScenePathRestore.absent()
+    elif kind == ScenePathRestoreKind.UNCHANGED.value and set(raw) == {"kind"}:
+        descriptor = ScenePathRestore.unchanged()
     elif kind == ScenePathRestoreKind.SYMLINK.value and set(raw) == {"kind", "target"}:
         literal = raw.get("target")
         if not isinstance(literal, str):

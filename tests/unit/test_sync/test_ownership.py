@@ -147,6 +147,7 @@ class TestLedgerRoundTrip:
         assert ledger.record_scene_absent(".cursor/skills") is True
         assert ledger.record_scene_symlink(".agents/skills", "../.claude/skills") is True
         assert ledger.record_scene_directory(".cursor/agents", ".cursor/agents.bak2") is True
+        assert ledger.record_scene_restore(".codex/agents", ScenePathRestore.unchanged()) is True
         ledger.record_scene_restore_directory_identity(".cursor/agents", device=42, inode=99)
         # A co-sharer cannot replace the first physical-path baseline.
         assert ledger.record_scene_absent(".agents/skills") is False
@@ -160,6 +161,7 @@ class TestLedgerRoundTrip:
         assert loaded.scene_restore(".cursor/agents") == ScenePathRestore.directory(
             ".cursor/agents.bak2", device=42, inode=99
         )
+        assert loaded.scene_restore(".codex/agents") == ScenePathRestore.unchanged()
         assert not loaded.is_empty()
 
     def test_clearing_last_scene_path_descriptor_makes_ledger_empty(self) -> None:

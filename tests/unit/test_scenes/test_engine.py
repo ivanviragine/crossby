@@ -339,6 +339,48 @@ class TestExactPathRestoration:
             classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
         )
 
+    @pytest.mark.parametrize(
+        ("tool", "target_rel", "kind"),
+        [
+            ("codex", ".codex/agents", "agents"),
+            ("antigravity-cli", ".agents/skills", "skills"),
+        ],
+    )
+    def test_clear_keeps_marker_backed_canonical_source_untouched(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tool: str,
+        target_rel: str,
+        kind: str,
+    ) -> None:
+        """Canonical sources skipped by PROJECT retain durable no-op provenance."""
+        from crossby.models.ai import AIToolID
+        from crossby.sync.ownership import ScenePathRestore
+        from tests.unit.test_scenes.conftest import make_agent, make_skill
+
+        tool_id = AIToolID(tool)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [tool_id]),
+        )
+        if kind == "agents":
+            make_agent(tmp_path, target_rel, "code-reviewer.md")
+        else:
+            make_skill(tmp_path, target_rel, "review-skill")
+        target = tmp_path / target_rel
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+
+        apply_scene(resolve(tmp_path, SCENE, tools=[tool_id]), tmp_path)
+
+        assert load_ledger(tmp_path).scene_restore(target_rel) == ScenePathRestore.unchanged()
+        results = clear_scene(tmp_path)
+
+        assert not any(result.action == "error" for result in results)
+        assert target.is_dir() and (target / ".crossby-managed").is_file()
+        assert not (tmp_path / ".crossby" / "scene").exists()
+        assert load_ledger(tmp_path).scene_restore(target_rel) is None
+
     def test_symlinked_target_ancestor_does_not_record_a_baseline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

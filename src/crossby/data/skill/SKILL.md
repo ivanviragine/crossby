@@ -203,10 +203,11 @@ Inspect and activate.
 
 Reverting reads `.crossby/owned.json` (what crossby wrote). For every physical
 PROJECT skills/agents target, the ledger records true absence, the exact literal
-symlink target, or the exact Crossby-allocated backup holding a displaced real
-directory. Shared targets have one record. Clear and switch restore from that
-record directly: never rediscover the original source, infer a baseline, or select
-a neighboring `.bak*` path by filename. If the ledger exists but is unreadable or
+symlink target, the exact Crossby-allocated backup holding a displaced real
+directory, or a canonical source the scene deliberately left untouched. Shared
+targets have one record. Clear and switch restore from that record directly: never
+rediscover the original source, infer a baseline, or select a neighboring `.bak*`
+path by filename. If the ledger exists but is unreadable or
 contains malformed/unsafe path provenance, `use` and `clear` (and `--plan`)
 **refuse** (exit 1) rather than revert from an empty view. An active legacy PROJECT
 scene with no path record also requires manual recovery. Ordinary `sync` leaves a

@@ -871,6 +871,37 @@ class TestPartialFailure:
         assert "left intact" in result.output.lower()
         assert (root / SCENE_STATE_PATH).exists()
 
+    def test_failed_switch_reconciliation_write_is_structured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial outgoing clear never leaks its recovery-state write error."""
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        failed_clear = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.SKILLS,
+            action="error",
+            message="cursor skills could not be restored",
+        )
+
+        def _state_write_fails(*_args: object, **_kwargs: object) -> None:
+            raise OSError("scene state directory is unwritable")
+
+        monkeypatch.setattr("crossby.scenes.engine.clear_scene", lambda *_a, **_k: [failed_clear])
+        monkeypatch.setattr(
+            "crossby.services.scene_activation.save_scene_state", _state_write_fails
+        )
+
+        result = _invoke(["scene", "use", "deploy"], root)
+
+        assert result.exit_code == 1
+        assert "cursor skills could not be restored" in result.output
+        assert "could not preserve partial recovery state" in result.output.lower()
+        assert not isinstance(result.exception, OSError)
+        assert (root / SCENE_STATE_PATH).exists()
+
     def test_clear_write_failure_keeps_ownership_and_retries(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

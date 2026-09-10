@@ -445,8 +445,14 @@ def _repoint_path(
 ) -> SyncResult:
     # Re-pointing the canonical source onto a tree that links back into it would
     # be circular; that directory is left unfiltered (its tool filters via DECLARE
-    # where it can) and the skip is reported rather than corrupting it.
+    # where it can) and the skip is reported rather than corrupting it. Record
+    # that no-op durably: a normal sync may have left the source as a managed
+    # marker-backed directory, which otherwise looks like an unrecoverable
+    # legacy projection during clear.
     if projection.is_source_dir(ctx.project_root, target_rel, source_rel):
+        if not ctx.dry_run and ctx.ledger.scene_restore(target_rel) is None:
+            ctx.ledger.record_scene_restore(target_rel, ScenePathRestore.unchanged())
+            save_ledger(ctx.project_root, ctx.ledger)
         shared = ", ".join(sorted(str(t) for t in tools))
         return SyncResult(
             tool_id=tools[0],
@@ -854,6 +860,8 @@ def _concern_for_target(target_rel: str) -> SyncConcern:
 
 
 def _restore_description(descriptor: ScenePathRestore) -> str:
+    if descriptor.kind == ScenePathRestoreKind.UNCHANGED:
+        return "without changing the canonical source"
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
         return "to absence"
     if descriptor.kind == ScenePathRestoreKind.SYMLINK:
@@ -873,6 +881,9 @@ def _restore_one_path(
     target = project_root / target_rel
     kind = "skills" if concern == SyncConcern.SKILLS else "agents"
     _validate_restore_one_path(project_root, target_rel, concern, descriptor, force=force)
+
+    if descriptor.kind == ScenePathRestoreKind.UNCHANGED:
+        return descriptor
 
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
         if os.path.lexists(target):
@@ -921,6 +932,8 @@ def _validate_restore_one_path(
     force: bool,
 ) -> None:
     """Raise when restoring *descriptor* cannot safely succeed without writing."""
+    if descriptor.kind == ScenePathRestoreKind.UNCHANGED:
+        return
     target = project_root / target_rel
     kind = "skills" if concern == SyncConcern.SKILLS else "agents"
     scope = ProjectScope(project_root)

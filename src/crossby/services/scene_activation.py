@@ -259,7 +259,23 @@ def activate_scene(
                     warnings=warnings,
                 ) from exc
             if _has_error(revert_results):
-                reconcile_partial_clear_state(project_root, active, revert_results)
+                try:
+                    reconcile_partial_clear_state(project_root, active, revert_results)
+                except Exception as exc:
+                    raise SceneActivationError(
+                        ActivationFailureKind.FAILED_REVERT,
+                        (
+                            f"Could not preserve partial recovery state while reverting "
+                            f"{active.scene!r}: {exc}"
+                        ),
+                        hint=(
+                            "The outgoing scene may be only partially reverted. Restore write "
+                            "access, inspect its scene state, then run "
+                            "'crossby scene clear --force'."
+                        ),
+                        warnings=warnings,
+                        results=revert_results,
+                    ) from exc
                 raise SceneActivationError(
                     ActivationFailureKind.FAILED_REVERT,
                     (
