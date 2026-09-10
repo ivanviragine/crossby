@@ -226,6 +226,38 @@ class TestDryRun:
         assert snapshot() == before
         assert results  # a full result set is still produced
 
+    def test_dry_run_unreadable_project_target_returns_error_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prospective baseline inspection failure must not escape the preview."""
+        from crossby.models.ai import AIToolID
+
+        populate_project(tmp_path)
+        target = tmp_path / ".cursor" / "skills"
+        target.mkdir(parents=True)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
+        )
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+        real_iterdir = Path.iterdir
+
+        def _unreadable(path: Path):  # type: ignore[no-untyped-def]
+            if path == target:
+                raise PermissionError("permission denied")
+            return real_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", _unreadable)
+
+        results = apply_scene(resolved, tmp_path, dry_run=True)
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "permission denied" in (result.message or "")
+            for result in results
+        )
+
 
 class TestUnsupportedAndVersionGate:
     def test_old_claude_skips_skilloverrides_additions(

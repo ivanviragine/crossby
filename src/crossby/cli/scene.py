@@ -573,6 +573,7 @@ def clear_active(
         recorded_tools,
     )
     from crossby.services.scene_resolution import scene_root
+    from crossby.sync.safe_write import SyncContainmentError
 
     project_root = path.resolve()
     root = scene_root(project_root)
@@ -639,7 +640,7 @@ def clear_active(
     if _has_error(results):
         try:
             reconcile_partial_clear_state(root, active, results)
-        except OSError as exc:
+        except (OSError, SyncContainmentError) as exc:
             console.warn(f"Could not narrow scene state after the partial clear: {exc}")
         console.error("Clear failed for some tools — remaining state left intact for retry.")
         raise typer.Exit(1)

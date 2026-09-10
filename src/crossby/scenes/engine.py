@@ -472,7 +472,7 @@ def _repoint_path(
                 ctx.force,
                 ctx.ledger.scene_restore(target_rel),
             )
-        except (ValueError, SyncContainmentError) as exc:
+        except (OSError, ValueError, SyncContainmentError) as exc:
             baseline = f"error:{exc}"
         if baseline.startswith("error:"):
             preview.action = "error"

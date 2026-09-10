@@ -871,6 +871,36 @@ class TestPartialFailure:
         assert "left intact" in result.output.lower()
         assert (root / SCENE_STATE_PATH).exists()
 
+    def test_failed_clear_containment_during_reconciliation_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A state-save containment refusal must retain the partial-clear guidance."""
+        from crossby.sync.base import SyncConcern, SyncResult
+        from crossby.sync.safe_write import SyncContainmentError
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        failed_clear = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.SKILLS,
+            action="error",
+            message="cursor skills could not be restored",
+        )
+        monkeypatch.setattr("crossby.scenes.engine.clear_scene", lambda *_a, **_k: [failed_clear])
+
+        external = root / "external-gitignore"
+        external.write_text("user-owned\n", encoding="utf-8")
+        (root / ".gitignore").unlink()
+        (root / ".gitignore").symlink_to(external)
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        assert "could not narrow scene state" in result.output.lower()
+        assert "remaining state left intact" in result.output.lower()
+        assert not isinstance(result.exception, SyncContainmentError)
+        assert (root / SCENE_STATE_PATH).exists()
+
     def test_failed_switch_reconciliation_write_is_structured(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
