@@ -556,6 +556,7 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
     if descriptor.kind == ScenePathRestoreKind.SYMLINK:
         if (
             not isinstance(descriptor.link_target, str)
+            or not descriptor.link_target
             or "\x00" in descriptor.link_target
             or descriptor.backup_path is not None
             or descriptor.directory_device is not None
