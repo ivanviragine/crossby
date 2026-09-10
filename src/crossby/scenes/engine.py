@@ -1069,6 +1069,8 @@ def _validate_restore_one_path(
         raise FileNotFoundError(f"recorded backup is missing: {backup_rel}")
     if backup.is_symlink() or not backup.is_dir():
         raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
+    if not _matches_recorded_directory_identity(backup, descriptor):
+        raise ValueError(f"recorded backup is not the displaced real directory: {backup_rel}")
     if os.path.lexists(target):
         _validate_scene_output_removal(project_root, target_rel, kind, force=force)
 

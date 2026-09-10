@@ -670,6 +670,33 @@ class TestClearAndSchema:
         assert result.exit_code == 0, result.output
         assert "nothing to clear" in result.output.lower()
 
+    def test_clear_plan_rejects_replaced_recorded_directory_backup(self, tmp_path: Path) -> None:
+        """Preview the same identity failure that a real clear would report."""
+        from crossby.sync.ownership import load_ledger
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+        applied = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+        assert applied.exit_code == 0, applied.output
+
+        descriptor = load_ledger(root).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        backup = root / descriptor.backup_path
+        shutil.rmtree(backup)
+        backup.mkdir()
+
+        plan = _invoke(["scene", "clear", "--tool", "cursor", "--plan"], root)
+        clear = _invoke(["scene", "clear", "--tool", "cursor"], root)
+
+        expected = "recorded backup is not the displaced real directory"
+        assert plan.exit_code == 1
+        assert expected in " ".join(plan.output.split())
+        assert clear.exit_code == 1
+        assert expected in " ".join(clear.output.split())
+        assert backup.is_dir()
+        assert (root / ".cursor/skills").is_symlink()
+
     def test_unrecognised_schema_version_is_no_active_scene(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
         state_path = root / SCENE_STATE_PATH

@@ -251,8 +251,7 @@ class TestDryRun:
             for result in preview
         )
         assert any(
-            result.action == "updated"
-            and "recorded absent baseline" in (result.message or "")
+            result.action == "updated" and "recorded absent baseline" in (result.message or "")
             for result in preview
         )
 
@@ -1036,7 +1035,9 @@ class TestExactPathRestoration:
         )
         descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
         assert descriptor is not None and descriptor.backup_path is not None
-        shutil.rmtree(tmp_path / descriptor.backup_path)
+        backup = tmp_path / descriptor.backup_path
+        held_backup = tmp_path / "held-cursor-skills"
+        backup.rename(held_backup)
 
         missing_backup = clear_scene(tmp_path, dry_run=True)
         assert any(
@@ -1044,7 +1045,7 @@ class TestExactPathRestoration:
             for result in missing_backup
         )
 
-        (tmp_path / descriptor.backup_path).mkdir(parents=True)
+        held_backup.rename(backup)
         target = tmp_path / ".cursor/skills"
         target.unlink()
         target.write_text("not a projection", encoding="utf-8")
