@@ -421,6 +421,13 @@ class TestLoadLedgerChecked:
                 ".cursor/skills": {
                     "kind": "directory",
                     "backup": ".cursor/skills.bak",
+                    "displaced": True,
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
                     "device": 5,
                 }
             },

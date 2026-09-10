@@ -443,6 +443,14 @@ def _repoint_path(
     tools: tuple[AIToolID, ...],
     source_rel: str,
 ) -> SyncResult:
+    descriptor = ctx.ledger.scene_restore(target_rel)
+    # A durable UNCHANGED descriptor identifies the original canonical source,
+    # even if an active projection now outranks it during source discovery.
+    # Honor that baseline before the current topology: a --plan must describe
+    # the same source/no-op pair that a real scene switch reaches after clear.
+    if descriptor is not None and descriptor.kind == ScenePathRestoreKind.UNCHANGED:
+        return _canonical_source_skip(tree, target_rel, tools)
+
     # Re-pointing the canonical source onto a tree that links back into it would
     # be circular; that directory is left unfiltered (its tool filters via DECLARE
     # where it can) and the skip is reported rather than corrupting it. Record
@@ -450,19 +458,11 @@ def _repoint_path(
     # marker-backed directory, which otherwise looks like an unrecoverable
     # legacy projection during clear.
     if projection.is_source_dir(ctx.project_root, target_rel, source_rel):
-        if not ctx.dry_run and ctx.ledger.scene_restore(target_rel) is None:
+        if not ctx.dry_run and descriptor is None:
             ctx.ledger.record_scene_restore(target_rel, ScenePathRestore.unchanged())
             save_ledger(ctx.project_root, ctx.ledger)
-        shared = ", ".join(sorted(str(t) for t in tools))
-        return SyncResult(
-            tool_id=tools[0],
-            concern=tree.concern,
-            action="skipped",
-            message=(
-                f"{target_rel} is the canonical {tree.concern.value} source ({shared}); "
-                "left unfiltered to avoid a circular re-point"
-            ),
-        )
+        if descriptor is None:
+            return _canonical_source_skip(tree, target_rel, tools)
     if ctx.dry_run:
         preview = projection.preview_repoint(tree, tools)
         try:
@@ -483,7 +483,6 @@ def _repoint_path(
         return preview
 
     target = ctx.project_root / target_rel
-    descriptor = ctx.ledger.scene_restore(target_rel)
     if descriptor is None:
         # Capturing and durably persisting the exact baseline is a prerequisite,
         # not a recoverable per-writer error. Escalate so launch fallbacks abort
@@ -509,10 +508,14 @@ def _repoint_path(
                         target,
                         f"recorded backup is not the displaced real directory: {backup_rel}",
                     )
-                if (
-                    descriptor.directory_device is not None
-                    and not _matches_recorded_directory_identity(backup, descriptor)
-                ):
+                if descriptor.directory_device is None:
+                    return _path_error(
+                        tools,
+                        tree.concern,
+                        target,
+                        f"recorded directory baseline has no identity: {backup_rel}",
+                    )
+                if not _matches_recorded_directory_identity(backup, descriptor):
                     return _path_error(
                         tools,
                         tree.concern,
@@ -601,6 +604,8 @@ def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
     # this check, a symlinked target ancestor could leak an outside-tree state
     # into the ledger even though the writer would refuse to mutate it.
     assert_ancestors(ProjectScope(ctx.project_root), target)
+    if projection.tool_symlink_points_into_projection(ctx.project_root, target_rel):
+        raise ValueError(_legacy_projection_baseline_error(target_rel))
     if target.is_symlink():
         descriptor = ScenePathRestore.symlink(os.readlink(target))
     elif not os.path.lexists(target):
@@ -650,9 +655,9 @@ def _describe_repoint_baseline(
         if os.path.lexists(backup):
             if backup.is_symlink() or not backup.is_dir():
                 return f"error:recorded backup is not the displaced real directory: {backup_rel}"
-            if descriptor.directory_device is not None and not _matches_recorded_directory_identity(
-                backup, descriptor
-            ):
+            if descriptor.directory_device is None:
+                return f"error:recorded directory baseline has no identity: {backup_rel}"
+            if not _matches_recorded_directory_identity(backup, descriptor):
                 return f"error:recorded backup is not the displaced real directory: {backup_rel}"
             if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
                 return f"error:recorded backup is occupied: {backup_rel}"
@@ -693,6 +698,8 @@ def _describe_repoint_baseline(
 
 def _describe_prospective_baseline(project_root: Path, target_rel: str, force: bool) -> str:
     target = project_root / target_rel
+    if projection.tool_symlink_points_into_projection(project_root, target_rel):
+        return f"error:{_legacy_projection_baseline_error(target_rel)}"
     if target.is_symlink():
         return f"would record literal symlink target {os.readlink(target)!r}"
     if not os.path.lexists(target):
@@ -714,6 +721,30 @@ def _path_error(
 ) -> SyncResult:
     return SyncResult(
         tool_id=tools[0], concern=concern, action="error", file_path=target, message=message
+    )
+
+
+def _canonical_source_skip(
+    tree: projection.ProjectionTree, target_rel: str, tools: tuple[AIToolID, ...]
+) -> SyncResult:
+    """Report a source directory that scenes intentionally leave untouched."""
+    shared = ", ".join(sorted(str(t) for t in tools))
+    return SyncResult(
+        tool_id=tools[0],
+        concern=tree.concern,
+        action="skipped",
+        message=(
+            f"{target_rel} is the canonical {tree.concern.value} source ({shared}); "
+            "left unfiltered to avoid a circular re-point"
+        ),
+    )
+
+
+def _legacy_projection_baseline_error(target_rel: str) -> str:
+    """Explain why a projection symlink cannot become restore authority."""
+    return (
+        f"{target_rel} is a legacy scene projection symlink without exact path provenance; "
+        "restore it manually and retry"
     )
 
 

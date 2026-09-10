@@ -630,8 +630,8 @@ def _validate_scene_restore(target: str, descriptor: ScenePathRestore) -> None:
         if _normalise_backup_path(target, descriptor.backup_path) != descriptor.backup_path:
             raise ValueError("scene backup path is not normalized")
         identity = (descriptor.directory_device, descriptor.directory_inode)
-        if descriptor.directory_displaced is False and identity == (None, None):
-            raise ValueError("pending directory displacement requires a directory identity")
+        if descriptor.directory_displaced is not None and identity == (None, None):
+            raise ValueError("directory displacement requires a directory identity")
         if identity != (None, None) and (
             any(
                 not isinstance(value, int) or isinstance(value, bool) or value < 0

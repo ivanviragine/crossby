@@ -226,6 +226,36 @@ class TestDryRun:
         assert snapshot() == before
         assert results  # a full result set is still produced
 
+    def test_dry_run_uses_recorded_canonical_baseline_before_projected_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Preview the same source recovery that a real scene switch performs."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        tools = [AIToolID.CURSOR, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: tools),
+        )
+        make_skill(tmp_path, ".cursor/skills", "review-skill")
+        resolved = resolve(tmp_path, SCENE, tools=tools)
+        apply_scene(resolved, tmp_path)
+
+        preview = apply_scene(resolve(tmp_path, SCENE, tools=tools), tmp_path, dry_run=True)
+
+        assert not any(result.action == "error" for result in preview)
+        assert any(
+            result.action == "skipped"
+            and ".cursor/skills is the canonical skills source" in (result.message or "")
+            for result in preview
+        )
+        assert any(
+            result.action == "updated"
+            and "recorded absent baseline" in (result.message or "")
+            for result in preview
+        )
+
     def test_dry_run_unreadable_project_target_returns_error_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -473,6 +503,65 @@ class TestExactPathRestoration:
         assert not any(
             "would preserve the directory" in (result.message or "") for result in results
         )
+
+    def test_legacy_projection_symlink_is_not_recorded_as_a_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        target = tmp_path / ".cursor/skills"
+        projection_target = tmp_path / ".crossby/scene/active/skills"
+        projection_target.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(projection_target, target_is_directory=True)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run, force=True)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "legacy scene projection symlink" in (result.message or "")
+                for result in results
+            )
+
+        assert target.is_symlink()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+
+    def test_legacy_directory_backup_without_identity_refuses_reapply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills.bak", "cursor-only")
+        target = tmp_path / ".cursor/skills"
+        projection_target = tmp_path / ".crossby/scene/active/skills"
+        projection_target.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(projection_target, target_is_directory=True)
+        ledger = OwnershipLedger()
+        ledger.record_scene_directory(".cursor/skills", ".cursor/skills.bak")
+        save_ledger(tmp_path, ledger)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run, force=True)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "recorded directory baseline has no identity" in (result.message or "")
+                for result in results
+            )
+
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor == ScenePathRestore.directory(".cursor/skills.bak")
+        assert target.is_symlink()
 
     def test_reapply_allows_marker_backed_target_beside_directory_backup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
