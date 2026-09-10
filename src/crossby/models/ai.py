@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class EffortLevel(StrEnum):
@@ -166,8 +166,9 @@ class PlanModeCapability(BaseModel, frozen=True):
 
     ``version_requirement`` deliberately accepts a human-readable selector
     requirement instead of pretending every upstream publishes a reliable
-    numeric introduction version. ``verified_version`` records the concrete
-    supported CLI help against which Crossby's mapping was checked.
+    numeric introduction version. ``verified_version`` records the oldest
+    concrete CLI build Crossby verified and is the conservative runtime floor
+    for native plan-mode launches.
     """
 
     activation: PlanModeActivation
@@ -199,8 +200,10 @@ _UNSUPPORTED_PLAN_MODE = PlanModeCapability(
 )
 
 
-class AIToolCapabilities(BaseModel, frozen=True):
+class AIToolCapabilities(BaseModel):
     """What an AI tool can do — declared by each adapter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_id: AIToolID
     display_name: str

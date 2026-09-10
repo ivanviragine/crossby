@@ -141,6 +141,62 @@ class ClaudeAdapter(AbstractAITool):
         settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
         return ["--settings", settings]
 
+    def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
+        """Collapse Crossby's Claude settings fragments into one settings source.
+
+        Claude treats repeated ``--settings`` options as replacement, not a
+        merge. Plan-output routing is emitted before scene arguments, so keep
+        earlier keys authoritative while folding a generated scene settings
+        file (for example ``skillOverrides``) into the same inline JSON value.
+        """
+        settings_flag = self.capabilities().scene_settings_flag or "--settings"
+        settings_pairs = [
+            (index, cmd[index + 1])
+            for index, token in enumerate(cmd[:-1])
+            if token == settings_flag
+            and (cmd[index + 1].lstrip().startswith("{") or Path(cmd[index + 1]).is_file())
+        ]
+        if len(settings_pairs) < 2:
+            return cmd
+
+        sources: list[dict[str, Any]] = []
+        try:
+            for _, value in settings_pairs:
+                raw = value if value.lstrip().startswith("{") else Path(value).read_text()
+                parsed = json.loads(raw)
+                if not isinstance(parsed, dict):
+                    raise TypeError("Claude settings must be a JSON object")
+                sources.append(parsed)
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            from crossby.ai_tools.plan_mode import PlanModeAdapterContractError
+
+            raise PlanModeAdapterContractError(
+                f"Claude Code could not combine plan and scene settings: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            ) from exc
+
+        merged: dict[str, Any] = {}
+        for source in sources:
+            for key, value in source.items():
+                merged.setdefault(key, value)
+
+        combined = json.dumps(merged, separators=(",", ":"), sort_keys=True)
+        result: list[str] = []
+        emitted = False
+        settings_indexes = {index for index, _ in settings_pairs}
+        index = 0
+        while index < len(cmd):
+            if index in settings_indexes:
+                if not emitted:
+                    result.extend((settings_flag, combined))
+                    emitted = True
+                index += 2
+                continue
+            result.append(cmd[index])
+            index += 1
+        return result
+
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Claude uses --add-dir for plan directory access."""
         return ["--add-dir", plan_dir]

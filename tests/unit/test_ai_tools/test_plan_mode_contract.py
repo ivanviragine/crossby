@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import (
@@ -14,6 +15,7 @@ from crossby.ai_tools.plan_mode import (
     PlanModeUnsupportedError,
 )
 from crossby.models.ai import (
+    AIToolCapabilities,
     AIToolID,
     EffortLevel,
     PlanArtifactLocation,
@@ -28,6 +30,14 @@ SUPPORTED = {
     AIToolID.ANTIGRAVITY_CLI: ("--mode", "plan"),
 }
 UNSUPPORTED = {AIToolID.CODEX, AIToolID.VSCODE, AIToolID.ANTIGRAVITY}
+
+
+@pytest.fixture(autouse=True)
+def _verified_installed_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep command-contract tests independent from the developer's installed CLIs."""
+    monkeypatch.setattr(
+        "crossby.utils.versioning.detect_binary_version", lambda _binary: (9999, 0, 0)
+    )
 
 
 class TestPlanModeCapabilityMatrix:
@@ -50,6 +60,12 @@ class TestPlanModeCapabilityMatrix:
         for tool_id in AIToolID:
             caps = AbstractAITool.get(tool_id).capabilities()
             assert caps.supports_plan_mode is caps.plan_mode.supported
+
+    def test_legacy_supports_plan_mode_constructor_field_is_rejected(self) -> None:
+        payload = AbstractAITool.get(AIToolID.CLAUDE).capabilities().model_dump()
+        payload["supports_plan_mode"] = True
+        with pytest.raises(ValidationError, match="supports_plan_mode"):
+            AIToolCapabilities.model_validate(payload)
 
     def test_supported_cli_selectors_match_capability_contract(self) -> None:
         for tool_id, expected in SUPPORTED.items():
@@ -177,6 +193,38 @@ class TestCompletePlanCommands:
 
 
 class TestPlanModeFailures:
+    def test_direct_builder_rejects_unverified_installed_version(self) -> None:
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 0)),
+            pytest.raises(PlanModeUnsupportedError, match="oldest release verified"),
+        ):
+            AbstractAITool.get(AIToolID.CLAUDE).build_launch_command(plan_mode=True)
+
+    @pytest.mark.parametrize("tool_id", sorted(SUPPORTED, key=str))
+    def test_direct_launch_rejects_unverified_installed_version_before_process_creation(
+        self, tool_id: AIToolID, tmp_path: Path
+    ) -> None:
+        adapter = AbstractAITool.get(tool_id)
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(0, 0, 1)),
+            patch("crossby.utils.process.run_with_transcript") as run,
+            pytest.raises(PlanModeUnsupportedError, match="oldest release verified"),
+        ):
+            adapter.launch(tmp_path, prompt="Plan this", plan_mode=True)
+        run.assert_not_called()
+
+    def test_direct_launch_rejects_unknown_installed_version_before_process_creation(
+        self, tmp_path: Path
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=None),
+            patch("crossby.utils.process.run_with_transcript") as run,
+            pytest.raises(PlanModeUnsupportedError, match="installed version unknown"),
+        ):
+            adapter.launch(tmp_path, plan_mode=True)
+        run.assert_not_called()
+
     @pytest.mark.parametrize("tool_id", sorted(UNSUPPORTED, key=str))
     def test_direct_builder_rejects_unsupported_tool(self, tool_id: AIToolID) -> None:
         with pytest.raises(PlanModeUnsupportedError) as raised:

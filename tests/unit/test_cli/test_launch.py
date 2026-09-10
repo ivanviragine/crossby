@@ -624,6 +624,20 @@ class TestNativePlanContractCLI:
         vscode_run.assert_not_called()
         antigravity_run.assert_not_called()
 
+    def test_unverified_installed_version_fails_before_launch(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 17, 0)),
+            patch("crossby.utils.process.run_with_transcript") as run,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "opencode", "--plan"],
+            )
+        assert result.exit_code == 1, result.output
+        assert "oldest release verified by this adapter is 1.18.29" in result.output
+        run.assert_not_called()
+
     @pytest.mark.parametrize("flag", ["--yolo", "--auto", "--accept-edits"])
     def test_plan_conflicts_are_rejected_before_launch(self, tmp_path: Path, flag: str) -> None:
         (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
@@ -638,7 +652,10 @@ class TestNativePlanContractCLI:
 
     def test_opencode_summary_and_process_command_report_native_plan(self, tmp_path: Path) -> None:
         (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
-        with patch("crossby.utils.process.run_with_transcript", return_value=0) as run:
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 18, 29)),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
             result = runner.invoke(
                 app,
                 [

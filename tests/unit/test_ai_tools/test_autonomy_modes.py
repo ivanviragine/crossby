@@ -7,6 +7,8 @@ plan-mode exclusivity, and the downgrade/fallback warning paths.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from crossby.ai_tools.base import AbstractAITool
@@ -194,7 +196,8 @@ class TestPrecedence:
             AbstractAITool.get("claude").build_launch_command(plan_mode=True, **{flag: True})
 
     def test_plan_alone(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 263)):
+            cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
         assert _permission_mode(cmd) == "plan"
 
     def test_no_autonomy_flags_is_bare(self) -> None:

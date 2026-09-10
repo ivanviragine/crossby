@@ -41,6 +41,31 @@ class PlanModeUnsupportedError(PlanModeLaunchError):
             capability=capability,
         )
 
+    @classmethod
+    def for_installed_version(
+        cls,
+        *,
+        tool_id: AIToolID,
+        display_name: str,
+        capability: PlanModeCapability,
+        installed_version: tuple[int, int, int] | None,
+    ) -> PlanModeUnsupportedError:
+        """Report an installed CLI that is older than, or cannot satisfy, the contract."""
+        detected = (
+            ".".join(str(part) for part in installed_version)
+            if installed_version is not None
+            else "unknown"
+        )
+        verified = capability.verified_version or "an adapter-verified release"
+        return cls(
+            f"{display_name} cannot guarantee native plan mode for installed version "
+            f"{detected}. Crossby requires {capability.version_requirement} "
+            f"The oldest release verified by this adapter is {verified}. "
+            f"Remediation: upgrade {display_name} to {verified} or newer, then retry.",
+            tool_id=tool_id,
+            capability=capability,
+        )
+
 
 class PlanModeConflictError(PlanModeLaunchError):
     """Plan mode was combined with a contradictory autonomy request."""

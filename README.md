@@ -375,6 +375,14 @@ slash-command dispatcher. The typed `capabilities().plan_mode` object exposes
 activation, version, initial-prompt, artifact-location, and remediation details;
 `supports_plan_mode` remains a derived compatibility property.
 
+For every supported terminal adapter, the shared validation gate probes the
+installed binary with `--version` before returning a plan command or spawning a
+process. The installed version must be parseable and at least the adapter's
+listed verified build. Crossby treats that build as a conservative support floor:
+an older or unknown version raises `PlanModeUnsupportedError` with upgrade
+guidance, even if an earlier upstream release may happen to expose a similarly
+named flag.
+
 Support matrix (selectors verified against the listed CLI help on 2026-09-10):
 
 | Tool | Native activation | Supported-version requirement | Initial prompt after activation | Plan artifacts / remediation |
@@ -395,6 +403,11 @@ Claude does so with its documented `plansDirectory` setting. Session-only,
 harness-managed, and private-artifact tools reject the request. Without this
 option, those tools' native plan modes remain available with their storage
 constraints exposed in capability metadata.
+
+When a Claude scene also narrows skills, Crossby combines `plansDirectory` and
+the scene's `skillOverrides` into one `--settings` JSON source. Claude treats
+repeated `--settings` occurrences as replacement, so emitting two would discard
+the requested plan destination.
 
 ### Autonomy modes
 

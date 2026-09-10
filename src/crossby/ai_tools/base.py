@@ -388,6 +388,25 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
 
+        from crossby.utils.versioning import detect_binary_version, parse_semver
+
+        verified_version = parse_semver(capability.verified_version or "")
+        if verified_version is None:
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} declares native plan mode without a parseable "
+                "verified_version. Update Crossby before retrying.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        installed_version = detect_binary_version(caps.binary)
+        if installed_version is None or installed_version < verified_version:
+            raise PlanModeUnsupportedError.for_installed_version(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+                installed_version=installed_version,
+            )
+
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Get extra CLI args to grant write access to a plan output directory."""
         return []  # Default: no plan dir support
@@ -872,6 +891,10 @@ class AbstractAITool(ABC):
         if scene is not None:
             cmd.extend(scene.args)
 
+        return self._finalize_launch_command(cmd)
+
+    def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
+        """Let an adapter reconcile arguments that must form one logical source."""
         return cmd
 
 
