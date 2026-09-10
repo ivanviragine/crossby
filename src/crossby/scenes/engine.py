@@ -469,6 +469,7 @@ def _repoint_path(
             baseline = _describe_repoint_baseline(
                 ctx.project_root,
                 target_rel,
+                tree.concern.value,
                 ctx.force,
                 ctx.ledger.scene_restore(target_rel),
             )
@@ -575,7 +576,11 @@ def _repoint_path(
                 projection.displace_directory(ctx.project_root, target_rel, backup_rel)
                 descriptor = ctx.ledger.record_scene_directory_displaced(target_rel)
                 save_ledger(ctx.project_root, ctx.ledger)
-        elif target.is_dir() and not target.is_symlink():
+            # The real directory was authenticated and displaced, so the
+            # generic writer cannot allocate an independent .bak path.
+            return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+
+        if target.is_dir() and not target.is_symlink():
             # Some writers materialise a managed directory rather than a
             # symlink. Re-run those without force; an unmarked directory is
             # drift and must not be preserved at an unrecorded .bak path.
@@ -588,10 +593,22 @@ def _repoint_path(
                     "restore the recorded baseline first",
                 )
             return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
-        # The scene owns replacement only after the baseline is durable. A real
-        # directory has already been displaced, so the generic writer cannot
-        # allocate an independent .bak path.
-        return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+        elif _recorded_non_directory_baseline_is_intact(target, descriptor):
+            # The writer has not yet replaced the durable baseline, so its
+            # original path is still the only thing this scene is authorized
+            # to replace.
+            return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+        elif projection.tool_points_at_projection(ctx.project_root, target_rel, tree.concern.value):
+            # An exact active projection proves that an earlier writer did
+            # replace the target. It can be re-synced without force.
+            return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
+        else:
+            return _path_error(
+                tools,
+                tree.concern,
+                target,
+                _non_directory_baseline_drift_error(target_rel, descriptor),
+            )
     except (OSError, ValueError, SyncContainmentError) as exc:
         return _path_error(tools, tree.concern, target, str(exc))
 
@@ -639,6 +656,7 @@ def _capture_path_baseline(ctx: _Context, target_rel: str) -> ScenePathRestore:
 def _describe_repoint_baseline(
     project_root: Path,
     target_rel: str,
+    kind: str,
     force: bool,
     descriptor: ScenePathRestore | None,
 ) -> str:
@@ -691,9 +709,31 @@ def _describe_repoint_baseline(
             "restore the recorded baseline first"
         )
 
+    if not _recorded_non_directory_baseline_is_intact(
+        target, descriptor
+    ) and not projection.tool_points_at_projection(project_root, target_rel, kind):
+        return f"would refuse: {_non_directory_baseline_drift_error(target_rel, descriptor)}"
+
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
         return "would retain the recorded absent baseline"
     return f"would retain the recorded literal symlink target {descriptor.link_target!r}"
+
+
+def _recorded_non_directory_baseline_is_intact(target: Path, descriptor: ScenePathRestore) -> bool:
+    """Whether *target* still matches an absent or literal-symlink baseline."""
+    if descriptor.kind == ScenePathRestoreKind.ABSENT:
+        return not os.path.lexists(target)
+    if descriptor.kind == ScenePathRestoreKind.SYMLINK:
+        return target.is_symlink() and os.readlink(target) == descriptor.link_target
+    return False
+
+
+def _non_directory_baseline_drift_error(target_rel: str, descriptor: ScenePathRestore) -> str:
+    """Explain why a retry cannot replace a changed non-directory baseline."""
+    return (
+        f"recorded {descriptor.kind.value} baseline changed before scene projection: {target_rel}; "
+        "refusing to replace the target"
+    )
 
 
 def _describe_prospective_baseline(project_root: Path, target_rel: str, force: bool) -> str:

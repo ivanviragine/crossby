@@ -699,6 +699,74 @@ class TestExactPathRestoration:
         clear_scene(tmp_path)
         assert not (tmp_path / ".cursor/skills").exists()
 
+    @pytest.mark.parametrize("initial_link", [None, "original-skills"])
+    def test_reapply_refuses_symlink_drift_after_non_directory_baseline_capture(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        initial_link: str | None,
+    ) -> None:
+        """A retry must not overwrite a link created after a pre-write crash."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        target = tmp_path / ".cursor/skills"
+        target.parent.mkdir()
+        if initial_link is not None:
+            target.symlink_to(initial_link, target_is_directory=True)
+
+        real_repoint = projection.repoint
+
+        def fail_after_baseline_capture(*args: object, **kwargs: object) -> SyncResult:
+            tree = args[1]
+            representative = args[2]
+            if tree.concern == SyncConcern.SKILLS and representative == AIToolID.CURSOR:
+                return SyncResult(
+                    tool_id=AIToolID.CURSOR,
+                    concern=SyncConcern.SKILLS,
+                    action="error",
+                    message="injected pre-write crash",
+                )
+            return real_repoint(*args, **kwargs)
+
+        monkeypatch.setattr("crossby.scenes.projection.repoint", fail_after_baseline_capture)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+        first = apply_scene(resolved, tmp_path)
+        assert any(result.message == "injected pre-write crash" for result in first)
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        expected = (
+            ScenePathRestore.absent()
+            if initial_link is None
+            else ScenePathRestore.symlink(initial_link)
+        )
+        assert descriptor == expected
+
+        external = tmp_path / "user-skills"
+        external.mkdir()
+        if target.is_symlink():
+            target.unlink()
+        target.symlink_to(external, target_is_directory=True)
+        monkeypatch.setattr("crossby.scenes.projection.repoint", real_repoint)
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run)
+            assert any(
+                "baseline changed before scene projection" in (result.message or "")
+                for result in results
+            )
+            if dry_run:
+                assert not any(
+                    result.action == "error" and result.file_path == target for result in results
+                )
+            else:
+                assert any(
+                    result.action == "error" and result.file_path == target for result in results
+                )
+            assert target.is_symlink()
+            assert target.readlink() == external
+
     def test_force_reapply_rejects_drifted_directory_without_directory_baseline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
