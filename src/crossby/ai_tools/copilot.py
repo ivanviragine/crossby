@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import PlanInteractionHandler
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import copilot as copilot_reader
 from crossby.models.ai import (
@@ -14,9 +21,21 @@ from crossby.models.ai import (
     AIToolType,
     HookOutputDialect,
     HookStopDialect,
+    PlanApprovalPolicy,
     PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanInteraction,
+    PlanInteractionKind,
+    PlanInteractionOutcome,
+    PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
+    PlanQuestionOption,
+    PlanRequestBehavior,
+    PlanSessionBinding,
+    PlanSessionRequest,
+    PlanSessionResult,
+    PlanSessionTransport,
     TokenUsage,
 )
 
@@ -49,15 +68,22 @@ class CopilotAdapter(AbstractAITool):
                 version_requirement="GitHub Copilot CLI exposing --plan.",
                 verified_version="1.0.83",
                 initial_prompt_after_activation=True,
-                artifact_location=PlanArtifactLocation.PRIVATE,
+                artifact_location=PlanArtifactLocation.SESSION,
                 artifact_location_detail=(
-                    "Copilot protects project files in plan mode and writes the draft in its own "
-                    "private planning workspace; --add-dir does not relocate that plan."
+                    "Crossby assigns a fresh UUID and parses only the unique local --share export "
+                    "created for that session."
                 ),
+                export_command=("copilot", "--share=<run-owned-path>"),
                 remediation=(
-                    "Review or copy the plan from Copilot's planning workspace, or use Claude "
-                    "when a specific filesystem output directory is required."
+                    "Use run_plan_session() for the normalized local share export, or use Claude "
+                    "when a persistent requested output directory is required."
                 ),
+                transport=PlanSessionTransport.HEADLESS_CLI,
+                artifact_source=PlanArtifactSource.SESSION_EXPORT,
+                binding=PlanSessionBinding.SESSION_ID,
+                interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
             ),
             supports_accept_edits=True,
             supports_session_start_hook=True,
@@ -122,6 +148,231 @@ class CopilotAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Copilot supports ``--plan`` (GA'd Jan 2026)."""
         return ["--plan"]
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Collect one UUID-bound local Copilot share without remote sharing."""
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactAmbiguousError,
+            PlanArtifactMalformedError,
+            PlanArtifactMissingError,
+            PlanBindingMismatchError,
+            PlanInteractionRequiredError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import parse_jsonl, run_captured
+
+        capability = self.capabilities().plan_mode
+        session_id = str(uuid.uuid4())
+        temp_dir = Path(tempfile.mkdtemp(prefix="crossby-copilot-plan-"))
+        export_path = temp_dir / f"{session_id}.md"
+        base = [
+            "copilot",
+            "--plan",
+            "--session-id",
+            session_id,
+            f"--share={export_path}",
+            "--output-format",
+            "json",
+            "--no-remote",
+            "--no-remote-export",
+        ]
+        if request.model:
+            base.extend(("--model", request.model))
+        for path in request.trusted_dirs:
+            base.extend(("--add-dir", str(path)))
+        if request.approval_policy is PlanApprovalPolicy.NEVER:
+            base.append("--deny-tool=*")
+
+        command = [*base, "--prompt", request.prompt]
+        seen_questions: set[str] = set()
+        try:
+            for _continuation in range(9):
+                try:
+                    run = run_captured(
+                        command,
+                        cwd=request.working_dir,
+                        timeout=request.timeout_seconds,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise PlanTransportError(
+                        f"GitHub Copilot plan process failed: {exc}",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    ) from exc
+                if run.returncode != 0:
+                    raise PlanTransportError(
+                        f"GitHub Copilot exited with status {run.returncode}.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        exit_code=run.returncode,
+                        session_id=session_id,
+                        paths=(export_path,),
+                        stderr=run.stderr,
+                    )
+                try:
+                    events = parse_jsonl(run.stdout)
+                except ValueError as exc:
+                    raise PlanArtifactMalformedError(
+                        f"GitHub Copilot emitted malformed JSON events: {exc}",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        exit_code=run.returncode,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    ) from exc
+                emitted_ids = {found for event in events for found in _copilot_session_ids(event)}
+                if emitted_ids and emitted_ids != {session_id}:
+                    raise PlanBindingMismatchError(
+                        "GitHub Copilot emitted events for a different session UUID.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        exit_code=run.returncode,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    )
+                pending = [
+                    item
+                    for item in _copilot_interactions(events, session_id)
+                    if item.question_id not in seen_questions
+                ]
+                if not pending:
+                    break
+                interaction = pending[0]
+                if interaction_handler is None:
+                    raise PlanInteractionRequiredError(
+                        "GitHub Copilot requires an explicit response to continue planning.",
+                        interaction=interaction,
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                    )
+                response = interaction_handler(interaction)
+                seen_questions.add(interaction.question_id)
+                answer: str | None
+                if interaction.kind is PlanInteractionKind.PLAN_APPROVAL:
+                    # Never translate approval into implementation. The safe
+                    # outcomes keep the exact session in planning and ask it to
+                    # finish/export the draft.
+                    if response.outcome is PlanInteractionOutcome.APPROVED:
+                        raise PlanInteractionRequiredError(
+                            "Approving Copilot's final plan would authorize implementation; "
+                            "choose a non-executing outcome.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        )
+                    answer = response.answer or "Do not implement. Finish and export the plan."
+                else:
+                    answer = (
+                        response.answer
+                        or response.option_id
+                        or ", ".join(response.option_ids)
+                        or None
+                    )
+                    if (
+                        response.outcome
+                        in {
+                            PlanInteractionOutcome.CANCELLED,
+                            PlanInteractionOutcome.SKIPPED,
+                        }
+                        or not answer
+                    ):
+                        raise PlanInteractionRequiredError(
+                            "GitHub Copilot planning question was left unanswered.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        )
+                command = [*base, "--prompt", answer]
+            else:
+                raise PlanTransportError(
+                    "GitHub Copilot exceeded the bounded planning-question continuation limit.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                    paths=(export_path,),
+                )
+
+            if not export_path.is_file() or export_path.is_symlink():
+                raise PlanArtifactMissingError(
+                    "GitHub Copilot completed without the unique local share export.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                )
+            try:
+                exported = export_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise PlanArtifactMalformedError(
+                    f"GitHub Copilot share export could not be read as UTF-8: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                ) from exc
+            try:
+                plan = _copilot_export_plan(exported, session_id)
+            except ValueError as exc:
+                raise PlanBindingMismatchError(
+                    str(exc),
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                ) from exc
+            except RuntimeError as exc:
+                raise PlanArtifactAmbiguousError(
+                    str(exc),
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                ) from exc
+            if plan is None:
+                raise PlanArtifactMissingError(
+                    "GitHub Copilot share export contained no authoritative Plan section.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                )
+            if not plan.strip():
+                raise PlanArtifactMalformedError(
+                    "GitHub Copilot share export contained a blank plan.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                    paths=(export_path,),
+                )
+            return PlanSessionResult(
+                tool=self.TOOL_ID,
+                version=version,
+                plan=plan,
+                session_id=session_id,
+                native_mode="--plan",
+                artifact_source=PlanArtifactSource.SESSION_EXPORT,
+                binding=PlanSessionBinding.SESSION_ID,
+                exit_code=0,
+                artifact_id=export_path.name,
+                artifact_path=export_path,
+            )
+        finally:
+            # The normalized result retains provenance, but the local share is a
+            # run-owned transport artifact rather than caller-owned output.
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Copilot uses --add-dir for plan directory access."""
@@ -203,3 +454,96 @@ def _allow_entry_excluded(entry: str, excluded_servers: set[str]) -> bool:
         entry == server or entry.startswith(f"{server}__") or entry.startswith(f"{server}(")
         for server in excluded_servers
     )
+
+
+def _copilot_session_ids(value: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in {"sessionId", "sessionID", "session_id"} and isinstance(nested, str):
+                found.append(nested)
+            else:
+                found.extend(_copilot_session_ids(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            found.extend(_copilot_session_ids(nested))
+    return found
+
+
+def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list[PlanInteraction]:
+    interactions: list[PlanInteraction] = []
+    for event in events:
+        event_type = str(event.get("type") or "")
+        data = event.get("data")
+        source = data if isinstance(data, dict) else event
+        if event_type not in {
+            "ask_user",
+            "user_input_requested",
+            "plan.approval",
+            "plan_approval",
+        }:
+            continue
+        kind = (
+            PlanInteractionKind.PLAN_APPROVAL
+            if "plan" in event_type and "approval" in event_type
+            else PlanInteractionKind.QUESTION
+        )
+        question_id = source.get("id") or source.get("questionId") or event.get("id")
+        prompt = source.get("question") or source.get("prompt") or source.get("message")
+        if not isinstance(question_id, str) or not isinstance(prompt, str):
+            continue
+        options = tuple(
+            PlanQuestionOption(
+                option_id=str(option.get("id") or option.get("label")),
+                label=str(option.get("label")),
+                description=(
+                    str(option["description"]) if option.get("description") is not None else None
+                ),
+            )
+            for option in source.get("options") or []
+            if isinstance(option, dict) and option.get("label")
+        )
+        interactions.append(
+            PlanInteraction(
+                kind=kind,
+                question_id=question_id,
+                prompt=prompt,
+                options=options,
+                session_id=session_id,
+                artifact_id=str(event.get("id") or "") or None,
+            )
+        )
+    return interactions
+
+
+def _copilot_export_plan(exported: str, session_id: str) -> str | None:
+    """Verify share metadata and extract one explicit Plan section."""
+    stripped = exported.strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        ids = set(_copilot_session_ids(payload))
+        if ids != {session_id}:
+            raise ValueError(
+                "GitHub Copilot share metadata did not match the assigned session UUID."
+            )
+        plan = payload.get("plan")
+        return plan if isinstance(plan, str) else None
+
+    metadata_ids = set(
+        re.findall(
+            r"(?im)^(?:session(?:[_ -]?id)?)\s*:\s*[`\"']?([0-9a-f-]{36})",
+            exported,
+        )
+    )
+    if metadata_ids != {session_id}:
+        raise ValueError("GitHub Copilot share metadata did not match the assigned session UUID.")
+    marked = re.findall(r"(?is)<!--\s*plan:start\s*-->(.*?)<!--\s*plan:end\s*-->", exported)
+    headed = re.findall(r"(?ims)^#{1,3}\s+Plan\s*$\n(.*?)(?=^#{1,3}\s+|\Z)", exported)
+    candidates = [candidate.strip() for candidate in [*marked, *headed] if candidate.strip()]
+    unique = list(dict.fromkeys(candidates))
+    if len(unique) > 1:
+        raise RuntimeError("GitHub Copilot share export contained conflicting Plan sections.")
+    return unique[0] if unique else None

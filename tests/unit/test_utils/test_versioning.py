@@ -45,6 +45,26 @@ class TestDetectBinaryVersion:
         monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
         assert versioning.detect_binary_version("claude") == (2, 1, 218)
 
+    def test_info_preserves_exact_version_line_and_normalized_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+
+        def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Cursor Agent 2026.09.02-c22c1a3\nmore output\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+        detected = versioning.detect_binary_version_info("agent")
+        assert detected is not None
+        assert detected.normalized == (2026, 9, 2)
+        assert detected.text == "Cursor Agent 2026.09.02-c22c1a3"
+        assert detected.raw == detected.text
+
     def test_falls_back_to_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
 

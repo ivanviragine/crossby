@@ -361,48 +361,98 @@ The setting never changes approval behavior: Codex `danger-full-access` does not
 
 ### Native plan mode
 
-`--plan` is a strict adapter contract, not prompt text and not the bottom of an
-autonomy ladder. A successful launch means the harness selected its native plan
-mode before processing the initial task. `--plan` is therefore mutually
-exclusive with `--yolo`, `--auto`, and `--accept-edits`; contradictory CLI or
-adapter API input is rejected instead of silently starting an editing mode.
+Native planning has two deliberately separate surfaces:
 
-Consumers should call `adapter.launch(..., plan_mode=True)` or
-`adapter.build_launch_command(..., plan_mode=True)` and handle
-`PlanModeLaunchError`. Do not prepend `/plan` to a prompt or treat an empty
-`plan_mode_args()` result as success: positional prompt text does not run a TUI
-slash-command dispatcher. The typed `capabilities().plan_mode` object exposes
-activation, version, initial-prompt, artifact-location, and remediation details;
-`supports_plan_mode` remains a derived compatibility property.
+- `launch(..., plan_mode=True)` enters native plan mode for a human and keeps the
+  historical exit-code return value. `supports_plan_mode` is this
+  **activation-only** compatibility view.
+- `run_plan_session(PlanSessionRequest(...))` owns activation, interaction,
+  exact-session collection, validation, and cleanup, then returns normalized
+  Markdown plus provenance. `supports_plan_session` is true only when that full
+  lifecycle is deterministic.
 
-For every supported terminal adapter, the shared validation gate probes the
-installed binary with `--version` before returning a plan command or spawning a
-process. The installed version must be parseable and at least the adapter's
-listed verified build. Crossby treats that build as a conservative support floor:
-an older or unknown version raises `PlanModeUnsupportedError` with upgrade
-guidance, even if an earlier upstream release may happen to expose a similarly
-named flag.
+Neither surface treats prompt text such as `/plan` as activation. Plan mode,
+sandbox confinement, and approval policy are independent request dimensions; a
+collector either preserves a supported choice or rejects it before spawning.
+Unknown and below-floor CLI versions also fail before a harness process starts.
 
-Support matrix (selectors verified against the listed CLI help on 2026-09-10):
+Support matrix (contracts verified against the listed builds on 2026-09-10):
 
-| Tool | Native activation | Supported-version requirement | Initial prompt after activation | Plan artifacts / remediation |
-| --- | --- | --- | --- | --- |
-| Claude Code | `--permission-mode plan` | CLI exposing that selector (verified 2.1.263) | Yes, positional prompt | Defaults to `~/.claude/plans`; `--plan-output-dir` supplies a project-relative `plansDirectory` setting |
-| Cursor CLI | `--mode plan` | CLI exposing that selector (verified 2026.09.02-c22c1a3) | Yes, positional prompt | Session output only; no launch-time on-disk destination guarantee |
-| GitHub Copilot CLI | `--plan` | CLI exposing that selector (verified 1.0.83) | Yes, `-i <prompt>` | **Private only:** Copilot's planning workspace; `--add-dir` does not relocate the plan |
-| OpenCode | `--agent plan` | Built-in `plan` agent plus `--agent` (verified 1.18.29) | Yes, `--prompt <prompt>` | OpenCode-managed plan files such as `.opencode/plans/*.md`, not an arbitrary output directory |
-| Antigravity CLI | `--mode plan` | CLI exposing that selector (verified 1.2.0) | Yes, `--prompt-interactive <prompt>` | **Private only:** `~/.gemini/antigravity-cli/brain/<conversation-id>/`; `--add-dir` does not relocate it and `agy` exposes no export/import command |
-| Codex CLI | Unsupported | No public interactive launch-time Plan selector in verified 0.153.4; `/plan` as a positional prompt is not activation | No guaranteed path | Upgrade when Codex adds an interactive selector/app-server-to-TUI path, or choose a supported terminal harness |
-| VS Code | Unsupported | No programmatic native selector in verified 1.136.1 | No | Select plan mode manually, or use a supported terminal harness |
-| Antigravity IDE | Unsupported | No programmatic native selector | No | Select plan mode manually, or use a supported terminal harness |
+| Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; ambiguous, symlinked, blank, or missing output fails |
+| Codex CLI | `collaborationMode.mode = "plan"` | App-server; exact thread + turn + completed plan-item IDs | Callback | Preserved / preserved | 0.153.4 | Use `run_plan_session()`; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
+| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
+| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + unique local `--share` export | Resumable callback | Tool-managed / preserved | 1.0.83 | Collection disables remote sharing and removes only its temporary export after normalization |
+| OpenCode | `run --agent plan` | Headless JSONL; emitted session ID + `export <exact-id>` | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Missing, multiple, or mismatched embedded session IDs fail; no latest-session lookup is used |
+| Antigravity CLI | `--mode plan` | Headless JSON; exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
+| VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
+| Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
-Use `--plan-output-dir <dir>` when a consumer requires filesystem-backed plan
-artifacts in a particular project-relative directory. It requires `--plan` and
-is accepted only when the adapter can route the native plan there; currently
-Claude does so with its documented `plansDirectory` setting. Session-only,
-harness-managed, and private-artifact tools reject the request. Without this
-option, those tools' native plan modes remain available with their storage
-constraints exposed in capability metadata.
+`tool-managed` means the harness's native plan posture owns that dimension; only
+its safe default is accepted. `preserved` means Crossby sends the caller's
+choice through explicitly. Protocol and resumable collectors never invent an
+answer or auto-approve implementation. A missing handler produces
+`PlanInteractionRequiredError`; final plan approval is represented separately
+and an `APPROVED` response is refused by collectors where it would transition
+into execution.
+
+The collected API is the automation surface:
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    PlanInteractionKind,
+    PlanInteractionOutcome,
+    PlanInteractionRequiredError,
+    PlanInteractionResponse,
+    PlanSessionError,
+    PlanSessionRequest,
+)
+
+
+def answer(interaction):
+    if interaction.kind is PlanInteractionKind.PLAN_APPROVAL:
+        return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+    # A real integration should obtain this from its user or workflow.
+    return PlanInteractionResponse(
+        outcome=PlanInteractionOutcome.ANSWERED,
+        option_id=interaction.options[0].option_id if interaction.options else None,
+        answer=None if interaction.options else "Use the existing public API",
+    )
+
+
+adapter = AbstractAITool.get("codex")
+try:
+    result = adapter.run_plan_session(
+        PlanSessionRequest(
+            prompt="Plan issue #176",
+            working_dir=Path.cwd(),
+        ),
+        answer,
+    )
+except PlanInteractionRequiredError as exc:
+    print(f"Waiting for {exc.interaction.question_id}: {exc.interaction.prompt}")
+except PlanSessionError as exc:
+    print(f"Plan collection failed: {exc}")
+else:
+    Path("PLAN.md").write_text(result.plan, encoding="utf-8")
+    print(result.session_id, result.artifact_source, result.artifact_id)
+```
+
+Crossby returns Markdown and the available session, turn, item, conversation,
+or path evidence. It does not impose WADE validation and does not require the
+harness itself to create `PLAN.md`.
+
+For activation-only CLI use, continue calling `adapter.launch(...,
+plan_mode=True)` or `adapter.build_launch_command(..., plan_mode=True)` and
+handle `PlanModeLaunchError`. `--plan` remains mutually exclusive with
+`--yolo`, `--auto`, and `--accept-edits`. `--plan-output-dir <dir>` remains a
+launch option only for Claude. The collected Claude API also accepts a
+project-contained `plan_output_dir`, but creates a unique run-owned child
+directory within it so a concurrent or newer artifact cannot be selected.
 
 When a Claude scene also narrows skills, Crossby combines `plansDirectory` and
 the scene's `skillOverrides` into one `--settings` JSON source. Claude treats

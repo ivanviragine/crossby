@@ -1,0 +1,38 @@
+{
+  "info": {
+    "id": "ses_exact_123",
+    "title": "Sanitized planning session"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg-user-1",
+        "role": "user",
+        "sessionID": "ses_exact_123"
+      },
+      "parts": [
+        {
+          "id": "part-user-1",
+          "sessionID": "ses_exact_123",
+          "type": "text",
+          "text": "Create a plan"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg-plan-1",
+        "role": "assistant",
+        "sessionID": "ses_exact_123"
+      },
+      "parts": [
+        {
+          "id": "part-plan-1",
+          "sessionID": "ses_exact_123",
+          "type": "plan",
+          "text": "# Native plan\n\n1. Inspect.\n2. Implement."
+        }
+      ]
+    }
+  ]
+}

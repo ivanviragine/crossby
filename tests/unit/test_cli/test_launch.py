@@ -690,7 +690,7 @@ class TestNativePlanContractCLI:
                 ],
             )
         assert result.exit_code == 1, result.output
-        assert "brain directory" in result.output
+        assert "structured_output" in result.output
         run.assert_not_called()
 
 

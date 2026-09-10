@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","id":1,"result":{"authMethods":[]}}
+{"jsonrpc":"2.0","id":3,"result":{"sessionId":"cursor-exact-123","modes":{"availableModes":[{"id":"agent"},{"id":"plan"}]}}}
+{"jsonrpc":"2.0","id":4,"result":{}}
+{"jsonrpc":"2.0","id":91,"method":"cursor/create_plan","params":{"toolCallId":"plan-tool-exact-123","name":"Native implementation plan","overview":"Review the completed plan without implementing it.","plan":"# Native plan\n\n1. Inspect.\n2. Implement.","todos":[{"id":"inspect","content":"Inspect","status":"pending"}],"isProject":false}}
+{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}

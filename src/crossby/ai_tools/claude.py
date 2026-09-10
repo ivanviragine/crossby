@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import PlanInteractionHandler
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import claude as claude_reader
 from crossby.models.ai import (
@@ -20,8 +23,15 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
+    PlanRequestBehavior,
+    PlanSessionBinding,
+    PlanSessionRequest,
+    PlanSessionResult,
+    PlanSessionTransport,
     TokenUsage,
 )
 
@@ -73,6 +83,12 @@ class ClaudeAdapter(AbstractAITool):
                     "setting for a requested path inside the project."
                 ),
                 artifact_path_template="~/.claude/plans/<generated-name>.md",
+                transport=PlanSessionTransport.INTERACTIVE_CLI,
+                artifact_source=PlanArtifactSource.REQUESTED_PATH,
+                binding=PlanSessionBinding.ISOLATED_RUN_PATH,
+                interaction=PlanInteractionSupport.TERMINAL,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
             ),
             supports_accept_edits=True,
             supports_auto=True,
@@ -140,6 +156,159 @@ class ClaudeAdapter(AbstractAITool):
         value = "." if relative == Path(".") else f"./{relative}"
         settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
         return ["--settings", settings]
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Collect exactly one plan from a unique Claude ``plansDirectory``."""
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactAmbiguousError,
+            PlanArtifactMalformedError,
+            PlanArtifactMissingError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import run_interactive
+
+        del interaction_handler  # Claude keeps its native TTY attached.
+        capability = self.capabilities().plan_mode
+        working_dir = request.working_dir.resolve()
+        root = (
+            request.plan_output_dir
+            if request.plan_output_dir is not None
+            else working_dir / ".crossby" / "plan-sessions"
+        ).resolve()
+        if not root.is_relative_to(working_dir):
+            from crossby.ai_tools.plan_mode import PlanArtifactLocationError
+
+            raise PlanArtifactLocationError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=self.capabilities().display_name,
+                capability=capability,
+                requested_dir=root,
+            )
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise PlanTransportError(
+                f"Claude Code plan root could not be created: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                paths=(root,),
+            ) from exc
+        session_id = str(uuid.uuid4())
+        run_dir = root / session_id
+        run_dir.mkdir(parents=False, exist_ok=False)
+
+        command = self.build_launch_command(
+            model=request.model,
+            initial_message=request.prompt,
+            plan_mode=True,
+            trusted_dirs=[str(path) for path in request.trusted_dirs] or None,
+            effort=request.effort,
+            working_dir=working_dir,
+            plan_output_dir=run_dir,
+            sandbox=request.sandbox,
+            _skip_plan_version_check=True,
+        )
+        try:
+            exit_code = run_interactive(
+                command,
+                cwd=working_dir,
+                timeout=request.timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            if run_dir.exists() and not any(run_dir.iterdir()):
+                run_dir.rmdir()
+            raise PlanTransportError(
+                f"Claude Code planning process failed: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(run_dir,),
+            ) from exc
+
+        if exit_code != 0:
+            if not any(run_dir.iterdir()):
+                run_dir.rmdir()
+            raise PlanTransportError(
+                f"Claude Code planning process exited with status {exit_code}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=(run_dir,),
+            )
+
+        entries = list(run_dir.iterdir())
+        symlinks = tuple(path for path in entries if path.is_symlink())
+        if symlinks:
+            raise PlanArtifactMalformedError(
+                "Claude Code produced a symlink in the isolated plan directory; refusing it.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=symlinks,
+            )
+        candidates = [path for path in entries if path.is_file() and path.suffix == ".md"]
+        if not candidates:
+            if not entries:
+                run_dir.rmdir()
+            raise PlanArtifactMissingError(
+                "Claude Code exited successfully without a Markdown plan in its isolated "
+                "plansDirectory.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=(run_dir,),
+            )
+        if len(candidates) != 1 or len(entries) != 1:
+            raise PlanArtifactAmbiguousError(
+                "Claude Code produced multiple or unexpected artifacts in the isolated plan "
+                "directory.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=tuple(entries),
+            )
+        artifact = candidates[0]
+        try:
+            plan = artifact.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PlanArtifactMalformedError(
+                f"Claude Code plan artifact could not be read as UTF-8: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=(artifact,),
+            ) from exc
+        if not plan.strip():
+            raise PlanArtifactMalformedError(
+                "Claude Code produced a blank plan artifact.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exit_code,
+                session_id=session_id,
+                paths=(artifact,),
+            )
+        return PlanSessionResult(
+            tool=self.TOOL_ID,
+            version=version,
+            plan=plan,
+            session_id=session_id,
+            native_mode="--permission-mode plan",
+            artifact_source=PlanArtifactSource.REQUESTED_PATH,
+            binding=PlanSessionBinding.ISOLATED_RUN_PATH,
+            exit_code=exit_code,
+            artifact_id=artifact.name,
+            artifact_path=artifact,
+        )
 
     def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
         """Collapse Crossby's Claude settings fragments into one settings source.

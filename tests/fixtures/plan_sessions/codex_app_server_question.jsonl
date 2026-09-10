@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"result":{"data":[{"mode":"plan","name":"Plan"}]}}
+{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thr-exact-123"},"model":"gpt-5.4"}}
+{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-exact-123"}}}
+{"jsonrpc":"2.0","id":71,"method":"item/tool/requestUserInput","params":{"threadId":"thr-exact-123","turnId":"turn-exact-123","itemId":"question-item-1","questions":[{"id":"architecture","question":"Which boundary should own collection?","options":[{"id":"adapter","label":"Adapter","description":"Keep native parsing tool-specific"},{"id":"service","label":"Service","description":"Centralize tool-specific parsing"}]}]}}
+{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-exact-123","turnId":"turn-exact-123","item":{"type":"plan","id":"plan-exact-123","text":"# Native plan\n\n1. Inspect.\n2. Implement."}}}
+{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thr-exact-123","turn":{"id":"turn-exact-123","status":"completed"}}}

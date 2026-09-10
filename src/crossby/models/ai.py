@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class EffortLevel(StrEnum):
@@ -42,6 +43,8 @@ class PlanModeActivation(StrEnum):
     """How an adapter activates a harness's native planning mode."""
 
     CLI_ARGUMENT = "cli_argument"
+    CODEX_APP_SERVER = "codex_app_server"
+    ACP = "acp"
     UNSUPPORTED = "unsupported"
 
 
@@ -53,6 +56,77 @@ class PlanArtifactLocation(StrEnum):
     PRIVATE = "private"
     SESSION = "session"
     UNAVAILABLE = "unavailable"
+
+
+class PlanArtifactSource(StrEnum):
+    """Authoritative source from which Crossby collected a native plan."""
+
+    REQUESTED_PATH = "requested_path"
+    STRUCTURED_OUTPUT = "structured_output"
+    SESSION_EXPORT = "session_export"
+    PROTOCOL_EVENT = "protocol_event"
+
+
+class PlanSessionBinding(StrEnum):
+    """Evidence that binds an artifact to the run Crossby launched."""
+
+    ISOLATED_RUN_PATH = "isolated_run_path"
+    SESSION_ID = "session_id"
+    CONVERSATION_ID = "conversation_id"
+    THREAD_TURN_IDS = "thread_turn_ids"
+
+
+class PlanSessionTransport(StrEnum):
+    """Transport used for a complete, collected planning session."""
+
+    INTERACTIVE_CLI = "interactive_cli"
+    HEADLESS_CLI = "headless_cli"
+    CODEX_APP_SERVER = "codex_app_server"
+    ACP = "acp"
+    UNAVAILABLE = "unavailable"
+
+
+class PlanInteractionSupport(StrEnum):
+    """How native planning questions are surfaced to a caller."""
+
+    TERMINAL = "terminal"
+    CALLBACK = "callback"
+    RESUMABLE_CALLBACK = "resumable_callback"
+    NONE = "none"
+
+
+class PlanRequestBehavior(StrEnum):
+    """How a collector treats a sandbox or approval request dimension."""
+
+    PRESERVED = "preserved"
+    TOOL_MANAGED = "tool_managed"
+    UNSUPPORTED = "unsupported"
+
+
+class PlanApprovalPolicy(StrEnum):
+    """Portable approval posture for collected planning sessions."""
+
+    ON_REQUEST = "on-request"
+    UNTRUSTED = "untrusted"
+    NEVER = "never"
+
+
+class PlanInteractionKind(StrEnum):
+    """Kind of native elicitation surfaced during a plan session."""
+
+    QUESTION = "question"
+    PERMISSION = "permission"
+    PLAN_APPROVAL = "plan_approval"
+
+
+class PlanInteractionOutcome(StrEnum):
+    """Caller-selected outcome for a native elicitation."""
+
+    ANSWERED = "answered"
+    APPROVED = "approved"
+    DENIED = "denied"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
 
 
 class ModelTier(StrEnum):
@@ -161,14 +235,153 @@ class AIModel(BaseModel, frozen=True):
         return self.id
 
 
+class PlanQuestionOption(BaseModel, frozen=True):
+    """One native option presented by a planning harness."""
+
+    option_id: str
+    label: str
+    description: str | None = None
+
+    @field_validator("option_id", "label")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("plan question options must have non-blank identifiers and labels")
+        return value
+
+
+class PlanInteraction(BaseModel, frozen=True):
+    """A session-bound native question or approval request."""
+
+    kind: PlanInteractionKind
+    question_id: str
+    prompt: str
+    options: tuple[PlanQuestionOption, ...] = ()
+    allow_multiple: bool = False
+    session_id: str
+    thread_id: str | None = None
+    turn_id: str | None = None
+    artifact_id: str | None = None
+
+    @field_validator("question_id", "prompt", "session_id")
+    @classmethod
+    def _required_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("plan interactions require non-blank identifiers and prompt text")
+        return value
+
+
+class PlanInteractionResponse(BaseModel, frozen=True):
+    """A caller's explicit response to one native interaction."""
+
+    outcome: PlanInteractionOutcome
+    answer: str | None = None
+    option_id: str | None = None
+    option_ids: tuple[str, ...] = ()
+
+    @field_validator("option_ids")
+    @classmethod
+    def _option_ids_are_not_blank(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not option_id.strip() for option_id in value):
+            raise ValueError("native option IDs must be non-blank")
+        return value
+
+    @model_validator(mode="after")
+    def _answer_matches_outcome(self) -> Self:
+        if self.outcome is PlanInteractionOutcome.ANSWERED and not (
+            (self.answer and self.answer.strip())
+            or (self.option_id and self.option_id.strip())
+            or self.option_ids
+        ):
+            raise ValueError("an answered interaction requires answer text or a native option ID")
+        return self
+
+
+class PlanSessionRequest(BaseModel, frozen=True):
+    """Portable inputs for one complete native planning lifecycle."""
+
+    prompt: str
+    working_dir: Path
+    model: str | None = None
+    effort: EffortLevel | None = None
+    trusted_dirs: tuple[Path, ...] = ()
+    plan_output_dir: Path | None = None
+    sandbox: bool = True
+    network_access: bool = False
+    approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.ON_REQUEST
+    timeout_seconds: float = Field(default=600.0, gt=0, le=3600.0)
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a collected plan session requires a non-blank prompt")
+        return value
+
+
+class PlanSessionResult(BaseModel, frozen=True):
+    """Normalized Markdown plan plus exact native provenance."""
+
+    tool: AIToolID
+    version: str
+    plan: str
+    session_id: str
+    native_mode: str
+    artifact_source: PlanArtifactSource
+    binding: PlanSessionBinding
+    exit_code: int
+    thread_id: str | None = None
+    turn_id: str | None = None
+    artifact_id: str | None = None
+    artifact_path: Path | None = None
+
+    @field_validator("version", "plan", "session_id", "native_mode")
+    @classmethod
+    def _non_blank_result_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("successful plan-session text and provenance must be non-blank")
+        return value
+
+    @model_validator(mode="after")
+    def _provenance_is_consistent(self) -> Self:
+        if self.exit_code != 0:
+            raise ValueError("a successful plan-session result requires exit_code=0")
+        if self.binding is PlanSessionBinding.THREAD_TURN_IDS and not (
+            self.thread_id and self.turn_id
+        ):
+            raise ValueError("thread/turn binding requires both thread_id and turn_id")
+        if self.binding is PlanSessionBinding.ISOLATED_RUN_PATH and self.artifact_path is None:
+            raise ValueError("isolated-path binding requires artifact_path")
+        if self.artifact_source is PlanArtifactSource.REQUESTED_PATH and self.artifact_path is None:
+            raise ValueError("requested-path artifact provenance requires artifact_path")
+        if self.artifact_source is PlanArtifactSource.PROTOCOL_EVENT and self.artifact_id is None:
+            raise ValueError("protocol-event provenance requires artifact_id")
+        expected_bindings = {
+            PlanArtifactSource.REQUESTED_PATH: {PlanSessionBinding.ISOLATED_RUN_PATH},
+            PlanArtifactSource.STRUCTURED_OUTPUT: {PlanSessionBinding.CONVERSATION_ID},
+            PlanArtifactSource.SESSION_EXPORT: {PlanSessionBinding.SESSION_ID},
+            PlanArtifactSource.PROTOCOL_EVENT: {
+                PlanSessionBinding.SESSION_ID,
+                PlanSessionBinding.THREAD_TURN_IDS,
+            },
+        }
+        if self.binding not in expected_bindings[self.artifact_source]:
+            raise ValueError(
+                f"{self.artifact_source.value} is inconsistent with {self.binding.value} binding"
+            )
+        return self
+
+
 class PlanModeCapability(BaseModel, frozen=True):
-    """Truthful, consumer-facing contract for native plan-mode activation.
+    """Truthful contract for activation and complete plan collection.
 
     ``version_requirement`` deliberately accepts a human-readable selector
     requirement instead of pretending every upstream publishes a reliable
     numeric introduction version. ``verified_version`` records the oldest
-    concrete CLI build Crossby verified and is the conservative runtime floor
-    for native plan-mode launches.
+    concrete CLI build Crossby verified and is the conservative runtime floor.
+    Activation-only launches remain available through :attr:`supported`; a
+    complete collected session additionally requires ``artifact_source`` and an
+    exact ``binding``.
     """
 
     activation: PlanModeActivation
@@ -182,11 +395,38 @@ class PlanModeCapability(BaseModel, frozen=True):
     export_command: tuple[str, ...] | None = None
     import_command: tuple[str, ...] | None = None
     remediation: str | None = None
+    collector_activation: PlanModeActivation | None = None
+    transport: PlanSessionTransport = PlanSessionTransport.UNAVAILABLE
+    artifact_source: PlanArtifactSource | None = None
+    binding: PlanSessionBinding | None = None
+    interaction: PlanInteractionSupport = PlanInteractionSupport.NONE
+    sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
+    approval_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
+
+    @property
+    def activation_supported(self) -> bool:
+        """Whether Crossby can select native mode before the first turn."""
+        return self.activation is not PlanModeActivation.UNSUPPORTED
 
     @property
     def supported(self) -> bool:
-        """Whether the adapter can guarantee native activation."""
-        return self.activation is not PlanModeActivation.UNSUPPORTED
+        """Compatibility alias for activation-only native plan support."""
+        return self.activation_supported
+
+    @property
+    def session_activation(self) -> PlanModeActivation:
+        """Activation used by collection, which may differ from ``launch``."""
+        return self.collector_activation or self.activation
+
+    @property
+    def session_supported(self) -> bool:
+        """Whether Crossby can return an artifact bound to the launched run."""
+        return (
+            self.session_activation is not PlanModeActivation.UNSUPPORTED
+            and self.transport is not PlanSessionTransport.UNAVAILABLE
+            and self.artifact_source is not None
+            and self.binding is not None
+        )
 
 
 _UNSUPPORTED_PLAN_MODE = PlanModeCapability(
@@ -246,8 +486,13 @@ class AIToolCapabilities(BaseModel):
 
     @property
     def supports_plan_mode(self) -> bool:
-        """Compatibility view over the typed plan-mode capability."""
+        """Compatibility activation-only view over the typed capability."""
         return self.plan_mode.supported
+
+    @property
+    def supports_plan_session(self) -> bool:
+        """Whether the adapter implements exact-session plan collection."""
+        return self.plan_mode.session_supported
 
     # --- Hook lifecycle & runtime I/O (consumed by crossby.hooks.runtime) ---
     supports_stop_hook: bool = False

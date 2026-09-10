@@ -1,0 +1,20 @@
+{
+  "status": "waiting_for_input",
+  "conversation_id": "conv-exact-123",
+  "waiting_for_input": true,
+  "question": {
+    "id": "scope",
+    "prompt": "Should the plan include compatibility coverage?",
+    "options": [
+      {
+        "id": "yes",
+        "label": "Yes",
+        "description": "Keep existing launches stable"
+      },
+      {
+        "id": "no",
+        "label": "No"
+      }
+    ]
+  }
+}
