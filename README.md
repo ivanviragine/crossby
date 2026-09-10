@@ -390,9 +390,10 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 | Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
-its safe default is accepted. `preserved` means Crossby enforces the listed caller
-choices explicitly; an unlisted approval policy is rejected before collection. Protocol and resumable collectors never invent an
-answer or auto-approve implementation. A missing handler produces
+its safe default is accepted. `preserved` means Crossby enforces the listed
+caller choices explicitly; an unlisted approval policy is rejected before
+collection. Protocol and resumable collectors never invent an answer or
+auto-approve implementation. A missing handler produces
 `PlanInteractionRequiredError`; final plan approval is represented separately
 and an `APPROVED` response is refused by collectors where it would transition
 into execution.

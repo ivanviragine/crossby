@@ -107,9 +107,9 @@ interactive sessions. A complete collector must:
 1. Activate the documented native mode before the first planning turn. Prompt
    prefixes and slash-command text are never selectors.
 2. Declare collector activation, transport, artifact source, exact binding,
-   interaction support, and sandbox/approval behavior in `PlanModeCapability`.
-   If any requested policy cannot be preserved, reject it before process
-   creation.
+   interaction support, sandbox/approval behavior, and the exact
+   `supported_approval_policies` in `PlanModeCapability`. If any requested
+   policy cannot be preserved, reject it before process creation.
 3. Bind collection to an identifier or isolated location created or returned by
    that invocation. Never inspect a global "latest" plan/session, call an
    ID-less export, use prefix/name matching, or scrape a harness's private
