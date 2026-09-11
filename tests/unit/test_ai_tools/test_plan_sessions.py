@@ -63,7 +63,7 @@ EXACT_VERSION = "fixture-tool 9999.0.0+exact"
 def _exact_version(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "crossby.utils.versioning.detect_binary_version_info",
-        lambda _binary: BinaryVersion((9999, 0, 0), EXACT_VERSION),
+        lambda _binary, **_kwargs: BinaryVersion((9999, 0, 0), EXACT_VERSION),
     )
 
 
@@ -231,7 +231,9 @@ class TestNormalizedContract:
     ) -> None:
         adapter = AbstractAITool.get(tool_id)
         collector = patch.object(adapter, "_run_plan_session")
-        monkeypatch.setattr("crossby.utils.versioning.detect_binary_version_info", lambda _b: None)
+        monkeypatch.setattr(
+            "crossby.utils.versioning.detect_binary_version_info", lambda _b, **_kwargs: None
+        )
         updates = (
             {"approval_policy": PlanApprovalPolicy.NEVER} if tool_id is AIToolID.COPILOT else {}
         )
@@ -245,7 +247,7 @@ class TestNormalizedContract:
         adapter = AbstractAITool.get(AIToolID.CODEX)
         monkeypatch.setattr(
             "crossby.utils.versioning.detect_binary_version_info",
-            lambda _b: BinaryVersion((0, 1, 0), "codex-cli 0.1.0"),
+            lambda _b, **_kwargs: BinaryVersion((0, 1, 0), "codex-cli 0.1.0"),
         )
         with (
             patch.object(adapter, "_run_plan_session") as run,
@@ -253,6 +255,39 @@ class TestNormalizedContract:
         ):
             adapter.run_plan_session(_request(tmp_path))
         run.assert_not_called()
+
+    def test_version_probe_and_collector_share_request_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.CODEX)
+        clock = iter((100.0, 102.0, 102.5))
+        probe_timeouts: list[float] = []
+
+        def detect(_binary: str, *, timeout_seconds: float) -> BinaryVersion:
+            probe_timeouts.append(timeout_seconds)
+            return BinaryVersion((9999, 0, 0), EXACT_VERSION)
+
+        result = PlanSessionResult(
+            tool=AIToolID.CODEX,
+            version=EXACT_VERSION,
+            plan="# Plan",
+            session_id="thread-1",
+            native_mode='collaborationMode.mode="plan"',
+            artifact_source=PlanArtifactSource.PROTOCOL_EVENT,
+            binding=PlanSessionBinding.THREAD_TURN_IDS,
+            exit_code=0,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            artifact_id="plan-1",
+        )
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: next(clock))
+        monkeypatch.setattr("crossby.utils.versioning.detect_binary_version_info", detect)
+
+        with patch.object(adapter, "_run_plan_session", return_value=result) as run:
+            adapter.run_plan_session(_request(tmp_path, timeout_seconds=10))
+
+        assert probe_timeouts == [8.0]
+        assert run.call_args.args[0].timeout_seconds == 7.5
 
     def test_tty_does_not_install_an_implicit_interaction_handler(self, tmp_path: Path) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
@@ -1199,6 +1234,7 @@ class TestExactSessionCliCollectors:
             return next(runs)
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 100.0)
         clock = iter((100.0, 101.0, 104.0, 107.0))
         monkeypatch.setattr("crossby.ai_tools.opencode.time.monotonic", lambda: next(clock))
 
@@ -1537,6 +1573,7 @@ class TestExactSessionCliCollectors:
             )
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 100.0)
         clock = iter((100.0, 101.0, 103.0, 105.0))
         monkeypatch.setattr("crossby.ai_tools.antigravity_cli.time.monotonic", lambda: next(clock))
         result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
@@ -2097,6 +2134,7 @@ class TestExactSessionCliCollectors:
 
         monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 100.0)
         clock = iter((100.0, 101.0, 104.0))
         monkeypatch.setattr("crossby.ai_tools.copilot.time.monotonic", lambda: next(clock))
         result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(

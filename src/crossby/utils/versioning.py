@@ -52,20 +52,25 @@ def parse_semver(text: str) -> tuple[int, int, int] | None:
     return (int(major), int(minor), int(patch) if patch is not None else 0)
 
 
-def detect_binary_version_info(binary: str) -> BinaryVersion | None:
+def detect_binary_version_info(
+    binary: str, *, timeout_seconds: float = _VERSION_TIMEOUT_S
+) -> BinaryVersion | None:
     """Run one bounded probe and retain normalized and original version text.
 
     Returns ``None`` when the binary is absent from PATH, the invocation fails
-    or times out, or no semver can be parsed. Never raises.
+    or times out, or no semver can be parsed. ``timeout_seconds`` can shorten,
+    but never extend, the normal probe bound. Never raises.
     """
     if shutil.which(binary) is None:
+        return None
+    if timeout_seconds <= 0:
         return None
     try:
         proc = subprocess.run(
             [binary, "--version"],
             capture_output=True,
             text=True,
-            timeout=_VERSION_TIMEOUT_S,
+            timeout=min(timeout_seconds, _VERSION_TIMEOUT_S),
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:

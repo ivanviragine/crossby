@@ -65,6 +65,19 @@ class TestDetectBinaryVersion:
         assert detected.text == "Cursor Agent 2026.09.02-c22c1a3"
         assert detected.raw == detected.text
 
+    def test_caller_can_shorten_probe_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+        observed: list[float] = []
+
+        def fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            observed.append(float(kwargs["timeout"]))
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="v1.2.3", stderr="")
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+
+        assert versioning.detect_binary_version_info("agent", timeout_seconds=0.25) is not None
+        assert observed == [0.25]
+
     def test_falls_back_to_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
 

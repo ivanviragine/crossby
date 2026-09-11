@@ -12,6 +12,7 @@ import shutil
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
@@ -270,9 +271,11 @@ class AbstractAITool(ABC):
         from crossby.ai_tools.plan_mode import (
             PlanModeAdapterContractError,
             PlanSessionUnsupportedError,
+            PlanTransportError,
         )
         from crossby.utils.versioning import detect_binary_version_info, parse_semver
 
+        deadline = monotonic() + request.timeout_seconds
         caps = self.capabilities()
         capability = caps.plan_mode
         if not capability.session_supported:
@@ -356,7 +359,21 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        detected = detect_binary_version_info(caps.binary)
+        probe_timeout = deadline - monotonic()
+        if probe_timeout <= 0:
+            raise PlanTransportError(
+                f"{caps.display_name} plan session timed out before version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        detected = detect_binary_version_info(caps.binary, timeout_seconds=probe_timeout)
+        remaining_timeout = deadline - monotonic()
+        if remaining_timeout <= 0:
+            raise PlanTransportError(
+                f"{caps.display_name} plan session timed out during version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         if detected is None or detected.normalized < floor:
             raise PlanSessionUnsupportedError.for_installed_version(
                 tool_id=self.TOOL_ID,
@@ -365,6 +382,7 @@ class AbstractAITool(ABC):
                 installed_version=detected.text if detected is not None else None,
             )
 
+        request = request.model_copy(update={"timeout_seconds": remaining_timeout})
         result = self._run_plan_session(request, detected.text, interaction_handler)
         if result.tool is not self.TOOL_ID:
             raise PlanModeAdapterContractError(

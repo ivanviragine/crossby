@@ -466,9 +466,10 @@ else:
 Crossby returns Markdown and the available session, turn, item, conversation,
 or path evidence. It does not impose WADE validation and does not require the
 harness itself to create `PLAN.md`. `timeout_seconds` is one collector deadline
-shared by the initial invocation, question continuations, protocol waits, and
-subprocess-backed export. Caller-visible timeout errors omit subprocess command
-arguments because those arguments can contain prompts or continuation answers.
+shared by the version probe, initial invocation, question continuations,
+protocol waits, and subprocess-backed export. Caller-visible timeout errors omit
+subprocess command arguments because those arguments can contain prompts or
+continuation answers.
 Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
 stderr. POSIX children use an isolated process group, and capture-worker cleanup
 is deadline-bounded on every platform, so descendants retaining inherited pipes

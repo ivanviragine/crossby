@@ -31,7 +31,7 @@ from crossby.ai_tools import (
     PlanInteractionResponse,
     PlanSessionRequest,
 )
-from crossby.models.ai import AIToolID, EffortLevel
+from crossby.models.ai import AIToolID, EffortLevel, PlanApprovalPolicy
 
 SELECTED = {
     value.strip()
@@ -107,7 +107,9 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
         prompt += " Do not edit files or implement the plan."
 
     request_options: dict[str, Any] = {}
-    if tool_id is AIToolID.CURSOR:
+    if tool_id is AIToolID.COPILOT:
+        request_options["approval_policy"] = PlanApprovalPolicy.NEVER
+    elif tool_id is AIToolID.CURSOR:
         request_options.update(model="sonnet-4.6", effort=EffortLevel.MEDIUM)
     elif tool_id is AIToolID.ANTIGRAVITY_CLI:
         request_options.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
