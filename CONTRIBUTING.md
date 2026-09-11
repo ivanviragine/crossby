@@ -335,7 +335,7 @@ in `cli/launch.py`.
 |---|---|
 | Claude | `--mcp-config <file> --strict-mcp-config` (selected servers), a `--settings` file of `skillOverrides` (gated on `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
-| Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
+| Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); profile-native `allow_tools` approvals travel independently, and entries naming an excluded MCP server are filtered before they are emitted |
 | Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
 | OpenCode | none — persistent fallback records lifecycle state but has no tool-config mechanism, so nothing is narrowed and the project's `opencode.json` stays authoritative |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |

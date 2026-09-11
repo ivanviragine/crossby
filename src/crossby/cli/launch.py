@@ -400,7 +400,6 @@ def launch(
             caps=caps,
             scene_root=compute_scene_root(work_dir),
             config=config,
-            allow_tools=profile_allow_tools,
         )
 
     # Deliver prompt if tool doesn't support initial messages
@@ -423,6 +422,7 @@ def launch(
             transcript_path=transcript,
             trusted_dirs=normalized_trusted_dirs,
             effort=resolved_effort,
+            allow_tools=profile_allow_tools,
             yolo=resolved_yolo,
             plan_mode=plan,
             accept_edits=resolved_accept_edits,
@@ -508,7 +508,6 @@ def _prepare_scene_launch(
     caps: AIToolCapabilities,
     scene_root: Path,
     config: CrossbyConfig,
-    allow_tools: list[str],
 ) -> SceneLaunchContext | None:
     """Resolve *scene_cfg* for one launch and pick how it applies to the tool.
 
@@ -587,7 +586,6 @@ def _prepare_scene_launch(
             resolved=resolved,
             project_root=scene_root,
             sync_data=build_sync_data(scene_root),
-            allow_tools=tuple(allow_tools),
         )
 
     reason = (
@@ -611,7 +609,6 @@ def _prepare_scene_launch(
             resolved=resolved,
             project_root=scene_root,
             sync_data=build_sync_data(scene_root),
-            allow_tools=tuple(allow_tools),
         ),
         tool_id=tool_id,
         installed=installed,

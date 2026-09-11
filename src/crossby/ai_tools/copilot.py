@@ -107,9 +107,8 @@ class CopilotAdapter(AbstractAITool):
             # (`timeoutSec`).
             hook_fail_open_default=False,
             # Session-scoped scenes: deselected MCP servers become repeated
-            # --disable-mcp-server flags; the visibility (--excluded-tools) and
-            # approval (--allow-tool) layers are independent, so a scene-excluded
-            # tool is also filtered out of any profile-supplied allow entries.
+            # --disable-mcp-server flags. Profile-native approvals travel on an
+            # independent launch channel and are filtered against the scene here.
             supports_scene_launch=True,
             scene_tool_denylist_flag="--excluded-tools",
         )
@@ -477,19 +476,32 @@ class CopilotAdapter(AbstractAITool):
         """Copilot scopes only MCP at launch (per-server disable + allow filter)."""
         return {"mcp"}
 
+    def allow_tools_args(
+        self,
+        allow_tools: list[str],
+        scene: SceneLaunchContext | None,
+    ) -> list[str]:
+        """Render Copilot-native profile approvals without canonical translation.
+
+        Profile values already use Copilot's ``--allow-tool`` grammar, such as
+        ``shell(git:*)`` or ``github(create_issue)``. A scene contributes only
+        the MCP servers it excludes; entries naming those servers are removed
+        while surviving values retain their source ordering and spelling.
+        """
+        excluded = scene.deselected_mcp() if scene is not None else set()
+        args: list[str] = []
+        for entry in allow_tools:
+            if not _allow_entry_excluded(entry, excluded):
+                args += ["--allow-tool", entry]
+        return args
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
-        """Scope a scene for one session via Copilot's two independent layers.
+        """Render Copilot scene visibility as server-disable flags only.
 
-        - **Visibility** — a repeated ``--disable-mcp-server <name>`` for each
-          deselected MCP server. A server hidden here cannot be re-exposed by the
-          approval layer, so this is authoritative.
-        - **Approval** — any profile-supplied ``--allow-tool`` entry that names a
-          scene-excluded server is dropped before the surviving entries are
-          re-emitted, so a profile can never re-allow a tool the scene removed.
-          crossby resolves this itself rather than relying on Copilot's internal
-          precedence between the two layers.
-
-        Writes no artefact files — Copilot's scene is entirely flag-driven.
+        Native profile approvals are independent of scene rendering and are
+        emitted by :meth:`allow_tools_args`, where the same excluded-server set
+        filters them before subprocess dispatch. Copilot's scene is entirely
+        flag-driven and writes no artefact files.
         """
         from crossby.scenes.launch import SceneLaunchArgs
 
@@ -497,9 +509,6 @@ class CopilotAdapter(AbstractAITool):
         args: list[str] = []
         for name in sorted(excluded):
             args += ["--disable-mcp-server", name]
-        for entry in scene.allow_tools:
-            if not _allow_entry_excluded(entry, excluded):
-                args += ["--allow-tool", entry]
         return SceneLaunchArgs(args=tuple(args))
 
 
