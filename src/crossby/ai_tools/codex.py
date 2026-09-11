@@ -179,6 +179,7 @@ class CodexAdapter(AbstractAITool):
     ) -> PlanSessionResult:
         """Collect the authoritative completed plan item from Codex app-server."""
         from crossby.ai_tools.plan_mode import (
+            PlanArtifactAmbiguousError,
             PlanArtifactMalformedError,
             PlanArtifactMissingError,
             PlanBindingMismatchError,
@@ -353,6 +354,17 @@ class CodexAdapter(AbstractAITool):
                             thread_id=thread_id,
                             turn_id=turn_id,
                         )
+                    if completed_plan is not None:
+                        raise PlanArtifactAmbiguousError(
+                            "Codex emitted multiple authoritative completed plan items for the "
+                            "bound turn.",
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                            session_id=thread_id,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            artifact_id=artifact_id,
+                        )
                     completed_plan = (artifact_id, text)
                     continue
                 if method == "turn/completed" and isinstance(params, dict):
@@ -449,6 +461,12 @@ class CodexAdapter(AbstractAITool):
                     turn_id=turn_id,
                     artifact_id=artifact_id,
                 )
+            rpc.request(
+                5,
+                "thread/backgroundTerminals/clean",
+                {"threadId": thread_id},
+            )
+            wait_response(5)
             return PlanSessionResult(
                 tool=self.TOOL_ID,
                 version=version,
@@ -672,6 +690,7 @@ def _rpc_method_name(request_id: int) -> str:
         2: "collaborationMode/list",
         3: "thread/start",
         4: "turn/start",
+        5: "thread/backgroundTerminals/clean",
     }.get(request_id, f"request {request_id}")
 
 

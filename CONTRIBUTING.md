@@ -138,6 +138,14 @@ progress/transcript parsing out of artifact parsers: only the adapter's declared
 authoritative event, export, structured field, or isolated path may become
 `result.plan`.
 
+Lifecycle completion is adapter-specific and must be explicit. Codex waits for
+the matching successful `turn/completed`, rejects a second completed plan item,
+then acknowledges `thread/backgroundTerminals/clean` before returning. Copilot
+requires one UUID-bound `result` event with `status="completed"` before reading
+the local share. Its `--prompt` transport cannot relay tool permission prompts,
+so collection supports only `approval_policy="never"` and runs it in a
+run-owned no-network sandbox with ambient hooks and external MCP disabled.
+
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
 status casing, plus contract tests covering success, malformed output,
@@ -511,6 +519,12 @@ The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
 compatibility. Complete collection accepts only `low`, `medium`, and `high`,
 because `run_plan_session()` rejects a requested effort tier that OpenCode's
 native `--variant` value cannot preserve exactly.
+
+The Cursor entries also describe interactive launch compatibility. Complete
+collection never collapses two requested tiers onto that generic mapping: it
+passes an already tiered model unchanged or adds Cursor's documented
+`[effort=<tier>]` model override. Conflicting tiers, `auto`, and unknown
+unparameterized models are rejected before the ACP process starts.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -85,10 +86,7 @@ class CopilotAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
-                supported_approval_policies=(
-                    PlanApprovalPolicy.ON_REQUEST,
-                    PlanApprovalPolicy.NEVER,
-                ),
+                supported_approval_policies=(PlanApprovalPolicy.NEVER,),
             ),
             supports_accept_edits=True,
             supports_session_start_hook=True,
@@ -183,9 +181,25 @@ class CopilotAdapter(AbstractAITool):
                 session_id=session_id,
             ) from exc
         export_path = temp_dir / f"{session_id}.md"
+        try:
+            environment = _copilot_isolated_environment(temp_dir, request)
+            project_mcp_names = _copilot_project_mcp_names(request.working_dir)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise PlanTransportError(
+                f"GitHub Copilot could not prepare its isolated plan environment: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(export_path,),
+            ) from exc
         base = [
             "copilot",
             "--plan",
+            "--sandbox",
+            "--allow-all-tools",
+            "--disable-builtin-mcps",
+            "--no-auto-update",
             "--session-id",
             session_id,
             f"--share={export_path}",
@@ -198,8 +212,8 @@ class CopilotAdapter(AbstractAITool):
             base.extend(("--model", request.model))
         for path in request.trusted_dirs:
             base.extend(("--add-dir", str(path)))
-        if request.approval_policy is PlanApprovalPolicy.NEVER:
-            base.append("--deny-tool=*")
+        for server_name in project_mcp_names:
+            base.extend(("--disable-mcp-server", server_name))
 
         command = [*base, "--prompt", request.prompt]
         seen_questions: set[str] = set()
@@ -220,6 +234,7 @@ class CopilotAdapter(AbstractAITool):
                         command,
                         cwd=request.working_dir,
                         timeout=remaining,
+                        env=environment,
                     )
                 except subprocess.TimeoutExpired as exc:
                     raise PlanTransportError(
@@ -281,6 +296,13 @@ class CopilotAdapter(AbstractAITool):
                     ) from exc
                 pending = [item for item in interactions if item.question_id not in seen_questions]
                 if not pending:
+                    _validate_copilot_terminal_result(
+                        events,
+                        session_id,
+                        capability=capability,
+                        exit_code=run.returncode,
+                        paths=(export_path,),
+                    )
                     break
                 interaction = pending[0]
                 if interaction_handler is None:
@@ -506,6 +528,138 @@ def _copilot_session_ids(value: Any) -> list[str]:
         for nested in value:
             found.extend(_copilot_session_ids(nested))
     return found
+
+
+def _copilot_isolated_environment(
+    temp_dir: Path,
+    request: PlanSessionRequest,
+) -> dict[str, str]:
+    """Create a per-run Copilot home with a fail-closed sandbox policy."""
+    isolated_home = temp_dir / "home"
+    isolated_home.mkdir(mode=0o700)
+
+    configured_home = os.environ.get("COPILOT_HOME")
+    source_home = (
+        Path(configured_home).expanduser() if configured_home else Path.home() / ".copilot"
+    )
+    source_config = source_home / "config.json"
+    if source_config.is_file():
+        shutil.copy2(source_config, isolated_home / "config.json")
+
+    sandbox = {
+        "enabled": True,
+        "addCurrentWorkingDirectory": True,
+        "allowDevToolAccess": False,
+        "allowBypass": False,
+        "auth": {"git": False, "gh": False},
+        "sandboxMcpServers": True,
+        "sandboxLspServers": True,
+        "userPolicy": {
+            "filesystem": {
+                "readonlyPaths": [str(path) for path in request.trusted_dirs],
+                "clearPolicyOnExit": True,
+            },
+            "network": {
+                "allowOutbound": False,
+                "allowLocalNetwork": False,
+            },
+            "seatbelt": {"keychainAccess": False},
+        },
+    }
+    (isolated_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "disableAllHooks": True,
+                "ide": {"autoConnect": False},
+                "sandbox": sandbox,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["COPILOT_HOME"] = str(isolated_home)
+    environment.pop("COPILOT_ALLOW_ALL", None)
+    return environment
+
+
+def _copilot_project_mcp_names(working_dir: Path) -> tuple[str, ...]:
+    """Find project Copilot MCP servers so a no-network run can disable them."""
+    root = working_dir
+    for candidate in (working_dir, *working_dir.parents):
+        if (candidate / ".git").exists():
+            root = candidate
+            break
+    config_path = root / ".vscode" / "mcp.json"
+    if not config_path.is_file():
+        return ()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read project MCP configuration: {exc}") from exc
+    servers = payload.get("servers") if isinstance(payload, dict) else None
+    if servers is None:
+        return ()
+    if not isinstance(servers, dict):
+        raise ValueError("project MCP configuration has a non-object servers field")
+    return tuple(sorted(name for name in servers if isinstance(name, str) and name.strip()))
+
+
+def _validate_copilot_terminal_result(
+    events: list[dict[str, Any]],
+    session_id: str,
+    *,
+    capability: PlanModeCapability,
+    exit_code: int,
+    paths: tuple[Path, ...],
+) -> None:
+    """Require one successful terminal result bound to the assigned UUID."""
+    from crossby.ai_tools.plan_mode import (
+        PlanArtifactAmbiguousError,
+        PlanArtifactMissingError,
+        PlanBindingMismatchError,
+        PlanTransportError,
+    )
+
+    results = [event for event in events if event.get("type") == "result"]
+    if not results:
+        raise PlanArtifactMissingError(
+            "GitHub Copilot emitted no terminal result for the completed plan run.",
+            tool_id=AIToolID.COPILOT,
+            capability=capability,
+            exit_code=exit_code,
+            session_id=session_id,
+            paths=paths,
+        )
+    if len(results) != 1:
+        raise PlanArtifactAmbiguousError(
+            "GitHub Copilot emitted multiple terminal results for the completed plan run.",
+            tool_id=AIToolID.COPILOT,
+            capability=capability,
+            exit_code=exit_code,
+            session_id=session_id,
+            paths=paths,
+        )
+    result = results[0]
+    if set(_copilot_session_ids(result)) != {session_id}:
+        raise PlanBindingMismatchError(
+            "GitHub Copilot terminal result was not bound to the assigned session UUID.",
+            tool_id=AIToolID.COPILOT,
+            capability=capability,
+            exit_code=exit_code,
+            session_id=session_id,
+            paths=paths,
+        )
+    status = result.get("status")
+    if status != "completed":
+        raise PlanTransportError(
+            f"GitHub Copilot plan run ended with status {status!r}.",
+            tool_id=AIToolID.COPILOT,
+            capability=capability,
+            exit_code=exit_code,
+            session_id=session_id,
+            paths=paths,
+        )
 
 
 def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list[PlanInteraction]:

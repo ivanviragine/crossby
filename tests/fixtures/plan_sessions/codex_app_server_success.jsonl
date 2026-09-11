@@ -4,3 +4,4 @@
 {"id":4,"result":{"turn":{"id":"turn-exact-123"}}}
 {"method":"item/completed","params":{"threadId":"thr-exact-123","turnId":"turn-exact-123","item":{"type":"plan","id":"plan-exact-123","text":"# Native plan\n\n1. Inspect.\n2. Implement."}}}
 {"method":"turn/completed","params":{"threadId":"thr-exact-123","turn":{"id":"turn-exact-123","status":"completed"}}}
+{"id":5,"result":{}}

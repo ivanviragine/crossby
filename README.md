@@ -376,36 +376,39 @@ sandbox confinement, and approval policy are independent request dimensions; a
 collector either preserves a supported choice or rejects it before spawning.
 Unknown and below-floor CLI versions also fail before a harness process starts.
 `PlanSessionRequest` rejects unknown fields instead of silently applying a
-default. Cursor and Antigravity CLI encode effort in model IDs, so an explicit
-`effort` also requires an explicit `model`. Cursor rejects conflicting explicit
-tiers and elevated-effort models without a compatible thinking variant before
-starting ACP; generic `-thinking` IDs satisfy `high`, while `xhigh` and `max`
-require an ID that encodes that exact tier. Antigravity further requires a
-compatible Gemini model whose native effort tier matches the request; missing,
-non-Gemini, unavailable, or conflicting model tiers are rejected before the
-collector launches. OpenCode collection accepts only `low`, `medium`, and
-`high`: interactive launches retain the legacy `xhigh`/`max` → `high`
-normalization, but a collected session rejects tiers the native `--variant`
-argument cannot preserve exactly.
+default. Cursor and Antigravity CLI require an explicit `model` with explicit
+`effort`. Cursor preserves an untiered known model with the CLI's documented
+`[effort=<tier>]` override and rejects `auto`, unknown models, or conflicting
+model-encoded tiers before starting ACP. Antigravity requires a compatible
+Gemini model whose native effort tier matches the request; missing, non-Gemini,
+unavailable, or conflicting model tiers are rejected before the collector
+launches. OpenCode collection accepts only `low`, `medium`, and `high` and
+repeats the exact model and variant on every session continuation: interactive
+launches retain the legacy `xhigh`/`max` → `high` normalization, but a collected
+session rejects tiers the native `--variant` argument cannot preserve exactly.
 
 Support matrix (contracts verified against the listed builds on 2026-09-10):
 
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; ambiguous, symlinked, blank, or missing output fails |
-| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs and successful turn completion | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
+| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs and successful turn completion | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully and its background terminals are cleaned; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
-| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + unique local `--share` export | Resumable callback | Tool-managed / preserved (`on-request`, `never`) | 1.0.83 | Collection disables remote sharing and removes only its temporary export after normalization |
+| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Isolated tool-managed / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection uses an explicit no-network sandbox, disables external MCP/hooks, and removes its temporary home/export after normalization |
 | OpenCode | `run --agent plan --dir <workspace>` | Headless JSONL; emitted session ID + `export <exact-id>` + plan-mode assistant text | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Exported session/message directories must match the request; no latest-session lookup is used |
 | Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
 | VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
 | Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
-its safe default is accepted. `preserved` means Crossby enforces the listed
-caller choices explicitly; an unlisted approval policy is rejected before
-collection. Protocol and resumable collectors never invent an answer or
-auto-approve implementation. A missing handler produces
+its safe default is accepted. Copilot's collector supplies that default through
+a run-owned home with sandbox bypass, tool network access, ambient hooks, and
+external MCP disabled; its non-interactive transport cannot surface tool
+permission prompts, so `on-request` is rejected and `never` is the only
+preserved approval policy. `preserved` means Crossby enforces the listed caller
+choices explicitly; an unlisted approval policy is rejected before collection.
+Protocol and resumable collectors never invent an answer or auto-approve
+implementation. A missing handler produces
 `PlanInteractionRequiredError`; final plan approval is represented separately
 and an `APPROVED` response is refused by collectors where it would transition
 into execution.

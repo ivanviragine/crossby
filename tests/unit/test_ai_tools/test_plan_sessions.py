@@ -213,8 +213,11 @@ class TestNormalizedContract:
         adapter = AbstractAITool.get(tool_id)
         collector = patch.object(adapter, "_run_plan_session")
         monkeypatch.setattr("crossby.utils.versioning.detect_binary_version_info", lambda _b: None)
+        updates = (
+            {"approval_policy": PlanApprovalPolicy.NEVER} if tool_id is AIToolID.COPILOT else {}
+        )
         with collector as run, pytest.raises(PlanSessionUnsupportedError, match="version unknown"):
-            adapter.run_plan_session(_request(tmp_path))
+            adapter.run_plan_session(_request(tmp_path, **updates))
         run.assert_not_called()
 
     def test_below_floor_version_fails_before_adapter_process(
@@ -258,6 +261,16 @@ class TestNormalizedContract:
             adapter.run_plan_session(
                 _request(tmp_path, approval_policy=PlanApprovalPolicy.UNTRUSTED)
             )
+        run.assert_not_called()
+
+    def test_copilot_rejects_on_request_approval_before_collection(self, tmp_path: Path) -> None:
+        adapter = AbstractAITool.get(AIToolID.COPILOT)
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanSessionUnsupportedError, match="approval_policy='on-request'"),
+        ):
+            adapter.run_plan_session(_request(tmp_path))
+
         run.assert_not_called()
 
     def test_unsupported_effort_is_rejected_before_collection(self, tmp_path: Path) -> None:
@@ -390,8 +403,13 @@ class TestSubprocessTimeoutRedaction:
 
         monkeypatch.setattr(f"crossby.ai_tools.plan_process.{runner}", time_out)
 
+        updates = (
+            {"approval_policy": PlanApprovalPolicy.NEVER} if tool_id is AIToolID.COPILOT else {}
+        )
         with pytest.raises(PlanTransportError, match="timed out") as raised:
-            AbstractAITool.get(tool_id).run_plan_session(_request(tmp_path, prompt=prompt))
+            AbstractAITool.get(tool_id).run_plan_session(
+                _request(tmp_path, prompt=prompt, **updates)
+            )
 
         message = str(raised.value)
         assert prompt not in message
@@ -725,7 +743,11 @@ class TestExactSessionCliCollectors:
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
         result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-            _request(tmp_path),
+            _request(
+                tmp_path,
+                model="anthropic/claude-sonnet-4",
+                effort=EffortLevel.HIGH,
+            ),
             lambda _interaction: PlanInteractionResponse(
                 outcome=PlanInteractionOutcome.ANSWERED,
                 answer="--keep-compatibility",
@@ -744,6 +766,10 @@ class TestExactSessionCliCollectors:
             "json",
             "--agent",
             "plan",
+            "--model",
+            "anthropic/claude-sonnet-4",
+            "--variant",
+            "high",
             "--",
             "--keep-compatibility",
         ]
@@ -1193,9 +1219,22 @@ class TestExactSessionCliCollectors:
         events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
         share = FIXTURES / "copilot_share_success.md"
         commands: list[list[str]] = []
+        sandbox_settings: list[dict[str, Any]] = []
+        isolated_homes: list[Path] = []
+        (tmp_path / ".vscode").mkdir()
+        (tmp_path / ".vscode" / "mcp.json").write_text(
+            json.dumps({"servers": {"remote-review": {"url": "https://example.invalid"}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "source-copilot-home"))
 
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
             commands.append(command)
+            isolated_home = Path(kwargs["env"]["COPILOT_HOME"])
+            isolated_homes.append(isolated_home)
+            sandbox_settings.append(
+                json.loads((isolated_home / "settings.json").read_text(encoding="utf-8"))
+            )
             export_arg = next(value for value in command if value.startswith("--share="))
             shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
             return CapturedProcess(0, events, "")
@@ -1214,8 +1253,80 @@ class TestExactSessionCliCollectors:
         assert result.session_id == str(exact_uuid)
         assert "--no-remote" in commands[0]
         assert "--no-remote-export" in commands[0]
-        assert "--deny-tool=*" in commands[0]
+        assert "--sandbox" in commands[0]
+        assert "--allow-all-tools" in commands[0]
+        assert "--disable-builtin-mcps" in commands[0]
+        disabled_index = commands[0].index("--disable-mcp-server")
+        assert commands[0][disabled_index + 1] == "remote-review"
+        assert "--deny-tool=*" not in commands[0]
+        sandbox = sandbox_settings[0]["sandbox"]
+        assert sandbox["enabled"] is True
+        assert sandbox["allowBypass"] is False
+        assert sandbox["userPolicy"]["network"] == {
+            "allowLocalNetwork": False,
+            "allowOutbound": False,
+        }
+        assert not isolated_homes[0].exists()
         assert result.artifact_path is None
+
+    @pytest.mark.parametrize(
+        ("events", "error", "message"),
+        [
+            ([], PlanArtifactMissingError, "no terminal result"),
+            (
+                [
+                    {
+                        "type": "result",
+                        "session_id": "12345678-1234-5678-1234-567812345678",
+                        "status": "failed",
+                    }
+                ],
+                PlanTransportError,
+                "status 'failed'",
+            ),
+            (
+                [
+                    {
+                        "type": "result",
+                        "session_id": "12345678-1234-5678-1234-567812345678",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "result",
+                        "session_id": "12345678-1234-5678-1234-567812345678",
+                        "status": "completed",
+                    },
+                ],
+                PlanArtifactAmbiguousError,
+                "multiple terminal results",
+            ),
+        ],
+        ids=("missing", "failed", "ambiguous"),
+    )
+    def test_copilot_requires_one_successful_bound_terminal_result(
+        self,
+        events: list[dict[str, Any]],
+        error: type[PlanSessionError],
+        message: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(
+                0,
+                "\n".join(json.dumps(event) for event in events),
+                "",
+            ),
+        )
+
+        with pytest.raises(error, match=message):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
 
     def test_copilot_temp_directory_errors_are_session_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1229,7 +1340,9 @@ class TestExactSessionCliCollectors:
         monkeypatch.setattr("crossby.ai_tools.copilot.tempfile.mkdtemp", fail_mkdtemp)
 
         with pytest.raises(PlanTransportError, match="temporary share directory") as raised:
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
 
         assert raised.value.session_id == str(session_id)
 
@@ -1263,7 +1376,9 @@ class TestExactSessionCliCollectors:
         )
 
         with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
 
     def test_copilot_preserves_nested_plan_headings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1297,7 +1412,9 @@ class TestExactSessionCliCollectors:
         monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
 
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+        )
 
         assert result.plan == "\n".join(
             [
@@ -1336,7 +1453,9 @@ class TestExactSessionCliCollectors:
         monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
 
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+        )
 
         assert result.plan == "# Plan\n\n## Steps\n1. Inspect."
 
@@ -1379,7 +1498,7 @@ class TestExactSessionCliCollectors:
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
 
         result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path),
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
             lambda _interaction: PlanInteractionResponse(
                 outcome=outcome,
                 answer="Implement it",
@@ -1420,7 +1539,11 @@ class TestExactSessionCliCollectors:
         clock = iter((100.0, 101.0, 104.0))
         monkeypatch.setattr("crossby.ai_tools.copilot.time.monotonic", lambda: next(clock))
         result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, timeout_seconds=10),
+            _request(
+                tmp_path,
+                timeout_seconds=10,
+                approval_policy=PlanApprovalPolicy.NEVER,
+            ),
             lambda _interaction: PlanInteractionResponse(
                 outcome=PlanInteractionOutcome.ANSWERED,
                 answer="Yes",
@@ -1453,7 +1576,7 @@ class TestExactSessionCliCollectors:
 
         with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
             AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path),
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
                 lambda _interaction: PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.DENIED,
                     answer="stale answer",
@@ -1481,10 +1604,23 @@ class TestProtocolCollectors:
         ("model", "effort", "message"),
         [
             ("gpt-5.4-low", EffortLevel.HIGH, "encodes effort='low'"),
-            ("auto", EffortLevel.HIGH, "no compatible thinking variant"),
-            ("sonnet-4.6-thinking", EffortLevel.LOW, "thinking model"),
-            ("sonnet-4.6", EffortLevel.XHIGH, "tier-specific model ID"),
-            ("sonnet-4.6-thinking", EffortLevel.MAX, "tier-specific model ID"),
+            (
+                "sonnet-4.6[effort=medium]",
+                EffortLevel.LOW,
+                "encodes effort='medium'",
+            ),
+            (
+                "sonnet-4.6[effort=invalid]",
+                EffortLevel.HIGH,
+                "invalid effort overrides",
+            ),
+            (
+                "gpt-5.4-low[effort=high]",
+                EffortLevel.HIGH,
+                "conflicting effort encodings",
+            ),
+            ("auto", EffortLevel.HIGH, "selected model is not known"),
+            ("future-model", EffortLevel.MAX, "unknown model"),
         ],
     )
     def test_cursor_rejects_incompatible_effort_model_before_protocol_process(
@@ -1503,6 +1639,31 @@ class TestProtocolCollectors:
             )
 
         process.assert_not_called()
+
+    def test_cursor_untiered_model_preserves_low_and_medium_as_distinct_launches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands: dict[EffortLevel, list[str]] = {}
+        for effort in (EffortLevel.LOW, EffortLevel.MEDIUM):
+            _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _request(tmp_path, model="sonnet-4.6", effort=effort),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                ),
+            )
+            commands[effort] = FakeRpc.instances[0].command
+
+        assert commands[EffortLevel.LOW] != commands[EffortLevel.MEDIUM]
+        assert commands[EffortLevel.LOW][3:5] == [
+            "--model",
+            "sonnet-4.6[effort=low]",
+        ]
+        assert commands[EffortLevel.MEDIUM][3:5] == [
+            "--model",
+            "sonnet-4.6[effort=medium]",
+        ]
 
     def test_cursor_accepts_tier_specific_effort_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1560,10 +1721,41 @@ class TestProtocolCollectors:
             kind == "request" and payload["method"] == "turn/interrupt"
             for kind, payload in rpc.sent
         )
+        cleanup = next(
+            payload for kind, payload in rpc.sent if kind == "request" and payload["id"] == 5
+        )
+        assert cleanup == {
+            "id": 5,
+            "method": "thread/backgroundTerminals/clean",
+            "params": {"threadId": "thr-exact-123"},
+        }
         assert all(
             "jsonrpc" not in message for message in _rpc_fixture("codex_app_server_success.jsonl")
         )
         assert rpc.closed
+
+    def test_codex_rejects_multiple_completed_plan_items_for_bound_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_success.jsonl", headerless=True)
+        FakeRpc.scripts[0].insert(
+            -2,
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact-123",
+                    "turnId": "turn-exact-123",
+                    "item": {
+                        "type": "plan",
+                        "id": "plan-conflicting-456",
+                        "text": "# Conflicting plan\n\n1. Do something else.",
+                    },
+                },
+            },
+        )
+
+        with pytest.raises(PlanArtifactAmbiguousError, match="multiple authoritative"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
 
     def test_codex_maps_max_effort_in_plan_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1586,7 +1778,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("codex_app_server_success.jsonl")
         messages.insert(
-            -1,
+            -2,
             {
                 "id": 72,
                 "method": "item/tool/requestUserInput",
@@ -1599,7 +1791,7 @@ class TestProtocolCollectors:
             },
         )
         messages.insert(
-            -1,
+            -2,
             {
                 "id": 73,
                 "method": "item/commandExecution/requestApproval",
@@ -1640,7 +1832,7 @@ class TestProtocolCollectors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         messages = _rpc_fixture("codex_app_server_success.jsonl")
-        messages[-1]["params"]["turn"]["status"] = "failed"
+        messages[-2]["params"]["turn"]["status"] = "failed"
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)

@@ -159,10 +159,12 @@ class OpenCodeAdapter(AbstractAITool):
             "--agent",
             "plan",
         ]
+        execution_args: list[str] = []
         if request.model:
-            command.extend(("--model", request.model))
+            execution_args.extend(("--model", request.model))
         if request.effort is not None:
-            command.extend(self.effort_args(request.effort))
+            execution_args.extend(self.effort_args(request.effort))
+        command.extend(execution_args)
         command.extend(("--", request.prompt))
         deadline = time.monotonic() + request.timeout_seconds
 
@@ -299,6 +301,7 @@ class OpenCodeAdapter(AbstractAITool):
                 "json",
                 "--agent",
                 "plan",
+                *execution_args,
                 "--",
                 *answers,
             ]

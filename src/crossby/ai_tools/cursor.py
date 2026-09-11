@@ -53,7 +53,9 @@ _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.
 
 def _encoded_effort(model: str) -> EffortLevel | None:
     """Return an explicit effort tier encoded near the end of a Cursor model ID."""
-    parts = model.removesuffix("-fast").split("-")
+    parts = model.split("[", 1)[0].removesuffix("-fast").split("-")
+    if len(parts) > 1 and parts[-2:] == ["extra", "high"]:
+        return EffortLevel.XHIGH
     candidate = parts[-2] if parts[-1] == "thinking" and len(parts) > 1 else parts[-1]
     try:
         return EffortLevel(candidate)
@@ -61,9 +63,31 @@ def _encoded_effort(model: str) -> EffortLevel | None:
         return None
 
 
-def _uses_thinking_variant(model: str) -> bool:
-    """Whether *model* names Cursor's generic or tiered thinking variant."""
-    return "thinking" in model.removesuffix("-fast").split("-")
+def _parameterized_effort(model: str) -> EffortLevel | None:
+    """Return an effort value from Cursor's documented bracket overrides."""
+    if "[" not in model and "]" not in model:
+        return None
+    if not model.endswith("]") or model.count("[") != 1 or model.count("]") != 1:
+        raise ValueError("malformed bracket overrides")
+    parameters = model.rsplit("[", 1)[1][:-1]
+    efforts: list[EffortLevel] = []
+    for parameter in parameters.split(","):
+        key, separator, value = parameter.partition("=")
+        if separator and key.strip() == "effort":
+            efforts.append(EffortLevel(value.strip()))
+    if len(efforts) > 1:
+        raise ValueError("multiple effort overrides")
+    return efforts[0] if efforts else None
+
+
+def _with_parameterized_effort(model: str, effort: EffortLevel) -> str:
+    """Add an exact per-run effort override without changing the model identity."""
+    if model.endswith("]") and "[" in model:
+        prefix, parameters = model.rsplit("[", 1)
+        existing = parameters[:-1].strip()
+        separator = "," if existing else ""
+        return f"{prefix}[{existing}{separator}effort={effort.value}]"
+    return f"{model}[effort={effort.value}]"
 
 
 class CursorAdapter(AbstractAITool):
@@ -222,46 +246,56 @@ class CursorAdapter(AbstractAITool):
                 capability=capability,
             )
         command = ["agent", "--sandbox", "enabled" if request.sandbox else "disabled"]
-        effective_model = self.resolve_effort_model(request.model, request.effort)
+        effective_model = request.model
         if request.effort is not None:
             assert request.model is not None
             assert effective_model is not None
-            encoded_effort = _encoded_effort(effective_model)
-            if encoded_effort is not None and encoded_effort is not request.effort:
+            try:
+                parameterized_effort = _parameterized_effort(effective_model)
+            except ValueError as exc:
                 raise PlanSessionUnsupportedError(
-                    f"Cursor model {effective_model!r} encodes effort={encoded_effort.value!r}, "
+                    f"Cursor model {effective_model!r} has invalid effort overrides: {exc}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                ) from exc
+            encoded_effort = _encoded_effort(effective_model)
+            if (
+                parameterized_effort is not None
+                and encoded_effort is not None
+                and parameterized_effort is not encoded_effort
+            ):
+                raise PlanSessionUnsupportedError(
+                    f"Cursor model {effective_model!r} contains conflicting effort encodings.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            declared_effort = parameterized_effort or encoded_effort
+            if declared_effort is not None and declared_effort is not request.effort:
+                raise PlanSessionUnsupportedError(
+                    f"Cursor model {effective_model!r} encodes effort={declared_effort.value!r}, "
                     f"which conflicts with requested effort={request.effort.value!r} for a "
                     "collected plan session.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            uses_thinking = _uses_thinking_variant(effective_model)
-            if request.effort in (EffortLevel.XHIGH, EffortLevel.MAX) and (
-                encoded_effort is not request.effort
-            ):
+            if effective_model.split("[", 1)[0] == "auto":
                 raise PlanSessionUnsupportedError(
-                    f"Cursor requires a tier-specific model ID for "
-                    f"effort={request.effort.value!r}; {effective_model!r} does not encode that "
-                    "exact tier.",
+                    f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
+                    "because the selected model is not known before launch.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            if request.effort in _THINKING_EFFORTS and not (
-                encoded_effort is request.effort or uses_thinking
-            ):
+            if declared_effort is None and effective_model.split("[", 1)[
+                0
+            ] not in get_models_for_tool(AIToolID.CURSOR):
                 raise PlanSessionUnsupportedError(
-                    f"Cursor cannot preserve effort={request.effort.value!r} with model="
-                    f"{request.model!r}: no compatible thinking variant is available.",
+                    f"Cursor cannot verify parameterized effort support for unknown model "
+                    f"{request.model!r} in a collected plan session.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            if request.effort not in _THINKING_EFFORTS and uses_thinking:
-                raise PlanSessionUnsupportedError(
-                    f"Cursor thinking model {effective_model!r} conflicts with requested "
-                    f"effort={request.effort.value!r} for a collected plan session.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
+            if declared_effort is None:
+                effective_model = _with_parameterized_effort(effective_model, request.effort)
         if effective_model:
             command.extend(("--model", effective_model))
         command.append("acp")
