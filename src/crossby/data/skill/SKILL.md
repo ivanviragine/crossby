@@ -201,14 +201,23 @@ Inspect and activate.
    $CROSSBY scene status                   # active scene + drift
    ```
 
-Reverting reads `.crossby/owned.json` (what crossby wrote). If that ledger exists
-but is unreadable, `use` and `clear` (and `--plan`) **refuse** (exit 1) rather than
-revert from an empty view — restore it from backup or revert by hand; never delete
-it (a missing ledger reads as "own nothing" and re-opens the gap). Drift compares a
-per-file content hash; a **symlinked** config is hashed by its resolved contents, so
-editing the link target counts as drift, and after upgrading crossby a config
-baselined under the old logic may need `$CROSSBY scene use <name> --force` once to
-refresh the baseline.
+Reverting reads `.crossby/owned.json` (what crossby wrote). For every physical
+PROJECT skills/agents target, the ledger records true absence, the exact literal
+symlink target, the exact Crossby-allocated backup holding a displaced real
+directory, or a canonical source the scene deliberately left untouched. Shared
+targets have one record. Clear and switch restore from that record directly: never
+rediscover the original source, infer a baseline, or select a neighboring `.bak*`
+path by filename. If the ledger exists but is unreadable or
+contains malformed/unsafe path provenance, `use` and `clear` (and `--plan`)
+**refuse** (exit 1) rather than revert from an empty view. An active legacy PROJECT
+scene with no path record also requires manual recovery. Ordinary `sync` leaves a
+corrupt ledger untouched and refuses hooks, permissions, and MCP writes before it
+would create ownership that cannot be persisted. Restore the ledger from backup or
+revert by hand; never delete it (a missing ledger reads as "own nothing" and
+re-opens the gap). Drift compares a
+per-file content hash; a **symlinked** config is hashed by its resolved contents,
+so editing the link target counts as drift. Restore an active scene from the old
+discovery-based logic manually before retrying `use` or `clear`.
 
 Author without hand-editing YAML. `create` runs a wizard on a TTY; pass
 selector flags to build a scene non-interactively (required when stdin is not a

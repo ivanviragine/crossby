@@ -568,8 +568,12 @@ def clear_active(
         load_scene_state,
         save_scene_state,
     )
-    from crossby.services.scene_activation import recorded_tools
+    from crossby.services.scene_activation import (
+        reconcile_partial_clear_state,
+        recorded_tools,
+    )
     from crossby.services.scene_resolution import scene_root
+    from crossby.sync.safe_write import SyncContainmentError
 
     project_root = path.resolve()
     root = scene_root(project_root)
@@ -605,7 +609,7 @@ def clear_active(
 
     # --plan writes nothing, so it always previews — even against a drifted scene.
     if plan:
-        results = clear_scene(root, dry_run=True, tools=scope)
+        results = clear_scene(root, dry_run=True, tools=scope, force=force)
         _display_results(results)
         console.info("(--plan) no changes written.")
         if _has_error(results):
@@ -628,13 +632,17 @@ def clear_active(
         scope, shared_skill_scope = _clear_scope(tool_id, active)
 
     _warn_retained_revocations(active, scope)
-    results = _call_engine_or_exit(clear_scene, root, tools=scope)
+    results = _call_engine_or_exit(clear_scene, root, tools=scope, force=force)
     _display_results(results)
 
-    # A failed clear leaves the state untouched so the revert can be retried —
-    # never delete the only record of what to revert on a partial failure.
+    # A failed clear retains only the mechanisms that still need recovery. Never
+    # delete the remaining record of what to revert on a partial failure.
     if _has_error(results):
-        console.error("Clear failed for some tools — state left intact for retry.")
+        try:
+            reconcile_partial_clear_state(root, active, results)
+        except (OSError, SyncContainmentError) as exc:
+            console.warn(f"Could not narrow scene state after the partial clear: {exc}")
+        console.error("Clear failed for some tools — remaining state left intact for retry.")
         raise typer.Exit(1)
 
     # On success update the state file: a full clear removes it; a scoped clear
