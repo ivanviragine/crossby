@@ -753,17 +753,11 @@ class TestExactPathRestoration:
         for dry_run in (True, False):
             results = apply_scene(resolved, tmp_path, dry_run=dry_run)
             assert any(
-                "baseline changed before scene projection" in (result.message or "")
+                result.action == "error"
+                and result.file_path == target
+                and "baseline changed before scene projection" in (result.message or "")
                 for result in results
             )
-            if dry_run:
-                assert not any(
-                    result.action == "error" and result.file_path == target for result in results
-                )
-            else:
-                assert any(
-                    result.action == "error" and result.file_path == target for result in results
-                )
             assert target.is_symlink()
             assert target.readlink() == external
 

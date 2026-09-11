@@ -709,10 +709,14 @@ def _describe_repoint_baseline(
             "restore the recorded baseline first"
         )
 
-    if not _recorded_non_directory_baseline_is_intact(
-        target, descriptor
-    ) and not projection.tool_points_at_projection(project_root, target_rel, kind):
-        return f"would refuse: {_non_directory_baseline_drift_error(target_rel, descriptor)}"
+    target_is_active_output = projection.tool_points_at_projection(
+        project_root, target_rel, kind
+    ) or (target.is_dir() and not target.is_symlink() and has_managed_marker(target))
+    if (
+        not _recorded_non_directory_baseline_is_intact(target, descriptor)
+        and not target_is_active_output
+    ):
+        return f"error:{_non_directory_baseline_drift_error(target_rel, descriptor)}"
 
     if descriptor.kind == ScenePathRestoreKind.ABSENT:
         return "would retain the recorded absent baseline"
