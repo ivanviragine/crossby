@@ -190,8 +190,9 @@ CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
   uv run pytest -s tests/integration/test_plan_sessions_smoke.py
 ```
 
-The answer variable is optional until a harness asks an informational planning
-question; final plan and permission requests are denied by the smoke handler.
+The answer variable is needed only when a harness asks an open-ended informational
+planning question. For option-based questions, the smoke handler selects the first
+emitted native option; final plan and permission requests are denied.
 The Copilot case deliberately requests a sentinel write and asserts that its
 read-only collector leaves the disposable workspace unchanged.
 Never enable these tests in the default or unauthenticated CI suite.

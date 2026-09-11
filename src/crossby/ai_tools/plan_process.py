@@ -82,8 +82,8 @@ def read_text_bounded(path: Path, *, limit: int | None = None) -> str:
     return content.decode("utf-8")
 
 
-def _kill_captured_process_group(proc: subprocess.Popen[bytes]) -> None:
-    """Kill the run-owned process group so descendants cannot retain capture pipes."""
+def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
+    """Kill a run-owned process group so descendants cannot outlive the deadline."""
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -131,7 +131,7 @@ def run_captured(
         or proc.stderr is None
         or (input_bytes is not None and proc.stdin is None)
     ):
-        _kill_captured_process_group(proc)
+        _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         raise OSError("failed to create captured subprocess pipes")
@@ -149,7 +149,7 @@ def run_captured(
                 with overflow_lock:
                     if not overflow:
                         overflow.append((name, limit))
-                        _kill_captured_process_group(proc)
+                        _kill_process_group(proc)
 
     readers = (
         threading.Thread(
@@ -191,14 +191,14 @@ def run_captured(
             raise subprocess.TimeoutExpired(command, timeout)
         returncode = proc.wait(timeout=remaining)
     except subprocess.TimeoutExpired:
-        _kill_captured_process_group(proc)
+        _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
 
     if not _join_until(workers, deadline):
-        _kill_captured_process_group(proc)
+        _kill_process_group(proc)
         _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
         if overflow:
             raise CapturedOutputLimitError(*overflow[0])
@@ -217,8 +217,19 @@ def run_captured(
 
 
 def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:
-    """Run a bounded child attached to the caller's terminal."""
-    return subprocess.run(command, cwd=cwd, timeout=timeout, check=False).returncode
+    """Run a bounded process group attached to the caller's terminal."""
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        start_new_session=os.name == "posix",
+    )
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+        raise subprocess.TimeoutExpired(command, timeout) from None
 
 
 def parse_jsonl(text: str) -> list[dict[str, Any]]:

@@ -29,6 +29,7 @@ from crossby.ai_tools import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    PlanQuestionOption,
     PlanSessionRequest,
 )
 from crossby.models.ai import AIToolID, EffortLevel, PlanApprovalPolicy
@@ -49,6 +50,64 @@ TOOLS = (
 )
 
 
+def _answer_interaction(interaction: PlanInteraction) -> PlanInteractionResponse:
+    if interaction.kind in {
+        PlanInteractionKind.PLAN_APPROVAL,
+        PlanInteractionKind.PERMISSION,
+    }:
+        rejecting = next(
+            (
+                option.option_id
+                for option in interaction.options
+                if any(
+                    word in f"{option.option_id} {option.label}".lower()
+                    for word in ("deny", "reject", "cancel", "decline")
+                )
+            ),
+            None,
+        )
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.DENIED,
+            option_id=rejecting,
+        )
+    if interaction.options:
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id=interaction.options[0].option_id,
+        )
+    configured = os.environ.get("CROSSBY_PLAN_SMOKE_ANSWER", "").strip()
+    if not configured:
+        pytest.fail(
+            "the harness asked a planning question; set CROSSBY_PLAN_SMOKE_ANSWER to an "
+            "explicit operator-provided response"
+        )
+    return PlanInteractionResponse(
+        outcome=PlanInteractionOutcome.ANSWERED,
+        answer=configured,
+    )
+
+
+def test_smoke_callback_selects_first_native_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CROSSBY_PLAN_SMOKE_ANSWER", "free text is not a native option")
+    response = _answer_interaction(
+        PlanInteraction(
+            kind=PlanInteractionKind.QUESTION,
+            question_id="scope",
+            prompt="Which scope should the plan cover?",
+            options=(
+                PlanQuestionOption(option_id="api", label="Public API"),
+                PlanQuestionOption(option_id="cli", label="CLI only"),
+            ),
+            session_id="smoke-session",
+        )
+    )
+
+    assert response == PlanInteractionResponse(
+        outcome=PlanInteractionOutcome.ANSWERED,
+        option_id="api",
+    )
+
+
 @pytest.mark.parametrize("tool_id", TOOLS)
 def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path) -> None:
     if tool_id.value not in SELECTED:
@@ -64,37 +123,6 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
         check=True,
     )
     subprocess.run(["git", "config", "user.name", "Crossby Smoke"], cwd=tmp_path, check=True)
-
-    def answer(interaction: PlanInteraction) -> PlanInteractionResponse:
-        if interaction.kind in {
-            PlanInteractionKind.PLAN_APPROVAL,
-            PlanInteractionKind.PERMISSION,
-        }:
-            rejecting = next(
-                (
-                    option.option_id
-                    for option in interaction.options
-                    if any(
-                        word in f"{option.option_id} {option.label}".lower()
-                        for word in ("deny", "reject", "cancel", "decline")
-                    )
-                ),
-                None,
-            )
-            return PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.DENIED,
-                option_id=rejecting,
-            )
-        configured = os.environ.get("CROSSBY_PLAN_SMOKE_ANSWER", "").strip()
-        if not configured:
-            pytest.fail(
-                "the harness asked a planning question; set CROSSBY_PLAN_SMOKE_ANSWER to an "
-                "explicit operator-provided response"
-            )
-        return PlanInteractionResponse(
-            outcome=PlanInteractionOutcome.ANSWERED,
-            answer=configured,
-        )
 
     sentinel = tmp_path / "copilot-must-not-write.txt"
     prompt = "Produce a short Markdown implementation plan for adding a README heading."
@@ -121,7 +149,7 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
             timeout_seconds=300,
             **request_options,
         ),
-        answer,
+        _answer_interaction,
     )
 
     assert result.plan.strip()

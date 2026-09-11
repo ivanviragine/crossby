@@ -51,6 +51,7 @@ from crossby.ai_tools.plan_process import (
     parse_jsonl,
     read_text_bounded,
     run_captured,
+    run_interactive,
 )
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
 from crossby.utils.versioning import BinaryVersion
@@ -575,6 +576,29 @@ class TestPlanProcess:
             run_captured([sys.executable, "-c", script], cwd=tmp_path, timeout=0.2)
 
         assert time.monotonic() - started < 2
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_interactive_process_timeout_kills_descendants(self, tmp_path: Path) -> None:
+        started = tmp_path / "descendant-started"
+        survived = tmp_path / "descendant-survived"
+        child = (
+            "import pathlib,time; "
+            f"pathlib.Path({str(started)!r}).write_text('started'); "
+            "time.sleep(1.2); "
+            f"pathlib.Path({str(survived)!r}).write_text('survived')"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable,'-c',{child!r}]); "
+            "time.sleep(30)"
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_interactive([sys.executable, "-c", parent], cwd=tmp_path, timeout=0.8)
+
+        assert started.is_file()
+        time.sleep(0.8)
+        assert not survived.exists()
 
     def test_captured_process_encodes_input_before_spawning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
