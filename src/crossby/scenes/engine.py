@@ -738,8 +738,10 @@ def _describe_repoint_baseline(
             )
         else:
             return f"would displace the recorded directory baseline at {backup_rel}"
-        if not os.path.lexists(target) or projection.tool_points_at_projection(
-            project_root, target_rel, kind
+        if (
+            not os.path.lexists(target)
+            or projection.tool_points_at_projection(project_root, target_rel, kind)
+            or (target.is_dir() and not target.is_symlink() and has_managed_marker(target))
         ):
             return f"would retain the recorded directory baseline at {backup_rel}"
         if force:

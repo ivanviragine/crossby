@@ -631,6 +631,9 @@ class TestExactPathRestoration:
                 result.action == "error" and "recorded backup is occupied" in (result.message or "")
                 for result in operation
             )
+            assert not any(
+                result.action == "error" and result.file_path == target for result in operation
+            )
         assert backup.is_dir() and (backup / "user-agent.toml").is_file()
         assert (target / ".crossby-managed").is_file()
 
