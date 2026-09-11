@@ -236,6 +236,16 @@ class CursorAdapter(AbstractAITool):
                     capability=capability,
                 )
             uses_thinking = _uses_thinking_variant(effective_model)
+            if request.effort in (EffortLevel.XHIGH, EffortLevel.MAX) and (
+                encoded_effort is not request.effort
+            ):
+                raise PlanSessionUnsupportedError(
+                    f"Cursor requires a tier-specific model ID for "
+                    f"effort={request.effort.value!r}; {effective_model!r} does not encode that "
+                    "exact tier.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
             if request.effort in _THINKING_EFFORTS and not (
                 encoded_effort is request.effort or uses_thinking
             ):

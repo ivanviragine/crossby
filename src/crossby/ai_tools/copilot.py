@@ -591,7 +591,8 @@ def _copilot_export_plan(exported: str, session_id: str) -> str | None:
         )
         end = next_peer.start() if next_peer is not None else len(remainder)
         headed.append(remainder[:end])
-    candidates = [candidate.strip() for candidate in [*marked, *headed] if candidate.strip()]
+    authoritative = marked if marked else headed
+    candidates = [candidate.strip() for candidate in authoritative if candidate.strip()]
     unique = list(dict.fromkeys(candidates))
     if len(unique) > 1:
         raise RuntimeError("GitHub Copilot share export contained conflicting Plan sections.")

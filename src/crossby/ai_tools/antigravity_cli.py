@@ -305,7 +305,16 @@ class AntigravityCLIAdapter(AbstractAITool):
             conversation_id = emitted_id
             if not _agy_waiting(response):
                 break
-            interaction = _agy_interaction(response, conversation_id)
+            try:
+                interaction = _agy_interaction(response, conversation_id)
+            except ValueError as exc:
+                raise PlanArtifactMalformedError(
+                    "Antigravity CLI emitted malformed interaction data.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                ) from exc
             if interaction_handler is None:
                 raise PlanInteractionRequiredError(
                     "Antigravity CLI requires an answer to continue the planning conversation.",

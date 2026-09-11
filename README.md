@@ -379,10 +379,11 @@ Unknown and below-floor CLI versions also fail before a harness process starts.
 default. Cursor and Antigravity CLI encode effort in model IDs, so an explicit
 `effort` also requires an explicit `model`. Cursor rejects conflicting explicit
 tiers and elevated-effort models without a compatible thinking variant before
-starting ACP. Antigravity further requires a compatible Gemini model whose
-native effort tier matches the request; missing, non-Gemini, unavailable, or
-conflicting model tiers are rejected before the collector launches. OpenCode
-collection accepts only `low`, `medium`, and
+starting ACP; generic `-thinking` IDs satisfy `high`, while `xhigh` and `max`
+require an ID that encodes that exact tier. Antigravity further requires a
+compatible Gemini model whose native effort tier matches the request; missing,
+non-Gemini, unavailable, or conflicting model tiers are rejected before the
+collector launches. OpenCode collection accepts only `low`, `medium`, and
 `high`: interactive launches retain the legacy `xhigh`/`max` → `high`
 normalization, but a collected session rejects tiers the native `--variant`
 argument cannot preserve exactly.
@@ -392,7 +393,7 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; ambiguous, symlinked, blank, or missing output fails |
-| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, then exact-turn interrupt | Callback | Preserved / preserved | 0.153.4 | The bound completed plan item is terminal; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
+| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, then exact-turn interrupt | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | The bound completed plan item is terminal; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
 | GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + unique local `--share` export | Resumable callback | Tool-managed / preserved (`on-request`, `never`) | 1.0.83 | Collection disables remote sharing and removes only its temporary export after normalization |
 | OpenCode | `run --agent plan --dir <workspace>` | Headless JSONL; emitted session ID + `export <exact-id>` + plan-mode assistant text | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Exported session/message directories must match the request; no latest-session lookup is used |
