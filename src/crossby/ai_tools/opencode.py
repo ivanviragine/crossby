@@ -214,7 +214,9 @@ class OpenCodeAdapter(AbstractAITool):
                 capability=capability,
                 exit_code=run.returncode,
             ) from exc
-        session_ids = {value for event in events for value in _session_ids(event) if value.strip()}
+        session_ids = {
+            value for event in events for value in _event_session_ids(event) if value.strip()
+        }
         if not session_ids:
             raise PlanArtifactMissingError(
                 "OpenCode completed without emitting the launched session ID.",
@@ -344,7 +346,7 @@ class OpenCodeAdapter(AbstractAITool):
                     session_id=session_id,
                 ) from exc
             continuation_ids = {
-                value for event in continued_events for value in _session_ids(event)
+                value for event in continued_events for value in _event_session_ids(event)
             }
             if continuation_ids != {session_id}:
                 raise PlanBindingMismatchError(
@@ -401,10 +403,8 @@ class OpenCodeAdapter(AbstractAITool):
                 exit_code=exported.returncode,
                 session_id=session_id,
             )
-        exported_ids = set(_session_ids(payload))
+        exported_ids = set(_export_session_ids(payload))
         export_info = payload.get("info")
-        if isinstance(export_info, dict) and isinstance(export_info.get("id"), str):
-            exported_ids.add(export_info["id"])
         if not exported_ids or exported_ids != {session_id}:
             raise PlanBindingMismatchError(
                 "OpenCode export session IDs did not match the launched session.",
@@ -507,20 +507,47 @@ class OpenCodeAdapter(AbstractAITool):
         return ["--variant", mapped]
 
 
-def _session_ids(value: Any) -> list[str]:
-    """Collect explicit OpenCode session-ID fields without guessing from text."""
+def _direct_session_ids(value: Any) -> list[str]:
+    """Collect session IDs from one documented OpenCode envelope object."""
     found: list[str] = []
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            is_session_field = key in {"sessionID", "sessionId", "session_id"}
-            is_session_object_id = key == "id" and value.get("type") == "session"
-            if (is_session_field or is_session_object_id) and isinstance(nested, str):
-                found.append(nested)
-            else:
-                found.extend(_session_ids(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            found.extend(_session_ids(nested))
+    if not isinstance(value, dict):
+        return found
+    for key in ("sessionID", "sessionId", "session_id"):
+        session_id = value.get(key)
+        if isinstance(session_id, str):
+            found.append(session_id)
+    object_id = value.get("id")
+    if value.get("type") == "session" and isinstance(object_id, str):
+        found.append(object_id)
+    return found
+
+
+def _event_session_ids(event: dict[str, Any]) -> list[str]:
+    """Collect IDs from an event and its documented ``part`` envelope."""
+    found = _direct_session_ids(event)
+    found.extend(_direct_session_ids(event.get("part")))
+    return found
+
+
+def _export_session_ids(payload: dict[str, Any]) -> list[str]:
+    """Collect IDs from documented OpenCode export envelope locations."""
+    found = _direct_session_ids(payload)
+    info = payload.get("info")
+    found.extend(_direct_session_ids(info))
+    if isinstance(info, dict) and isinstance(info.get("id"), str):
+        found.append(info["id"])
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return found
+    for message in messages:
+        found.extend(_direct_session_ids(message))
+        if not isinstance(message, dict):
+            continue
+        found.extend(_direct_session_ids(message.get("info")))
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                found.extend(_direct_session_ids(part))
     return found
 
 
@@ -568,7 +595,7 @@ def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[P
         question_id = source.get("id") or source.get("questionID") or source.get("questionId")
         prompt = source.get("question") or source.get("prompt")
         if not isinstance(question_id, str) or not isinstance(prompt, str):
-            continue
+            raise ValueError("recognized question omitted a string question ID or prompt")
         if not question_id.strip() or not prompt.strip():
             raise ValueError("recognized question contained a blank question ID or prompt")
         options = tuple(

@@ -20,7 +20,9 @@ _AUTHORIZATION_RE = re.compile(r"(?i)\b(authorization)\b\s*[:=]?\s*(?:[a-z][a-z0
 _SECRET_RE = re.compile(
     r"""(?ix)
     (?P<key_quote>["']?)
-    (?P<key>\b(?:[a-z][a-z0-9]*[_-])*(?:token|password|secret|api[_ -]?key|bearer)\b)
+    (?P<key>\b(?:[a-z][a-z0-9]*[_-])*(?:
+        token|password|secret|api[_ -]?key|(?:access|private)[_ -]?key|bearer
+    )\b)
     (?P=key_quote)
     (?P<separator>\s*[:=]?\s*)
     (?:(?P<value_quote>["'])(?:\\.|(?!(?P=value_quote)).)*(?P=value_quote)|(?P<value>\S+))

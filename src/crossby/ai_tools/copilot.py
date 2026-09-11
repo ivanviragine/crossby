@@ -519,16 +519,19 @@ def _allow_entry_excluded(entry: str, excluded_servers: set[str]) -> bool:
 
 
 def _copilot_session_ids(value: Any) -> list[str]:
+    """Collect IDs only from Copilot's event/share envelope fields."""
     found: list[str] = []
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if key in {"sessionId", "sessionID", "session_id"} and isinstance(nested, str):
-                found.append(nested)
-            else:
-                found.extend(_copilot_session_ids(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            found.extend(_copilot_session_ids(nested))
+    if not isinstance(value, dict):
+        return found
+    sources = [value]
+    data = value.get("data")
+    if isinstance(data, dict):
+        sources.append(data)
+    for source in sources:
+        for key in ("sessionId", "sessionID", "session_id"):
+            session_id = source.get(key)
+            if isinstance(session_id, str):
+                found.append(session_id)
     return found
 
 
@@ -685,7 +688,7 @@ def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list
         question_id = source.get("id") or source.get("questionId") or event.get("id")
         prompt = source.get("question") or source.get("prompt") or source.get("message")
         if not isinstance(question_id, str) or not isinstance(prompt, str):
-            continue
+            raise ValueError("recognized interaction omitted a string question ID or prompt")
         if not question_id.strip() or not prompt.strip():
             raise ValueError("recognized interaction contained a blank question ID or prompt")
         options = tuple(

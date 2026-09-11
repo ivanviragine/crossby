@@ -38,8 +38,10 @@ from crossby.ai_tools import (
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import (
+    _JSON_RPC_FRAME_LIMIT,
     _STDERR_TAIL_LIMIT,
     _STDOUT_QUEUE_LIMIT,
+    CapturedOutputDecodeError,
     CapturedOutputLimitError,
     CapturedProcess,
     JsonRpcProcess,
@@ -390,6 +392,8 @@ class TestNormalizedContract:
         [
             ("OPENAI_API_KEY=sk-example", "OPENAI_API_KEY=<redacted>"),
             ("GITHUB_TOKEN=ghp_example", "GITHUB_TOKEN=<redacted>"),
+            ("AWS_SECRET_ACCESS_KEY=abc123", "AWS_SECRET_ACCESS_KEY=<redacted>"),
+            ("PRIVATE_KEY=private-material", "PRIVATE_KEY=<redacted>"),
         ],
     )
     def test_error_excerpt_redacts_provider_prefixed_credentials(
@@ -520,6 +524,36 @@ class TestPlanProcess:
         assert result.stdout == "hello\n"
         assert result.stderr == "diagnostic\n"
 
+    def test_captured_process_encodes_input_before_spawning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.locale.getpreferredencoding", lambda _: "ascii"
+        )
+
+        with (
+            patch("crossby.ai_tools.plan_process.subprocess.Popen") as popen,
+            pytest.raises(UnicodeEncodeError),
+        ):
+            run_captured(["unused"], cwd=tmp_path, timeout=5, input_text="café")
+
+        popen.assert_not_called()
+
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_captured_process_translates_invalid_output_encoding(
+        self, stream: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.locale.getpreferredencoding", lambda _: "ascii"
+        )
+        script = f"import sys; sys.{stream}.buffer.write(bytes([255]))"
+
+        with pytest.raises(CapturedOutputDecodeError) as raised:
+            run_captured([sys.executable, "-c", script], cwd=tmp_path, timeout=5)
+
+        assert raised.value.stream == stream
+        assert raised.value.encoding == "ascii"
+
     def test_stdout_reader_applies_bounded_backpressure_until_closed(self) -> None:
         blocked = threading.Event()
 
@@ -546,6 +580,17 @@ class TestPlanProcess:
         reader.join(timeout=1.0)
 
         assert not reader.is_alive()
+
+    def test_stdout_reader_rejects_an_oversized_json_rpc_frame(self) -> None:
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._stdout_queue = queue.Queue(maxsize=2)
+        rpc._closing = threading.Event()
+
+        rpc._read_stdout(StringIO("x" * (_JSON_RPC_FRAME_LIMIT + 1)))
+
+        with pytest.raises(ValueError, match="frame exceeded"):
+            rpc.read(timeout=0.1)
+        assert rpc._stdout_queue.get_nowait() is None
 
     def test_stdout_queue_has_a_fixed_message_limit(self, tmp_path: Path) -> None:
         with (
@@ -677,6 +722,42 @@ class TestClaudeCollector:
         assert list(root.iterdir()) == []
         assert outside.read_text(encoding="utf-8") == "# Keep"
 
+    @pytest.mark.parametrize("stage", ["command", "enumeration"])
+    def test_post_directory_failures_are_wrapped_and_cleaned(
+        self, stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        root = tmp_path / "plans"
+        run_dir = root / str(session_id)
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        monkeypatch.setattr("crossby.ai_tools.claude.uuid.uuid4", lambda: session_id)
+
+        if stage == "command":
+
+            def fail_build(**_kwargs: Any) -> list[str]:
+                raise ValueError("invalid launch command")
+
+            monkeypatch.setattr(adapter, "build_launch_command", fail_build)
+        else:
+            original_iterdir = Path.iterdir
+            monkeypatch.setattr(
+                "crossby.ai_tools.plan_process.run_interactive",
+                lambda *_args, **_kwargs: 0,
+            )
+
+            def fail_run_directory(path: Path):
+                if path == run_dir:
+                    raise OSError("plan directory became unreadable")
+                return original_iterdir(path)
+
+            monkeypatch.setattr(Path, "iterdir", fail_run_directory)
+
+        with pytest.raises(PlanTransportError, match="after creating its isolated directory"):
+            adapter.run_plan_session(_request(tmp_path, plan_output_dir=root))
+
+        assert root.is_dir()
+        assert list(root.iterdir()) == []
+
     def test_isolated_directory_creation_errors_are_session_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -786,6 +867,32 @@ class TestExactSessionCliCollectors:
         assert result.session_id == "ses_exact_123"
         assert commands[0][commands[0].index("--dir") + 1] == str(tmp_path.resolve())
         assert commands[-1] == ["opencode", "export", "ses_exact_123"]
+
+    def test_opencode_ignores_nested_non_envelope_session_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events = _rpc_fixture("opencode_events_success.jsonl")
+        events[0]["part"]["metadata"] = {
+            "type": "session",
+            "id": "ses-decoy",
+            "session_id": "ses-decoy",
+        }
+        exported = _opencode_export(tmp_path)
+        exported["messages"][0]["parts"][0]["metadata"] = {"sessionID": "ses-decoy"}
+        runs = iter(
+            (
+                CapturedProcess(0, "\n".join(json.dumps(event) for event in events), ""),
+                CapturedProcess(0, json.dumps(exported), ""),
+            )
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
+
+        assert result.session_id == "ses_exact_123"
 
     def test_opencode_separates_option_like_initial_prompt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1069,12 +1176,23 @@ class TestExactSessionCliCollectors:
         [
             {"id": " ", "question": "Choose a scope"},
             {"id": "scope", "question": " "},
+            {"question": "Choose a scope"},
+            {"id": 42, "question": "Choose a scope"},
+            {"id": "scope"},
+            {"id": "scope", "question": ["Choose a scope"]},
         ],
-        ids=("blank-question-id", "blank-prompt"),
+        ids=(
+            "blank-question-id",
+            "blank-prompt",
+            "missing-question-id",
+            "non-string-question-id",
+            "missing-prompt",
+            "non-string-prompt",
+        ),
     )
-    def test_opencode_rejects_blank_question_fields_as_malformed_artifacts(
+    def test_opencode_rejects_invalid_question_fields_as_malformed_artifacts(
         self,
-        interaction: dict[str, str],
+        interaction: dict[str, Any],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1440,6 +1558,38 @@ class TestExactSessionCliCollectors:
         assert not isolated_homes[0].exists()
         assert result.artifact_path is None
 
+    def test_copilot_ignores_nested_non_envelope_session_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        event = {
+            "type": "result",
+            "session_id": str(exact_uuid),
+            "status": "completed",
+            "data": {"tool_result": {"session_id": "decoy-session"}},
+        }
+        share = {
+            "session_id": str(exact_uuid),
+            "plan": "# Plan\n\n1. Inspect.",
+            "metadata": {"session_id": "decoy-session"},
+        }
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            export_arg = next(value for value in command if value.startswith("--share="))
+            Path(export_arg.removeprefix("--share=")).write_text(
+                json.dumps(share), encoding="utf-8"
+            )
+            return CapturedProcess(0, json.dumps(event), "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+        )
+
+        assert result.session_id == str(exact_uuid)
+
     @pytest.mark.parametrize(
         ("events", "error", "message"),
         [
@@ -1522,12 +1672,23 @@ class TestExactSessionCliCollectors:
         [
             {"id": " ", "question": "Choose a scope"},
             {"id": "scope", "question": " "},
+            {"question": "Choose a scope"},
+            {"id": 42, "question": "Choose a scope"},
+            {"id": "scope"},
+            {"id": "scope", "question": ["Choose a scope"]},
         ],
-        ids=("blank-question-id", "blank-prompt"),
+        ids=(
+            "blank-question-id",
+            "blank-prompt",
+            "missing-question-id",
+            "non-string-question-id",
+            "missing-prompt",
+            "non-string-prompt",
+        ),
     )
-    def test_copilot_rejects_blank_interaction_fields_as_malformed_artifacts(
+    def test_copilot_rejects_invalid_interaction_fields_as_malformed_artifacts(
         self,
-        interaction: dict[str, str],
+        interaction: dict[str, Any],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2172,6 +2333,45 @@ class TestProtocolCollectors:
             },
         ) in FakeRpc.instances[0].sent
 
+    @pytest.mark.parametrize(
+        ("prompt_response", "message"),
+        [
+            ({"jsonrpc": "2.0", "id": 5}, "malformed session/prompt response"),
+            (
+                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "cancelled"}},
+                "stop reason 'cancelled'",
+            ),
+            (
+                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "refusal"}},
+                "stop reason 'refusal'",
+            ),
+        ],
+        ids=("missing-result", "cancelled", "refused"),
+    )
+    def test_cursor_requires_successful_prompt_completion(
+        self,
+        prompt_response: dict[str, Any],
+        message: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages[-1] = prompt_response
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match=message):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                ),
+            )
+
+        assert FakeRpc.instances[0].closed
+
     def test_cursor_denial_overrides_stale_allow_option(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2216,6 +2416,67 @@ class TestProtocolCollectors:
                 "result": {"outcome": {"outcome": "selected", "optionId": "deny-once"}},
             },
         ) in FakeRpc.instances[0].sent
+
+    @pytest.mark.parametrize(
+        ("options", "permission_response"),
+        [
+            (
+                [
+                    {"optionId": "allow-once", "name": "Allow once"},
+                    {"optionId": "deny-once", "name": "Deny once"},
+                ],
+                PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.APPROVED,
+                    option_id="fabricated-option",
+                ),
+            ),
+            (
+                [{"optionId": "proceed-once", "name": "Proceed once"}],
+                PlanInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+            ),
+        ],
+        ids=("unknown-callback-option", "no-fabricated-approved-fallback"),
+    )
+    def test_cursor_permission_requires_a_native_option(
+        self,
+        options: list[dict[str, str]],
+        permission_response: PlanInteractionResponse,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages.insert(
+            3,
+            {
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "cursor-exact-123",
+                    "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
+                    "options": options,
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            if interaction.kind is PlanInteractionKind.PERMISSION:
+                return permission_response
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            )
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option ID"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), answer)
+
+        assert FakeRpc.instances[0].closed
+        assert not any(
+            kind == "respond" and payload["id"] == 90 for kind, payload in FakeRpc.instances[0].sent
+        )
 
     def test_cursor_forwards_multi_question_native_option_ids(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

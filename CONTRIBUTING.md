@@ -149,7 +149,7 @@ then acknowledges `thread/backgroundTerminals/clean` before returning. Copilot
 requires one UUID-bound `result` event with `status="completed"` before reading
 the local share. Its `--prompt` transport cannot relay tool permission prompts,
 so collection supports only `approval_policy="never"` and runs it in a
-run-owned no-network sandbox with ambient hooks and external MCP disabled. The
+run-owned no-network sandbox with hooks and external MCP disabled. The
 model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell
 permissions are also explicitly denied.
 
@@ -159,7 +159,8 @@ status casing, plus contract tests covering success, malformed output,
 missing/duplicate artifacts, mismatched identifiers,
 interaction-required behavior, process cleanup, and independent sandbox and
 approval choices. Seed decoy sessions/files to prove exact binding. Tests for an
-unknown or below-floor version must assert that no subprocess was created.
+unknown or below-floor version must assert that no adapter process was created
+after the version-probe subprocess.
 
 When an upstream protocol changes, capture a sanitized fixture from the new
 release, update the parser and positive/negative tests, then raise

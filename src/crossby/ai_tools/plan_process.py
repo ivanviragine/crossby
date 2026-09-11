@@ -16,6 +16,8 @@ from typing import IO, Any, ClassVar
 _STDERR_TAIL_LIMIT = 8 * 1024
 _STDOUT_QUEUE_LIMIT = 256
 _QUEUE_PUT_TIMEOUT_SECONDS = 0.1
+_JSON_RPC_FRAME_LIMIT = 1024 * 1024
+_JSON_RPC_READ_CHUNK_SIZE = 64 * 1024
 _CAPTURED_STDOUT_LIMIT = 8 * 1024 * 1024
 _CAPTURED_STDERR_LIMIT = 1024 * 1024
 _CAPTURE_CHUNK_SIZE = 64 * 1024
@@ -39,6 +41,15 @@ class CapturedOutputLimitError(subprocess.SubprocessError):
         self.limit = limit
 
 
+class CapturedOutputDecodeError(subprocess.SubprocessError):
+    """A captured child emitted bytes invalid for the selected locale encoding."""
+
+    def __init__(self, stream: str, encoding: str) -> None:
+        super().__init__(f"captured {stream} was not valid {encoding} text")
+        self.stream = stream
+        self.encoding = encoding
+
+
 def run_captured(
     command: list[str],
     *,
@@ -49,10 +60,11 @@ def run_captured(
 ) -> CapturedProcess:
     """Run a bounded child with hard stdout/stderr memory limits and no shell."""
     encoding = locale.getpreferredencoding(False)
+    input_bytes = input_text.encode(encoding) if input_text is not None else None
     proc = subprocess.Popen(
         command,
         cwd=cwd,
-        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -60,7 +72,7 @@ def run_captured(
     if (
         proc.stdout is None
         or proc.stderr is None
-        or (input_text is not None and proc.stdin is None)
+        or (input_bytes is not None and proc.stdin is None)
     ):
         proc.kill()
         proc.wait()
@@ -90,13 +102,13 @@ def run_captured(
         reader.start()
 
     writer: threading.Thread | None = None
-    if input_text is not None:
+    if input_bytes is not None:
         input_stream = proc.stdin
         assert input_stream is not None
 
         def write_input() -> None:
             try:
-                input_stream.write(input_text.encode(encoding))
+                input_stream.write(input_bytes)
                 input_stream.flush()
             except (BrokenPipeError, OSError):
                 pass
@@ -125,11 +137,14 @@ def run_captured(
     if overflow:
         raise CapturedOutputLimitError(*overflow[0])
 
-    return CapturedProcess(
-        returncode,
-        outputs["stdout"].decode(encoding),
-        outputs["stderr"].decode(encoding),
-    )
+    decoded: dict[str, str] = {}
+    for name, output in outputs.items():
+        try:
+            decoded[name] = output.decode(encoding)
+        except UnicodeDecodeError as exc:
+            raise CapturedOutputDecodeError(name, encoding) from exc
+
+    return CapturedProcess(returncode, decoded["stdout"], decoded["stderr"])
 
 
 def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:
@@ -174,7 +189,9 @@ class JsonRpcProcess:
             self._proc.kill()
             raise OSError("failed to create JSON-RPC stdio pipes")
         self._stdin: IO[str] = self._proc.stdin
-        self._stdout_queue: queue.Queue[str | None] = queue.Queue(maxsize=_STDOUT_QUEUE_LIMIT)
+        self._stdout_queue: queue.Queue[str | ValueError | None] = queue.Queue(
+            maxsize=_STDOUT_QUEUE_LIMIT
+        )
         self._stderr_tail = ""
         self._stderr_lock = threading.Lock()
         self._closing = threading.Event()
@@ -202,16 +219,23 @@ class JsonRpcProcess:
 
     def _read_stdout(self, stream: IO[str]) -> None:
         try:
-            for line in stream:
+            while line := stream.readline(_JSON_RPC_FRAME_LIMIT + 1):
+                if len(line) > _JSON_RPC_FRAME_LIMIT:
+                    self._queue_stdout(
+                        ValueError(
+                            f"JSON-RPC frame exceeded the {_JSON_RPC_FRAME_LIMIT}-character limit"
+                        )
+                    )
+                    break
                 if not self._queue_stdout(line):
                     break
-        except ValueError:
+        except ValueError as exc:
             if not self._closing.is_set():
-                raise
+                self._queue_stdout(exc)
         finally:
             self._queue_stdout(None)
 
-    def _queue_stdout(self, line: str | None) -> bool:
+    def _queue_stdout(self, line: str | ValueError | None) -> bool:
         """Queue one stdout record, applying backpressure until read or closed."""
         while not self._closing.is_set():
             try:
@@ -223,10 +247,10 @@ class JsonRpcProcess:
 
     def _read_stderr(self, stream: IO[str]) -> None:
         try:
-            for line in stream:
-                line_tail = line[-_STDERR_TAIL_LIMIT:]
+            while chunk := stream.readline(_JSON_RPC_READ_CHUNK_SIZE):
+                chunk_tail = chunk[-_STDERR_TAIL_LIMIT:]
                 with self._stderr_lock:
-                    self._stderr_tail = (self._stderr_tail + line_tail)[-_STDERR_TAIL_LIMIT:]
+                    self._stderr_tail = (self._stderr_tail + chunk_tail)[-_STDERR_TAIL_LIMIT:]
         except ValueError:
             if not self._closing.is_set():
                 raise
@@ -264,6 +288,8 @@ class JsonRpcProcess:
         if line is None:
             code = self._proc.poll()
             raise EOFError(f"JSON-RPC stream closed (exit status {code})")
+        if isinstance(line, ValueError):
+            raise line
         try:
             payload = json.loads(line)
         except json.JSONDecodeError as exc:

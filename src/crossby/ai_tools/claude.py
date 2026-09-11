@@ -211,123 +211,130 @@ class ClaudeAdapter(AbstractAITool):
                 paths=(run_dir,),
             ) from exc
 
-        command = self.build_launch_command(
-            model=request.model,
-            initial_message=request.prompt,
-            plan_mode=True,
-            trusted_dirs=[str(path) for path in request.trusted_dirs] or None,
-            effort=request.effort,
-            working_dir=working_dir,
-            plan_output_dir=run_dir,
-            sandbox=request.sandbox,
-            _skip_plan_version_check=True,
-        )
+        succeeded = False
         try:
-            exit_code = run_interactive(
-                command,
-                cwd=working_dir,
-                timeout=request.timeout_seconds,
+            command = self.build_launch_command(
+                model=request.model,
+                initial_message=request.prompt,
+                plan_mode=True,
+                trusted_dirs=[str(path) for path in request.trusted_dirs] or None,
+                effort=request.effort,
+                working_dir=working_dir,
+                plan_output_dir=run_dir,
+                sandbox=request.sandbox,
+                _skip_plan_version_check=True,
             )
-        except subprocess.TimeoutExpired as exc:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanTransportError(
-                f"Claude Code planning process timed out after {exc.timeout} seconds.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
+            try:
+                exit_code = run_interactive(
+                    command,
+                    cwd=working_dir,
+                    timeout=request.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlanTransportError(
+                    f"Claude Code planning process timed out after {exc.timeout} seconds.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                ) from None
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PlanTransportError(
+                    f"Claude Code planning process failed: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                ) from exc
+
+            if exit_code != 0:
+                raise PlanTransportError(
+                    f"Claude Code planning process exited with status {exit_code}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                )
+
+            entries = list(run_dir.iterdir())
+            symlinks = tuple(path for path in entries if path.is_symlink())
+            if symlinks:
+                raise PlanArtifactMalformedError(
+                    "Claude Code produced a symlink in the isolated plan directory; refusing it.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=symlinks,
+                )
+            candidates = [path for path in entries if path.is_file() and path.suffix == ".md"]
+            if not candidates:
+                raise PlanArtifactMissingError(
+                    "Claude Code exited successfully without a Markdown plan in its isolated "
+                    "plansDirectory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                )
+            if len(candidates) != 1 or len(entries) != 1:
+                raise PlanArtifactAmbiguousError(
+                    "Claude Code produced multiple or unexpected artifacts in the isolated plan "
+                    "directory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=tuple(entries),
+                )
+            artifact = candidates[0]
+            try:
+                plan = artifact.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise PlanArtifactMalformedError(
+                    f"Claude Code plan artifact could not be read as UTF-8: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(artifact,),
+                ) from exc
+            if not plan.strip():
+                raise PlanArtifactMalformedError(
+                    "Claude Code produced a blank plan artifact.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(artifact,),
+                )
+            result = PlanSessionResult(
+                tool=self.TOOL_ID,
+                version=version,
+                plan=plan,
                 session_id=session_id,
-                paths=(run_dir,),
-            ) from None
-        except (OSError, subprocess.SubprocessError) as exc:
-            shutil.rmtree(run_dir, ignore_errors=True)
+                native_mode="--permission-mode plan",
+                artifact_source=PlanArtifactSource.REQUESTED_PATH,
+                binding=PlanSessionBinding.ISOLATED_RUN_PATH,
+                exit_code=exit_code,
+                artifact_id=artifact.name,
+                artifact_path=artifact,
+            )
+            succeeded = True
+            return result
+        except (OSError, ValueError) as exc:
             raise PlanTransportError(
-                f"Claude Code planning process failed: {exc}",
+                f"Claude Code plan session failed after creating its isolated directory: {exc}",
                 tool_id=self.TOOL_ID,
                 capability=capability,
                 session_id=session_id,
                 paths=(run_dir,),
             ) from exc
-
-        if exit_code != 0:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanTransportError(
-                f"Claude Code planning process exited with status {exit_code}.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=(run_dir,),
-            )
-
-        entries = list(run_dir.iterdir())
-        symlinks = tuple(path for path in entries if path.is_symlink())
-        if symlinks:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanArtifactMalformedError(
-                "Claude Code produced a symlink in the isolated plan directory; refusing it.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=symlinks,
-            )
-        candidates = [path for path in entries if path.is_file() and path.suffix == ".md"]
-        if not candidates:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanArtifactMissingError(
-                "Claude Code exited successfully without a Markdown plan in its isolated "
-                "plansDirectory.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=(run_dir,),
-            )
-        if len(candidates) != 1 or len(entries) != 1:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanArtifactAmbiguousError(
-                "Claude Code produced multiple or unexpected artifacts in the isolated plan "
-                "directory.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=tuple(entries),
-            )
-        artifact = candidates[0]
-        try:
-            plan = artifact.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanArtifactMalformedError(
-                f"Claude Code plan artifact could not be read as UTF-8: {exc}",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=(artifact,),
-            ) from exc
-        if not plan.strip():
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise PlanArtifactMalformedError(
-                "Claude Code produced a blank plan artifact.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exit_code,
-                session_id=session_id,
-                paths=(artifact,),
-            )
-        return PlanSessionResult(
-            tool=self.TOOL_ID,
-            version=version,
-            plan=plan,
-            session_id=session_id,
-            native_mode="--permission-mode plan",
-            artifact_source=PlanArtifactSource.REQUESTED_PATH,
-            binding=PlanSessionBinding.ISOLATED_RUN_PATH,
-            exit_code=exit_code,
-            artifact_id=artifact.name,
-            artifact_path=artifact,
-        )
+        finally:
+            if not succeeded:
+                shutil.rmtree(run_dir, ignore_errors=True)
 
     def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
         """Collapse Crossby's Claude settings fragments into one settings source.

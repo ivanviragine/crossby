@@ -407,6 +407,22 @@ class CursorAdapter(AbstractAITool):
                             session_id=session_id,
                             stderr=rpc.stderr,
                         )
+                    result = message.get("result")
+                    if not isinstance(result, dict):
+                        raise PlanTransportError(
+                            "Cursor ACP returned a malformed session/prompt response.",
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                            session_id=session_id,
+                        )
+                    stop_reason = result.get("stopReason")
+                    if stop_reason != "end_turn":
+                        raise PlanTransportError(
+                            f"Cursor ACP session/prompt ended with stop reason {stop_reason!r}.",
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                            session_id=session_id,
+                        )
                     prompt_completed = True
                     continue
                 method = message.get("method")
@@ -874,31 +890,35 @@ def _answer_cursor_permission(
                 ),
                 None,
             )
-        elif response.outcome is PlanInteractionOutcome.APPROVED:
-            selected = (
-                response.option_id
-                or next(iter(response.option_ids), None)
-                or next(
+        else:
+            selected_ids = response.option_ids or (
+                (response.option_id,) if response.option_id is not None else ()
+            )
+            if len(selected_ids) > 1:
+                raise PlanInteractionRequiredError(
+                    "Cursor permissions require one valid native option ID.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
+            selected = next(iter(selected_ids), None)
+            if selected is None and response.outcome is PlanInteractionOutcome.APPROVED:
+                selected = next(
                     (
                         option.option_id
                         for option in options
                         if "allow" in option.label.lower() or "approve" in option.label.lower()
                     ),
-                    "approved",
+                    None,
                 )
-            )
-        else:
-            selected = response.option_id or next(
-                (
-                    option.option_id
-                    for option in options
-                    if any(
-                        word in option.label.lower()
-                        for word in ("deny", "reject", "cancel", "decline")
-                    )
-                ),
-                None,
-            )
+            valid_ids = {option.option_id for option in options}
+            if selected is None or selected not in valid_ids:
+                raise PlanInteractionRequiredError(
+                    "Cursor permissions require one valid native option ID.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
     if selected is None:
         rpc.respond(message["id"], {"outcome": {"outcome": "cancelled"}})
     else:
