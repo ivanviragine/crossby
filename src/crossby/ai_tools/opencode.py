@@ -153,7 +153,6 @@ class OpenCodeAdapter(AbstractAITool):
             "run",
             "--dir",
             str(working_dir),
-            request.prompt,
             "--format",
             "json",
             "--agent",
@@ -163,6 +162,7 @@ class OpenCodeAdapter(AbstractAITool):
             command.extend(("--model", request.model))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
+        command.extend(("--", request.prompt))
         deadline = time.monotonic() + request.timeout_seconds
 
         def remaining_timeout(*, session_id: str | None = None) -> float:
@@ -223,7 +223,8 @@ class OpenCodeAdapter(AbstractAITool):
             )
         session_id = next(iter(session_ids))
         seen_questions: set[str] = set()
-        for _continuation in range(8):
+        max_continuations = 8
+        for continuation_count in range(max_continuations + 1):
             pending = [
                 question
                 for question in _opencode_questions(events, session_id)
@@ -231,6 +232,13 @@ class OpenCodeAdapter(AbstractAITool):
             ]
             if not pending:
                 break
+            if continuation_count == max_continuations:
+                raise PlanTransportError(
+                    "OpenCode exceeded the bounded planning-question continuation limit.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
             if interaction_handler is None:
                 from crossby.ai_tools.plan_mode import PlanInteractionRequiredError
 
@@ -249,6 +257,7 @@ class OpenCodeAdapter(AbstractAITool):
                 if (
                     response.outcome
                     in {
+                        PlanInteractionOutcome.DENIED,
                         PlanInteractionOutcome.CANCELLED,
                         PlanInteractionOutcome.SKIPPED,
                     }
@@ -320,13 +329,6 @@ class OpenCodeAdapter(AbstractAITool):
                     session_id=session_id,
                 )
             events.extend(continued_events)
-        else:
-            raise PlanTransportError(
-                "OpenCode exceeded the bounded planning-question continuation limit.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                session_id=session_id,
-            )
         try:
             exported = run_captured(
                 ["opencode", "export", session_id],
@@ -491,13 +493,12 @@ def _session_ids(value: Any) -> list[str]:
 
 
 def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
-    """Return final text from assistant messages explicitly bound to plan mode."""
+    """Return the terminal assistant response explicitly bound to plan mode."""
     info = payload.get("info")
     messages = payload.get("messages")
     if not isinstance(info, dict) or not isinstance(messages, list):
         return []
-    explicit_plans: list[tuple[str, str | None]] = []
-    for message in messages:
+    for message in reversed(messages):
         if not isinstance(message, dict):
             continue
         message_info = message.get("info")
@@ -521,8 +522,8 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
         artifact_id = message_info.get("id")
         candidate_id = (str(artifact_id).strip() or None) if artifact_id is not None else None
         if plan_parts:
-            explicit_plans.append(("\n".join(plan_parts), candidate_id))
-    return explicit_plans
+            return [("\n".join(plan_parts), candidate_id)]
+    return []
 
 
 def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[PlanInteraction]:

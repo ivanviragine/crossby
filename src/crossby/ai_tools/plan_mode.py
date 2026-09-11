@@ -17,7 +17,26 @@ from crossby.models.ai import (
 PlanInteractionHandler = Callable[[PlanInteraction], PlanInteractionResponse]
 
 _AUTHORIZATION_RE = re.compile(r"(?i)\b(authorization)\b\s*[:=]?\s*(?:[a-z][a-z0-9._~+/-]*\s+)?\S+")
-_SECRET_RE = re.compile(r"(?i)\b(token|password|secret|api[_ -]?key|bearer)\b\s*[:=]?\s*\S+")
+_SECRET_RE = re.compile(
+    r"""(?ix)
+    (?P<key_quote>["']?)
+    (?P<key>\b(?:token|password|secret|api[_ -]?key|bearer)\b)
+    (?P=key_quote)
+    (?P<separator>\s*[:=]?\s*)
+    (?:(?P<value_quote>["'])(?:\\.|(?!(?P=value_quote)).)*(?P=value_quote)|(?P<value>\S+))
+    """
+)
+
+
+def _redact_secret(match: re.Match[str]) -> str:
+    value_quote = match.group("value_quote")
+    if value_quote:
+        key_quote = match.group("key_quote")
+        return (
+            f"{key_quote}{match.group('key')}{key_quote}{match.group('separator')}"
+            f"{value_quote}<redacted>{value_quote}"
+        )
+    return f"{match.group('key')}=<redacted>"
 
 
 def safe_error_excerpt(text: str | None, *, limit: int = 500) -> str | None:
@@ -26,7 +45,7 @@ def safe_error_excerpt(text: str | None, *, limit: int = 500) -> str | None:
         return None
     compact = " ".join(text.split())
     redacted = _AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}=<redacted>", compact)
-    redacted = _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", redacted)
+    redacted = _SECRET_RE.sub(_redact_secret, redacted)
     return redacted[:limit] or None
 
 

@@ -298,6 +298,13 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        if request.effort is not None and not caps.supports_effort:
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve effort={request.effort.value!r} for "
+                "collected plan sessions. Remove effort or use another adapter.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         if request.network_access and not caps.supports_network_access:
             raise PlanSessionUnsupportedError(
                 f"{caps.display_name} cannot preserve network_access=True for collected plan "
