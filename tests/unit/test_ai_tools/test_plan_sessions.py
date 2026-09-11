@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import queue
 import shutil
+import subprocess
 import threading
 import uuid
 from io import StringIO
@@ -364,6 +365,39 @@ class TestNormalizedContract:
         run.assert_not_called()
 
 
+class TestSubprocessTimeoutRedaction:
+    @pytest.mark.parametrize(
+        ("tool_id", "runner"),
+        [
+            (AIToolID.OPENCODE, "run_captured"),
+            (AIToolID.ANTIGRAVITY_CLI, "run_captured"),
+            (AIToolID.CLAUDE, "run_interactive"),
+            (AIToolID.COPILOT, "run_captured"),
+        ],
+    )
+    def test_initial_prompt_is_not_exposed_by_timeout_error(
+        self,
+        tool_id: AIToolID,
+        runner: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        prompt = "Plan with private-value-that-must-not-leak"
+
+        def time_out(command: list[str], **kwargs: Any) -> Any:
+            assert prompt in command
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        monkeypatch.setattr(f"crossby.ai_tools.plan_process.{runner}", time_out)
+
+        with pytest.raises(PlanTransportError, match="timed out") as raised:
+            AbstractAITool.get(tool_id).run_plan_session(_request(tmp_path, prompt=prompt))
+
+        message = str(raised.value)
+        assert prompt not in message
+        assert "Command '" not in message
+
+
 class TestPlanProcess:
     def test_stdout_reader_applies_bounded_backpressure_until_closed(self) -> None:
         blocked = threading.Event()
@@ -713,6 +747,65 @@ class TestExactSessionCliCollectors:
             "--",
             "--keep-compatibility",
         ]
+
+    def test_opencode_continuation_timeout_does_not_expose_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        question = json.dumps(
+            {
+                "type": "question",
+                "id": "question-1",
+                "sessionID": "ses_exact_123",
+                "question": "Which compatibility target?",
+            }
+        )
+        answer = "private-continuation-answer"
+        calls = 0
+
+        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return CapturedProcess(0, question, "")
+            assert answer in command
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanTransportError, match="continuation timed out") as raised:
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    answer=answer,
+                ),
+            )
+
+        assert answer not in str(raised.value)
+        assert "Command '" not in str(raised.value)
+
+    def test_opencode_export_timeout_does_not_stringify_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+
+        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                )
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanTransportError, match="export timed out") as raised:
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
+
+        assert "Command '" not in str(raised.value)
 
     def test_opencode_continuation_and_export_share_one_timeout_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1433,7 +1526,7 @@ class TestProtocolCollectors:
             "gpt-5.4-xhigh",
         ]
 
-    def test_codex_collects_completed_plan_item(
+    def test_codex_collects_completed_plan_item_after_successful_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _install_rpc(monkeypatch, "codex_app_server_success.jsonl", headerless=True)
@@ -1463,14 +1556,10 @@ class TestProtocolCollectors:
             "writable_roots": [str(tmp_path / "reference")],
             "network_access": True,
         }
-        assert (
-            "request",
-            {
-                "id": 5,
-                "method": "turn/interrupt",
-                "params": {"threadId": "thr-exact-123", "turnId": "turn-exact-123"},
-            },
-        ) in rpc.sent
+        assert not any(
+            kind == "request" and payload["method"] == "turn/interrupt"
+            for kind, payload in rpc.sent
+        )
         assert all(
             "jsonrpc" not in message for message in _rpc_fixture("codex_app_server_success.jsonl")
         )
@@ -1492,7 +1581,7 @@ class TestProtocolCollectors:
         )
         assert turn_start["params"]["collaborationMode"]["settings"]["reasoning_effort"] == "xhigh"
 
-    def test_codex_declines_inflight_requests_while_interrupting_completed_plan(
+    def test_codex_handles_inflight_requests_before_successful_turn_completion(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         messages = _rpc_fixture("codex_app_server_success.jsonl")
@@ -1527,14 +1616,39 @@ class TestProtocolCollectors:
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
 
-        result = AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            if interaction.kind is PlanInteractionKind.QUESTION:
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    answer="No",
+                )
+            return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+
+        result = AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path), answer)
 
         assert result.artifact_id == "plan-exact-123"
-        assert ("respond", {"id": 72, "result": {"answers": {}}}) in FakeRpc.instances[0].sent
+        assert (
+            "respond",
+            {"id": 72, "result": {"answers": {"late": {"answers": ["No"]}}}},
+        ) in FakeRpc.instances[0].sent
         assert (
             "respond",
             {"id": 73, "result": {"decision": "decline"}},
         ) in FakeRpc.instances[0].sent
+
+    def test_codex_rejects_failed_turn_after_completed_plan_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        messages[-1]["params"]["turn"]["status"] = "failed"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="status 'failed'"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+        assert FakeRpc.instances[0].closed
 
     def test_codex_denial_overrides_stale_accept_option(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -228,6 +228,16 @@ class ClaudeAdapter(AbstractAITool):
                 cwd=working_dir,
                 timeout=request.timeout_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            if run_dir.exists() and not any(run_dir.iterdir()):
+                run_dir.rmdir()
+            raise PlanTransportError(
+                f"Claude Code planning process timed out after {exc.timeout} seconds.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(run_dir,),
+            ) from None
         except (OSError, subprocess.SubprocessError) as exc:
             if run_dir.exists() and not any(run_dir.iterdir()):
                 run_dir.rmdir()

@@ -198,26 +198,12 @@ class CodexAdapter(AbstractAITool):
                 raise TimeoutError("Codex plan session exceeded its timeout")
             return wait
 
-        def wait_response(
-            request_id: int,
-            *,
-            interrupt_binding: tuple[str, str] | None = None,
-        ) -> dict[str, Any]:
+        def wait_response(request_id: int) -> dict[str, Any]:
             assert rpc is not None
             while True:
                 message = rpc.read(timeout=remaining())
                 if message.get("id") != request_id:
                     if "method" in message and "id" in message:
-                        if interrupt_binding is not None:
-                            _decline_codex_inflight_request(
-                                rpc,
-                                message,
-                                thread_id=interrupt_binding[0],
-                                turn_id=interrupt_binding[1],
-                                tool_id=self.TOOL_ID,
-                                capability=capability,
-                            )
-                            continue
                         raise PlanTransportError(
                             f"Codex requested {message.get('method')!r} before the plan turn "
                             "was established.",
@@ -334,7 +320,7 @@ class CodexAdapter(AbstractAITool):
                 )
 
             completed_plan: tuple[str, str] | None = None
-            while completed_plan is None:
+            while True:
                 message = rpc.read(timeout=remaining())
                 method = message.get("method")
                 params = message.get("params")
@@ -368,7 +354,7 @@ class CodexAdapter(AbstractAITool):
                             turn_id=turn_id,
                         )
                     completed_plan = (artifact_id, text)
-                    break
+                    continue
                 if method == "turn/completed" and isinstance(params, dict):
                     completed_thread = params.get("threadId")
                     completed_turn = params.get("turn")
@@ -463,12 +449,6 @@ class CodexAdapter(AbstractAITool):
                     turn_id=turn_id,
                     artifact_id=artifact_id,
                 )
-            rpc.request(
-                5,
-                "turn/interrupt",
-                {"threadId": thread_id, "turnId": turn_id},
-            )
-            wait_response(5, interrupt_binding=(thread_id, turn_id))
             return PlanSessionResult(
                 tool=self.TOOL_ID,
                 version=version,
@@ -830,56 +810,6 @@ def _answer_codex_questions(
             )
         answers[question_id] = {"answers": answer_values}
     rpc.respond(message["id"], {"answers": answers})
-
-
-def _decline_codex_inflight_request(
-    rpc: Any,
-    message: dict[str, Any],
-    *,
-    thread_id: str,
-    turn_id: str,
-    tool_id: AIToolID,
-    capability: PlanModeCapability,
-) -> None:
-    """Safely drain known server requests while interrupting a completed plan turn."""
-    from crossby.ai_tools.plan_mode import PlanTransportError
-
-    params = message.get("params")
-    if not isinstance(params, dict):
-        raise PlanTransportError(
-            "Codex in-flight request had malformed params during turn interruption.",
-            tool_id=tool_id,
-            capability=capability,
-            session_id=thread_id,
-            thread_id=thread_id,
-            turn_id=turn_id,
-        )
-    _require_codex_binding(
-        params,
-        thread_id=thread_id,
-        turn_id=turn_id,
-        tool_id=tool_id,
-        capability=capability,
-    )
-    method = message.get("method")
-    if method == "item/tool/requestUserInput":
-        rpc.respond(message["id"], {"answers": {}})
-        return
-    if method in {
-        "item/commandExecution/requestApproval",
-        "item/fileChange/requestApproval",
-    }:
-        rpc.respond(message["id"], {"decision": "decline"})
-        return
-    raise PlanTransportError(
-        f"Codex app-server requested unsupported method {method!r} while interrupting the "
-        "completed plan turn.",
-        tool_id=tool_id,
-        capability=capability,
-        session_id=thread_id,
-        thread_id=thread_id,
-        turn_id=turn_id,
-    )
 
 
 def _answer_codex_approval(

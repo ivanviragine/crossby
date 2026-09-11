@@ -250,6 +250,13 @@ class AntigravityCLIAdapter(AbstractAITool):
                     cwd=request.working_dir,
                     timeout=remaining,
                 )
+            except subprocess.TimeoutExpired as exc:
+                raise PlanTransportError(
+                    f"Antigravity CLI plan process timed out after {exc.timeout} seconds.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=conversation_id,
+                ) from None
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PlanTransportError(
                     f"Antigravity CLI plan process failed: {exc}",

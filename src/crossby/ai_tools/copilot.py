@@ -221,6 +221,14 @@ class CopilotAdapter(AbstractAITool):
                         cwd=request.working_dir,
                         timeout=remaining,
                     )
+                except subprocess.TimeoutExpired as exc:
+                    raise PlanTransportError(
+                        f"GitHub Copilot plan process timed out after {exc.timeout} seconds.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    ) from None
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PlanTransportError(
                         f"GitHub Copilot plan process failed: {exc}",

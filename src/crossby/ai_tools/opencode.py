@@ -183,6 +183,12 @@ class OpenCodeAdapter(AbstractAITool):
                 cwd=working_dir,
                 timeout=remaining_timeout(),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise PlanTransportError(
+                f"OpenCode plan process timed out after {exc.timeout} seconds.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            ) from None
         except (OSError, subprocess.SubprocessError) as exc:
             raise PlanTransportError(
                 f"OpenCode plan process failed: {exc}",
@@ -302,6 +308,13 @@ class OpenCodeAdapter(AbstractAITool):
                     cwd=working_dir,
                     timeout=remaining_timeout(session_id=session_id),
                 )
+            except subprocess.TimeoutExpired as exc:
+                raise PlanTransportError(
+                    f"OpenCode continuation timed out after {exc.timeout} seconds.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                ) from None
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PlanTransportError(
                     f"OpenCode continuation failed for session {session_id}: {exc}",
@@ -344,6 +357,13 @@ class OpenCodeAdapter(AbstractAITool):
                 cwd=working_dir,
                 timeout=remaining_timeout(session_id=session_id),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise PlanTransportError(
+                f"OpenCode export timed out after {exc.timeout} seconds.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+            ) from None
         except (OSError, subprocess.SubprocessError) as exc:
             raise PlanTransportError(
                 f"OpenCode export failed for session {session_id}: {exc}",
