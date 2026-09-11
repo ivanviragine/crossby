@@ -377,10 +377,12 @@ collector either preserves a supported choice or rejects it before spawning.
 Unknown and below-floor CLI versions also fail before a harness process starts.
 `PlanSessionRequest` rejects unknown fields instead of silently applying a
 default. Cursor and Antigravity CLI encode effort in model IDs, so an explicit
-`effort` also requires an explicit `model`. Antigravity further requires a
-compatible Gemini model whose native effort tier matches the request; missing,
-non-Gemini, unavailable, or conflicting model tiers are rejected before the
-collector launches. OpenCode collection accepts only `low`, `medium`, and
+`effort` also requires an explicit `model`. Cursor rejects conflicting explicit
+tiers and elevated-effort models without a compatible thinking variant before
+starting ACP. Antigravity further requires a compatible Gemini model whose
+native effort tier matches the request; missing, non-Gemini, unavailable, or
+conflicting model tiers are rejected before the collector launches. OpenCode
+collection accepts only `low`, `medium`, and
 `high`: interactive launches retain the legacy `xhigh`/`max` → `high`
 normalization, but a collected session rejects tiers the native `--variant`
 argument cannot preserve exactly.

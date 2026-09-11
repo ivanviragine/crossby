@@ -48,6 +48,23 @@ _EFFORT_LEVEL_SUFFIXES = frozenset({"-low", "-medium", "-high", "-xhigh", "-max"
 # Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
+_THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
+
+
+def _encoded_effort(model: str) -> EffortLevel | None:
+    """Return an explicit effort tier encoded near the end of a Cursor model ID."""
+    parts = model.removesuffix("-fast").split("-")
+    candidate = parts[-2] if parts[-1] == "thinking" and len(parts) > 1 else parts[-1]
+    try:
+        return EffortLevel(candidate)
+    except ValueError:
+        return None
+
+
+def _uses_thinking_variant(model: str) -> bool:
+    """Whether *model* names Cursor's generic or tiered thinking variant."""
+    return "thinking" in model.removesuffix("-fast").split("-")
+
 
 class CursorAdapter(AbstractAITool):
     """Adapter for Cursor CLI (``agent`` binary).
@@ -206,6 +223,35 @@ class CursorAdapter(AbstractAITool):
             )
         command = ["agent", "--sandbox", "enabled" if request.sandbox else "disabled"]
         effective_model = self.resolve_effort_model(request.model, request.effort)
+        if request.effort is not None:
+            assert request.model is not None
+            assert effective_model is not None
+            encoded_effort = _encoded_effort(effective_model)
+            if encoded_effort is not None and encoded_effort is not request.effort:
+                raise PlanSessionUnsupportedError(
+                    f"Cursor model {effective_model!r} encodes effort={encoded_effort.value!r}, "
+                    f"which conflicts with requested effort={request.effort.value!r} for a "
+                    "collected plan session.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            uses_thinking = _uses_thinking_variant(effective_model)
+            if request.effort in _THINKING_EFFORTS and not (
+                encoded_effort is request.effort or uses_thinking
+            ):
+                raise PlanSessionUnsupportedError(
+                    f"Cursor cannot preserve effort={request.effort.value!r} with model="
+                    f"{request.model!r}: no compatible thinking variant is available.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            if request.effort not in _THINKING_EFFORTS and uses_thinking:
+                raise PlanSessionUnsupportedError(
+                    f"Cursor thinking model {effective_model!r} conflicts with requested "
+                    f"effort={request.effort.value!r} for a collected plan session.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
         if effective_model:
             command.extend(("--model", effective_model))
         command.append("acp")
@@ -496,7 +542,7 @@ class CursorAdapter(AbstractAITool):
         Cursor CLI receives a valid ID.
         """
         if (
-            effort in (EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX)
+            effort in _THINKING_EFFORTS
             and model
             and model not in _NO_THINKING_MODELS
             and not model.endswith("-thinking")

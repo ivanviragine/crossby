@@ -1331,6 +1331,31 @@ class TestProtocolCollectors:
 
         process.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("model", "effort", "message"),
+        [
+            ("gpt-5.4-low", EffortLevel.HIGH, "encodes effort='low'"),
+            ("auto", EffortLevel.HIGH, "no compatible thinking variant"),
+            ("sonnet-4.6-thinking", EffortLevel.LOW, "thinking model"),
+        ],
+    )
+    def test_cursor_rejects_incompatible_effort_model_before_protocol_process(
+        self,
+        model: str,
+        effort: EffortLevel,
+        message: str,
+        tmp_path: Path,
+    ) -> None:
+        with (
+            patch("crossby.ai_tools.plan_process.JsonRpcProcess") as process,
+            pytest.raises(PlanSessionUnsupportedError, match=message),
+        ):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _request(tmp_path, model=model, effort=effort)
+            )
+
+        process.assert_not_called()
+
     def test_codex_collects_completed_plan_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
