@@ -22,6 +22,7 @@ dry-run hand-computes the result rows and leaves the filesystem byte-identical.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,13 @@ from crossby.config.linker import create_symlink
 from crossby.models.ai import AIToolID
 from crossby.sync import run_sync
 from crossby.sync.base import SyncConcern, SyncData, SyncResult
-from crossby.sync.file_utils import MANAGED_MARKER_NAME, is_same_path, write_managed_marker
+from crossby.sync.file_utils import (
+    MANAGED_MARKER_NAME,
+    backup_path,
+    is_same_path,
+    write_managed_marker,
+)
+from crossby.sync.safe_write import ProjectScope, assert_ancestors, assert_resolved_within
 
 logger = structlog.get_logger()
 
@@ -241,6 +248,58 @@ def tool_points_at_projection(project_root: Path, target_rel: str, kind: str) ->
     survive so that tool keeps resolving.
     """
     return is_same_path(project_root / target_rel, project_root / _kind_dir(kind))
+
+
+def tool_symlink_points_into_projection(project_root: Path, target_rel: str) -> bool:
+    """Whether a target's literal symlink destination is in the scene tree.
+
+    ``is_same_path`` intentionally requires both endpoints to resolve.  A
+    legacy target can instead be a dangling link after ``.crossby/scene`` was
+    removed, so inspect its literal destination as a fail-closed recovery
+    guard without requiring that destination to exist.
+    """
+    target = project_root / target_rel
+    if not target.is_symlink():
+        return False
+    try:
+        literal = target.readlink()
+        destination = literal if literal.is_absolute() else target.parent / literal
+        projection_root = project_root / SCENE_PROJECTION_ROOT
+        return destination.resolve(strict=False).is_relative_to(
+            projection_root.resolve(strict=False)
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
+def allocate_directory_backup(project_root: Path, target_rel: str) -> str:
+    """Return the exact free sibling backup path for a scene displacement."""
+    target = project_root / target_rel
+    backup = backup_path(target)
+    scope = ProjectScope(project_root)
+    assert_ancestors(scope, target)
+    assert_ancestors(scope, backup)
+    return backup.relative_to(project_root).as_posix()
+
+
+def displace_directory(project_root: Path, target_rel: str, backup_rel: str) -> None:
+    """Atomically move a real PROJECT target to its pre-recorded backup.
+
+    The engine persists ``backup_rel`` before calling this function. Refusing an
+    occupied backup prevents a concurrent or stale path from being adopted as
+    recovery authority.
+    """
+    target = project_root / target_rel
+    backup = project_root / backup_rel
+    scope = ProjectScope(project_root)
+    assert_ancestors(scope, target)
+    assert_ancestors(scope, backup)
+    if target.is_symlink() or not target.is_dir():
+        raise OSError(f"{target_rel} is no longer the real directory recorded for displacement")
+    assert_resolved_within(scope, target)
+    if os.path.lexists(backup):
+        raise FileExistsError(f"recorded scene backup is already occupied: {backup_rel}")
+    os.replace(target, backup)
 
 
 def clear_projection(project_root: Path, *, dry_run: bool = False) -> SyncResult | None:

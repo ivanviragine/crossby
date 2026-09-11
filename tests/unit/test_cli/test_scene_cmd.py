@@ -8,6 +8,8 @@ pinned for determinism, and each subcommand is invoked through ``CliRunner``.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -223,6 +225,44 @@ class TestSwitching:
         assert not (root / SCENE_STATE_PATH).exists()
         assert not (root / ".crossby" / "scene").exists()
 
+    def test_force_switch_then_clear_restores_pre_first_scene_directory(
+        self, tmp_path: Path
+    ) -> None:
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+
+        first = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+        switched = _invoke(["scene", "use", "deploy", "--tool", "cursor", "--force"], root)
+        cleared = _invoke(["scene", "clear"], root)
+
+        assert first.exit_code == 0, first.output
+        assert switched.exit_code == 0, switched.output
+        assert cleared.exit_code == 0, cleared.output
+        assert (root / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert not list(root.glob(".cursor/skills.bak*"))
+
+    def test_state_write_failure_restores_displaced_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+
+        def fail_state(*_args: object, **_kwargs: object) -> None:
+            raise OSError("state path is unwritable")
+
+        monkeypatch.setattr("crossby.services.scene_activation.save_scene_state", fail_state)
+        result = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+
+        assert result.exit_code == 1
+        assert "rolled back" in result.output.lower()
+        assert (root / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert not list(root.glob(".cursor/skills.bak*"))
+        assert not (root / SCENE_STATE_PATH).exists()
+
     def test_reapply_active_scene_repairs_state(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
         assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
@@ -328,10 +368,9 @@ class TestPerToolScope:
         assert _invoke(["scene", "clear"], root).exit_code == 0
         assert not (root / ".claude" / "settings.json").exists()
         assert not (root / SCENE_STATE_PATH).exists()
-        # Cursor's dir is restored to the unfiltered source.
-        cursor_skills = root / ".cursor" / "skills"
-        names = {p.name for p in cursor_skills.iterdir() if p.name != ".crossby-managed"}
-        assert names == {"review-skill", "knowledge", "deploy-prod"}
+        # Cursor's target did not exist before activation, so it returns to
+        # absence instead of being redirected to the discovered source.
+        assert not (root / ".cursor" / "skills").exists()
 
     def test_switch_after_partial_apply_reverts_only_cursor(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -425,6 +464,33 @@ command = "lin-mcp"
         result = _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root)
         assert result.exit_code == 0, result.output
 
+    def test_failed_clear_keeps_only_unrestored_path_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.scenes import engine
+        from crossby.sync.ownership import load_ledger
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        real_restore = engine._restore_one_path
+
+        def fail_cursor_skills(
+            project_root: Path, ledger: object, target_rel: str, *args: object, **kwargs: object
+        ) -> object:
+            if target_rel == ".cursor/skills":
+                raise OSError("injected restore failure")
+            return real_restore(project_root, ledger, target_rel, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(engine, "_restore_one_path", fail_cursor_skills)
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        state = read_json(root / SCENE_STATE_PATH)
+        assert set(state["tools"]) == {"cursor"}, state["tools"].get("claude")
+        assert state["tools"]["cursor"]["mechanisms"] == {"skills": "project"}
+        assert set(load_ledger(root).scene_restores()) == {".cursor/skills"}
+        assert (root / ".crossby/scene").exists()
+
 
 # ---------------------------------------------------------------------------
 # Drift
@@ -492,6 +558,24 @@ class TestDrift:
         clear_plan = _invoke(["scene", "clear", "--plan"], root)
         assert clear_plan.exit_code == 0, clear_plan.output
         # Neither preview mutated the active scene.
+        assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
+
+    def test_force_clear_plan_previews_drifted_projection_symlink(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review", "--tool", "cursor"], root).exit_code == 0
+        target = root / ".cursor/skills"
+        target.unlink()
+        external = root / "external-skills"
+        external.mkdir()
+        target.symlink_to(external, target_is_directory=True)
+
+        refused = _invoke(["scene", "clear", "--tool", "cursor", "--plan"], root)
+        preview = _invoke(["scene", "clear", "--tool", "cursor", "--plan", "--force"], root)
+
+        assert refused.exit_code == 1
+        assert preview.exit_code == 0, preview.output
+        assert target.is_symlink()
+        assert target.readlink() == external
         assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
 
     def test_clear_refuses_on_drift_without_force(self, tmp_path: Path) -> None:
@@ -585,6 +669,33 @@ class TestClearAndSchema:
         result = _invoke(["scene", "clear"], root)
         assert result.exit_code == 0, result.output
         assert "nothing to clear" in result.output.lower()
+
+    def test_clear_plan_rejects_replaced_recorded_directory_backup(self, tmp_path: Path) -> None:
+        """Preview the same identity failure that a real clear would report."""
+        from crossby.sync.ownership import load_ledger
+        from tests.unit.test_scenes.conftest import make_skill
+
+        root = _project(tmp_path)
+        make_skill(root, ".cursor/skills", "cursor-only")
+        applied = _invoke(["scene", "use", "pr-review", "--tool", "cursor", "--force"], root)
+        assert applied.exit_code == 0, applied.output
+
+        descriptor = load_ledger(root).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        backup = root / descriptor.backup_path
+        shutil.rmtree(backup)
+        backup.mkdir()
+
+        plan = _invoke(["scene", "clear", "--tool", "cursor", "--plan"], root)
+        clear = _invoke(["scene", "clear", "--tool", "cursor"], root)
+
+        expected = "recorded backup is not the displaced real directory"
+        assert plan.exit_code == 1
+        assert expected in " ".join(plan.output.split())
+        assert clear.exit_code == 1
+        assert expected in " ".join(clear.output.split())
+        assert backup.is_dir()
+        assert (root / ".cursor/skills").is_symlink()
 
     def test_unrecognised_schema_version_is_no_active_scene(self, tmp_path: Path) -> None:
         root = _project(tmp_path)
@@ -787,6 +898,67 @@ class TestPartialFailure:
         assert "left intact" in result.output.lower()
         assert (root / SCENE_STATE_PATH).exists()
 
+    def test_failed_clear_containment_during_reconciliation_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A state-save containment refusal must retain the partial-clear guidance."""
+        from crossby.sync.base import SyncConcern, SyncResult
+        from crossby.sync.safe_write import SyncContainmentError
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        failed_clear = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.SKILLS,
+            action="error",
+            message="cursor skills could not be restored",
+        )
+        monkeypatch.setattr("crossby.scenes.engine.clear_scene", lambda *_a, **_k: [failed_clear])
+
+        external = root / "external-gitignore"
+        external.write_text("user-owned\n", encoding="utf-8")
+        (root / ".gitignore").unlink()
+        (root / ".gitignore").symlink_to(external)
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        assert "could not narrow scene state" in result.output.lower()
+        assert "remaining state left intact" in result.output.lower()
+        assert not isinstance(result.exception, SyncContainmentError)
+        assert (root / SCENE_STATE_PATH).exists()
+
+    def test_failed_switch_reconciliation_write_is_structured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial outgoing clear never leaks its recovery-state write error."""
+        from crossby.sync.base import SyncConcern, SyncResult
+
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        failed_clear = SyncResult(
+            tool_id=AIToolID.CURSOR,
+            concern=SyncConcern.SKILLS,
+            action="error",
+            message="cursor skills could not be restored",
+        )
+
+        def _state_write_fails(*_args: object, **_kwargs: object) -> None:
+            raise OSError("scene state directory is unwritable")
+
+        monkeypatch.setattr("crossby.scenes.engine.clear_scene", lambda *_a, **_k: [failed_clear])
+        monkeypatch.setattr(
+            "crossby.services.scene_activation.save_scene_state", _state_write_fails
+        )
+
+        result = _invoke(["scene", "use", "deploy"], root)
+
+        assert result.exit_code == 1
+        assert "cursor skills could not be restored" in result.output
+        assert "could not preserve partial recovery state" in result.output.lower()
+        assert not isinstance(result.exception, OSError)
+        assert (root / SCENE_STATE_PATH).exists()
+
     def test_clear_write_failure_keeps_ownership_and_retries(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -936,6 +1108,93 @@ class TestCorruptLedger:
         assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
         assert read_json(root / SCENE_STATE_PATH)["scene"] == "pr-review"
         assert _settings(root)["skillOverrides"] == {"deploy-prod": "off"}
+
+    def test_malformed_scene_path_provenance_refuses(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene_paths"][".cursor/skills"] = {
+            "kind": "directory",
+            "backup": "../unsafe.bak",
+        }
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert (root / SCENE_STATE_PATH).exists()
+
+    def test_nul_symlink_restore_path_refuses_without_mutating_scene(self, tmp_path: Path) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data["scene_paths"][".cursor/skills"] = {"kind": "symlink", "target": "foo\x00bar"}
+        corrupt_bytes = json.dumps(data)
+        (root / LEDGER).write_text(corrupt_bytes, encoding="utf-8")
+        managed_paths = {
+            target_rel: (
+                os.path.lexists(root / target_rel),
+                (root / target_rel).is_symlink(),
+                (root / target_rel).readlink() if (root / target_rel).is_symlink() else None,
+            )
+            for target_rel in data["scene_paths"]
+        }
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        assert "unreadable" in result.output.lower()
+        assert (root / LEDGER).read_text(encoding="utf-8") == corrupt_bytes
+        assert (root / SCENE_STATE_PATH).exists()
+        assert {
+            target_rel: (
+                os.path.lexists(root / target_rel),
+                (root / target_rel).is_symlink(),
+                (root / target_rel).readlink() if (root / target_rel).is_symlink() else None,
+            )
+            for target_rel in data["scene_paths"]
+        } == managed_paths
+
+    def test_legacy_active_projection_without_path_provenance_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data.pop("scene_paths")
+        (root / LEDGER).write_text(json.dumps(data), encoding="utf-8")
+
+        result = _invoke(["scene", "clear"], root)
+
+        assert result.exit_code == 1
+        normalized = " ".join(result.output.lower().split())
+        assert "legacy activation" in normalized
+        assert "will not infer" in normalized
+        assert (root / SCENE_STATE_PATH).exists()
+        assert (root / ".agents/skills").is_symlink()
+
+    def test_legacy_dangling_projection_without_path_provenance_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        root = _project(tmp_path)
+        assert _invoke(["scene", "use", "pr-review"], root).exit_code == 0
+        data = read_json(root / LEDGER)
+        data.pop("scene_paths")
+        (root / LEDGER).write_text(json.dumps(data), encoding="utf-8")
+        target = root / ".agents" / "skills"
+        literal = target.readlink()
+        shutil.rmtree(root / ".crossby" / "scene")
+        assert target.is_symlink() and not target.exists()
+
+        result = _invoke(["scene", "clear", "--force"], root)
+
+        assert result.exit_code == 1
+        assert "legacy activation" in " ".join(result.output.lower().split())
+        assert (root / SCENE_STATE_PATH).exists()
+        assert target.is_symlink()
+        assert target.readlink() == literal
 
     def test_typo_scene_key_refuses(self, tmp_path: Path) -> None:
         # A scene entry under a key no revert handler recognises (a typo'd

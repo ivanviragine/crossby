@@ -32,6 +32,7 @@ from crossby.sync.ownership import (
     LEDGER_VERSION,
     OwnershipLedger,
     SceneDeclareKey,
+    ScenePathRestore,
     load_ledger,
     load_ledger_checked,
     save_ledger,
@@ -140,6 +141,42 @@ class TestLedgerRoundTrip:
     def test_empty_ledger_is_not_materialised(self, tmp_path: Path) -> None:
         assert save_ledger(tmp_path, OwnershipLedger()) is False
         assert not (tmp_path / LEDGER_PATH).exists()
+
+    def test_scene_path_descriptors_round_trip_and_are_path_keyed(self, tmp_path: Path) -> None:
+        ledger = OwnershipLedger()
+        assert ledger.record_scene_absent(".cursor/skills") is True
+        assert ledger.record_scene_symlink(".agents/skills", "../.claude/skills") is True
+        assert (
+            ledger.record_scene_restore(
+                ".cursor/agents",
+                ScenePathRestore.directory(
+                    ".cursor/agents.bak2", displaced=False, device=42, inode=99
+                ),
+            )
+            is True
+        )
+        assert ledger.record_scene_restore(".codex/agents", ScenePathRestore.unchanged()) is True
+        ledger.record_scene_directory_displaced(".cursor/agents")
+        # A co-sharer cannot replace the first physical-path baseline.
+        assert ledger.record_scene_absent(".agents/skills") is False
+        save_ledger(tmp_path, ledger)
+
+        loaded = load_ledger(tmp_path)
+        assert loaded.scene_restore(".cursor/skills") == ScenePathRestore.absent()
+        assert loaded.scene_restore(".agents/skills") == ScenePathRestore.symlink(
+            "../.claude/skills"
+        )
+        assert loaded.scene_restore(".cursor/agents") == ScenePathRestore.directory(
+            ".cursor/agents.bak2", displaced=True, device=42, inode=99
+        )
+        assert loaded.scene_restore(".codex/agents") == ScenePathRestore.unchanged()
+        assert not loaded.is_empty()
+
+    def test_clearing_last_scene_path_descriptor_makes_ledger_empty(self) -> None:
+        ledger = OwnershipLedger()
+        ledger.record_scene_absent(".cursor/skills")
+        ledger.clear_scene_restore(".cursor/skills")
+        assert ledger.is_empty()
 
 
 class TestLedgerDegradesGracefully:
@@ -348,6 +385,75 @@ class TestLoadLedgerChecked:
         )
         assert load_ledger_checked(tmp_path).corrupt is True
 
+    @pytest.mark.parametrize(
+        "scene_paths",
+        [
+            None,
+            [],
+            {"/absolute/skills": {"kind": "absent"}},
+            {"../escape": {"kind": "absent"}},
+            {".unknown/skills": {"kind": "absent"}},
+            {".cursor/skills": {"kind": "unknown"}},
+            {".cursor/skills": {"kind": "absent", "target": "extra"}},
+            {".cursor/skills": {"kind": "symlink"}},
+            {".cursor/skills": {"kind": "symlink", "target": 5}},
+            {".cursor/skills": {"kind": "symlink", "target": ""}},
+            {".cursor/skills": {"kind": "symlink", "target": "foo\x00bar"}},
+            {".cursor/skills": {"kind": "directory", "backup": "/tmp/stolen"}},
+            {".cursor/skills": {"kind": "directory", "backup": "../skills.bak"}},
+            {".cursor/skills": {"kind": "directory", "backup": ".agents/skills.bak"}},
+            {".cursor/skills": {"kind": "directory", "backup": ".cursor/other.bak"}},
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "displaced": "yes",
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "displaced": False,
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "displaced": True,
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "device": 5,
+                }
+            },
+            {
+                ".cursor/skills": {
+                    "kind": "directory",
+                    "backup": ".cursor/skills.bak",
+                    "device": True,
+                    "inode": 9,
+                }
+            },
+        ],
+    )
+    def test_malformed_scene_paths_fail_closed(self, tmp_path: Path, scene_paths: object) -> None:
+        self._write(
+            tmp_path,
+            json.dumps({"version": LEDGER_VERSION, "owned": {}, "scene_paths": scene_paths}),
+        )
+        assert load_ledger_checked(tmp_path).corrupt is True
+
+    def test_absent_scene_paths_section_is_backward_compatible(self, tmp_path: Path) -> None:
+        self._write(tmp_path, json.dumps({"version": 2, "owned": {}}))
+        loaded = load_ledger_checked(tmp_path)
+        assert loaded.corrupt is False
+        assert loaded.ledger.scene_restores() == {}
+
 
 # ---------------------------------------------------------------------------
 # run_sync ledger integration
@@ -357,6 +463,62 @@ _HOOK = HookEntry(event="pre_tool_use", command="guard", tools=["Edit"])
 
 
 class TestRunSyncLedgerGating:
+    @pytest.mark.parametrize(
+        "concern", [SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP]
+    )
+    def test_corrupt_scene_paths_refuse_ownership_writers_before_mutation(
+        self, tmp_path: Path, concern: SyncConcern
+    ) -> None:
+        """Corrupt scene provenance must block all ownership-bearing writes."""
+        path = tmp_path / LEDGER_PATH
+        path.parent.mkdir(parents=True)
+        original = json.dumps(
+            {
+                "version": LEDGER_VERSION,
+                "owned": {},
+                "scene_paths": {
+                    ".cursor/skills": {"kind": "absent"},
+                    ".github/agents": {"kind": "unknown"},
+                },
+            }
+        )
+        path.write_text(original, encoding="utf-8")
+
+        touched = tmp_path / "writer-ran"
+
+        class _MutatingWriter(AbstractSyncWriter):
+            tool_id = AIToolID.CLAUDE
+
+            def __init__(self, writer_concern: SyncConcern) -> None:
+                self.concern = writer_concern
+
+            def sync(
+                self,
+                data: SyncData,
+                project_root: Path,
+                *,
+                dry_run: bool = False,
+                force: bool = False,
+            ) -> SyncResult:
+                touched.write_text("mutated", encoding="utf-8")
+                return SyncResult(tool_id=self.tool_id, concern=self.concern, action="updated")
+
+        results = run_sync(
+            SyncData(hooks=[_HOOK]),
+            tmp_path,
+            tool_id=AIToolID.CLAUDE,
+            registry=_registry(_MutatingWriter(concern)),
+        )
+
+        assert path.read_text(encoding="utf-8") == original
+        assert not touched.exists()
+        assert any(
+            result.concern == concern
+            and result.action == "error"
+            and "refusing to sync" in (result.message or "")
+            for result in results
+        )
+
     def test_success_records_ownership(self, tmp_path: Path) -> None:
         reg = _registry(_make_writer(SyncConcern.HOOKS, "updated"))
         run_sync(SyncData(hooks=[_HOOK]), tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)

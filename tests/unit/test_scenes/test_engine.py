@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 
 from crossby.models.config import SceneConfig, SceneSelector
-from crossby.scenes import apply_scene, clear_scene
+from crossby.scenes import apply_scene, clear_scene, projection
 from crossby.scenes.engine import SceneApplyError
 from crossby.sync.base import SyncConcern, SyncResult
-from crossby.sync.ownership import SceneDeclareKey, load_ledger
+from crossby.sync.ownership import (
+    OwnershipLedger,
+    SceneDeclareKey,
+    ScenePathRestore,
+    load_ledger,
+    save_ledger,
+)
 from tests.unit.test_scenes.conftest import populate_project, read_json, resolve
 
 # A scene that keeps 2 of 3 skills, 1 of 2 agents, 1 of 2 MCP servers.
@@ -219,6 +226,106 @@ class TestDryRun:
         assert snapshot() == before
         assert results  # a full result set is still produced
 
+    def test_dry_run_uses_recorded_canonical_baseline_before_projected_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Preview the same source recovery that a real scene switch performs."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        tools = [AIToolID.CURSOR, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: tools),
+        )
+        make_skill(tmp_path, ".cursor/skills", "review-skill")
+        resolved = resolve(tmp_path, SCENE, tools=tools)
+        apply_scene(resolved, tmp_path)
+
+        preview = apply_scene(resolve(tmp_path, SCENE, tools=tools), tmp_path, dry_run=True)
+
+        assert not any(result.action == "error" for result in preview)
+        assert any(
+            result.action == "skipped"
+            and ".cursor/skills is the canonical skills source" in (result.message or "")
+            for result in preview
+        )
+        assert any(
+            result.action == "updated" and "recorded absent baseline" in (result.message or "")
+            for result in preview
+        )
+
+    def test_dry_run_builds_projected_tree_from_recorded_canonical_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plan matches the source tree that a real scene switch restores."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        tools = [AIToolID.CURSOR, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI]
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: tools),
+        )
+        make_skill(tmp_path, ".cursor/skills", "scene-a")
+        make_skill(tmp_path, ".cursor/skills", "scene-b")
+        scene_a = SceneConfig(skills=SceneSelector(include=["scene-a"]))
+        scene_b = SceneConfig(skills=SceneSelector(include=["scene-b"]))
+
+        apply_scene(resolve(tmp_path, scene_a, tools=tools), tmp_path)
+        preview = apply_scene(resolve(tmp_path, scene_b, tools=tools), tmp_path, dry_run=True)
+
+        projected = next(
+            result
+            for result in preview
+            if result.concern == SyncConcern.SKILLS
+            and result.action == "updated"
+            and "codex" in (result.message or "")
+        )
+        assert projected.added == 1
+        assert "1 selected skills" in (projected.message or "")
+
+        clear_scene(tmp_path)
+        apply_scene(resolve(tmp_path, scene_b, tools=tools), tmp_path)
+        actual = {
+            child.name
+            for child in (tmp_path / ".agents/skills").iterdir()
+            if child.name != ".crossby-managed"
+        }
+        assert actual == {"scene-b"}
+
+    def test_dry_run_unreadable_project_target_returns_error_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prospective baseline inspection failure must not escape the preview."""
+        from crossby.models.ai import AIToolID
+
+        populate_project(tmp_path)
+        target = tmp_path / ".cursor" / "skills"
+        target.mkdir(parents=True)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
+        )
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+        real_iterdir = Path.iterdir
+
+        def _unreadable(path: Path):  # type: ignore[no-untyped-def]
+            if path == target:
+                raise PermissionError("permission denied")
+            return real_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", _unreadable)
+
+        results = apply_scene(resolved, tmp_path, dry_run=True)
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "permission denied" in (result.message or "")
+            for result in results
+        )
+
 
 class TestUnsupportedAndVersionGate:
     def test_old_claude_skips_skilloverrides_additions(
@@ -318,16 +425,784 @@ class TestNonManagedDirRefusal:
         backups = list(tmp_path.glob(".agents/skills.bak*"))
         assert backups and (backups[0] / "user-notes.txt").is_file()
 
-    def test_clear_refuses_real_non_crossby_target(self, tmp_path: Path) -> None:
-        # clear must not back up and replace a real, non-crossby directory it never
-        # managed — the same refusal the apply path enforces.
+    def test_clear_ignores_real_target_without_scene_provenance(self, tmp_path: Path) -> None:
+        # Descriptor-driven clear neither replaces nor guesses a baseline for a
+        # path that was never projected.
         self._project_with_real_agents_skills(tmp_path)
         results = clear_scene(tmp_path)
         assert not (tmp_path / ".agents" / "skills").is_symlink()
         assert (tmp_path / ".agents" / "skills" / "user-notes.txt").is_file()
         assert not list(tmp_path.glob(".agents/skills.bak*"))
-        skills_errs = [r for r in results if r.concern.value == "skills" and r.action == "error"]
-        assert skills_errs
+        assert not [r for r in results if r.concern.value == "skills" and r.action == "error"]
+
+
+class TestExactPathRestoration:
+    def _install_cursor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CURSOR]),
+        )
+
+    @pytest.mark.parametrize(
+        ("tool", "target_rel", "kind"),
+        [
+            ("codex", ".codex/agents", "agents"),
+            ("antigravity-cli", ".agents/skills", "skills"),
+        ],
+    )
+    def test_clear_keeps_marker_backed_canonical_source_untouched(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tool: str,
+        target_rel: str,
+        kind: str,
+    ) -> None:
+        """Canonical sources skipped by PROJECT retain durable no-op provenance."""
+        from crossby.models.ai import AIToolID
+        from crossby.sync.ownership import ScenePathRestore
+        from tests.unit.test_scenes.conftest import make_agent, make_skill
+
+        tool_id = AIToolID(tool)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [tool_id]),
+        )
+        if kind == "agents":
+            make_agent(tmp_path, target_rel, "code-reviewer.md")
+        else:
+            make_skill(tmp_path, target_rel, "review-skill")
+        target = tmp_path / target_rel
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+
+        apply_scene(resolve(tmp_path, SCENE, tools=[tool_id]), tmp_path)
+
+        assert load_ledger(tmp_path).scene_restore(target_rel) == ScenePathRestore.unchanged()
+        results = clear_scene(tmp_path)
+
+        assert not any(result.action == "error" for result in results)
+        assert target.is_dir() and (target / ".crossby-managed").is_file()
+        assert not (tmp_path / ".crossby" / "scene").exists()
+        assert load_ledger(tmp_path).scene_restore(target_rel) is None
+
+    def test_symlinked_target_ancestor_does_not_record_a_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / ".cursor").symlink_to(outside, target_is_directory=True)
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path
+        )
+
+        assert any(
+            result.action == "error"
+            and result.file_path == tmp_path / ".cursor" / "skills"
+            and "symlinked directory" in (result.message or "")
+            for result in results
+        )
+        assert not (outside / "skills").exists()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+
+    def test_plan_rejects_symlinked_target_ancestor_before_inspection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "skills").mkdir()
+        (outside / "skills" / "outside-only").write_text("mine", encoding="utf-8")
+        (tmp_path / ".cursor").symlink_to(outside, target_is_directory=True)
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            dry_run=True,
+        )
+
+        assert any(
+            result.action == "error"
+            and result.file_path == tmp_path / ".cursor" / "skills"
+            and "symlinked directory" in (result.message or "")
+            for result in results
+        )
+        assert not any(
+            "would preserve the directory" in (result.message or "") for result in results
+        )
+
+    def test_legacy_projection_symlink_is_not_recorded_as_a_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        target = tmp_path / ".cursor/skills"
+        projection_target = tmp_path / ".crossby/scene/active/skills"
+        projection_target.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(projection_target, target_is_directory=True)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run, force=True)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "legacy scene projection symlink" in (result.message or "")
+                for result in results
+            )
+
+        assert target.is_symlink()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+
+    def test_legacy_directory_backup_without_identity_refuses_reapply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills.bak", "cursor-only")
+        target = tmp_path / ".cursor/skills"
+        projection_target = tmp_path / ".crossby/scene/active/skills"
+        projection_target.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(projection_target, target_is_directory=True)
+        ledger = OwnershipLedger()
+        ledger.record_scene_directory(".cursor/skills", ".cursor/skills.bak")
+        save_ledger(tmp_path, ledger)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run, force=True)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "recorded directory baseline has no identity" in (result.message or "")
+                for result in results
+            )
+
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor == ScenePathRestore.directory(".cursor/skills.bak")
+        assert target.is_symlink()
+
+    def test_reapply_allows_marker_backed_target_beside_directory_backup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CODEX]),
+        )
+        populate_project(tmp_path)
+        target = tmp_path / ".codex" / "agents"
+        target.mkdir(parents=True)
+        (target / "user-agent.toml").write_text("name = 'user-agent'", encoding="utf-8")
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CODEX])
+
+        apply_scene(resolved, tmp_path, force=True)
+        descriptor = load_ledger(tmp_path).scene_restore(".codex/agents")
+        assert descriptor is not None and descriptor.backup_path is not None
+        backup = tmp_path / descriptor.backup_path
+        assert backup.is_dir() and (backup / "user-agent.toml").is_file()
+        assert (target / ".crossby-managed").is_file()
+
+        preview = apply_scene(resolved, tmp_path, dry_run=True)
+        results = apply_scene(resolved, tmp_path)
+
+        for operation in (preview, results):
+            assert not any(
+                result.action == "error" and "recorded backup is occupied" in (result.message or "")
+                for result in operation
+            )
+            assert not any(
+                result.action == "error" and result.file_path == target for result in operation
+            )
+        assert backup.is_dir() and (backup / "user-agent.toml").is_file()
+        assert (target / ".crossby-managed").is_file()
+
+    @pytest.mark.parametrize(
+        ("tool", "target_rel"),
+        [
+            ("codex", ".codex/agents"),
+            ("copilot", ".github/agents"),
+        ],
+    )
+    def test_legacy_managed_agent_projection_without_baseline_refuses_clear(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tool: str,
+        target_rel: str,
+    ) -> None:
+        """Never clear a marker-backed legacy projection without its baseline."""
+        from crossby.models.ai import AIToolID
+
+        tool_id = AIToolID(tool)
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [tool_id]),
+        )
+        target = tmp_path / target_rel
+        target.mkdir(parents=True)
+        (target / ".crossby-managed").write_text("", encoding="utf-8")
+        projection_root = tmp_path / ".crossby" / "scene"
+        projection_root.mkdir(parents=True)
+
+        results = clear_scene(tmp_path)
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "legacy activation" in (result.message or "")
+            for result in results
+        )
+        assert target.is_dir() and (target / ".crossby-managed").is_file()
+        assert projection_root.is_dir()
+
+    def test_force_restores_exact_cursor_directory_and_leaves_other_backups(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        for name in ("review-skill", "knowledge", "deploy-prod"):
+            make_skill(tmp_path, ".claude/skills", name)
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        for suffix in (".bak", ".bak2"):
+            backup = tmp_path / f".cursor/skills{suffix}"
+            backup.mkdir(parents=True)
+            (backup / "sentinel").write_text(suffix, encoding="utf-8")
+
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        ledger = load_ledger(tmp_path)
+        descriptor = ledger.scene_restore(".cursor/skills")
+        assert descriptor is not None
+        assert descriptor.backup_path == ".cursor/skills.bak3"
+        assert (tmp_path / ".cursor/skills.bak3/cursor-only/SKILL.md").is_file()
+
+        clear_scene(tmp_path)
+
+        assert (tmp_path / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert not (tmp_path / ".cursor/skills.bak3").exists()
+        assert (tmp_path / ".cursor/skills.bak/sentinel").read_text() == ".bak"
+        assert (tmp_path / ".cursor/skills.bak2/sentinel").read_text() == ".bak2"
+
+    @pytest.mark.parametrize("literal", ["../custom-skills", "/tmp/crossby-dangling-skills"])
+    def test_restores_literal_symlink_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, literal: str
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        link = tmp_path / ".cursor/skills"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(literal, target_is_directory=True)
+
+        apply_scene(resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path)
+        assert link.readlink() != Path(literal)
+        clear_scene(tmp_path)
+        assert link.is_symlink()
+        assert str(link.readlink()) == literal
+
+    def test_originally_absent_target_returns_to_absence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        apply_scene(resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path)
+        assert (tmp_path / ".cursor/skills").is_symlink()
+        clear_scene(tmp_path)
+        assert not (tmp_path / ".cursor/skills").exists()
+
+    @pytest.mark.parametrize("initial_link", [None, "original-skills"])
+    def test_reapply_refuses_symlink_drift_after_non_directory_baseline_capture(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        initial_link: str | None,
+    ) -> None:
+        """A retry must not overwrite a link created after a pre-write crash."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        target = tmp_path / ".cursor/skills"
+        target.parent.mkdir()
+        if initial_link is not None:
+            target.symlink_to(initial_link, target_is_directory=True)
+
+        real_repoint = projection.repoint
+
+        def fail_after_baseline_capture(*args: object, **kwargs: object) -> SyncResult:
+            tree = args[1]
+            representative = args[2]
+            if tree.concern == SyncConcern.SKILLS and representative == AIToolID.CURSOR:
+                return SyncResult(
+                    tool_id=AIToolID.CURSOR,
+                    concern=SyncConcern.SKILLS,
+                    action="error",
+                    message="injected pre-write crash",
+                )
+            return real_repoint(*args, **kwargs)
+
+        monkeypatch.setattr("crossby.scenes.projection.repoint", fail_after_baseline_capture)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+        first = apply_scene(resolved, tmp_path)
+        assert any(result.message == "injected pre-write crash" for result in first)
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        expected = (
+            ScenePathRestore.absent()
+            if initial_link is None
+            else ScenePathRestore.symlink(initial_link)
+        )
+        assert descriptor == expected
+
+        external = tmp_path / "user-skills"
+        external.mkdir()
+        if target.is_symlink():
+            target.unlink()
+        target.symlink_to(external, target_is_directory=True)
+        monkeypatch.setattr("crossby.scenes.projection.repoint", real_repoint)
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "baseline changed before scene projection" in (result.message or "")
+                for result in results
+            )
+            assert target.is_symlink()
+            assert target.readlink() == external
+
+    def test_force_reapply_rejects_drifted_directory_without_directory_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        apply_scene(resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path)
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.mkdir(parents=True)
+        (target / "user-notes.txt").write_text("mine", encoding="utf-8")
+
+        preview = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            dry_run=True,
+            force=True,
+        )
+        assert any(
+            result.action == "error" and "drifted to a real directory" in (result.message or "")
+            for result in preview
+        )
+        assert not any(
+            "would preserve the directory" in (result.message or "") for result in preview
+        )
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        assert any(
+            result.action == "error"
+            and result.file_path == target
+            and "drifted to a real directory" in (result.message or "")
+            for result in results
+        )
+        assert (target / "user-notes.txt").read_text(encoding="utf-8") == "mine"
+        assert not list(tmp_path.glob(".cursor/skills.bak*"))
+
+    def test_reapply_refuses_symlink_when_directory_baseline_was_not_displaced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        external = tmp_path / "external-skills"
+        external.mkdir()
+        target = tmp_path / ".cursor/skills"
+        target.parent.mkdir()
+        target.symlink_to(external, target_is_directory=True)
+
+        ledger = OwnershipLedger()
+        ledger.record_scene_directory(".cursor/skills", ".cursor/skills.bak")
+        save_ledger(tmp_path, ledger)
+
+        preview = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            dry_run=True,
+            force=True,
+        )
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        for operation in (preview, results):
+            assert any(
+                result.action == "error" and "baseline was not displaced" in (result.message or "")
+                for result in operation
+            )
+        assert target.is_symlink()
+        assert target.readlink() == external
+        assert not (tmp_path / ".cursor/skills.bak").exists()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") == ledger.scene_restore(
+            ".cursor/skills"
+        )
+
+    def test_missing_recorded_backup_refuses_unrelated_real_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        shutil.rmtree(tmp_path / descriptor.backup_path)
+
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.mkdir()
+        (target / "unrelated").write_text("mine", encoding="utf-8")
+
+        results = clear_scene(tmp_path)
+
+        assert any(
+            result.action == "error" and "recorded backup is missing" in (result.message or "")
+            for result in results
+        )
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") == descriptor
+        assert (target / "unrelated").read_text(encoding="utf-8") == "mine"
+        assert (tmp_path / ".crossby/scene").exists()
+
+    def test_projection_error_after_displacement_keeps_recoverable_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        real_repoint = projection.repoint
+
+        def fail_cursor(*args: object, **kwargs: object) -> SyncResult:
+            if args[2] == AIToolID.CURSOR:
+                return SyncResult(
+                    tool_id=AIToolID.CURSOR,
+                    concern=SyncConcern.SKILLS,
+                    action="error",
+                    message="injected projection failure",
+                )
+            return real_repoint(*args, **kwargs)
+
+        monkeypatch.setattr("crossby.scenes.projection.repoint", fail_cursor)
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        assert any(result.action == "error" for result in results)
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is not None
+
+        clear_scene(tmp_path)
+        assert (tmp_path / ".cursor/skills/cursor-only/SKILL.md").is_file()
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+
+    def test_reapply_does_not_adopt_managed_output_when_displaced_backup_is_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_agent
+
+        monkeypatch.setattr(
+            "crossby.ai_tools.base.AbstractAITool.detect_installed",
+            classmethod(lambda _cls: [AIToolID.CLAUDE, AIToolID.CODEX]),
+        )
+        make_agent(tmp_path, ".claude/agents", "code-reviewer.md")
+        make_agent(tmp_path, ".codex/agents", "user-agent.toml")
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CODEX])
+        apply_scene(resolved, tmp_path, force=True)
+
+        descriptor = load_ledger(tmp_path).scene_restore(".codex/agents")
+        assert descriptor is not None and descriptor.backup_path is not None
+        assert descriptor.directory_displaced is True
+        shutil.rmtree(tmp_path / descriptor.backup_path)
+
+        results = apply_scene(resolved, tmp_path, force=True)
+
+        assert any(
+            result.action == "error"
+            and "recorded directory backup is missing" in (result.message or "")
+            for result in results
+        )
+        assert (tmp_path / ".codex/agents/.crossby-managed").is_file()
+        assert not (tmp_path / descriptor.backup_path).exists()
+
+    def test_reapply_completes_an_authenticated_interrupted_displacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        target = tmp_path / ".cursor/skills"
+        identity = target.stat()
+        descriptor = ScenePathRestore.directory(
+            ".cursor/skills.bak",
+            displaced=False,
+            device=identity.st_dev,
+            inode=identity.st_ino,
+        )
+        ledger = OwnershipLedger()
+        ledger.record_scene_restore(".cursor/skills", descriptor)
+        save_ledger(tmp_path, ledger)
+        target.replace(tmp_path / ".cursor/skills.bak")
+
+        results = apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path
+        )
+
+        assert not any(
+            result.action == "error" and result.file_path == target for result in results
+        )
+        assert target.is_symlink()
+        restored = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert restored is not None and restored.directory_displaced is True
+
+    def test_reapply_preserves_symlink_drift_after_authenticated_displacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A completed backup does not authorise replacing a new user symlink."""
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        target = tmp_path / ".cursor/skills"
+        identity = target.stat()
+        ledger = OwnershipLedger()
+        ledger.record_scene_restore(
+            ".cursor/skills",
+            ScenePathRestore.directory(
+                ".cursor/skills.bak",
+                displaced=False,
+                device=identity.st_dev,
+                inode=identity.st_ino,
+            ),
+        )
+        save_ledger(tmp_path, ledger)
+        target.replace(tmp_path / ".cursor/skills.bak")
+        external = tmp_path / "user-skills"
+        external.mkdir()
+        target.symlink_to(external, target_is_directory=True)
+        resolved = resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR])
+
+        for dry_run in (True, False):
+            results = apply_scene(resolved, tmp_path, dry_run=dry_run)
+            assert any(
+                result.action == "error"
+                and result.file_path == target
+                and "baseline was displaced" in (result.message or "")
+                for result in results
+            )
+            assert target.is_symlink()
+            assert target.readlink() == external
+
+        forced = apply_scene(resolved, tmp_path, force=True)
+        assert not any(result.action == "error" and result.file_path == target for result in forced)
+        assert projection.tool_points_at_projection(tmp_path, ".cursor/skills", "skills")
+
+    def test_cleanup_save_failure_retains_descriptor_across_later_path_save(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.scenes import engine
+        from tests.unit.test_scenes.conftest import make_agent, make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_agent(tmp_path, ".claude/agents", "code-reviewer.md")
+        apply_scene(resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]), tmp_path)
+        real_save = engine.save_ledger
+        failed = False
+
+        def fail_first_cleanup(project_root: Path, ledger: OwnershipLedger) -> bool:
+            nonlocal failed
+            if not failed and ledger.scene_restore(".cursor/agents") is None:
+                failed = True
+                raise OSError("injected cleanup save failure")
+            return real_save(project_root, ledger)
+
+        monkeypatch.setattr(engine, "save_ledger", fail_first_cleanup)
+        first = clear_scene(tmp_path)
+        assert any(result.action == "error" for result in first)
+        assert load_ledger(tmp_path).scene_restore(".cursor/agents") is not None
+
+        monkeypatch.setattr(engine, "save_ledger", real_save)
+        second = clear_scene(tmp_path)
+        assert not any(result.action == "error" for result in second)
+        assert load_ledger(tmp_path).scene_restores() == {}
+
+    def test_directory_restore_retries_after_cleanup_save_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from crossby.scenes import engine
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+
+        real_save = engine.save_ledger
+        failed = False
+
+        def fail_cleanup(project_root: Path, ledger: OwnershipLedger) -> bool:
+            nonlocal failed
+            if not failed and ledger.scene_restore(".cursor/skills") is None:
+                failed = True
+                raise OSError("injected cleanup save failure")
+            return real_save(project_root, ledger)
+
+        monkeypatch.setattr(engine, "save_ledger", fail_cleanup)
+        first = clear_scene(tmp_path)
+
+        target = tmp_path / ".cursor/skills"
+        assert any(result.action == "error" for result in first)
+        assert target.is_dir() and not target.is_symlink()
+        assert (target / "cursor-only/SKILL.md").is_file()
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None
+        assert descriptor.directory_device is not None and descriptor.directory_inode is not None
+        assert not (tmp_path / descriptor.backup_path).exists()  # type: ignore[arg-type]
+
+        monkeypatch.setattr(engine, "save_ledger", real_save)
+        second = clear_scene(tmp_path)
+
+        assert not any(result.action == "error" for result in second)
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") is None
+        assert (target / "cursor-only/SKILL.md").is_file()
+
+    def test_missing_recorded_backup_fails_without_adopting_neighbor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        neighbor = tmp_path / ".cursor/skills.bak"
+        neighbor.mkdir(parents=True)
+        (neighbor / "unrelated").write_text("mine", encoding="utf-8")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path == ".cursor/skills.bak2"
+        recorded = tmp_path / descriptor.backup_path
+        # Simulate external loss of the exact recorded backup.
+        shutil.rmtree(recorded)
+
+        results = clear_scene(tmp_path)
+        assert any(result.action == "error" for result in results)
+        assert load_ledger(tmp_path).scene_restore(".cursor/skills") == descriptor
+        assert (neighbor / "unrelated").read_text(encoding="utf-8") == "mine"
+        assert (tmp_path / ".crossby/scene").exists()
+
+    def test_dry_run_reports_missing_backup_and_nonremovable_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from crossby.models.ai import AIToolID
+        from tests.unit.test_scenes.conftest import make_skill
+
+        self._install_cursor(monkeypatch)
+        make_skill(tmp_path, ".claude/skills", "review-skill")
+        make_skill(tmp_path, ".cursor/skills", "cursor-only")
+        apply_scene(
+            resolve(tmp_path, SCENE, tools=[AIToolID.CLAUDE, AIToolID.CURSOR]),
+            tmp_path,
+            force=True,
+        )
+        descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
+        assert descriptor is not None and descriptor.backup_path is not None
+        backup = tmp_path / descriptor.backup_path
+        held_backup = tmp_path / "held-cursor-skills"
+        backup.rename(held_backup)
+
+        missing_backup = clear_scene(tmp_path, dry_run=True)
+        assert any(
+            result.action == "error" and "recorded backup is missing" in (result.message or "")
+            for result in missing_backup
+        )
+
+        held_backup.rename(backup)
+        target = tmp_path / ".cursor/skills"
+        target.unlink()
+        target.write_text("not a projection", encoding="utf-8")
+        nonremovable_target = clear_scene(tmp_path, dry_run=True)
+        assert any(
+            result.action == "error"
+            and "target is not removable scene-owned projection output" in (result.message or "")
+            for result in nonremovable_target
+        )
 
 
 class TestHooksPermissionsFilter:
@@ -434,27 +1309,22 @@ class TestToolScope:
             tools=[AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI, AIToolID.CURSOR],
         )
         assert not (tmp_path / ".crossby" / "scene").exists()
-        # Cursor's dir resolves to the real source, not a dangling deleted path.
-        resolved = {p.name for p in (tmp_path / ".cursor" / "skills").iterdir()}
-        assert {"review-skill", "knowledge", "deploy-prod"} <= resolved
+        # Cursor's target was absent before activation, so exact restoration
+        # removes it rather than redirecting it to a newly discovered source.
+        assert not (tmp_path / ".cursor" / "skills").exists()
 
     def test_clear_keeps_projection_when_restore_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from crossby.models.ai import AIToolID
-        from crossby.sync.base import SyncConcern, SyncResult
-
         self._install_four(monkeypatch)
         populate_project(tmp_path)
         apply_scene(resolve(tmp_path, SCENE), tmp_path)
         assert (tmp_path / ".crossby" / "scene").exists()
 
-        def _err(*_a: object, **_kw: object) -> SyncResult:
-            return SyncResult(
-                tool_id=AIToolID.CURSOR, concern=SyncConcern.SKILLS, action="error", message="boom"
-            )
+        def _err(*_a: object, **_kw: object) -> None:
+            raise OSError("boom")
 
-        monkeypatch.setattr("crossby.scenes.projection.restore_source", _err)
+        monkeypatch.setattr("crossby.scenes.engine._restore_one_path", _err)
         clear_scene(tmp_path)
         # A failed re-point must not leave a tool dangling — keep the projection.
         assert (tmp_path / ".crossby" / "scene").exists()

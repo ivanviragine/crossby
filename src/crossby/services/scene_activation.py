@@ -34,7 +34,7 @@ from crossby.scenes.state import (
     save_scene_state,
 )
 from crossby.services.scene_resolution import ResolvedScene
-from crossby.sync.base import SyncResult
+from crossby.sync.base import SyncConcern, SyncResult
 from crossby.sync.ownership import LEDGER_PATH, load_ledger_checked
 
 
@@ -250,7 +250,7 @@ def activate_scene(
                 )
             try:
                 reverted_scope = outgoing if not explicitly_scoped else initial_scope
-                revert_results = engine.clear_scene(project_root, tools=reverted_scope)
+                revert_results = engine.clear_scene(project_root, tools=reverted_scope, force=force)
             except Exception as exc:
                 raise SceneActivationError(
                     ActivationFailureKind.FAILED_REVERT,
@@ -259,9 +259,29 @@ def activate_scene(
                     warnings=warnings,
                 ) from exc
             if _has_error(revert_results):
+                try:
+                    reconcile_partial_clear_state(project_root, active, revert_results)
+                except Exception as exc:
+                    raise SceneActivationError(
+                        ActivationFailureKind.FAILED_REVERT,
+                        (
+                            f"Could not preserve partial recovery state while reverting "
+                            f"{active.scene!r}: {exc}"
+                        ),
+                        hint=(
+                            "The outgoing scene may be only partially reverted. Restore write "
+                            "access, inspect its scene state, then run "
+                            "'crossby scene clear --force'."
+                        ),
+                        warnings=warnings,
+                        results=revert_results,
+                    ) from exc
                 raise SceneActivationError(
                     ActivationFailureKind.FAILED_REVERT,
-                    f"Could not revert {active.scene!r} — aborting; state left intact.",
+                    (
+                        f"Could not fully revert {active.scene!r} — aborting; "
+                        "remaining recovery state was retained."
+                    ),
                     warnings=warnings,
                     results=revert_results,
                 )
@@ -319,7 +339,7 @@ def activate_scene(
         rollback_results: list[SyncResult] = []
         rollback_error: Exception | None = None
         try:
-            rollback_results = engine.clear_scene(project_root, tools=initial_scope)
+            rollback_results = engine.clear_scene(project_root, tools=initial_scope, force=True)
         except Exception as rollback_exc:
             rollback_error = rollback_exc
         engine_rolled_back = rollback_error is None and not _has_error(rollback_results)
@@ -378,6 +398,82 @@ def activate_scene(
 
 def _has_error(results: Sequence[SyncResult]) -> bool:
     return any(result.action == "error" for result in results)
+
+
+def reconcile_partial_clear_state(
+    project_root: Path, active: SceneState, results: Sequence[SyncResult]
+) -> None:
+    """Persist only mechanisms that remain after an incomplete clear.
+
+    PROJECT restoration is keyed by physical path, so one successful row clears
+    every sharing tool's bookkeeping. DECLARE rows clear only their own tool and
+    concern. Recovery-only revocation records are retained.
+    """
+    from crossby.config.skills import SKILLS_DIR
+    from crossby.sync.agents import _AGENT_TARGET_PATHS
+
+    registered_targets = {*SKILLS_DIR.values(), *_AGENT_TARGET_PATHS.values()}
+    project_targets: list[tuple[str, str]] = []
+    for result in results:
+        if result.action == "error":
+            continue
+        concern = result.concern.value
+        if result.file_path is not None and concern in ("skills", "agents"):
+            try:
+                rel = result.file_path.relative_to(project_root).as_posix()
+            except ValueError:
+                continue
+            if rel in registered_targets:
+                project_targets.append((concern, rel))
+                continue
+        if result.tool_id is None:
+            continue
+        record = active.tools.get(str(result.tool_id))
+        if record is None or record.mechanisms.get(concern) != "declare":
+            continue
+        record.mechanisms.pop(concern, None)
+        if result.file_path is not None:
+            with contextlib.suppress(ValueError):
+                record.hashes.pop(result.file_path.relative_to(project_root).as_posix(), None)
+
+    for concern, target in project_targets:
+        for tool_name, record in active.tools.items():
+            try:
+                tool = AIToolID(tool_name)
+            except ValueError:
+                continue
+            tool_target = (
+                SKILLS_DIR.get(tool)
+                if concern == SyncConcern.SKILLS.value
+                else _AGENT_TARGET_PATHS.get(tool_name)
+            )
+            if tool_target != target or record.mechanisms.get(concern) != "project":
+                continue
+            record.mechanisms.pop(concern, None)
+            record.hashes.pop(target, None)
+
+    # Unsupported cells never changed persistent state and need no recovery.
+    for record in active.tools.values():
+        record.mechanisms = {
+            concern: mechanism
+            for concern, mechanism in record.mechanisms.items()
+            if mechanism != "unsupported"
+        }
+
+    for tool_name in list(active.tools):
+        record = active.tools[tool_name]
+        if record.mechanisms or record.hashes:
+            continue
+        if record.revoked_concerns:
+            record.status = "recovery"
+        else:
+            active.tools.pop(tool_name)
+
+    if not active.tools:
+        clear_scene_state(project_root)
+        return
+    active.status = "partial"
+    save_scene_state(project_root, active)
 
 
 def _detect_scoped_drift(
@@ -635,5 +731,6 @@ __all__ = [
     "SceneActivationOutcome",
     "activate_scene",
     "expand_shared_scope",
+    "reconcile_partial_clear_state",
     "recorded_tools",
 ]
