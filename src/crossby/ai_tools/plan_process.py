@@ -10,7 +10,7 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, ClassVar
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,8 @@ def parse_jsonl(text: str) -> list[dict[str, Any]]:
 class JsonRpcProcess:
     """Line-delimited JSON-RPC stdio process with bounded reads and cleanup."""
 
+    _include_jsonrpc_version: ClassVar[bool] = True
+
     def __init__(self, command: list[str], *, cwd: Path) -> None:
         self.command = command
         self._proc = subprocess.Popen(
@@ -121,11 +123,12 @@ class JsonRpcProcess:
     def send(self, payload: dict[str, Any]) -> None:
         if self._proc.poll() is not None:
             raise EOFError(f"JSON-RPC child exited with status {self._proc.returncode}")
-        self._stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
+        self._stdin.write(json.dumps(envelope, separators=(",", ":")) + "\n")
         self._stdin.flush()
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        payload: dict[str, Any] = {"method": method}
         if params is not None:
             payload["params"] = params
         self.send(payload)
@@ -133,7 +136,6 @@ class JsonRpcProcess:
     def request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
         self.send(
             {
-                "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
                 "params": params,
@@ -141,7 +143,7 @@ class JsonRpcProcess:
         )
 
     def respond(self, request_id: object, result: Any) -> None:
-        self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
+        self.send({"id": request_id, "result": result})
 
     def read(self, *, timeout: float) -> dict[str, Any]:
         try:
@@ -157,8 +159,11 @@ class JsonRpcProcess:
             raise ValueError(f"malformed JSON-RPC envelope: {exc.msg}") from exc
         if not isinstance(payload, dict):
             raise ValueError("malformed JSON-RPC envelope: expected an object")
-        if payload.get("jsonrpc") != "2.0":
-            raise ValueError("malformed JSON-RPC envelope: expected jsonrpc='2.0'")
+        if self._include_jsonrpc_version:
+            if payload.get("jsonrpc") != "2.0":
+                raise ValueError("malformed JSON-RPC envelope: expected jsonrpc='2.0'")
+        elif "jsonrpc" in payload:
+            raise ValueError("malformed headerless JSON-RPC envelope: unexpected jsonrpc field")
         if "id" not in payload and "method" not in payload:
             raise ValueError("malformed JSON-RPC envelope: missing both id and method")
         return payload
@@ -190,6 +195,12 @@ class JsonRpcProcess:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+class HeaderlessJsonRpcProcess(JsonRpcProcess):
+    """Codex app-server's JSONL dialect, which omits the JSON-RPC version field."""
+
+    _include_jsonrpc_version = False
 
 
 def child_environment(extra: dict[str, str] | None = None) -> dict[str, str] | None:

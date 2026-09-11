@@ -1,5 +1,5 @@
 {
-  "status": "waiting_for_input",
+  "status": "WAITING_FOR_INPUT",
   "conversation_id": "conv-exact-123",
   "waiting_for_input": true,
   "question": {

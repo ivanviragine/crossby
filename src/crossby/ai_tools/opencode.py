@@ -147,7 +147,18 @@ class OpenCodeAdapter(AbstractAITool):
         from crossby.ai_tools.plan_process import parse_jsonl, run_captured
 
         capability = self.capabilities().plan_mode
-        command = ["opencode", "run", request.prompt, "--format", "json", "--agent", "plan"]
+        working_dir = request.working_dir.resolve()
+        command = [
+            "opencode",
+            "run",
+            "--dir",
+            str(working_dir),
+            request.prompt,
+            "--format",
+            "json",
+            "--agent",
+            "plan",
+        ]
         if request.model:
             command.extend(("--model", request.model))
         if request.effort is not None:
@@ -168,7 +179,7 @@ class OpenCodeAdapter(AbstractAITool):
         try:
             run = run_captured(
                 command,
-                cwd=request.working_dir,
+                cwd=working_dir,
                 timeout=remaining_timeout(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -256,6 +267,8 @@ class OpenCodeAdapter(AbstractAITool):
             continuation_command = [
                 "opencode",
                 "run",
+                "--dir",
+                str(working_dir),
                 "--session",
                 session_id,
                 "--format",
@@ -268,7 +281,7 @@ class OpenCodeAdapter(AbstractAITool):
             try:
                 continued = run_captured(
                     continuation_command,
-                    cwd=request.working_dir,
+                    cwd=working_dir,
                     timeout=remaining_timeout(session_id=session_id),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
@@ -317,7 +330,7 @@ class OpenCodeAdapter(AbstractAITool):
         try:
             exported = run_captured(
                 ["opencode", "export", session_id],
-                cwd=request.working_dir,
+                cwd=working_dir,
                 timeout=remaining_timeout(session_id=session_id),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -366,6 +379,42 @@ class OpenCodeAdapter(AbstractAITool):
                 exit_code=exported.returncode,
                 session_id=session_id,
             )
+        exported_directory = export_info.get("directory") if isinstance(export_info, dict) else None
+        if not isinstance(exported_directory, str) or not exported_directory.strip():
+            raise PlanArtifactMalformedError(
+                "OpenCode export omitted its working directory.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            )
+        exported_directories = [exported_directory]
+        for message in payload.get("messages") or []:
+            message_info = message.get("info") if isinstance(message, dict) else None
+            path_info = message_info.get("path") if isinstance(message_info, dict) else None
+            if not isinstance(path_info, dict):
+                continue
+            message_cwd = path_info.get("cwd")
+            if isinstance(message_cwd, str) and message_cwd.strip():
+                exported_directories.append(message_cwd)
+        for directory in exported_directories:
+            exported_path = Path(directory)
+            if not exported_path.is_absolute():
+                raise PlanArtifactMalformedError(
+                    "OpenCode export contained a relative working directory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exported.returncode,
+                    session_id=session_id,
+                )
+            if exported_path.resolve() != working_dir:
+                raise PlanBindingMismatchError(
+                    "OpenCode export working directory did not match the requested workspace.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exported.returncode,
+                    session_id=session_id,
+                )
         plans = _opencode_plans(payload)
         if not plans:
             raise PlanArtifactMissingError(
@@ -442,7 +491,7 @@ def _session_ids(value: Any) -> list[str]:
 
 
 def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
-    """Return only assistant messages containing explicit plan parts."""
+    """Return final text from assistant messages explicitly bound to plan mode."""
     info = payload.get("info")
     messages = payload.get("messages")
     if not isinstance(info, dict) or not isinstance(messages, list):
@@ -452,7 +501,11 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
         if not isinstance(message, dict):
             continue
         message_info = message.get("info")
-        if not isinstance(message_info, dict) or message_info.get("role") != "assistant":
+        if (
+            not isinstance(message_info, dict)
+            or message_info.get("role") != "assistant"
+            or (message_info.get("mode") != "plan" and message_info.get("agent") != "plan")
+        ):
             continue
         parts = message.get("parts")
         if not isinstance(parts, list):
@@ -461,7 +514,7 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
             str(part.get("text"))
             for part in parts
             if isinstance(part, dict)
-            and part.get("type") == "plan"
+            and part.get("type") == "text"
             and isinstance(part.get("text"), str)
             and str(part.get("text")).strip()
         ]

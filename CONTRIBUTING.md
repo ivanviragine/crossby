@@ -128,13 +128,15 @@ interactive sessions. A complete collector must:
    temporary artifacts. Caller-owned Claude plan files are preserved.
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
-strict JSONL, and line-delimited JSON-RPC. Keep progress/transcript parsing out
-of artifact parsers: only the adapter's declared authoritative event, export,
-structured field, or isolated path may become `result.plan`.
+strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
+headerless JSONL dialect. Keep progress/transcript parsing out of artifact
+parsers: only the adapter's declared authoritative event, export, structured
+field, or isolated path may become `result.plan`.
 
-Every complete collector needs sanitized fixtures under
-`tests/fixtures/plan_sessions/` and contract tests covering success plus
-malformed output, missing/duplicate artifacts, mismatched identifiers,
+Every complete collector needs sanitized captures from its verified release
+under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
+status casing, plus contract tests covering success, malformed output,
+missing/duplicate artifacts, mismatched identifiers,
 interaction-required behavior, process cleanup, and independent sandbox and
 approval choices. Seed decoy sessions/files to prove exact binding. Tests for an
 unknown or below-floor version must assert that no subprocess was created.

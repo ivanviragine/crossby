@@ -176,7 +176,6 @@ class CodexAdapter(AbstractAITool):
     ) -> PlanSessionResult:
         """Collect the authoritative completed plan item from Codex app-server."""
         from crossby.ai_tools.plan_mode import (
-            PlanArtifactAmbiguousError,
             PlanArtifactMalformedError,
             PlanArtifactMissingError,
             PlanBindingMismatchError,
@@ -184,11 +183,11 @@ class CodexAdapter(AbstractAITool):
             PlanSessionUnsupportedError,
             PlanTransportError,
         )
-        from crossby.ai_tools.plan_process import JsonRpcProcess
+        from crossby.ai_tools.plan_process import HeaderlessJsonRpcProcess
 
         capability = self.capabilities().plan_mode
         deadline = time.monotonic() + request.timeout_seconds
-        rpc: JsonRpcProcess | None = None
+        rpc: HeaderlessJsonRpcProcess | None = None
 
         def remaining() -> float:
             wait = deadline - time.monotonic()
@@ -226,7 +225,9 @@ class CodexAdapter(AbstractAITool):
                 return result
 
         try:
-            rpc = JsonRpcProcess(["codex", "app-server", "--stdio"], cwd=request.working_dir)
+            rpc = HeaderlessJsonRpcProcess(
+                ["codex", "app-server", "--stdio"], cwd=request.working_dir
+            )
             rpc.request(
                 1,
                 "initialize",
@@ -315,9 +316,8 @@ class CodexAdapter(AbstractAITool):
                     thread_id=thread_id,
                 )
 
-            plans: list[tuple[str, str]] = []
-            completed = False
-            while not completed:
+            completed_plan: tuple[str, str] | None = None
+            while completed_plan is None:
                 message = rpc.read(timeout=remaining())
                 method = message.get("method")
                 params = message.get("params")
@@ -350,8 +350,8 @@ class CodexAdapter(AbstractAITool):
                             thread_id=thread_id,
                             turn_id=turn_id,
                         )
-                    plans.append((artifact_id, text))
-                    continue
+                    completed_plan = (artifact_id, text)
+                    break
                 if method == "turn/completed" and isinstance(params, dict):
                     completed_thread = params.get("threadId")
                     completed_turn = params.get("turn")
@@ -385,8 +385,7 @@ class CodexAdapter(AbstractAITool):
                             turn_id=turn_id,
                             stderr=rpc.stderr,
                         )
-                    completed = True
-                    continue
+                    break
                 if method == "item/tool/requestUserInput" and "id" in message:
                     _answer_codex_questions(
                         rpc,
@@ -427,7 +426,7 @@ class CodexAdapter(AbstractAITool):
                         turn_id=turn_id,
                     )
 
-            if not plans:
+            if completed_plan is None:
                 raise PlanArtifactMissingError(
                     "Codex turn completed without an authoritative completed plan item.",
                     tool_id=self.TOOL_ID,
@@ -436,17 +435,7 @@ class CodexAdapter(AbstractAITool):
                     thread_id=thread_id,
                     turn_id=turn_id,
                 )
-            if len(plans) != 1:
-                raise PlanArtifactAmbiguousError(
-                    "Codex emitted multiple completed plan items for one turn.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=thread_id,
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    artifact_id=",".join(item_id for item_id, _ in plans),
-                )
-            artifact_id, plan = plans[0]
+            artifact_id, plan = completed_plan
             if not plan.strip():
                 raise PlanArtifactMalformedError(
                     "Codex completed plan item was blank.",
@@ -457,6 +446,12 @@ class CodexAdapter(AbstractAITool):
                     turn_id=turn_id,
                     artifact_id=artifact_id,
                 )
+            rpc.request(
+                5,
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+            )
+            wait_response(5)
             return PlanSessionResult(
                 tool=self.TOOL_ID,
                 version=version,

@@ -524,13 +524,18 @@ def _agy_conversation_id(payload: dict[str, Any]) -> str | None:
 
 
 def _agy_waiting(payload: dict[str, Any]) -> bool:
-    return payload.get("status") in {"waiting", "waiting_for_input", "input_required"} or bool(
+    return _agy_status(payload) in {"waiting", "waiting_for_input", "input_required"} or bool(
         payload.get("waiting_for_input")
     )
 
 
 def _agy_success(payload: dict[str, Any]) -> bool:
-    return payload.get("status") in {"success", "completed"} and not bool(payload.get("is_error"))
+    return _agy_status(payload) in {"success", "completed"} and not bool(payload.get("is_error"))
+
+
+def _agy_status(payload: dict[str, Any]) -> str | None:
+    value = payload.get("status")
+    return value.strip().lower() if isinstance(value, str) else None
 
 
 def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInteraction:

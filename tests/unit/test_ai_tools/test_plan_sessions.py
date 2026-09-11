@@ -113,10 +113,22 @@ def _rpc_fixture(name: str) -> list[dict[str, Any]]:
     return parse_jsonl((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def _install_rpc(monkeypatch: pytest.MonkeyPatch, fixture: str) -> None:
+def _opencode_export(working_dir: Path) -> dict[str, Any]:
+    payload = json.loads((FIXTURES / "opencode_export_success.json").read_text())
+    resolved = str(working_dir.resolve())
+    payload["info"]["directory"] = resolved
+    for message in payload["messages"]:
+        message["info"]["path"] = {"cwd": resolved, "root": resolved}
+    return payload
+
+
+def _install_rpc(
+    monkeypatch: pytest.MonkeyPatch, fixture: str, *, headerless: bool = False
+) -> None:
     FakeRpc.scripts = [_rpc_fixture(fixture)]
     FakeRpc.instances = []
-    monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+    transport = "HeaderlessJsonRpcProcess" if headerless else "JsonRpcProcess"
+    monkeypatch.setattr(f"crossby.ai_tools.plan_process.{transport}", FakeRpc)
 
 
 class TestNormalizedContract:
@@ -355,7 +367,7 @@ class TestExactSessionCliCollectors:
                 ),
                 CapturedProcess(
                     0,
-                    (FIXTURES / "opencode_export_success.json").read_text(encoding="utf-8"),
+                    json.dumps(_opencode_export(tmp_path)),
                     "",
                 ),
             ]
@@ -375,12 +387,13 @@ class TestExactSessionCliCollectors:
             binding=PlanSessionBinding.SESSION_ID,
         )
         assert result.session_id == "ses_exact_123"
+        assert commands[0][commands[0].index("--dir") + 1] == str(tmp_path.resolve())
         assert commands[-1] == ["opencode", "export", "ses_exact_123"]
 
     def test_opencode_rejects_mismatched_export(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        exported = json.loads((FIXTURES / "opencode_export_success.json").read_text())
+        exported = _opencode_export(tmp_path)
         exported["info"]["id"] = "ses-decoy"
         runs = iter(
             [
@@ -420,7 +433,7 @@ class TestExactSessionCliCollectors:
                 ),
                 CapturedProcess(
                     0,
-                    (FIXTURES / "opencode_export_success.json").read_text(),
+                    json.dumps(_opencode_export(tmp_path)),
                     "",
                 ),
             ]
@@ -444,6 +457,8 @@ class TestExactSessionCliCollectors:
         assert commands[1] == [
             "opencode",
             "run",
+            "--dir",
+            str(tmp_path.resolve()),
             "--session",
             "ses_exact_123",
             "--format",
@@ -475,7 +490,7 @@ class TestExactSessionCliCollectors:
                 ),
                 CapturedProcess(
                     0,
-                    (FIXTURES / "opencode_export_success.json").read_text(),
+                    json.dumps(_opencode_export(tmp_path)),
                     "",
                 ),
             ]
@@ -501,11 +516,12 @@ class TestExactSessionCliCollectors:
         assert result.session_id == "ses_exact_123"
         assert timeouts == [9.0, 6.0, 3.0]
 
-    def test_opencode_rejects_assistant_text_without_plan_part(
+    def test_opencode_rejects_assistant_text_without_plan_metadata(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        exported = json.loads((FIXTURES / "opencode_export_success.json").read_text())
-        exported["messages"][1]["parts"][0]["type"] = "text"
+        exported = _opencode_export(tmp_path)
+        exported["messages"][1]["info"].pop("mode")
+        exported["messages"][1]["info"].pop("agent")
         runs = iter(
             [
                 CapturedProcess(
@@ -527,7 +543,7 @@ class TestExactSessionCliCollectors:
     def test_opencode_normalizes_blank_plan_artifact_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        exported = json.loads((FIXTURES / "opencode_export_success.json").read_text())
+        exported = _opencode_export(tmp_path)
         exported["messages"][1]["info"]["id"] = "   "
         runs = iter(
             [
@@ -547,6 +563,29 @@ class TestExactSessionCliCollectors:
         result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
         assert result.artifact_id is None
+
+    def test_opencode_rejects_mismatched_export_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exported = _opencode_export(tmp_path)
+        exported["info"]["directory"] = str(tmp_path.parent / "decoy")
+        runs = iter(
+            [
+                CapturedProcess(
+                    0,
+                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
+                    "",
+                ),
+                CapturedProcess(0, json.dumps(exported), ""),
+            ]
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        with pytest.raises(PlanBindingMismatchError, match="working directory"):
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
     def test_antigravity_requires_exact_schema_echo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -771,7 +810,7 @@ class TestProtocolCollectors:
     def test_codex_collects_completed_plan_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_rpc(monkeypatch, "codex_app_server_success.jsonl")
+        _install_rpc(monkeypatch, "codex_app_server_success.jsonl", headerless=True)
         request = _request(
             tmp_path,
             network_access=True,
@@ -798,12 +837,23 @@ class TestProtocolCollectors:
             "writable_roots": [str(tmp_path / "reference")],
             "network_access": True,
         }
+        assert (
+            "request",
+            {
+                "id": 5,
+                "method": "turn/interrupt",
+                "params": {"threadId": "thr-exact-123", "turnId": "turn-exact-123"},
+            },
+        ) in rpc.sent
+        assert all(
+            "jsonrpc" not in message for message in _rpc_fixture("codex_app_server_success.jsonl")
+        )
         assert rpc.closed
 
     def test_codex_maps_max_effort_in_plan_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_rpc(monkeypatch, "codex_app_server_success.jsonl")
+        _install_rpc(monkeypatch, "codex_app_server_success.jsonl", headerless=True)
 
         AbstractAITool.get(AIToolID.CODEX).run_plan_session(
             _request(tmp_path, effort=EffortLevel.MAX)
@@ -823,7 +873,6 @@ class TestProtocolCollectors:
         messages.insert(
             4,
             {
-                "jsonrpc": "2.0",
                 "id": 70,
                 "method": "item/commandExecution/requestApproval",
                 "params": {
@@ -837,7 +886,7 @@ class TestProtocolCollectors:
         )
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
-        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
 
         AbstractAITool.get(AIToolID.CODEX).run_plan_session(
             _request(tmp_path),
@@ -855,7 +904,7 @@ class TestProtocolCollectors:
     def test_codex_forwards_native_question_ids_and_options(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_rpc(monkeypatch, "codex_app_server_question.jsonl")
+        _install_rpc(monkeypatch, "codex_app_server_question.jsonl", headerless=True)
         seen: list[Any] = []
 
         def answer(interaction: Any) -> PlanInteractionResponse:
@@ -884,7 +933,7 @@ class TestProtocolCollectors:
         messages[4]["params"]["turnId"] = "turn-decoy"
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
-        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
         with pytest.raises(PlanBindingMismatchError):
             AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
         assert FakeRpc.instances[0].closed
@@ -896,7 +945,7 @@ class TestProtocolCollectors:
         messages[4]["params"]["item"]["id"] = " "
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
-        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
 
         with pytest.raises(PlanArtifactMalformedError, match="omitted its ID"):
             AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
