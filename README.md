@@ -393,7 +393,7 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; failed UUID directories are removed recursively while successful plan directories remain |
 | Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs and successful turn completion | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully and its background terminals are cleaned; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
-| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
+| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID + successful `end_turn` | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
 | GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Read-only tool allowlist + isolated sandbox / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection exposes only file viewing/search and questions, explicitly denies writes/shell, disables external MCP/hooks/network, and removes its temporary home/export after normalization |
 | OpenCode | `run --agent plan --dir <workspace>` | Headless JSONL; emitted session ID + `export <exact-id>` + plan-mode assistant text | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Exported session/message directories must match the request; no latest-session lookup is used |
 | Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
@@ -402,7 +402,7 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
 its safe default is accepted. Copilot's collector supplies that default through
-a run-owned home with sandbox bypass, tool network access, ambient hooks, and
+a run-owned home with sandbox bypass, tool network access, hooks, and
 external MCP disabled; its non-interactive transport cannot surface tool
 permission prompts, so `on-request` is rejected and `never` is the only
 preserved approval policy. `preserved` means Crossby enforces the listed caller

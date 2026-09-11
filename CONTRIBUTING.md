@@ -136,12 +136,12 @@ interactive sessions. A complete collector must:
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
 headerless JSONL dialect. Captured CLI stdout and stderr have hard byte limits;
-protocol stdout is bounded by a fixed-size queue so a child that keeps emitting
-while an interaction callback runs receives pipe backpressure instead of
-growing parent-process memory without limit. Keep
-progress/transcript parsing out of artifact parsers: only the adapter's declared
-authoritative event, export, structured field, or isolated path may become
-`result.plan`.
+protocol stdout has a per-frame cap and a fixed-size queue so a child that keeps
+emitting while an interaction callback runs receives pipe backpressure instead
+of growing parent-process memory without limit. Protocol stderr is consumed in
+bounded chunks and retained only as a tail. Keep progress/transcript parsing out
+of artifact parsers: only the adapter's declared authoritative event, export,
+structured field, or isolated path may become `result.plan`.
 
 Lifecycle completion is adapter-specific and must be explicit. Codex waits for
 the matching successful `turn/completed`, rejects a second completed plan item,
