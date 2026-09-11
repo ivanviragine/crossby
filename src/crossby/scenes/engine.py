@@ -309,10 +309,18 @@ def _context(
         raise ValueError(
             f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; refusing to apply a scene"
         )
+    base = build_sync_data(project_root)
+    if dry_run:
+        # A live projection can outrank its original source during normal source
+        # discovery. A real scene switch clears that projection first; use the
+        # durable no-op baseline to make the preview build from the same source.
+        for kind in ("skills", "agents"):
+            if source_rel := _recorded_canonical_source(project_root, loaded.ledger, kind):
+                setattr(base, f"{kind}_source", source_rel)
 
     return _Context(
         project_root=project_root,
-        base=build_sync_data(project_root),
+        base=base,
         ledger=loaded.ledger,
         installed=installed,
         selected={concern: set(resolved.names(concern)) for concern in SCENE_CONCERNS},
@@ -321,6 +329,21 @@ def _context(
         dry_run=dry_run,
         force=force,
     )
+
+
+def _recorded_canonical_source(
+    project_root: Path, ledger: OwnershipLedger, kind: str
+) -> str | None:
+    """Return the durable source a real switch retains after clearing a scene."""
+    concern = SyncConcern.SKILLS if kind == "skills" else SyncConcern.AGENTS
+    for target_rel, descriptor in ledger.scene_restores().items():
+        if (
+            descriptor.kind == ScenePathRestoreKind.UNCHANGED
+            and _concern_for_target(target_rel) == concern
+            and (project_root / target_rel).is_dir()
+        ):
+            return target_rel
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +599,23 @@ def _repoint_path(
                 projection.displace_directory(ctx.project_root, target_rel, backup_rel)
                 descriptor = ctx.ledger.record_scene_directory_displaced(target_rel)
                 save_ledger(ctx.project_root, ctx.ledger)
-            # The real directory was authenticated and displaced, so the
-            # generic writer cannot allocate an independent .bak path.
-            return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+            # A verified backup proves the original directory was displaced,
+            # not that a newly occupied target belongs to this scene. Preserve
+            # target drift unless the user explicitly authorises its replacement.
+            if not os.path.lexists(target):
+                return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+            if projection.tool_points_at_projection(
+                ctx.project_root, target_rel, tree.concern.value
+            ):
+                return projection.repoint(ctx.project_root, tree, tools[0], tools, force=False)
+            if ctx.force:
+                return projection.repoint(ctx.project_root, tree, tools[0], tools, force=True)
+            return _path_error(
+                tools,
+                tree.concern,
+                target,
+                _displaced_directory_target_drift_error(target_rel),
+            )
 
         if target.is_dir() and not target.is_symlink():
             # Some writers materialise a managed directory rather than a
@@ -701,7 +738,13 @@ def _describe_repoint_baseline(
             )
         else:
             return f"would displace the recorded directory baseline at {backup_rel}"
-        return f"would retain the recorded directory baseline at {backup_rel}"
+        if not os.path.lexists(target) or projection.tool_points_at_projection(
+            project_root, target_rel, kind
+        ):
+            return f"would retain the recorded directory baseline at {backup_rel}"
+        if force:
+            return f"would replace drifted target {target_rel} with --force"
+        return f"error:{_displaced_directory_target_drift_error(target_rel)}"
 
     if target.is_dir() and not target.is_symlink() and not has_managed_marker(target):
         return (
@@ -737,6 +780,14 @@ def _non_directory_baseline_drift_error(target_rel: str, descriptor: ScenePathRe
     return (
         f"recorded {descriptor.kind.value} baseline changed before scene projection: {target_rel}; "
         "refusing to replace the target"
+    )
+
+
+def _displaced_directory_target_drift_error(target_rel: str) -> str:
+    """Explain why a completed directory displacement cannot replace target drift."""
+    return (
+        f"recorded directory baseline was displaced, but {target_rel} drifted; "
+        "refusing to replace the target without --force"
     )
 
 
