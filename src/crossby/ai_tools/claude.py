@@ -170,7 +170,7 @@ class ClaudeAdapter(AbstractAITool):
             PlanArtifactMissingError,
             PlanTransportError,
         )
-        from crossby.ai_tools.plan_process import run_interactive
+        from crossby.ai_tools.plan_process import read_text_bounded, run_interactive
 
         del interaction_handler  # Claude keeps its native TTY attached.
         capability = self.capabilities().plan_mode
@@ -291,10 +291,10 @@ class ClaudeAdapter(AbstractAITool):
                 )
             artifact = candidates[0]
             try:
-                plan = artifact.read_text(encoding="utf-8")
+                plan = read_text_bounded(artifact)
             except (OSError, UnicodeError) as exc:
                 raise PlanArtifactMalformedError(
-                    f"Claude Code plan artifact could not be read as UTF-8: {exc}",
+                    f"Claude Code plan artifact violated the bounded UTF-8 contract: {exc}",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                     exit_code=exit_code,

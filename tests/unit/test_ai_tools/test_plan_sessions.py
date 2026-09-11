@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from io import StringIO
 from pathlib import Path
@@ -44,8 +45,11 @@ from crossby.ai_tools.plan_process import (
     CapturedOutputDecodeError,
     CapturedOutputLimitError,
     CapturedProcess,
+    JsonRpcFrameLimitError,
     JsonRpcProcess,
+    PlanArtifactSizeError,
     parse_jsonl,
+    read_text_bounded,
     run_captured,
 )
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
@@ -524,6 +528,19 @@ class TestPlanProcess:
         assert result.stdout == "hello\n"
         assert result.stderr == "diagnostic\n"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_captured_process_timeout_kills_descendants_holding_pipes(self, tmp_path: Path) -> None:
+        script = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])"
+        )
+        started = time.monotonic()
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_captured([sys.executable, "-c", script], cwd=tmp_path, timeout=0.2)
+
+        assert time.monotonic() - started < 2
+
     def test_captured_process_encodes_input_before_spawning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -581,16 +598,45 @@ class TestPlanProcess:
 
         assert not reader.is_alive()
 
-    def test_stdout_reader_rejects_an_oversized_json_rpc_frame(self) -> None:
+    def test_stdout_reader_rejects_an_oversized_json_rpc_frame_and_kills_child(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.killed = False
+
+            def poll(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+
         rpc = object.__new__(JsonRpcProcess)
         rpc._stdout_queue = queue.Queue(maxsize=2)
         rpc._closing = threading.Event()
+        rpc._proc = FakeProcess()  # type: ignore[assignment]
+        private_payload = "private-protocol-payload"
+        oversized = private_payload * (_JSON_RPC_FRAME_LIMIT // len(private_payload) + 1)
 
-        rpc._read_stdout(StringIO("x" * (_JSON_RPC_FRAME_LIMIT + 1)))
+        rpc._read_stdout(StringIO(oversized))
 
-        with pytest.raises(ValueError, match="frame exceeded"):
+        with pytest.raises(JsonRpcFrameLimitError, match="frame exceeded") as raised:
             rpc.read(timeout=0.1)
+        assert raised.value.limit == _JSON_RPC_FRAME_LIMIT
+        assert private_payload not in str(raised.value)
+        assert rpc._proc.killed
         assert rpc._stdout_queue.get_nowait() is None
+
+    def test_file_artifact_read_is_hard_limited(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        artifact = tmp_path / "plan.md"
+        artifact.write_bytes(b"private-payload" * 5)
+        monkeypatch.setattr("crossby.ai_tools.plan_process._PLAN_ARTIFACT_TEXT_LIMIT", 64)
+
+        with pytest.raises(PlanArtifactSizeError) as raised:
+            read_text_bounded(artifact)
+
+        assert raised.value.limit == 64
+        assert "private-payload" not in str(raised.value)
 
     def test_stdout_queue_has_a_fixed_message_limit(self, tmp_path: Path) -> None:
         with (
@@ -676,6 +722,7 @@ class TestClaudeCollector:
             ("missing", PlanArtifactMissingError),
             ("ambiguous", PlanArtifactAmbiguousError),
             ("unreadable", PlanArtifactMalformedError),
+            ("oversized", PlanArtifactMalformedError),
             ("blank", PlanArtifactMalformedError),
         ],
     )
@@ -703,6 +750,8 @@ class TestClaudeCollector:
                 (run_dir / "two.md").write_text("# Two", encoding="utf-8")
             elif failure == "unreadable":
                 (run_dir / "plan.md").write_bytes(b"\xff")
+            elif failure == "oversized":
+                (run_dir / "plan.md").write_bytes(b"x" * 65)
             elif failure == "blank":
                 (run_dir / "plan.md").write_text("   ", encoding="utf-8")
 
@@ -713,6 +762,8 @@ class TestClaudeCollector:
             return 1 if failure == "nonzero" else 0
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
+        if failure == "oversized":
+            monkeypatch.setattr("crossby.ai_tools.plan_process._PLAN_ARTIFACT_TEXT_LIMIT", 64)
 
         with pytest.raises(error):
             AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
@@ -722,7 +773,7 @@ class TestClaudeCollector:
         assert list(root.iterdir()) == []
         assert outside.read_text(encoding="utf-8") == "# Keep"
 
-    @pytest.mark.parametrize("stage", ["command", "enumeration"])
+    @pytest.mark.parametrize("stage", ["command", "enumeration", "result"])
     def test_post_directory_failures_are_wrapped_and_cleaned(
         self, stage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -738,7 +789,7 @@ class TestClaudeCollector:
                 raise ValueError("invalid launch command")
 
             monkeypatch.setattr(adapter, "build_launch_command", fail_build)
-        else:
+        elif stage == "enumeration":
             original_iterdir = Path.iterdir
             monkeypatch.setattr(
                 "crossby.ai_tools.plan_process.run_interactive",
@@ -751,6 +802,18 @@ class TestClaudeCollector:
                 return original_iterdir(path)
 
             monkeypatch.setattr(Path, "iterdir", fail_run_directory)
+        else:
+
+            def write_plan(*_args: Any, **_kwargs: Any) -> int:
+                (run_dir / "plan.md").write_text("# Plan", encoding="utf-8")
+                return 0
+
+            monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+
+            def fail_result(**_kwargs: Any) -> None:
+                raise ValueError("result validation failed")
+
+            monkeypatch.setattr("crossby.ai_tools.claude.PlanSessionResult", fail_result)
 
         with pytest.raises(PlanTransportError, match="after creating its isolated directory"):
             adapter.run_plan_session(_request(tmp_path, plan_output_dir=root))
@@ -872,12 +935,16 @@ class TestExactSessionCliCollectors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         events = _rpc_fixture("opencode_events_success.jsonl")
+        events[0]["session_id"] = "ses-decoy"
         events[0]["part"]["metadata"] = {
             "type": "session",
             "id": "ses-decoy",
             "session_id": "ses-decoy",
         }
         exported = _opencode_export(tmp_path)
+        exported["sessionID"] = "ses-decoy"
+        exported["messages"][0]["sessionID"] = "ses-decoy"
+        exported["messages"][0]["info"]["session_id"] = "ses-decoy"
         exported["messages"][0]["parts"][0]["metadata"] = {"sessionID": "ses-decoy"}
         runs = iter(
             (
@@ -1211,6 +1278,48 @@ class TestExactSessionCliCollectors:
         with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
             AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
+    def test_opencode_rejects_malformed_native_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        event = {
+            "type": "question",
+            "id": "scope",
+            "sessionID": "ses_exact_123",
+            "question": "Choose a scope",
+            "options": [{"id": "api", "label": "API"}, {"id": "cli"}],
+        }
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
+
+    def test_opencode_rejects_unknown_native_option_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        event = {
+            "type": "question",
+            "id": "scope",
+            "sessionID": "ses_exact_123",
+            "question": "Choose a scope",
+            "options": [{"id": "api", "label": "API"}],
+        }
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
+        )
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="fabricated",
+                ),
+            )
+
     def test_opencode_checks_completion_after_eighth_continuation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1498,6 +1607,39 @@ class TestExactSessionCliCollectors:
                 _antigravity_request(tmp_path)
             )
 
+    def test_antigravity_rejects_malformed_native_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        waiting = json.loads((FIXTURES / "antigravity_waiting.json").read_text())
+        waiting["question"]["options"].append({"id": "no-label"})
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(waiting), ""),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _antigravity_request(tmp_path)
+            )
+
+    def test_antigravity_rejects_unknown_native_option_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        waiting = (FIXTURES / "antigravity_waiting.json").read_text(encoding="utf-8")
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, waiting, ""),
+        )
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _antigravity_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="fabricated",
+                ),
+            )
+
     def test_copilot_uuid_share_is_local_and_cleaned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1667,6 +1809,41 @@ class TestExactSessionCliCollectors:
 
         assert raised.value.session_id == str(session_id)
 
+    def test_copilot_rejects_oversized_share_and_removes_temporary_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        temporary_roots: list[Path] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            export_arg = next(value for value in command if value.startswith("--share="))
+            export_path = Path(export_arg.removeprefix("--share="))
+            temporary_roots.append(export_path.parent)
+            export_path.write_bytes(b"private-export-payload" * 4)
+            return CapturedProcess(
+                0,
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": str(session_id),
+                        "status": "completed",
+                    }
+                ),
+                "",
+            )
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr("crossby.ai_tools.plan_process._PLAN_ARTIFACT_TEXT_LIMIT", 64)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanArtifactMalformedError, match="byte limit") as raised:
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
+
+        assert "private-export-payload" not in str(raised.value)
+        assert temporary_roots and not temporary_roots[0].exists()
+
     @pytest.mark.parametrize(
         "interaction",
         [
@@ -1710,6 +1887,58 @@ class TestExactSessionCliCollectors:
         with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
             AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
                 _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
+
+    def test_copilot_rejects_malformed_native_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        event = {
+            "type": "ask_user",
+            "session_id": str(session_id),
+            "data": {
+                "id": "scope",
+                "question": "Choose a scope",
+                "options": [{"id": "api", "label": "API"}, {"id": "cli"}],
+            },
+        }
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
+
+    def test_copilot_rejects_unknown_native_option_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        event = {
+            "type": "ask_user",
+            "session_id": str(session_id),
+            "data": {
+                "id": "scope",
+                "question": "Choose a scope",
+                "options": [{"id": "api", "label": "API"}],
+            },
+        }
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
+        )
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="fabricated",
+                ),
             )
 
     def test_copilot_preserves_nested_plan_headings(
@@ -1919,6 +2148,24 @@ class TestExactSessionCliCollectors:
 
 
 class TestProtocolCollectors:
+    def test_cursor_normalizes_frame_overflow_to_a_session_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class OverflowRpc(FakeRpc):
+            def read(self, *, timeout: float) -> dict[str, Any]:
+                assert timeout > 0
+                raise JsonRpcFrameLimitError(64)
+
+        OverflowRpc.scripts = [[]]
+        OverflowRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", OverflowRpc)
+
+        with pytest.raises(PlanTransportError, match="frame exceeded") as raised:
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path))
+
+        assert raised.value.tool_id is AIToolID.CURSOR
+        assert OverflowRpc.instances[0].closed
+
     @pytest.mark.parametrize(
         ("model", "effort"),
         [
@@ -2247,6 +2494,36 @@ class TestProtocolCollectors:
             },
         ) in FakeRpc.instances[0].sent
 
+    def test_codex_rejects_malformed_native_question_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_question.jsonl")
+        messages[4]["params"]["questions"][0]["options"].append({"id": "missing-label"})
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="native question options"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+        assert FakeRpc.instances[0].closed
+
+    def test_codex_rejects_unknown_native_question_option_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_question.jsonl", headerless=True)
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="fabricated",
+                ),
+            )
+
+        assert FakeRpc.instances[0].closed
+
     def test_codex_question_denial_discards_stale_option(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2333,10 +2610,44 @@ class TestProtocolCollectors:
             },
         ) in FakeRpc.instances[0].sent
 
+    def test_cursor_final_plan_denial_overrides_stale_cancel_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _cursor_request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="cancelled",
+            ),
+        )
+
+        assert (
+            "respond",
+            {
+                "id": 91,
+                "result": {
+                    "outcome": {
+                        "outcome": "rejected",
+                        "reason": "Plan collected without implementation.",
+                    }
+                },
+            },
+        ) in FakeRpc.instances[0].sent
+
     @pytest.mark.parametrize(
         ("prompt_response", "message"),
         [
             ({"jsonrpc": "2.0", "id": 5}, "malformed session/prompt response"),
+            (
+                {"jsonrpc": "2.0", "id": 5, "result": {}},
+                "malformed session/prompt stopReason",
+            ),
+            (
+                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": 42}},
+                "malformed session/prompt stopReason",
+            ),
             (
                 {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "cancelled"}},
                 "stop reason 'cancelled'",
@@ -2345,8 +2656,28 @@ class TestProtocolCollectors:
                 {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "refusal"}},
                 "stop reason 'refusal'",
             ),
+            (
+                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "max_tokens"}},
+                "stop reason 'max_tokens'",
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "result": {"stopReason": "max_turn_requests"},
+                },
+                "stop reason 'max_turn_requests'",
+            ),
         ],
-        ids=("missing-result", "cancelled", "refused"),
+        ids=(
+            "missing-result",
+            "missing-stop-reason",
+            "malformed-stop-reason",
+            "cancelled",
+            "refused",
+            "max-tokens",
+            "max-turn-requests",
+        ),
     )
     def test_cursor_requires_successful_prompt_completion(
         self,
@@ -2434,8 +2765,20 @@ class TestProtocolCollectors:
                 [{"optionId": "proceed-once", "name": "Proceed once"}],
                 PlanInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
             ),
+            (
+                [{"optionId": "allow-once", "name": "Allow once"}],
+                PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.APPROVED,
+                    option_id="fabricated-option",
+                    option_ids=("allow-once",),
+                ),
+            ),
         ],
-        ids=("unknown-callback-option", "no-fabricated-approved-fallback"),
+        ids=(
+            "unknown-callback-option",
+            "no-fabricated-approved-fallback",
+            "validate-singular-and-plural-selections",
+        ),
     )
     def test_cursor_permission_requires_a_native_option(
         self,
@@ -2477,6 +2820,116 @@ class TestProtocolCollectors:
         assert not any(
             kind == "respond" and payload["id"] == 90 for kind, payload in FakeRpc.instances[0].sent
         )
+
+    def test_cursor_permission_rejects_native_option_without_an_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages.insert(
+            3,
+            {
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "cursor-exact-123",
+                    "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
+                    "options": [{"name": "Allow once"}],
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="native question options omitted"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.APPROVED
+                ),
+            )
+
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_permission_forwards_a_valid_native_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages.insert(
+            3,
+            {
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "cursor-exact-123",
+                    "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            if interaction.kind is PlanInteractionKind.PERMISSION:
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.APPROVED,
+                    option_id="allow-once",
+                )
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            )
+
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), answer)
+
+        assert (
+            "respond",
+            {
+                "id": 90,
+                "result": {"outcome": {"outcome": "selected", "optionId": "allow-once"}},
+            },
+        ) in FakeRpc.instances[0].sent
+
+    def test_cursor_permission_cancels_when_no_native_denial_option_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages.insert(
+            3,
+            {
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "cursor-exact-123",
+                    "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
+                    "options": [{"optionId": "allow-once", "name": "Allow once"}],
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _cursor_request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            ),
+        )
+
+        assert (
+            "respond",
+            {"id": 90, "result": {"outcome": {"outcome": "cancelled"}}},
+        ) in FakeRpc.instances[0].sent
 
     def test_cursor_forwards_multi_question_native_option_ids(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2527,6 +2980,36 @@ class TestProtocolCollectors:
                 },
             },
         ) in FakeRpc.instances[0].sent
+
+    def test_cursor_rejects_malformed_native_question_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_question.jsonl")
+        messages[3]["params"]["questions"][0]["options"].append({"id": "missing-label"})
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="native question options"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path))
+
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_rejects_unknown_native_question_option_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_question.jsonl")
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="fabricated",
+                ),
+            )
+
+        assert FakeRpc.instances[0].closed
 
     def test_cursor_question_denial_discards_stale_option(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

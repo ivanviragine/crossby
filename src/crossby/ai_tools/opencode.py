@@ -10,7 +10,11 @@ from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.model_utils import classify_tier_universal, has_date_suffix
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+    validate_plan_option_selection,
+)
 from crossby.models.ai import (
     AIModel,
     AIToolCapabilities,
@@ -25,7 +29,6 @@ from crossby.models.ai import (
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
-    PlanQuestionOption,
     PlanRequestBehavior,
     PlanSessionBinding,
     PlanSessionRequest,
@@ -143,6 +146,7 @@ class OpenCodeAdapter(AbstractAITool):
             PlanArtifactMalformedError,
             PlanArtifactMissingError,
             PlanBindingMismatchError,
+            PlanInteractionRequiredError,
             PlanTransportError,
         )
         from crossby.ai_tools.plan_process import parse_jsonl, run_captured
@@ -259,8 +263,6 @@ class OpenCodeAdapter(AbstractAITool):
                     session_id=session_id,
                 )
             if interaction_handler is None:
-                from crossby.ai_tools.plan_mode import PlanInteractionRequiredError
-
                 raise PlanInteractionRequiredError(
                     "OpenCode requires an answer to continue the exact planning session.",
                     interaction=pending[0],
@@ -270,20 +272,28 @@ class OpenCodeAdapter(AbstractAITool):
             answers: list[str] = []
             for interaction in pending:
                 response = interaction_handler(interaction)
-                answer = (
-                    response.answer or response.option_id or ", ".join(response.option_ids) or None
-                )
-                if (
-                    response.outcome
-                    in {
-                        PlanInteractionOutcome.DENIED,
-                        PlanInteractionOutcome.CANCELLED,
-                        PlanInteractionOutcome.SKIPPED,
-                    }
-                    or not answer
-                ):
-                    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError
-
+                if response.outcome in {
+                    PlanInteractionOutcome.DENIED,
+                    PlanInteractionOutcome.CANCELLED,
+                    PlanInteractionOutcome.SKIPPED,
+                }:
+                    raise PlanInteractionRequiredError(
+                        "OpenCode planning question was left unanswered.",
+                        interaction=interaction,
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                    )
+                try:
+                    selected_ids = validate_plan_option_selection(interaction, response)
+                except ValueError as exc:
+                    raise PlanInteractionRequiredError(
+                        "OpenCode planning question requires valid native option IDs.",
+                        interaction=interaction,
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                    ) from exc
+                answer = response.answer or ", ".join(selected_ids) or None
+                if not answer:
                     raise PlanInteractionRequiredError(
                         "OpenCode planning question was left unanswered.",
                         interaction=interaction,
@@ -507,47 +517,36 @@ class OpenCodeAdapter(AbstractAITool):
         return ["--variant", mapped]
 
 
-def _direct_session_ids(value: Any) -> list[str]:
-    """Collect session IDs from one documented OpenCode envelope object."""
-    found: list[str] = []
-    if not isinstance(value, dict):
-        return found
-    for key in ("sessionID", "sessionId", "session_id"):
-        session_id = value.get(key)
-        if isinstance(session_id, str):
-            found.append(session_id)
-    object_id = value.get("id")
-    if value.get("type") == "session" and isinstance(object_id, str):
-        found.append(object_id)
-    return found
-
-
 def _event_session_ids(event: dict[str, Any]) -> list[str]:
-    """Collect IDs from an event and its documented ``part`` envelope."""
-    found = _direct_session_ids(event)
-    found.extend(_direct_session_ids(event.get("part")))
-    return found
+    """Collect IDs from exact documented event and ``part`` fields."""
+    part = event.get("part")
+    values = (
+        event.get("sessionID"),
+        part.get("sessionID") if isinstance(part, dict) else None,
+    )
+    return [value for value in values if isinstance(value, str)]
 
 
 def _export_session_ids(payload: dict[str, Any]) -> list[str]:
-    """Collect IDs from documented OpenCode export envelope locations."""
-    found = _direct_session_ids(payload)
+    """Collect IDs from exact documented OpenCode export envelope fields."""
+    found: list[str] = []
     info = payload.get("info")
-    found.extend(_direct_session_ids(info))
     if isinstance(info, dict) and isinstance(info.get("id"), str):
         found.append(info["id"])
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return found
     for message in messages:
-        found.extend(_direct_session_ids(message))
         if not isinstance(message, dict):
             continue
-        found.extend(_direct_session_ids(message.get("info")))
+        message_info = message.get("info")
+        if isinstance(message_info, dict) and isinstance(message_info.get("sessionID"), str):
+            found.append(message_info["sessionID"])
         parts = message.get("parts")
         if isinstance(parts, list):
             for part in parts:
-                found.extend(_direct_session_ids(part))
+                if isinstance(part, dict) and isinstance(part.get("sessionID"), str):
+                    found.append(part["sessionID"])
     return found
 
 
@@ -598,17 +597,7 @@ def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[P
             raise ValueError("recognized question omitted a string question ID or prompt")
         if not question_id.strip() or not prompt.strip():
             raise ValueError("recognized question contained a blank question ID or prompt")
-        options = tuple(
-            PlanQuestionOption(
-                option_id=str(option.get("id") or option.get("label")),
-                label=str(option.get("label")),
-                description=(
-                    str(option["description"]) if option.get("description") is not None else None
-                ),
-            )
-            for option in source.get("options") or []
-            if isinstance(option, dict) and option.get("label")
-        )
+        options = parse_plan_question_options(source.get("options"))
         questions.append(
             PlanInteraction(
                 kind=PlanInteractionKind.QUESTION,

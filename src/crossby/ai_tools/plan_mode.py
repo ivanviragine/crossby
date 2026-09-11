@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from crossby.models.ai import (
     AIToolID,
@@ -12,6 +13,7 @@ from crossby.models.ai import (
     PlanInteractionOutcome,
     PlanInteractionResponse,
     PlanModeCapability,
+    PlanQuestionOption,
 )
 
 PlanInteractionHandler = Callable[[PlanInteraction], PlanInteractionResponse]
@@ -28,6 +30,83 @@ _SECRET_RE = re.compile(
     (?:(?P<value_quote>["'])(?:\\.|(?!(?P=value_quote)).)*(?P=value_quote)|(?P<value>\S+))
     """
 )
+
+
+def parse_plan_question_options(
+    value: Any,
+    *,
+    id_fields: tuple[str, ...] = ("id",),
+    label_fields: tuple[str, ...] = ("label",),
+    require_id: bool = False,
+) -> tuple[PlanQuestionOption, ...]:
+    """Parse one provider's native choices without dropping malformed entries."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("native question options must be a list")
+
+    parsed: list[PlanQuestionOption] = []
+    seen_ids: set[str] = set()
+    for option in value:
+        if not isinstance(option, dict):
+            raise ValueError("native question options must be objects")
+
+        label = _first_option_text(option, label_fields)
+        assert label is not None
+        option_id = _first_option_text(option, id_fields, required=require_id)
+        if option_id is None:
+            option_id = label
+        description = option.get("description")
+        if description is not None and not isinstance(description, str):
+            raise ValueError("native question option descriptions must be strings")
+        if option_id in seen_ids:
+            raise ValueError("native question option IDs must be unique")
+        seen_ids.add(option_id)
+        parsed.append(
+            PlanQuestionOption(
+                option_id=option_id,
+                label=label,
+                description=description,
+            )
+        )
+    return tuple(parsed)
+
+
+def _first_option_text(
+    option: dict[str, Any], fields: tuple[str, ...], *, required: bool = True
+) -> str | None:
+    """Return the first present alias, rejecting a malformed authoritative value."""
+    for field in fields:
+        if field not in option:
+            continue
+        value = option[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("native question option IDs and labels must be non-blank strings")
+        return value
+    if required:
+        raise ValueError("native question options omitted an ID or label")
+    return None
+
+
+def validate_plan_option_selection(
+    interaction: PlanInteraction,
+    response: PlanInteractionResponse,
+) -> tuple[str, ...]:
+    """Return selected native IDs, rejecting unknown, duplicate, or excessive choices."""
+    selected_ids = (
+        *((response.option_id,) if response.option_id is not None else ()),
+        *response.option_ids,
+    )
+    if not selected_ids:
+        return ()
+    valid_ids = {option.option_id for option in interaction.options}
+    if (
+        len(set(selected_ids)) != len(selected_ids)
+        or any(option_id not in valid_ids for option_id in selected_ids)
+        or (not interaction.allow_multiple and len(selected_ids) != 1)
+    ):
+        raise ValueError("response did not select valid native option IDs")
+    return selected_ids
 
 
 def _redact_secret(match: re.Match[str]) -> str:

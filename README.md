@@ -402,18 +402,21 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
 its safe default is accepted. Copilot's collector supplies that default through
-a run-owned home with sandbox bypass, tool network access, hooks, and
-external MCP disabled; its non-interactive transport cannot surface tool
-permission prompts, so `on-request` is rejected and `never` is the only
-preserved approval policy. `preserved` means Crossby enforces the listed caller
-choices explicitly; an unlisted approval policy is rejected before collection.
+a run-owned no-network sandbox with hooks and external MCP disabled; its
+non-interactive transport cannot surface tool permission prompts, so
+`on-request` is rejected and `never` is the only preserved approval policy.
+`preserved` means Crossby enforces the listed caller choices explicitly; an
+unlisted approval policy is rejected before collection.
 Protocol and resumable collectors never invent an answer or auto-approve
 implementation. A missing handler produces
 `PlanInteractionRequiredError`, including when the caller's stdin is a TTY. A
 caller that intentionally wants terminal input must explicitly pass the
 exported `terminal_interaction_handler`. Final plan approval is represented
 separately and an `APPROVED` response is refused by collectors where it would
-transition into execution.
+transition into execution. Native option lists are parsed without discarding
+malformed entries, and callback option IDs must match those exact choices;
+explicit denied, cancelled, or skipped outcomes take precedence over stale
+selections.
 
 The collected API is the automation surface:
 
@@ -467,7 +470,12 @@ shared by the initial invocation, question continuations, protocol waits, and
 subprocess-backed export. Caller-visible timeout errors omit subprocess command
 arguments because those arguments can contain prompts or continuation answers.
 Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
-stderr; a child exceeding either limit is terminated and fails collection.
+stderr. POSIX children use an isolated process group, and capture-worker cleanup
+is deadline-bounded on every platform, so descendants retaining inherited pipes
+cannot hang the collector.
+Each JSON-RPC frame is capped before queueing and an oversized frame terminates
+the owned protocol child. Claude and Copilot file-backed plan artifacts are
+capped at 8 MiB before UTF-8 decoding.
 Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
 and are also caught by the collected API's `PlanSessionError` integration
 boundary.

@@ -126,12 +126,15 @@ interactive sessions. A complete collector must:
    cases use the typed errors in `ai_tools/plan_mode.py`.
 6. Apply one request-wide deadline to the initial invocation, every protocol or
    continuation wait, and any subprocess-backed export. Always terminate
-   protocol children, hard-limit captured stdout/stderr, redact/truncate
-   diagnostics, and remove only run-owned temporary artifacts. Successful
-   Claude artifact directories remain available to the caller, but every failed
-   UUID run directory is removed recursively. Catch `subprocess.TimeoutExpired`
-   before broader subprocess failures and never stringify it: its command field
-   may contain a prompt or continuation answer.
+   protocol children, isolate captured POSIX process groups, hard-limit captured
+   stdout/stderr, redact/truncate diagnostics, and remove only run-owned
+   temporary artifacts. Capture-worker joins share the request deadline on
+   every platform; on POSIX, a deadline or output overflow must also terminate
+   descendants retaining inherited pipes. Successful Claude artifact
+   directories remain available to the caller, but every failed UUID run
+   directory is removed recursively. Catch `subprocess.TimeoutExpired` before
+   broader subprocess failures and never stringify it: its command field may
+   contain a prompt or continuation answer.
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
@@ -139,9 +142,11 @@ headerless JSONL dialect. Captured CLI stdout and stderr have hard byte limits;
 protocol stdout has a per-frame cap and a fixed-size queue so a child that keeps
 emitting while an interaction callback runs receives pipe backpressure instead
 of growing parent-process memory without limit. Protocol stderr is consumed in
-bounded chunks and retained only as a tail. Keep progress/transcript parsing out
-of artifact parsers: only the adapter's declared authoritative event, export,
-structured field, or isolated path may become `result.plan`.
+bounded chunks and retained only as a tail; a frame overflow terminates the
+owned child. Read file-backed plan artifacts through the bounded helper before
+UTF-8 decoding. Keep progress/transcript parsing out of artifact parsers: only
+the adapter's declared authoritative event, export, structured field, or
+isolated path may become `result.plan`.
 
 Lifecycle completion is adapter-specific and must be explicit. Codex waits for
 the matching successful `turn/completed`, rejects a second completed plan item,
@@ -161,6 +166,11 @@ interaction-required behavior, process cleanup, and independent sandbox and
 approval choices. Seed decoy sessions/files to prove exact binding. Tests for an
 unknown or below-floor version must assert that no adapter process was created
 after the version-probe subprocess.
+
+Treat recognized interaction envelopes as protocol data: required identifiers,
+prompts, and every native option must retain their documented types and shape.
+Do not silently drop malformed options, and validate every callback selection
+against the native option IDs before resuming or responding.
 
 When an upstream protocol changes, capture a sanitized fixture from the new
 release, update the parser and positive/negative tests, then raise

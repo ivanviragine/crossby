@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+    validate_plan_option_selection,
+)
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -26,7 +30,6 @@ from crossby.models.ai import (
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
-    PlanQuestionOption,
     PlanRequestBehavior,
     PlanSessionBinding,
     PlanSessionRequest,
@@ -334,21 +337,28 @@ class AntigravityCLIAdapter(AbstractAITool):
                     capability=capability,
                 )
             answer_response = interaction_handler(interaction)
-            answer = (
-                answer_response.answer
-                or answer_response.option_id
-                or ", ".join(answer_response.option_ids)
-                or None
-            )
-            if (
-                answer_response.outcome
-                in {
-                    PlanInteractionOutcome.DENIED,
-                    PlanInteractionOutcome.CANCELLED,
-                    PlanInteractionOutcome.SKIPPED,
-                }
-                or not answer
-            ):
+            if answer_response.outcome in {
+                PlanInteractionOutcome.DENIED,
+                PlanInteractionOutcome.CANCELLED,
+                PlanInteractionOutcome.SKIPPED,
+            }:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI planning question was left unanswered.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            try:
+                selected_ids = validate_plan_option_selection(interaction, answer_response)
+            except ValueError as exc:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI planning question requires valid native option IDs.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                ) from exc
+            answer = answer_response.answer or ", ".join(selected_ids) or None
+            if not answer:
                 raise PlanInteractionRequiredError(
                     "Antigravity CLI planning question was left unanswered.",
                     interaction=interaction,
@@ -587,17 +597,7 @@ def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInter
     question = raw_question if isinstance(raw_question, dict) else payload
     prompt = _agy_required_question_field(question, "prompt", "question", "message")
     question_id = _agy_required_question_field(question, "id", "question_id")
-    options = tuple(
-        PlanQuestionOption(
-            option_id=str(option.get("id") or option.get("label")),
-            label=str(option.get("label")),
-            description=(
-                str(option["description"]) if option.get("description") is not None else None
-            ),
-        )
-        for option in question.get("options") or []
-        if isinstance(option, dict) and option.get("label")
-    )
+    options = parse_plan_question_options(question.get("options"))
     return PlanInteraction(
         kind=PlanInteractionKind.QUESTION,
         question_id=str(question_id),

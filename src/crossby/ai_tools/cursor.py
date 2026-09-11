@@ -10,7 +10,10 @@ from typing import Any, ClassVar
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+)
 from crossby.data import get_models_for_tool
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import cursor as cursor_reader
@@ -416,6 +419,13 @@ class CursorAdapter(AbstractAITool):
                             session_id=session_id,
                         )
                     stop_reason = result.get("stopReason")
+                    if not isinstance(stop_reason, str) or not stop_reason.strip():
+                        raise PlanTransportError(
+                            "Cursor ACP returned a malformed session/prompt stopReason.",
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                            session_id=session_id,
+                        )
                     if stop_reason != "end_turn":
                         raise PlanTransportError(
                             f"Cursor ACP session/prompt ended with stop reason {stop_reason!r}.",
@@ -481,11 +491,18 @@ class CursorAdapter(AbstractAITool):
                             tool_id=self.TOOL_ID,
                             capability=capability,
                         )
-                    if (
-                        outcome.outcome is PlanInteractionOutcome.CANCELLED
-                        or outcome.option_id == "cancelled"
-                    ):
+                    if outcome.outcome is PlanInteractionOutcome.CANCELLED:
                         native_outcome: dict[str, str] = {"outcome": "cancelled"}
+                    elif outcome.outcome in {
+                        PlanInteractionOutcome.DENIED,
+                        PlanInteractionOutcome.SKIPPED,
+                    }:
+                        native_outcome = {
+                            "outcome": "rejected",
+                            "reason": outcome.answer or "Plan collected without implementation.",
+                        }
+                    elif outcome.option_id == "cancelled":
+                        native_outcome = {"outcome": "cancelled"}
                     else:
                         native_outcome = {
                             "outcome": "rejected",
@@ -743,13 +760,16 @@ def _answer_cursor_question(
                 capability=capability,
                 session_id=session_id,
             )
-        options = tuple(
-            PlanQuestionOption(
-                option_id=str(option.get("id")),
-                label=str(option.get("label")),
+        if not question_id.strip() or not prompt.strip():
+            raise PlanTransportError(
+                "Cursor ACP planning question contained a blank ID or prompt.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
             )
-            for option in raw_question.get("options") or []
-            if isinstance(option, dict) and option.get("id") and option.get("label")
+        options = parse_plan_question_options(
+            raw_question.get("options"),
+            require_id=True,
         )
         interaction = PlanInteraction(
             kind=PlanInteractionKind.QUESTION,
@@ -787,8 +807,9 @@ def _answer_cursor_question(
                 },
             )
             return
-        selected_ids = response.option_ids or (
-            (response.option_id,) if response.option_id is not None else ()
+        selected_ids = (
+            *((response.option_id,) if response.option_id is not None else ()),
+            *response.option_ids,
         )
         if response.answer and not selected_ids:
             selected_ids = tuple(
@@ -799,6 +820,7 @@ def _answer_cursor_question(
         valid_ids = {option.option_id for option in options}
         if (
             not selected_ids
+            or len(set(selected_ids)) != len(selected_ids)
             or any(option_id not in valid_ids for option_id in selected_ids)
             or (not interaction.allow_multiple and len(selected_ids) != 1)
         ):
@@ -834,15 +856,11 @@ def _answer_cursor_permission(
         capability=capability,
         require_session_id=True,
     )
-    raw_options = params.get("options") or []
-    options = tuple(
-        PlanQuestionOption(
-            option_id=str(option.get("optionId") or option.get("id") or option.get("name")),
-            label=str(option.get("name") or option.get("label") or option.get("optionId")),
-        )
-        for option in raw_options
-        if isinstance(option, dict)
-        and (option.get("optionId") or option.get("id") or option.get("name"))
+    options = parse_plan_question_options(
+        params.get("options"),
+        id_fields=("optionId",),
+        label_fields=("name", "label"),
+        require_id=True,
     )
     tool_call = params.get("toolCall")
     tool_call_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
@@ -891,8 +909,9 @@ def _answer_cursor_permission(
                 None,
             )
         else:
-            selected_ids = response.option_ids or (
-                (response.option_id,) if response.option_id is not None else ()
+            selected_ids = (
+                *((response.option_id,) if response.option_id is not None else ()),
+                *response.option_ids,
             )
             if len(selected_ids) > 1:
                 raise PlanInteractionRequiredError(

@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+    validate_plan_option_selection,
+)
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import codex as codex_reader
 from crossby.models.ai import (
@@ -773,17 +777,16 @@ def _answer_codex_questions(
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
-        options = tuple(
-            PlanQuestionOption(
-                option_id=str(option.get("id") or option.get("label")),
-                label=str(option.get("label")),
-                description=(
-                    str(option["description"]) if option.get("description") is not None else None
-                ),
+        if not question_id.strip() or not prompt.strip():
+            raise PlanTransportError(
+                "Codex planning question contained a blank ID or prompt.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
             )
-            for option in raw_question.get("options") or []
-            if isinstance(option, dict) and option.get("label")
-        )
+        options = parse_plan_question_options(raw_question.get("options"))
         interaction = PlanInteraction(
             kind=PlanInteractionKind.QUESTION,
             question_id=question_id,
@@ -805,22 +808,31 @@ def _answer_codex_questions(
                 capability=capability,
             )
         response = handler(interaction)
+        if response.outcome in {
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.CANCELLED,
+            PlanInteractionOutcome.SKIPPED,
+        }:
+            raise PlanInteractionRequiredError(
+                "Codex planning question was left unanswered.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
+        try:
+            selected_ids = validate_plan_option_selection(interaction, response)
+        except ValueError as exc:
+            raise PlanInteractionRequiredError(
+                "Codex planning questions require valid native option IDs.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            ) from exc
         answer_values = [response.answer] if response.answer else []
-        selected_ids = response.option_ids or (
-            (response.option_id,) if response.option_id is not None else ()
-        )
         for option_id in selected_ids:
-            selected = next((option for option in options if option.option_id == option_id), None)
-            answer_values.append(selected.label if selected is not None else option_id)
-        if (
-            response.outcome
-            in {
-                PlanInteractionOutcome.DENIED,
-                PlanInteractionOutcome.CANCELLED,
-                PlanInteractionOutcome.SKIPPED,
-            }
-            or not answer_values
-        ):
+            selected = next(option for option in options if option.option_id == option_id)
+            answer_values.append(selected.label)
+        if not answer_values:
             raise PlanInteractionRequiredError(
                 "Codex planning question was left unanswered.",
                 interaction=interaction,

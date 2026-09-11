@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+    validate_plan_option_selection,
+)
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import copilot as copilot_reader
 from crossby.models.ai import (
@@ -32,7 +36,6 @@ from crossby.models.ai import (
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
-    PlanQuestionOption,
     PlanRequestBehavior,
     PlanSessionBinding,
     PlanSessionRequest,
@@ -166,7 +169,7 @@ class CopilotAdapter(AbstractAITool):
             PlanInteractionRequiredError,
             PlanTransportError,
         )
-        from crossby.ai_tools.plan_process import parse_jsonl, run_captured
+        from crossby.ai_tools.plan_process import parse_jsonl, read_text_bounded, run_captured
 
         capability = self.capabilities().plan_mode
         session_id = str(uuid.uuid4())
@@ -330,21 +333,28 @@ class CopilotAdapter(AbstractAITool):
                         )
                     answer = "Do not implement. Finish and export the plan."
                 else:
-                    answer = (
-                        response.answer
-                        or response.option_id
-                        or ", ".join(response.option_ids)
-                        or None
-                    )
-                    if (
-                        response.outcome
-                        in {
-                            PlanInteractionOutcome.DENIED,
-                            PlanInteractionOutcome.CANCELLED,
-                            PlanInteractionOutcome.SKIPPED,
-                        }
-                        or not answer
-                    ):
+                    if response.outcome in {
+                        PlanInteractionOutcome.DENIED,
+                        PlanInteractionOutcome.CANCELLED,
+                        PlanInteractionOutcome.SKIPPED,
+                    }:
+                        raise PlanInteractionRequiredError(
+                            "GitHub Copilot planning question was left unanswered.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        )
+                    try:
+                        selected_ids = validate_plan_option_selection(interaction, response)
+                    except ValueError as exc:
+                        raise PlanInteractionRequiredError(
+                            "GitHub Copilot planning question requires valid native option IDs.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        ) from exc
+                    answer = response.answer or ", ".join(selected_ids) or None
+                    if not answer:
                         raise PlanInteractionRequiredError(
                             "GitHub Copilot planning question was left unanswered.",
                             interaction=interaction,
@@ -371,10 +381,10 @@ class CopilotAdapter(AbstractAITool):
                     paths=(export_path,),
                 )
             try:
-                exported = export_path.read_text(encoding="utf-8")
+                exported = read_text_bounded(export_path)
             except (OSError, UnicodeError) as exc:
                 raise PlanArtifactMalformedError(
-                    f"GitHub Copilot share export could not be read as UTF-8: {exc}",
+                    f"GitHub Copilot share export violated the bounded UTF-8 contract: {exc}",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                     exit_code=0,
@@ -700,17 +710,7 @@ def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list
             raise ValueError("recognized interaction omitted a string question ID or prompt")
         if not question_id.strip() or not prompt.strip():
             raise ValueError("recognized interaction contained a blank question ID or prompt")
-        options = tuple(
-            PlanQuestionOption(
-                option_id=str(option.get("id") or option.get("label")),
-                label=str(option.get("label")),
-                description=(
-                    str(option["description"]) if option.get("description") is not None else None
-                ),
-            )
-            for option in source.get("options") or []
-            if isinstance(option, dict) and option.get("label")
-        )
+        options = parse_plan_question_options(source.get("options"))
         interactions.append(
             PlanInteraction(
                 kind=kind,

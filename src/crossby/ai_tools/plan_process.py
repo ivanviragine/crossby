@@ -6,8 +6,10 @@ import json
 import locale
 import os
 import queue
+import signal
 import subprocess
 import threading
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,8 @@ _JSON_RPC_READ_CHUNK_SIZE = 64 * 1024
 _CAPTURED_STDOUT_LIMIT = 8 * 1024 * 1024
 _CAPTURED_STDERR_LIMIT = 1024 * 1024
 _CAPTURE_CHUNK_SIZE = 64 * 1024
+_CAPTURE_CLEANUP_GRACE_SECONDS = 0.2
+_PLAN_ARTIFACT_TEXT_LIMIT = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,57 @@ class CapturedOutputDecodeError(subprocess.SubprocessError):
         self.encoding = encoding
 
 
+class PlanArtifactSizeError(OSError):
+    """A file-backed plan artifact exceeded its in-memory text bound."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"plan artifact exceeded the {limit}-byte limit")
+        self.limit = limit
+
+
+class JsonRpcFrameLimitError(ValueError):
+    """A protocol child emitted a frame larger than the configured bound."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"JSON-RPC frame exceeded the {limit}-character limit")
+        self.limit = limit
+
+
+def read_text_bounded(path: Path, *, limit: int | None = None) -> str:
+    """Read one UTF-8 plan artifact without allocating beyond a fixed byte cap."""
+    effective_limit = _PLAN_ARTIFACT_TEXT_LIMIT if limit is None else limit
+    if effective_limit <= 0:
+        raise ValueError("plan artifact limit must be positive")
+    with path.open("rb") as stream:
+        content = stream.read(effective_limit + 1)
+    if len(content) > effective_limit:
+        raise PlanArtifactSizeError(effective_limit)
+    return content.decode("utf-8")
+
+
+def _kill_captured_process_group(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the run-owned process group so descendants cannot retain capture pipes."""
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    if proc.poll() is None:
+        with suppress(OSError):
+            proc.kill()
+
+
+def _join_until(threads: tuple[threading.Thread, ...], deadline: float) -> bool:
+    """Join workers against one deadline rather than one timeout per thread."""
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        thread.join(timeout=remaining)
+    return all(not thread.is_alive() for thread in threads)
+
+
 def run_captured(
     command: list[str],
     *,
@@ -59,6 +114,7 @@ def run_captured(
     env: dict[str, str] | None = None,
 ) -> CapturedProcess:
     """Run a bounded child with hard stdout/stderr memory limits and no shell."""
+    deadline = time.monotonic() + timeout
     encoding = locale.getpreferredencoding(False)
     input_bytes = input_text.encode(encoding) if input_text is not None else None
     proc = subprocess.Popen(
@@ -68,14 +124,16 @@ def run_captured(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        start_new_session=os.name == "posix",
     )
     if (
         proc.stdout is None
         or proc.stderr is None
         or (input_bytes is not None and proc.stdin is None)
     ):
-        proc.kill()
-        proc.wait()
+        _kill_captured_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         raise OSError("failed to create captured subprocess pipes")
 
     outputs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
@@ -91,12 +149,19 @@ def run_captured(
                 with overflow_lock:
                     if not overflow:
                         overflow.append((name, limit))
-                        with suppress(OSError):
-                            proc.kill()
+                        _kill_captured_process_group(proc)
 
     readers = (
-        threading.Thread(target=read_bounded, args=(proc.stdout, "stdout", _CAPTURED_STDOUT_LIMIT)),
-        threading.Thread(target=read_bounded, args=(proc.stderr, "stderr", _CAPTURED_STDERR_LIMIT)),
+        threading.Thread(
+            target=read_bounded,
+            args=(proc.stdout, "stdout", _CAPTURED_STDOUT_LIMIT),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=read_bounded,
+            args=(proc.stderr, "stderr", _CAPTURED_STDERR_LIMIT),
+            daemon=True,
+        ),
     )
     for reader in readers:
         reader.start()
@@ -116,24 +181,28 @@ def run_captured(
                 with suppress(OSError):
                     input_stream.close()
 
-        writer = threading.Thread(target=write_input)
+        writer = threading.Thread(target=write_input, daemon=True)
         writer.start()
 
+    workers = (*readers, *((writer,) if writer is not None else ()))
     try:
-        returncode = proc.wait(timeout=timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
+        returncode = proc.wait(timeout=remaining)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        for reader in readers:
-            reader.join()
-        if writer is not None:
-            writer.join()
+        _kill_captured_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+        _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
 
-    for reader in readers:
-        reader.join()
-    if writer is not None:
-        writer.join()
+    if not _join_until(workers, deadline):
+        _kill_captured_process_group(proc)
+        _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
+        if overflow:
+            raise CapturedOutputLimitError(*overflow[0])
+        raise subprocess.TimeoutExpired(command, timeout) from None
     if overflow:
         raise CapturedOutputLimitError(*overflow[0])
 
@@ -221,11 +290,11 @@ class JsonRpcProcess:
         try:
             while line := stream.readline(_JSON_RPC_FRAME_LIMIT + 1):
                 if len(line) > _JSON_RPC_FRAME_LIMIT:
-                    self._queue_stdout(
-                        ValueError(
-                            f"JSON-RPC frame exceeded the {_JSON_RPC_FRAME_LIMIT}-character limit"
-                        )
-                    )
+                    proc = getattr(self, "_proc", None)
+                    if proc is not None and proc.poll() is None:
+                        with suppress(OSError):
+                            proc.kill()
+                    self._queue_stdout(JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT))
                     break
                 if not self._queue_stdout(line):
                     break
