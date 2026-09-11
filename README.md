@@ -391,10 +391,10 @@ Support matrix (contracts verified against the listed builds on 2026-09-10):
 
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; ambiguous, symlinked, blank, or missing output fails |
+| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; failed UUID directories are removed recursively while successful plan directories remain |
 | Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs and successful turn completion | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully and its background terminals are cleaned; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
-| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Isolated tool-managed / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection uses an explicit no-network sandbox, disables external MCP/hooks, and removes its temporary home/export after normalization |
+| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Read-only tool allowlist + isolated sandbox / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection exposes only file viewing/search and questions, explicitly denies writes/shell, disables external MCP/hooks/network, and removes its temporary home/export after normalization |
 | OpenCode | `run --agent plan --dir <workspace>` | Headless JSONL; emitted session ID + `export <exact-id>` + plan-mode assistant text | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Exported session/message directories must match the request; no latest-session lookup is used |
 | Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
 | VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
@@ -409,9 +409,11 @@ preserved approval policy. `preserved` means Crossby enforces the listed caller
 choices explicitly; an unlisted approval policy is rejected before collection.
 Protocol and resumable collectors never invent an answer or auto-approve
 implementation. A missing handler produces
-`PlanInteractionRequiredError`; final plan approval is represented separately
-and an `APPROVED` response is refused by collectors where it would transition
-into execution.
+`PlanInteractionRequiredError`, including when the caller's stdin is a TTY. A
+caller that intentionally wants terminal input must explicitly pass the
+exported `terminal_interaction_handler`. Final plan approval is represented
+separately and an `APPROVED` response is refused by collectors where it would
+transition into execution.
 
 The collected API is the automation surface:
 
@@ -464,6 +466,8 @@ harness itself to create `PLAN.md`. `timeout_seconds` is one collector deadline
 shared by the initial invocation, question continuations, protocol waits, and
 subprocess-backed export. Caller-visible timeout errors omit subprocess command
 arguments because those arguments can contain prompts or continuation answers.
+Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
+stderr; a child exceeding either limit is terminated and fails collection.
 Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
 and are also caught by the collected API's `PlanSessionError` integration
 boundary.

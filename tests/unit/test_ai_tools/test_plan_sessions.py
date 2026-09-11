@@ -6,6 +6,7 @@ import json
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from io import StringIO
@@ -39,9 +40,11 @@ from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import (
     _STDERR_TAIL_LIMIT,
     _STDOUT_QUEUE_LIMIT,
+    CapturedOutputLimitError,
     CapturedProcess,
     JsonRpcProcess,
     parse_jsonl,
+    run_captured,
 )
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
 from crossby.utils.versioning import BinaryVersion
@@ -65,6 +68,16 @@ def _request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
     }
     values.update(updates)
     return PlanSessionRequest(**values)
+
+
+def _antigravity_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
+    values = {"model": "gemini-3.8-flash", "effort": EffortLevel.MEDIUM, **updates}
+    return _request(tmp_path, **values)
+
+
+def _cursor_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
+    values = {"model": "sonnet-4.6", "effort": EffortLevel.MEDIUM, **updates}
+    return _request(tmp_path, **values)
 
 
 def _assert_result(
@@ -235,6 +248,30 @@ class TestNormalizedContract:
             adapter.run_plan_session(_request(tmp_path))
         run.assert_not_called()
 
+    def test_tty_does_not_install_an_implicit_interaction_handler(self, tmp_path: Path) -> None:
+        adapter = AbstractAITool.get(AIToolID.CODEX)
+        result = PlanSessionResult(
+            tool=AIToolID.CODEX,
+            version=EXACT_VERSION,
+            plan="# Plan",
+            session_id="thread-1",
+            native_mode='collaborationMode.mode="plan"',
+            artifact_source=PlanArtifactSource.PROTOCOL_EVENT,
+            binding=PlanSessionBinding.THREAD_TURN_IDS,
+            exit_code=0,
+            thread_id="thread-1",
+            turn_id="turn-1",
+            artifact_id="plan-1",
+        )
+
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch.object(adapter, "_run_plan_session", return_value=result) as run,
+        ):
+            adapter.run_plan_session(_request(tmp_path))
+
+        assert run.call_args.args[2] is None
+
     @pytest.mark.parametrize(
         "tool_id", [AIToolID.CLAUDE, AIToolID.OPENCODE, AIToolID.ANTIGRAVITY_CLI]
     )
@@ -297,7 +334,6 @@ class TestNormalizedContract:
     @pytest.mark.parametrize(
         ("model", "effort"),
         [
-            (None, EffortLevel.HIGH),
             ("claude-sonnet-4-6", EffortLevel.HIGH),
             ("gemini-3.1-pro", EffortLevel.MEDIUM),
             ("gemini-3.8-flash-low", EffortLevel.HIGH),
@@ -315,6 +351,32 @@ class TestNormalizedContract:
             pytest.raises(PlanSessionUnsupportedError, match="cannot preserve effort"),
         ):
             adapter.run_plan_session(_request(tmp_path, model=model, effort=effort))
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("model", "effort"),
+        [
+            (None, None),
+            (None, EffortLevel.HIGH),
+            ("gemini-3.8-flash", None),
+            (" ", EffortLevel.HIGH),
+        ],
+        ids=("both-missing", "model-missing", "effort-missing", "model-blank"),
+    )
+    def test_antigravity_rejects_incomplete_request_before_collection(
+        self,
+        model: str | None,
+        effort: EffortLevel | None,
+        tmp_path: Path,
+    ) -> None:
+        with (
+            patch("crossby.ai_tools.plan_process.run_captured") as run,
+            pytest.raises(PlanSessionUnsupportedError, match="explicit model and effort"),
+        ):
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _request(tmp_path, model=model, effort=effort)
+            )
+
         run.assert_not_called()
 
     def test_error_excerpt_redacts_and_bounds_secrets(self) -> None:
@@ -403,9 +465,11 @@ class TestSubprocessTimeoutRedaction:
 
         monkeypatch.setattr(f"crossby.ai_tools.plan_process.{runner}", time_out)
 
-        updates = (
-            {"approval_policy": PlanApprovalPolicy.NEVER} if tool_id is AIToolID.COPILOT else {}
-        )
+        updates: dict[str, Any] = {}
+        if tool_id is AIToolID.COPILOT:
+            updates["approval_policy"] = PlanApprovalPolicy.NEVER
+        elif tool_id is AIToolID.ANTIGRAVITY_CLI:
+            updates.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
         with pytest.raises(PlanTransportError, match="timed out") as raised:
             AbstractAITool.get(tool_id).run_plan_session(
                 _request(tmp_path, prompt=prompt, **updates)
@@ -417,6 +481,45 @@ class TestSubprocessTimeoutRedaction:
 
 
 class TestPlanProcess:
+    @pytest.mark.parametrize(
+        ("stream", "limit_name"),
+        [
+            ("stdout", "_CAPTURED_STDOUT_LIMIT"),
+            ("stderr", "_CAPTURED_STDERR_LIMIT"),
+        ],
+    )
+    def test_captured_process_output_is_hard_limited(
+        self,
+        stream: str,
+        limit_name: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(f"crossby.ai_tools.plan_process.{limit_name}", 64)
+        script = f"import sys; sys.{stream}.write('x' * 4096)"
+
+        with pytest.raises(CapturedOutputLimitError) as raised:
+            run_captured([sys.executable, "-c", script], cwd=tmp_path, timeout=5)
+
+        assert raised.value.stream == stream
+        assert raised.value.limit == 64
+
+    def test_captured_process_preserves_bounded_text_and_input(self, tmp_path: Path) -> None:
+        result = run_captured(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print(sys.stdin.read()); print('diagnostic', file=sys.stderr)",
+            ],
+            cwd=tmp_path,
+            timeout=5,
+            input_text="hello",
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == "hello\n"
+        assert result.stderr == "diagnostic\n"
+
     def test_stdout_reader_applies_bounded_backpressure_until_closed(self) -> None:
         blocked = threading.Event()
 
@@ -518,6 +621,62 @@ class TestPlanProcess:
 
 
 class TestClaudeCollector:
+    @pytest.mark.parametrize(
+        ("failure", "error"),
+        [
+            ("timeout", PlanTransportError),
+            ("subprocess", PlanTransportError),
+            ("nonzero", PlanTransportError),
+            ("symlink", PlanArtifactMalformedError),
+            ("missing", PlanArtifactMissingError),
+            ("ambiguous", PlanArtifactAmbiguousError),
+            ("unreadable", PlanArtifactMalformedError),
+            ("blank", PlanArtifactMalformedError),
+        ],
+    )
+    def test_failed_collection_removes_only_its_run_directory(
+        self,
+        failure: str,
+        error: type[PlanSessionError],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Keep", encoding="utf-8")
+
+        def fake_run(command: list[str], *, cwd: Path, timeout: float) -> int:
+            settings = json.loads(command[command.index("--settings") + 1])
+            run_dir = cwd / settings["plansDirectory"]
+            if failure in {"timeout", "subprocess", "nonzero"}:
+                (run_dir / "partial.tmp").write_text("partial", encoding="utf-8")
+            elif failure == "symlink":
+                (run_dir / "plan.md").symlink_to(outside)
+            elif failure == "missing":
+                (run_dir / "notes.txt").write_text("not a plan", encoding="utf-8")
+            elif failure == "ambiguous":
+                (run_dir / "one.md").write_text("# One", encoding="utf-8")
+                (run_dir / "two.md").write_text("# Two", encoding="utf-8")
+            elif failure == "unreadable":
+                (run_dir / "plan.md").write_bytes(b"\xff")
+            elif failure == "blank":
+                (run_dir / "plan.md").write_text("   ", encoding="utf-8")
+
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, timeout)
+            if failure == "subprocess":
+                raise OSError("collector failed")
+            return 1 if failure == "nonzero" else 0
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
+
+        with pytest.raises(error):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+
+        root = tmp_path / ".crossby" / "plan-sessions"
+        assert root.is_dir()
+        assert list(root.iterdir()) == []
+        assert outside.read_text(encoding="utf-8") == "# Keep"
+
     def test_isolated_directory_creation_errors_are_session_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1083,7 +1242,9 @@ class TestExactSessionCliCollectors:
             "crossby.ai_tools.plan_process.run_captured",
             lambda *_args, **_kwargs: CapturedProcess(0, payload, ""),
         )
-        result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
+        result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+            _antigravity_request(tmp_path)
+        )
         _assert_result(
             result,
             tool=AIToolID.ANTIGRAVITY_CLI,
@@ -1099,7 +1260,9 @@ class TestExactSessionCliCollectors:
             lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(malformed), ""),
         )
         with pytest.raises(PlanArtifactMalformedError, match="schema"):
-            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _antigravity_request(tmp_path)
+            )
 
     def test_antigravity_normalizes_blank_artifact_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1111,7 +1274,9 @@ class TestExactSessionCliCollectors:
             lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(payload), ""),
         )
 
-        result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
+        result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+            _antigravity_request(tmp_path)
+        )
 
         assert result.artifact_id is None
 
@@ -1148,9 +1313,8 @@ class TestExactSessionCliCollectors:
         clock = iter((100.0, 101.0, 103.0, 105.0))
         monkeypatch.setattr("crossby.ai_tools.antigravity_cli.time.monotonic", lambda: next(clock))
         result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
-            _request(
+            _antigravity_request(
                 tmp_path,
-                model="claude-sonnet-4-6",
                 trusted_dirs=(tmp_path / "reference",),
                 timeout_seconds=10,
             ),
@@ -1161,7 +1325,7 @@ class TestExactSessionCliCollectors:
         assert timeouts == [9.0, 7.0, 5.0]
         for command in commands[1:]:
             assert command[command.index("--conversation") + 1] == "conv-exact-123"
-            assert command[command.index("--model") + 1] == "claude-sonnet-4-6"
+            assert command[command.index("--model") + 1] == "gemini-3.8-flash-medium"
             assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
 
     def test_antigravity_denial_discards_stale_answer(
@@ -1178,7 +1342,7 @@ class TestExactSessionCliCollectors:
 
         with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
             AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
-                _request(tmp_path),
+                _antigravity_request(tmp_path),
                 lambda _interaction: PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.DENIED,
                     answer="stale answer",
@@ -1191,10 +1355,12 @@ class TestExactSessionCliCollectors:
     @pytest.mark.parametrize(
         "question",
         [
+            {"prompt": "Choose a scope"},
+            {"id": "scope"},
             {"id": " ", "prompt": "Choose a scope"},
             {"id": "scope", "prompt": " "},
         ],
-        ids=("blank-question-id", "blank-prompt"),
+        ids=("missing-question-id", "missing-prompt", "blank-question-id", "blank-prompt"),
     )
     def test_antigravity_rejects_blank_interaction_fields_as_malformed_artifacts(
         self,
@@ -1210,7 +1376,9 @@ class TestExactSessionCliCollectors:
         )
 
         with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _antigravity_request(tmp_path)
+            )
 
     def test_copilot_uuid_share_is_local_and_cleaned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1254,7 +1422,10 @@ class TestExactSessionCliCollectors:
         assert "--no-remote" in commands[0]
         assert "--no-remote-export" in commands[0]
         assert "--sandbox" in commands[0]
-        assert "--allow-all-tools" in commands[0]
+        assert "--allow-all-tools" not in commands[0]
+        assert "--available-tools=view,grep,glob,ask_user" in commands[0]
+        assert "--deny-tool=write" in commands[0]
+        assert "--deny-tool=shell" in commands[0]
         assert "--disable-builtin-mcps" in commands[0]
         disabled_index = commands[0].index("--disable-mcp-server")
         assert commands[0][disabled_index + 1] == "remote-review"
@@ -1587,15 +1758,28 @@ class TestExactSessionCliCollectors:
 
 
 class TestProtocolCollectors:
-    def test_cursor_rejects_effort_without_model_before_protocol_process(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("model", "effort"),
+        [
+            (None, None),
+            (None, EffortLevel.HIGH),
+            ("sonnet-4.6", None),
+            (" ", EffortLevel.HIGH),
+        ],
+        ids=("both-missing", "model-missing", "effort-missing", "model-blank"),
+    )
+    def test_cursor_rejects_incomplete_request_before_protocol_process(
+        self,
+        model: str | None,
+        effort: EffortLevel | None,
+        tmp_path: Path,
     ) -> None:
         with (
             patch("crossby.ai_tools.plan_process.JsonRpcProcess") as process,
-            pytest.raises(PlanSessionUnsupportedError, match="without an explicit model"),
+            pytest.raises(PlanSessionUnsupportedError, match="explicit model and effort"),
         ):
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
-                _request(tmp_path, effort=EffortLevel.HIGH)
+                _request(tmp_path, model=model, effort=effort)
             )
 
         process.assert_not_called()
@@ -1951,7 +2135,7 @@ class TestProtocolCollectors:
     ) -> None:
         _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
         with pytest.raises(PlanInteractionRequiredError) as raised:
-            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_request(tmp_path))
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path))
         assert raised.value.interaction.session_id == "cursor-exact-123"
         assert FakeRpc.instances[0].closed
 
@@ -1964,7 +2148,7 @@ class TestProtocolCollectors:
             )
 
         result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
-            _request(tmp_path, sandbox=False, approval_policy=PlanApprovalPolicy.NEVER),
+            _cursor_request(tmp_path, sandbox=False, approval_policy=PlanApprovalPolicy.NEVER),
             keep_plan,
         )
         _assert_result(
@@ -1973,7 +2157,8 @@ class TestProtocolCollectors:
             source=PlanArtifactSource.PROTOCOL_EVENT,
             binding=PlanSessionBinding.SESSION_ID,
         )
-        assert FakeRpc.instances[0].command[:4] == ["agent", "--sandbox", "disabled", "acp"]
+        assert FakeRpc.instances[0].command[:3] == ["agent", "--sandbox", "disabled"]
+        assert FakeRpc.instances[0].command[-1] == "acp"
         assert (
             "respond",
             {
@@ -2022,7 +2207,7 @@ class TestProtocolCollectors:
                 option_id="rejected",
             )
 
-        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_request(tmp_path), deny)
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), deny)
 
         assert (
             "respond",
@@ -2055,7 +2240,9 @@ class TestProtocolCollectors:
                 option_id="rejected",
             )
 
-        result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_request(tmp_path), answer)
+        result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _cursor_request(tmp_path), answer
+        )
         assert result.artifact_id == "plan-tool-exact-123"
         assert [(item.question_id, item.allow_multiple) for item in seen[:2]] == [
             ("scope", False),
@@ -2086,7 +2273,7 @@ class TestProtocolCollectors:
         _install_rpc(monkeypatch, "cursor_acp_question.jsonl")
 
         result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
-            _request(tmp_path),
+            _cursor_request(tmp_path),
             lambda _interaction: PlanInteractionResponse(
                 outcome=PlanInteractionOutcome.DENIED,
                 option_id="api",

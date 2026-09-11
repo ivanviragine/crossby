@@ -238,18 +238,15 @@ class CursorAdapter(AbstractAITool):
         from crossby.ai_tools.plan_process import JsonRpcProcess
 
         capability = self.capabilities().plan_mode
-        if request.effort is not None and request.model is None:
+        if request.model is None or not request.model.strip() or request.effort is None:
             raise PlanSessionUnsupportedError(
-                f"Cursor cannot preserve effort={request.effort.value!r} without an explicit "
-                "model for collected plan sessions.",
+                "Cursor requires an explicit model and effort for collected plan sessions.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
         command = ["agent", "--sandbox", "enabled" if request.sandbox else "disabled"]
         effective_model = request.model
         if request.effort is not None:
-            assert request.model is not None
-            assert effective_model is not None
             try:
                 parameterized_effort = _parameterized_effort(effective_model)
             except ValueError as exc:

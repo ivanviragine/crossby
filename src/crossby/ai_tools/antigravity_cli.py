@@ -198,13 +198,17 @@ class AntigravityCLIAdapter(AbstractAITool):
         from crossby.ai_tools.plan_process import run_captured
 
         capability = self.capabilities().plan_mode
-        if request.effort is not None and not _agy_model_encodes_effort(
-            request.model, request.effort
-        ):
-            model = request.model or "no explicit model"
+        if request.model is None or not request.model.strip() or request.effort is None:
+            raise PlanSessionUnsupportedError(
+                "Antigravity CLI requires an explicit model and effort for collected plan "
+                "sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if not _agy_model_encodes_effort(request.model, request.effort):
             raise PlanSessionUnsupportedError(
                 f"Antigravity CLI cannot preserve effort={request.effort.value!r} with "
-                f"{model!r}. Supply a compatible Gemini model/tier or omit effort.",
+                f"{request.model!r}. Supply a compatible Gemini model/tier.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
@@ -581,8 +585,8 @@ def _agy_status(payload: dict[str, Any]) -> str | None:
 def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInteraction:
     raw_question = payload.get("question")
     question = raw_question if isinstance(raw_question, dict) else payload
-    prompt = question.get("prompt") or question.get("question") or question.get("message")
-    question_id = question.get("id") or question.get("question_id") or "question"
+    prompt = _agy_required_question_field(question, "prompt", "question", "message")
+    question_id = _agy_required_question_field(question, "id", "question_id")
     options = tuple(
         PlanQuestionOption(
             option_id=str(option.get("id") or option.get("label")),
@@ -601,3 +605,12 @@ def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInter
         options=options,
         session_id=conversation_id,
     )
+
+
+def _agy_required_question_field(question: dict[str, Any], *names: str) -> str:
+    """Return the first emitted non-blank string alias for a required question field."""
+    for name in names:
+        value = question.get(name)
+        if isinstance(value, str) and value.strip():
+            return value
+    raise ValueError(f"missing non-blank question field: {'/'.join(names)}")

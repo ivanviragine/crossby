@@ -9,7 +9,6 @@ from __future__ import annotations
 import inspect
 import os
 import shutil
-import sys
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -260,9 +259,7 @@ class AbstractAITool(ABC):
         from crossby.ai_tools.plan_mode import (
             PlanModeAdapterContractError,
             PlanSessionUnsupportedError,
-            terminal_interaction_handler,
         )
-        from crossby.models.ai import PlanInteractionSupport
         from crossby.utils.versioning import detect_binary_version_info, parse_semver
 
         caps = self.capabilities()
@@ -357,16 +354,7 @@ class AbstractAITool(ABC):
                 installed_version=detected.text if detected is not None else None,
             )
 
-        handler = interaction_handler
-        if (
-            handler is None
-            and sys.stdin.isatty()
-            and capability.interaction
-            in {PlanInteractionSupport.CALLBACK, PlanInteractionSupport.RESUMABLE_CALLBACK}
-        ):
-            handler = terminal_interaction_handler
-
-        result = self._run_plan_session(request, detected.text, handler)
+        result = self._run_plan_session(request, detected.text, interaction_handler)
         if result.tool is not self.TOOL_ID:
             raise PlanModeAdapterContractError(
                 f"{caps.display_name} collector returned the wrong tool identifier.",

@@ -117,23 +117,28 @@ interactive sessions. A complete collector must:
 4. Surface native questions through `PlanInteractionHandler`, preserving native
    question and option IDs. Model final plan approval as
    `PlanInteractionKind.PLAN_APPROVAL`; collection must never translate it into
-   permission to implement.
+   permission to implement. Never infer interactive consent from a TTY: callers
+   must explicitly pass `terminal_interaction_handler` when terminal input is
+   intentional.
 5. Return `PlanSessionResult` with non-blank Markdown, the exact text from the
    single version probe, native-mode evidence, and all available binding IDs.
    Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
    cases use the typed errors in `ai_tools/plan_mode.py`.
 6. Apply one request-wide deadline to the initial invocation, every protocol or
    continuation wait, and any subprocess-backed export. Always terminate
-   protocol children, redact/truncate stderr, and remove only run-owned
-   temporary artifacts. Catch `subprocess.TimeoutExpired` before broader
-   subprocess failures and never stringify it: its command field may contain a
-   prompt or continuation answer. Caller-owned Claude plan files are preserved.
+   protocol children, hard-limit captured stdout/stderr, redact/truncate
+   diagnostics, and remove only run-owned temporary artifacts. Successful
+   Claude artifact directories remain available to the caller, but every failed
+   UUID run directory is removed recursively. Catch `subprocess.TimeoutExpired`
+   before broader subprocess failures and never stringify it: its command field
+   may contain a prompt or continuation answer.
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
-headerless JSONL dialect. Its protocol stdout queue is bounded so a child that
-keeps emitting while an interaction callback runs receives pipe backpressure
-instead of growing parent-process memory without limit. Keep
+headerless JSONL dialect. Captured CLI stdout and stderr have hard byte limits;
+protocol stdout is bounded by a fixed-size queue so a child that keeps emitting
+while an interaction callback runs receives pipe backpressure instead of
+growing parent-process memory without limit. Keep
 progress/transcript parsing out of artifact parsers: only the adapter's declared
 authoritative event, export, structured field, or isolated path may become
 `result.plan`.
@@ -144,7 +149,9 @@ then acknowledges `thread/backgroundTerminals/clean` before returning. Copilot
 requires one UUID-bound `result` event with `status="completed"` before reading
 the local share. Its `--prompt` transport cannot relay tool permission prompts,
 so collection supports only `approval_policy="never"` and runs it in a
-run-owned no-network sandbox with ambient hooks and external MCP disabled.
+run-owned no-network sandbox with ambient hooks and external MCP disabled. The
+model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell
+permissions are also explicitly denied.
 
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
@@ -174,6 +181,8 @@ CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
 
 The answer variable is optional until a harness asks an informational planning
 question; final plan and permission requests are denied by the smoke handler.
+The Copilot case deliberately requests a sentinel write and asserts that its
+read-only collector leaves the disposable workspace unchanged.
 Never enable these tests in the default or unauthenticated CI suite.
 
 ## Adding a New AI Tool

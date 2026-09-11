@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import os
 import queue
 import subprocess
@@ -15,6 +16,9 @@ from typing import IO, Any, ClassVar
 _STDERR_TAIL_LIMIT = 8 * 1024
 _STDOUT_QUEUE_LIMIT = 256
 _QUEUE_PUT_TIMEOUT_SECONDS = 0.1
+_CAPTURED_STDOUT_LIMIT = 8 * 1024 * 1024
+_CAPTURED_STDERR_LIMIT = 1024 * 1024
+_CAPTURE_CHUNK_SIZE = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,15 @@ class CapturedProcess:
     stderr: str
 
 
+class CapturedOutputLimitError(subprocess.SubprocessError):
+    """A captured child exceeded the configured in-memory output bound."""
+
+    def __init__(self, stream: str, limit: int) -> None:
+        super().__init__(f"captured {stream} exceeded the {limit}-byte limit")
+        self.stream = stream
+        self.limit = limit
+
+
 def run_captured(
     command: list[str],
     *,
@@ -34,18 +47,89 @@ def run_captured(
     input_text: str | None = None,
     env: dict[str, str] | None = None,
 ) -> CapturedProcess:
-    """Run a bounded child with text I/O and no shell interpretation."""
-    proc = subprocess.run(
+    """Run a bounded child with hard stdout/stderr memory limits and no shell."""
+    encoding = locale.getpreferredencoding(False)
+    proc = subprocess.Popen(
         command,
         cwd=cwd,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=env,
     )
-    return CapturedProcess(proc.returncode, proc.stdout, proc.stderr)
+    if (
+        proc.stdout is None
+        or proc.stderr is None
+        or (input_text is not None and proc.stdin is None)
+    ):
+        proc.kill()
+        proc.wait()
+        raise OSError("failed to create captured subprocess pipes")
+
+    outputs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    overflow: list[tuple[str, int]] = []
+    overflow_lock = threading.Lock()
+
+    def read_bounded(stream: IO[bytes], name: str, limit: int) -> None:
+        while chunk := stream.read(_CAPTURE_CHUNK_SIZE):
+            remaining = limit - len(outputs[name])
+            if remaining > 0:
+                outputs[name].extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                with overflow_lock:
+                    if not overflow:
+                        overflow.append((name, limit))
+                        with suppress(OSError):
+                            proc.kill()
+
+    readers = (
+        threading.Thread(target=read_bounded, args=(proc.stdout, "stdout", _CAPTURED_STDOUT_LIMIT)),
+        threading.Thread(target=read_bounded, args=(proc.stderr, "stderr", _CAPTURED_STDERR_LIMIT)),
+    )
+    for reader in readers:
+        reader.start()
+
+    writer: threading.Thread | None = None
+    if input_text is not None:
+        input_stream = proc.stdin
+        assert input_stream is not None
+
+        def write_input() -> None:
+            try:
+                input_stream.write(input_text.encode(encoding))
+                input_stream.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                with suppress(OSError):
+                    input_stream.close()
+
+        writer = threading.Thread(target=write_input)
+        writer.start()
+
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for reader in readers:
+            reader.join()
+        if writer is not None:
+            writer.join()
+        raise subprocess.TimeoutExpired(command, timeout) from None
+
+    for reader in readers:
+        reader.join()
+    if writer is not None:
+        writer.join()
+    if overflow:
+        raise CapturedOutputLimitError(*overflow[0])
+
+    return CapturedProcess(
+        returncode,
+        outputs["stdout"].decode(encoding),
+        outputs["stderr"].decode(encoding),
+    )
 
 
 def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:

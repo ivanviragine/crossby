@@ -229,8 +229,7 @@ class ClaudeAdapter(AbstractAITool):
                 timeout=request.timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            if run_dir.exists() and not any(run_dir.iterdir()):
-                run_dir.rmdir()
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanTransportError(
                 f"Claude Code planning process timed out after {exc.timeout} seconds.",
                 tool_id=self.TOOL_ID,
@@ -239,8 +238,7 @@ class ClaudeAdapter(AbstractAITool):
                 paths=(run_dir,),
             ) from None
         except (OSError, subprocess.SubprocessError) as exc:
-            if run_dir.exists() and not any(run_dir.iterdir()):
-                run_dir.rmdir()
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanTransportError(
                 f"Claude Code planning process failed: {exc}",
                 tool_id=self.TOOL_ID,
@@ -250,8 +248,7 @@ class ClaudeAdapter(AbstractAITool):
             ) from exc
 
         if exit_code != 0:
-            if not any(run_dir.iterdir()):
-                run_dir.rmdir()
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanTransportError(
                 f"Claude Code planning process exited with status {exit_code}.",
                 tool_id=self.TOOL_ID,
@@ -264,6 +261,7 @@ class ClaudeAdapter(AbstractAITool):
         entries = list(run_dir.iterdir())
         symlinks = tuple(path for path in entries if path.is_symlink())
         if symlinks:
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanArtifactMalformedError(
                 "Claude Code produced a symlink in the isolated plan directory; refusing it.",
                 tool_id=self.TOOL_ID,
@@ -274,8 +272,7 @@ class ClaudeAdapter(AbstractAITool):
             )
         candidates = [path for path in entries if path.is_file() and path.suffix == ".md"]
         if not candidates:
-            if not entries:
-                run_dir.rmdir()
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanArtifactMissingError(
                 "Claude Code exited successfully without a Markdown plan in its isolated "
                 "plansDirectory.",
@@ -286,6 +283,7 @@ class ClaudeAdapter(AbstractAITool):
                 paths=(run_dir,),
             )
         if len(candidates) != 1 or len(entries) != 1:
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanArtifactAmbiguousError(
                 "Claude Code produced multiple or unexpected artifacts in the isolated plan "
                 "directory.",
@@ -299,6 +297,7 @@ class ClaudeAdapter(AbstractAITool):
         try:
             plan = artifact.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanArtifactMalformedError(
                 f"Claude Code plan artifact could not be read as UTF-8: {exc}",
                 tool_id=self.TOOL_ID,
@@ -308,6 +307,7 @@ class ClaudeAdapter(AbstractAITool):
                 paths=(artifact,),
             ) from exc
         if not plan.strip():
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise PlanArtifactMalformedError(
                 "Claude Code produced a blank plan artifact.",
                 tool_id=self.TOOL_ID,
