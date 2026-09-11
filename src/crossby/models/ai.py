@@ -297,8 +297,10 @@ class PlanInteractionResponse(BaseModel, frozen=True):
         return self
 
 
-class PlanSessionRequest(BaseModel, frozen=True):
+class PlanSessionRequest(BaseModel):
     """Portable inputs for one complete native planning lifecycle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     prompt: str
     working_dir: Path

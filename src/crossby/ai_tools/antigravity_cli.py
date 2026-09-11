@@ -192,11 +192,23 @@ class AntigravityCLIAdapter(AbstractAITool):
             PlanArtifactMalformedError,
             PlanBindingMismatchError,
             PlanInteractionRequiredError,
+            PlanSessionUnsupportedError,
             PlanTransportError,
         )
         from crossby.ai_tools.plan_process import run_captured
 
         capability = self.capabilities().plan_mode
+        if request.effort is not None and not _agy_model_encodes_effort(
+            request.model, request.effort
+        ):
+            model = request.model or "no explicit model"
+            raise PlanSessionUnsupportedError(
+                f"Antigravity CLI cannot preserve effort={request.effort.value!r} with "
+                f"{model!r}. Supply a compatible Gemini model/tier or omit effort.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
         schema: dict[str, Any] = {
             "type": "object",
             "properties": {"plan": {"type": "string", "minLength": 1}},
@@ -517,6 +529,17 @@ class AntigravityCLIAdapter(AbstractAITool):
         parseable text, so this mirrors the known Gemini-CLI
         transcript-persistence limitation for a different underlying reason."""
         return TokenUsage()
+
+
+def _agy_model_encodes_effort(model: str | None, effort: EffortLevel) -> bool:
+    """Whether *model* can preserve an explicit collected-session effort."""
+    if model is None or model in _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS:
+        return False
+    base, suffix_effort = _split_effort_suffix(model)
+    tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
+    return (
+        tiers is not None and effort in tiers and (suffix_effort is None or suffix_effort is effort)
+    )
 
 
 def _agy_conversation_id(payload: dict[str, Any]) -> str | None:

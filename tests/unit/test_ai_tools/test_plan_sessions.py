@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
@@ -32,7 +33,7 @@ from crossby.ai_tools import (
     PlanTransportError,
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
-from crossby.ai_tools.plan_process import CapturedProcess, parse_jsonl
+from crossby.ai_tools.plan_process import CapturedProcess, JsonRpcProcess, parse_jsonl
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
 from crossby.utils.versioning import BinaryVersion
 
@@ -132,6 +133,16 @@ def _install_rpc(
 
 
 class TestNormalizedContract:
+    def test_request_rejects_unknown_fields(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError, match="approvalPolicy"):
+            PlanSessionRequest.model_validate(
+                {
+                    "prompt": "Create a plan",
+                    "working_dir": tmp_path,
+                    "approvalPolicy": "never",
+                }
+            )
+
     def test_result_rejects_blank_or_inconsistent_success(self, tmp_path: Path) -> None:
         common = {
             "tool": AIToolID.CLAUDE,
@@ -261,6 +272,29 @@ class TestNormalizedContract:
             adapter.run_plan_session(_request(tmp_path, effort=effort))
         run.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("model", "effort"),
+        [
+            (None, EffortLevel.HIGH),
+            ("claude-sonnet-4-6", EffortLevel.HIGH),
+            ("gemini-3.1-pro", EffortLevel.MEDIUM),
+            ("gemini-3.8-flash-low", EffortLevel.HIGH),
+        ],
+    )
+    def test_antigravity_rejects_effort_its_model_cannot_encode(
+        self,
+        model: str | None,
+        effort: EffortLevel,
+        tmp_path: Path,
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+        with (
+            patch("crossby.ai_tools.plan_process.run_captured") as run,
+            pytest.raises(PlanSessionUnsupportedError, match="cannot preserve effort"),
+        ):
+            adapter.run_plan_session(_request(tmp_path, model=model, effort=effort))
+        run.assert_not_called()
+
     def test_error_excerpt_redacts_and_bounds_secrets(self) -> None:
         excerpt = safe_error_excerpt("API_KEY=super-secret " + ("x" * 1000))
         assert excerpt is not None
@@ -320,6 +354,56 @@ class TestNormalizedContract:
 
         assert isinstance(raised.value, PlanArtifactLocationError)
         run.assert_not_called()
+
+
+class TestPlanProcess:
+    def test_close_joins_reader_threads_before_closing_streams(self) -> None:
+        events: list[str] = []
+
+        class FakeStream:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.closed = False
+
+            def close(self) -> None:
+                events.append(f"close:{self.name}")
+                self.closed = True
+
+        class FakeThread:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def join(self, *, timeout: float) -> None:
+                assert timeout > 0
+                events.append(f"join:{self.name}")
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = FakeStream("stdin")
+                self.stdout = FakeStream("stdout")
+                self.stderr = FakeStream("stderr")
+                self.returncode = 0
+
+            def poll(self) -> int:
+                return 0
+
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._proc = FakeProcess()  # type: ignore[assignment]
+        rpc._stdin = rpc._proc.stdin  # type: ignore[assignment]
+        rpc._closing = threading.Event()
+        rpc._stdout_thread = FakeThread("stdout")  # type: ignore[assignment]
+        rpc._stderr_thread = FakeThread("stderr")  # type: ignore[assignment]
+
+        assert rpc.close() == 0
+        assert events == [
+            "close:stdin",
+            "join:stdout",
+            "join:stderr",
+            "close:stdout",
+            "close:stderr",
+            "join:stdout",
+            "join:stderr",
+        ]
 
 
 class TestClaudeCollector:

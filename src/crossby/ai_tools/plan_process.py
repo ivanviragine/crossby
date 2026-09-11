@@ -88,6 +88,7 @@ class JsonRpcProcess:
         self._stdin: IO[str] = self._proc.stdin
         self._stdout_queue: queue.Queue[str | None] = queue.Queue()
         self._stderr_lines: list[str] = []
+        self._closing = threading.Event()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
             args=(self._proc.stdout,),
@@ -113,12 +114,19 @@ class JsonRpcProcess:
         try:
             for line in stream:
                 self._stdout_queue.put(line)
+        except ValueError:
+            if not self._closing.is_set():
+                raise
         finally:
             self._stdout_queue.put(None)
 
     def _read_stderr(self, stream: IO[str]) -> None:
-        for line in stream:
-            self._stderr_lines.append(line)
+        try:
+            for line in stream:
+                self._stderr_lines.append(line)
+        except ValueError:
+            if not self._closing.is_set():
+                raise
 
     def send(self, payload: dict[str, Any]) -> None:
         if self._proc.poll() is not None:
@@ -183,11 +191,15 @@ class JsonRpcProcess:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
                     self._proc.wait(timeout=1.0)
+        readers = (self._stdout_thread, self._stderr_thread)
+        for thread in readers:
+            thread.join(timeout=0.2)
+        self._closing.set()
         for stream in (self._proc.stdout, self._proc.stderr):
             if stream is not None and not stream.closed:
                 stream.close()
-        self._stdout_thread.join(timeout=0.2)
-        self._stderr_thread.join(timeout=0.2)
+        for thread in readers:
+            thread.join(timeout=0.2)
         return self._proc.returncode if self._proc.returncode is not None else 0
 
     def __enter__(self) -> JsonRpcProcess:
