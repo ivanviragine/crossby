@@ -6,6 +6,7 @@ import json
 import shutil
 import threading
 import uuid
+from io import StringIO
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -33,7 +34,12 @@ from crossby.ai_tools import (
     PlanTransportError,
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
-from crossby.ai_tools.plan_process import CapturedProcess, JsonRpcProcess, parse_jsonl
+from crossby.ai_tools.plan_process import (
+    _STDERR_TAIL_LIMIT,
+    CapturedProcess,
+    JsonRpcProcess,
+    parse_jsonl,
+)
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
 from crossby.utils.versioning import BinaryVersion
 
@@ -357,6 +363,18 @@ class TestNormalizedContract:
 
 
 class TestPlanProcess:
+    def test_stderr_reader_retains_only_a_bounded_tail(self) -> None:
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._stderr_tail = ""
+        rpc._stderr_lock = threading.Lock()
+        rpc._closing = threading.Event()
+        latest = "latest diagnostic\n"
+
+        rpc._read_stderr(StringIO(("old diagnostic\n" * _STDERR_TAIL_LIMIT) + latest))
+
+        assert len(rpc.stderr) == _STDERR_TAIL_LIMIT
+        assert rpc.stderr.endswith(latest)
+
     def test_close_joins_reader_threads_before_closing_streams(self) -> None:
         events: list[str] = []
 
@@ -1015,6 +1033,38 @@ class TestExactSessionCliCollectors:
 
         assert raised.value.session_id == str(session_id)
 
+    @pytest.mark.parametrize(
+        "interaction",
+        [
+            {"id": " ", "question": "Choose a scope"},
+            {"id": "scope", "question": " "},
+        ],
+        ids=("blank-question-id", "blank-prompt"),
+    )
+    def test_copilot_rejects_blank_interaction_fields_as_malformed_artifacts(
+        self,
+        interaction: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        event = json.dumps(
+            {
+                "type": "ask_user",
+                "session_id": str(session_id),
+                "data": interaction,
+            }
+        )
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, event, ""),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+
     def test_copilot_preserves_nested_plan_headings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1185,6 +1235,19 @@ class TestExactSessionCliCollectors:
 
 
 class TestProtocolCollectors:
+    def test_cursor_rejects_effort_without_model_before_protocol_process(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch("crossby.ai_tools.plan_process.JsonRpcProcess") as process,
+            pytest.raises(PlanSessionUnsupportedError, match="without an explicit model"),
+        ):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _request(tmp_path, effort=EffortLevel.HIGH)
+            )
+
+        process.assert_not_called()
+
     def test_codex_collects_completed_plan_item(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

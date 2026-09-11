@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, ClassVar
 
+_STDERR_TAIL_LIMIT = 8 * 1024
+
 
 @dataclass(frozen=True)
 class CapturedProcess:
@@ -87,7 +89,8 @@ class JsonRpcProcess:
             raise OSError("failed to create JSON-RPC stdio pipes")
         self._stdin: IO[str] = self._proc.stdin
         self._stdout_queue: queue.Queue[str | None] = queue.Queue()
-        self._stderr_lines: list[str] = []
+        self._stderr_tail = ""
+        self._stderr_lock = threading.Lock()
         self._closing = threading.Event()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
@@ -108,7 +111,8 @@ class JsonRpcProcess:
 
     @property
     def stderr(self) -> str:
-        return "".join(self._stderr_lines)
+        with self._stderr_lock:
+            return self._stderr_tail
 
     def _read_stdout(self, stream: IO[str]) -> None:
         try:
@@ -123,7 +127,9 @@ class JsonRpcProcess:
     def _read_stderr(self, stream: IO[str]) -> None:
         try:
             for line in stream:
-                self._stderr_lines.append(line)
+                line_tail = line[-_STDERR_TAIL_LIMIT:]
+                with self._stderr_lock:
+                    self._stderr_tail = (self._stderr_tail + line_tail)[-_STDERR_TAIL_LIMIT:]
         except ValueError:
             if not self._closing.is_set():
                 raise

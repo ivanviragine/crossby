@@ -260,11 +260,18 @@ class CopilotAdapter(AbstractAITool):
                         session_id=session_id,
                         paths=(export_path,),
                     )
-                pending = [
-                    item
-                    for item in _copilot_interactions(events, session_id)
-                    if item.question_id not in seen_questions
-                ]
+                try:
+                    interactions = _copilot_interactions(events, session_id)
+                except ValueError as exc:
+                    raise PlanArtifactMalformedError(
+                        f"GitHub Copilot emitted malformed interaction data: {exc}",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        exit_code=run.returncode,
+                        session_id=session_id,
+                        paths=(export_path,),
+                    ) from exc
+                pending = [item for item in interactions if item.question_id not in seen_questions]
                 if not pending:
                     break
                 interaction = pending[0]
@@ -515,6 +522,8 @@ def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list
         prompt = source.get("question") or source.get("prompt") or source.get("message")
         if not isinstance(question_id, str) or not isinstance(prompt, str):
             continue
+        if not question_id.strip() or not prompt.strip():
+            raise ValueError("recognized interaction contained a blank question ID or prompt")
         options = tuple(
             PlanQuestionOption(
                 option_id=str(option.get("id") or option.get("label")),
