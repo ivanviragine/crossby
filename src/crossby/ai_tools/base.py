@@ -140,7 +140,6 @@ class AbstractAITool(ABC):
         trusted_dirs: list[str] | None = None,
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
-        allow_tools: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
         accept_edits: bool = False,
@@ -148,6 +147,7 @@ class AbstractAITool(ABC):
         scene: SceneLaunchContext | None = None,
         network_access: bool = False,
         plan_output_dir: Path | None = None,
+        allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
     ) -> int:
@@ -170,11 +170,6 @@ class AbstractAITool(ABC):
             effort: Optional reasoning effort level for the AI tool.
             allowed_commands: Optional list of canonical command patterns to
                 pre-authorize (e.g. ``["myapp:*", "./scripts/check.sh:*"]``).
-            allow_tools: Optional list of tool-native approval patterns from a
-                launch profile (e.g. Copilot's ``"shell(git:*)"``). Unlike
-                ``allowed_commands``, these values are already in an adapter's
-                native grammar and must never be translated as canonical command
-                patterns.
             yolo: If True, skip all permission prompts (YOLO mode).
             plan_mode: If True, start in the tool's read-only plan/approval mode.
             accept_edits: If True, auto-approve file edits while still prompting
@@ -194,6 +189,11 @@ class AbstractAITool(ABC):
             plan_output_dir: Optional filesystem directory in which native plan
                 artifacts must be writable. Session-only, harness-managed, and
                 private-artifact tools reject this requirement before launch.
+            allow_tools: Optional list of tool-native approval patterns from a
+                launch profile (e.g. Copilot's ``"shell(git:*)"``). Unlike
+                ``allowed_commands``, these values are already in an adapter's
+                native grammar and must never be translated as canonical command
+                patterns.
             sandbox: Whether to launch with the tool's sandbox enabled. Only
                 adapters declaring ``supports_sandbox_toggle`` translate this
                 programmatic input into a sandbox-selection flag.

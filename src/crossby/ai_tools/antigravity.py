@@ -85,7 +85,6 @@ class AntigravityAdapter(AbstractAITool):
         trusted_dirs: list[str] | None = None,
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
-        allow_tools: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
         accept_edits: bool = False,
@@ -93,6 +92,7 @@ class AntigravityAdapter(AbstractAITool):
         scene: SceneLaunchContext | None = None,
         network_access: bool = False,
         plan_output_dir: Path | None = None,
+        allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
     ) -> int:

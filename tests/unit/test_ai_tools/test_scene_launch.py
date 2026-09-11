@@ -364,9 +364,7 @@ class TestCopilotSceneLaunch:
         assert CopilotAdapter().scene_launch_args(ctx).args == ("--disable-mcp-server", "github")
         # The unrelated tool is still allowed; neither the excluded server nor
         # either per-tool spelling (documented `(...)` or `__` namespacing) is.
-        allow_values = [
-            result[i + 1] for i, a in enumerate(result) if a == "--allow-tool"
-        ]
+        allow_values = [result[i + 1] for i, a in enumerate(result) if a == "--allow-tool"]
         assert allow_values == ["shell(git:*)"]
 
 

@@ -105,8 +105,7 @@ class SceneLaunchArgs:
 
 @dataclass(frozen=True)
 class SceneLaunchContext:
-    """Everything an adapter needs to render a scene for one launch.
-    """
+    """Everything an adapter needs to render a scene for one launch."""
 
     name: str
     resolved: ResolvedScene

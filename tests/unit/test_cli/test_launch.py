@@ -614,9 +614,7 @@ class TestProfileNativeAllowTools:
             scenes={"narrow": {"mcp": {"include": ["linear"]}}},
         )
         (tmp_path / ".mcp.json").write_text(
-            json.dumps(
-                {"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}}
-            ),
+            json.dumps({"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}}),
             encoding="utf-8",
         )
         # Add Copilot's alternate MCP spelling too; all github variants must go.
