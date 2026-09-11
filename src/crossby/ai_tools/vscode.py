@@ -69,6 +69,7 @@ class VSCodeAdapter(AbstractAITool):
         trusted_dirs: list[str] | None = None,
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
+        allow_tools: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
         accept_edits: bool = False,

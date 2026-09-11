@@ -305,7 +305,7 @@ crossby launch --scene pr-review --tool codex --model gpt-5.2
 | --- | --- |
 | Claude | `--mcp-config <file> --strict-mcp-config`, a `--settings` file of `skillOverrides` (needs `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
-| Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
+| Copilot | `--disable-mcp-server <name>` per deselected server; profile `allow_tools` approvals are rendered independently and entries naming an excluded MCP server are dropped |
 | Cursor | none — falls back to persistent activation (its only knob relocates the whole config base including auth) |
 | OpenCode | none — persistent fallback records the lifecycle but has no tool-config mechanism, so deselected servers stay enabled; `scene clear` removes the fallback state |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
@@ -511,6 +511,12 @@ profiles:
     tool: cursor
     model: haiku
     effort: low
+  cop:                            # → crossby launch cop
+    tool: copilot
+    allow_tools:                  # Copilot-native approval entries
+      - shell(git:*)
+      - github
+      - github(create_issue)
 
 scenes:                           # task-shaped bundles of capabilities
   base:
@@ -542,7 +548,9 @@ handoff_defaults:                 # fed into `crossby handoff`
   token_budget: 32000
 ```
 
-Profiles are named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
+Profiles are named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`, plus Copilot-only `allow_tools`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
+
+Copilot profiles may also set `allow_tools`. Each value uses Copilot's native `--allow-tool` syntax and is passed through unchanged on every Copilot launch, with or without `--scene`; it is not Crossby's canonical `command:arguments` permission format. A scene only filters entries that name MCP servers it excludes, so `shell(git:*)` remains independent of scene visibility.
 
 The `models:` section maps a tool + complexity tier to a model id. Each tier (`easy` / `medium` / `complex` / `very_complex`) also takes an optional `<tier>_effort` override. Effort resolution order is `--effort` flag → `CROSSBY_EFFORT` env → per-command `ai.<command>.effort` → per-tier `<tier>_effort` → global `ai.effort`. Values must be one of `low` / `medium` / `high` / `xhigh` / `max`.
 

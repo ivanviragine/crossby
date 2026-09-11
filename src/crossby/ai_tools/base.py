@@ -140,6 +140,7 @@ class AbstractAITool(ABC):
         trusted_dirs: list[str] | None = None,
         effort: EffortLevel | None = None,
         allowed_commands: list[str] | None = None,
+        allow_tools: list[str] | None = None,
         yolo: bool = False,
         plan_mode: bool = False,
         accept_edits: bool = False,
@@ -169,6 +170,11 @@ class AbstractAITool(ABC):
             effort: Optional reasoning effort level for the AI tool.
             allowed_commands: Optional list of canonical command patterns to
                 pre-authorize (e.g. ``["myapp:*", "./scripts/check.sh:*"]``).
+            allow_tools: Optional list of tool-native approval patterns from a
+                launch profile (e.g. Copilot's ``"shell(git:*)"``). Unlike
+                ``allowed_commands``, these values are already in an adapter's
+                native grammar and must never be translated as canonical command
+                patterns.
             yolo: If True, skip all permission prompts (YOLO mode).
             plan_mode: If True, start in the tool's read-only plan/approval mode.
             accept_edits: If True, auto-approve file edits while still prompting
@@ -232,6 +238,11 @@ class AbstractAITool(ABC):
         if self.capabilities().supports_sandbox_toggle:
             command_kwargs["sandbox"] = sandbox
         cmd = self.build_launch_command(**command_kwargs)
+        # Native profile approvals intentionally compose *around* the public
+        # command-builder hook. This preserves legacy/custom builders while
+        # keeping native values out of allowed_commands_args(), which only
+        # accepts crossby canonical command:arguments patterns.
+        cmd.extend(self.allow_tools_args(allow_tools or [], scene))
         extra_env = self.build_launch_environment(scene=scene_args)
         child_env = {**os.environ, **extra_env} if extra_env else None
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
@@ -484,6 +495,21 @@ class AbstractAITool(ABC):
         tool-specific flags.
 
         Default: no support (returns empty list). Override per tool.
+        """
+        return []
+
+    def allow_tools_args(
+        self,
+        allow_tools: list[str],
+        scene: SceneLaunchContext | None,
+    ) -> list[str]:
+        """Render profile-native tool approvals for one launch.
+
+        ``allow_tools`` entries are intentionally separate from
+        :meth:`allowed_commands_args`: they already use an adapter's native
+        syntax, rather than Crossby's canonical ``command:arguments`` grammar.
+        The optional scene lets an adapter discard an approval whose tool the
+        active scene excluded. Most adapters have no native approval channel.
         """
         return []
 

@@ -106,18 +106,12 @@ class SceneLaunchArgs:
 @dataclass(frozen=True)
 class SceneLaunchContext:
     """Everything an adapter needs to render a scene for one launch.
-
-    ``allow_tools`` carries the resolved profile's approval-layer allow entries
-    (Copilot ``--allow-tool``); an adapter filters out any that name a
-    scene-excluded tool before re-emitting them, so a profile can't re-allow
-    what the scene excluded.
     """
 
     name: str
     resolved: ResolvedScene
     project_root: Path
     sync_data: SyncData
-    allow_tools: tuple[str, ...] = ()
 
     # -- selections -------------------------------------------------------
     def selected(self, concern: str) -> set[str]:
