@@ -383,6 +383,8 @@ class AntigravityCLIAdapter(AbstractAITool):
                 exit_code=0,
                 session_id=conversation_id,
             )
+        raw_artifact_id = response.get("artifact_id")
+        artifact_id = str(raw_artifact_id).strip() or None if raw_artifact_id is not None else None
         return PlanSessionResult(
             tool=self.TOOL_ID,
             version=version,
@@ -392,7 +394,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             artifact_source=PlanArtifactSource.STRUCTURED_OUTPUT,
             binding=PlanSessionBinding.CONVERSATION_ID,
             exit_code=0,
-            artifact_id=(str(response.get("artifact_id")) if response.get("artifact_id") else None),
+            artifact_id=artifact_id,
         )
 
     def accept_edits_args(self) -> list[str]:

@@ -294,7 +294,9 @@ class CodexAdapter(AbstractAITool):
                         "settings": {
                             "model": effective_model,
                             "reasoning_effort": (
-                                request.effort.value if request.effort is not None else None
+                                _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
+                                if request.effort is not None
+                                else None
                             ),
                             "developer_instructions": None,
                         },
@@ -867,9 +869,16 @@ def _answer_codex_approval(
     else:
         response = handler(interaction)
         selected_option = response.option_id or next(iter(response.option_ids), None)
-        if response.outcome is PlanInteractionOutcome.APPROVED or selected_option == "accept":
+        if response.outcome is PlanInteractionOutcome.CANCELLED:
+            decision = "cancel"
+        elif response.outcome in {
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.SKIPPED,
+        }:
+            decision = "decline"
+        elif response.outcome is PlanInteractionOutcome.APPROVED or selected_option == "accept":
             decision = "accept"
-        elif response.outcome is PlanInteractionOutcome.CANCELLED or selected_option == "cancel":
+        elif selected_option == "cancel":
             decision = "cancel"
         else:
             decision = "decline"

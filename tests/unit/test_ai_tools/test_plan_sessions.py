@@ -33,7 +33,7 @@ from crossby.ai_tools import (
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import CapturedProcess, parse_jsonl
-from crossby.models.ai import AIToolID
+from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionKind
 from crossby.utils.versioning import BinaryVersion
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "plan_sessions"
@@ -574,6 +574,20 @@ class TestExactSessionCliCollectors:
         with pytest.raises(PlanArtifactMalformedError, match="schema"):
             AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
 
+    def test_antigravity_normalizes_blank_artifact_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = json.loads((FIXTURES / "antigravity_success.json").read_text())
+        payload["artifact_id"] = "   "
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(payload), ""),
+        )
+
+        result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(_request(tmp_path))
+
+        assert result.artifact_id is None
+
     def test_antigravity_continues_questions_by_exact_conversation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -653,6 +667,22 @@ class TestExactSessionCliCollectors:
         assert "--no-remote-export" in commands[0]
         assert "--deny-tool=*" in commands[0]
         assert result.artifact_path is None
+
+    def test_copilot_temp_directory_errors_are_session_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+
+        def fail_mkdtemp(*_args: Any, **_kwargs: Any) -> str:
+            raise OSError("temporary filesystem is full")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.tempfile.mkdtemp", fail_mkdtemp)
+
+        with pytest.raises(PlanTransportError, match="temporary share directory") as raised:
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(_request(tmp_path))
+
+        assert raised.value.session_id == str(session_id)
 
     def test_copilot_preserves_nested_plan_headings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -770,6 +800,58 @@ class TestProtocolCollectors:
         }
         assert rpc.closed
 
+    def test_codex_maps_max_effort_in_plan_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_success.jsonl")
+
+        AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+            _request(tmp_path, effort=EffortLevel.MAX)
+        )
+
+        turn_start = next(
+            payload
+            for kind, payload in FakeRpc.instances[0].sent
+            if kind == "request" and payload["id"] == 4
+        )
+        assert turn_start["params"]["collaborationMode"]["settings"]["reasoning_effort"] == "xhigh"
+
+    def test_codex_denial_overrides_stale_accept_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        messages.insert(
+            4,
+            {
+                "jsonrpc": "2.0",
+                "id": 70,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thr-exact-123",
+                    "turnId": "turn-exact-123",
+                    "approvalId": "approval-1",
+                    "itemId": "command-1",
+                    "reason": "Run a command?",
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+            _request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="accept",
+            ),
+        )
+
+        assert (
+            "respond",
+            {"id": 70, "result": {"decision": "decline"}},
+        ) in FakeRpc.instances[0].sent
+
     def test_codex_forwards_native_question_ids_and_options(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -858,6 +940,51 @@ class TestProtocolCollectors:
                         "reason": "Plan collected without implementation.",
                     }
                 },
+            },
+        ) in FakeRpc.instances[0].sent
+
+    def test_cursor_denial_overrides_stale_allow_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages.insert(
+            3,
+            {
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "cursor-exact-123",
+                    "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        def deny(interaction: Any) -> PlanInteractionResponse:
+            if interaction.kind is PlanInteractionKind.PERMISSION:
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="allow-once",
+                )
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            )
+
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_request(tmp_path), deny)
+
+        assert (
+            "respond",
+            {
+                "id": 90,
+                "result": {"outcome": {"outcome": "selected", "optionId": "deny-once"}},
             },
         ) in FakeRpc.instances[0].sent
 

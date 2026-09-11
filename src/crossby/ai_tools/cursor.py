@@ -762,7 +762,24 @@ def _answer_cursor_permission(
         )
     else:
         response = handler(interaction)
-        if response.outcome is PlanInteractionOutcome.APPROVED:
+        if response.outcome is PlanInteractionOutcome.CANCELLED:
+            selected = None
+        elif response.outcome in {
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.SKIPPED,
+        }:
+            selected = next(
+                (
+                    option.option_id
+                    for option in options
+                    if any(
+                        word in option.label.lower()
+                        for word in ("deny", "reject", "cancel", "decline")
+                    )
+                ),
+                None,
+            )
+        elif response.outcome is PlanInteractionOutcome.APPROVED:
             selected = (
                 response.option_id
                 or next(iter(response.option_ids), None)

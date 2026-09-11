@@ -173,7 +173,15 @@ class CopilotAdapter(AbstractAITool):
 
         capability = self.capabilities().plan_mode
         session_id = str(uuid.uuid4())
-        temp_dir = Path(tempfile.mkdtemp(prefix="crossby-copilot-plan-"))
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix="crossby-copilot-plan-"))
+        except OSError as exc:
+            raise PlanTransportError(
+                f"GitHub Copilot could not create its temporary share directory: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+            ) from exc
         export_path = temp_dir / f"{session_id}.md"
         base = [
             "copilot",
