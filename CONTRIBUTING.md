@@ -126,11 +126,12 @@ interactive sessions. A complete collector must:
    cases use the typed errors in `ai_tools/plan_mode.py`.
 6. Apply one request-wide deadline to the version probe, initial invocation,
    every protocol or continuation wait, and any subprocess-backed export.
-   Always terminate protocol children, isolate captured POSIX process groups,
-   hard-limit captured stdout/stderr, redact/truncate diagnostics, and remove
-   only run-owned temporary artifacts. Capture-worker joins share the request
-   deadline on every platform; on POSIX, a deadline or output overflow must also
-   terminate descendants retaining inherited pipes. Successful Claude artifact
+   Always terminate protocol children, isolate bounded captured and interactive
+   POSIX subprocesses in run-owned process groups, hard-limit captured
+   stdout/stderr, redact/truncate diagnostics, and remove only run-owned temporary
+   artifacts. Capture-worker joins share the request deadline on every platform;
+   on POSIX, a deadline or output overflow must also terminate descendants
+   retaining inherited pipes. Successful Claude artifact
    directories remain available to the caller, but every failed UUID run
    directory is removed recursively. Catch `subprocess.TimeoutExpired` before
    broader subprocess failures and never stringify it: its command field may
