@@ -267,6 +267,18 @@ class TestNormalizedContract:
         assert "super-secret" not in excerpt
         assert len(excerpt) == 500
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("OPENAI_API_KEY=sk-example", "OPENAI_API_KEY=<redacted>"),
+            ("GITHUB_TOKEN=ghp_example", "GITHUB_TOKEN=<redacted>"),
+        ],
+    )
+    def test_error_excerpt_redacts_provider_prefixed_credentials(
+        self, text: str, expected: str
+    ) -> None:
+        assert safe_error_excerpt(text) == expected
+
     def test_error_excerpt_redacts_authorization_scheme_and_credential(self) -> None:
         excerpt = safe_error_excerpt(
             "request failed: Authorization: Bearer ghp_abcdef; retry denied"
