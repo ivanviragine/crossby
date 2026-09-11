@@ -740,6 +740,7 @@ class TestExactSessionCliCollectors:
                 "## Steps",
                 "1. Inspect.",
                 "2. Implement.",
+                "session_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "",
                 "# Notes",
                 "Exclude this section.",
@@ -764,8 +765,61 @@ class TestExactSessionCliCollectors:
                 "## Steps",
                 "1. Inspect.",
                 "2. Implement.",
+                "session_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ]
         )
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            PlanInteractionOutcome.ANSWERED,
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.CANCELLED,
+            PlanInteractionOutcome.SKIPPED,
+        ],
+    )
+    def test_copilot_discards_stale_answer_after_non_approving_plan_outcome(
+        self,
+        outcome: PlanInteractionOutcome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        approval = json.dumps(
+            {
+                "type": "plan.approval",
+                "id": "approval-1",
+                "session_id": str(exact_uuid),
+                "data": {"id": "approval-1", "prompt": "Implement this plan?"},
+            }
+        )
+        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = FIXTURES / "copilot_share_success.md"
+        runs = iter((approval, success))
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            export_arg = next(value for value in command if value.startswith("--share="))
+            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
+            return CapturedProcess(0, next(runs), "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=outcome,
+                answer="Implement it",
+            ),
+        )
+
+        assert result.session_id == str(exact_uuid)
+        assert commands[1][-2:] == [
+            "--prompt",
+            "Do not implement. Finish and export the plan.",
+        ]
 
     def test_copilot_continuations_share_one_timeout_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -290,7 +290,7 @@ class CopilotAdapter(AbstractAITool):
                             tool_id=self.TOOL_ID,
                             capability=capability,
                         )
-                    answer = response.answer or "Do not implement. Finish and export the plan."
+                    answer = "Do not implement. Finish and export the plan."
                 else:
                     answer = (
                         response.answer
@@ -554,10 +554,19 @@ def _copilot_export_plan(exported: str, session_id: str) -> str | None:
         plan = payload.get("plan")
         return plan if isinstance(plan, str) else None
 
+    plan_markers = [
+        match.start()
+        for pattern in (
+            r"(?is)<!--\s*plan:start\s*-->",
+            r"(?im)^#{1,3}[ \t]+Plan[ \t]*$",
+        )
+        for match in re.finditer(pattern, exported)
+    ]
+    metadata = exported[: min(plan_markers, default=len(exported))]
     metadata_ids = set(
         re.findall(
             r"(?im)^(?:session(?:[_ -]?id)?)\s*:\s*[`\"']?([0-9a-f-]{36})",
-            exported,
+            metadata,
         )
     )
     if metadata_ids != {session_id}:
