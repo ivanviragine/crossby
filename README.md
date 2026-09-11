@@ -380,7 +380,10 @@ default. Cursor and Antigravity CLI encode effort in model IDs, so an explicit
 `effort` also requires an explicit `model`. Antigravity further requires a
 compatible Gemini model whose native effort tier matches the request; missing,
 non-Gemini, unavailable, or conflicting model tiers are rejected before the
-collector launches.
+collector launches. OpenCode collection accepts only `low`, `medium`, and
+`high`: interactive launches retain the legacy `xhigh`/`max` → `high`
+normalization, but a collected session rejects tiers the native `--variant`
+argument cannot preserve exactly.
 
 Support matrix (contracts verified against the listed builds on 2026-09-10):
 

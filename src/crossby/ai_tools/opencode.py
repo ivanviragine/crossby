@@ -62,6 +62,7 @@ class OpenCodeAdapter(AbstractAITool):
             headless_flag="run",
             supports_headless=True,
             supports_effort=True,
+            supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
             supports_resume=True,
             plan_mode=PlanModeCapability(
                 activation=PlanModeActivation.CLI_ARGUMENT,
@@ -225,10 +226,18 @@ class OpenCodeAdapter(AbstractAITool):
         seen_questions: set[str] = set()
         max_continuations = 8
         for continuation_count in range(max_continuations + 1):
+            try:
+                questions = _opencode_questions(events, session_id)
+            except ValueError as exc:
+                raise PlanArtifactMalformedError(
+                    f"OpenCode emitted malformed interaction data: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=0,
+                    session_id=session_id,
+                ) from exc
             pending = [
-                question
-                for question in _opencode_questions(events, session_id)
-                if question.question_id not in seen_questions
+                question for question in questions if question.question_id not in seen_questions
             ]
             if not pending:
                 break
@@ -470,7 +479,7 @@ class OpenCodeAdapter(AbstractAITool):
         return raw_model_id
 
     def effort_args(self, effort: EffortLevel) -> list[str]:
-        """OpenCode uses ``--variant <level>`` (xhigh/max both map to high)."""
+        """OpenCode uses ``--variant <level>`` (xhigh/max map to high for launches)."""
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
 
@@ -537,6 +546,8 @@ def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[P
         prompt = source.get("question") or source.get("prompt")
         if not isinstance(question_id, str) or not isinstance(prompt, str):
             continue
+        if not question_id.strip() or not prompt.strip():
+            raise ValueError("recognized question contained a blank question ID or prompt")
         options = tuple(
             PlanQuestionOption(
                 option_id=str(option.get("id") or option.get("label")),

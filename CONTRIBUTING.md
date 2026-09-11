@@ -129,9 +129,12 @@ interactive sessions. A complete collector must:
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
-headerless JSONL dialect. Keep progress/transcript parsing out of artifact
-parsers: only the adapter's declared authoritative event, export, structured
-field, or isolated path may become `result.plan`.
+headerless JSONL dialect. Its protocol stdout queue is bounded so a child that
+keeps emitting while an interaction callback runs receives pipe backpressure
+instead of growing parent-process memory without limit. Keep
+progress/transcript parsing out of artifact parsers: only the adapter's declared
+authoritative event, export, structured field, or isolated path may become
+`result.plan`.
 
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
@@ -501,6 +504,11 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 | `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
 | `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
 | `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+
+The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
+compatibility. Complete collection accepts only `low`, `medium`, and `high`,
+because `run_plan_session()` rejects a requested effort tier that OpenCode's
+native `--variant` value cannot preserve exactly.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

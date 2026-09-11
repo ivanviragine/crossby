@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import threading
 import uuid
@@ -36,6 +37,7 @@ from crossby.ai_tools import (
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import (
     _STDERR_TAIL_LIMIT,
+    _STDOUT_QUEUE_LIMIT,
     CapturedProcess,
     JsonRpcProcess,
     parse_jsonl,
@@ -363,6 +365,45 @@ class TestNormalizedContract:
 
 
 class TestPlanProcess:
+    def test_stdout_reader_applies_bounded_backpressure_until_closed(self) -> None:
+        blocked = threading.Event()
+
+        class SignalingQueue(queue.Queue[str | None]):
+            def put(
+                self,
+                item: str | None,
+                block: bool = True,
+                timeout: float | None = None,
+            ) -> None:
+                if self.full():
+                    blocked.set()
+                super().put(item, block=block, timeout=timeout)
+
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._stdout_queue = SignalingQueue(maxsize=1)
+        rpc._closing = threading.Event()
+        reader = threading.Thread(target=rpc._read_stdout, args=(StringIO("one\ntwo\n"),))
+
+        reader.start()
+        assert blocked.wait(timeout=1.0)
+        assert rpc._stdout_queue.qsize() == 1
+        rpc._closing.set()
+        reader.join(timeout=1.0)
+
+        assert not reader.is_alive()
+
+    def test_stdout_queue_has_a_fixed_message_limit(self, tmp_path: Path) -> None:
+        with (
+            patch("crossby.ai_tools.plan_process.subprocess.Popen") as popen,
+            patch("crossby.ai_tools.plan_process.threading.Thread"),
+        ):
+            popen.return_value.stdin = StringIO()
+            popen.return_value.stdout = StringIO()
+            popen.return_value.stderr = StringIO()
+            rpc = JsonRpcProcess(["fake-json-rpc"], cwd=tmp_path)
+
+        assert rpc._stdout_queue.maxsize == _STDOUT_QUEUE_LIMIT
+
     def test_stderr_reader_retains_only_a_bounded_tail(self) -> None:
         rpc = object.__new__(JsonRpcProcess)
         rpc._stderr_tail = ""
@@ -581,6 +622,19 @@ class TestExactSessionCliCollectors:
             "--audit-compatibility",
         ]
 
+    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
+    def test_opencode_rejects_unrepresentable_effort_before_collection(
+        self, effort: EffortLevel, tmp_path: Path
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.OPENCODE)
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanSessionUnsupportedError, match=rf"effort='{effort.value}'"),
+        ):
+            adapter.run_plan_session(_request(tmp_path, effort=effort))
+
+        run.assert_not_called()
+
     def test_opencode_rejects_mismatched_export(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -731,6 +785,35 @@ class TestExactSessionCliCollectors:
                     answer="stale answer",
                 ),
             )
+
+    @pytest.mark.parametrize(
+        "interaction",
+        [
+            {"id": " ", "question": "Choose a scope"},
+            {"id": "scope", "question": " "},
+        ],
+        ids=("blank-question-id", "blank-prompt"),
+    )
+    def test_opencode_rejects_blank_question_fields_as_malformed_artifacts(
+        self,
+        interaction: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = json.dumps(
+            {
+                "type": "question",
+                "sessionID": "ses_exact_123",
+                **interaction,
+            }
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(0, event, ""),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
+            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
 
     def test_opencode_checks_completion_after_eighth_continuation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

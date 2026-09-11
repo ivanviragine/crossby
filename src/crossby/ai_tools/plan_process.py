@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import IO, Any, ClassVar
 
 _STDERR_TAIL_LIMIT = 8 * 1024
+_STDOUT_QUEUE_LIMIT = 256
+_QUEUE_PUT_TIMEOUT_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -88,7 +90,7 @@ class JsonRpcProcess:
             self._proc.kill()
             raise OSError("failed to create JSON-RPC stdio pipes")
         self._stdin: IO[str] = self._proc.stdin
-        self._stdout_queue: queue.Queue[str | None] = queue.Queue()
+        self._stdout_queue: queue.Queue[str | None] = queue.Queue(maxsize=_STDOUT_QUEUE_LIMIT)
         self._stderr_tail = ""
         self._stderr_lock = threading.Lock()
         self._closing = threading.Event()
@@ -117,12 +119,23 @@ class JsonRpcProcess:
     def _read_stdout(self, stream: IO[str]) -> None:
         try:
             for line in stream:
-                self._stdout_queue.put(line)
+                if not self._queue_stdout(line):
+                    break
         except ValueError:
             if not self._closing.is_set():
                 raise
         finally:
-            self._stdout_queue.put(None)
+            self._queue_stdout(None)
+
+    def _queue_stdout(self, line: str | None) -> bool:
+        """Queue one stdout record, applying backpressure until read or closed."""
+        while not self._closing.is_set():
+            try:
+                self._stdout_queue.put(line, timeout=_QUEUE_PUT_TIMEOUT_SECONDS)
+            except queue.Full:
+                continue
+            return True
+        return False
 
     def _read_stderr(self, stream: IO[str]) -> None:
         try:
@@ -197,10 +210,10 @@ class JsonRpcProcess:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
                     self._proc.wait(timeout=1.0)
+        self._closing.set()
         readers = (self._stdout_thread, self._stderr_thread)
         for thread in readers:
             thread.join(timeout=0.2)
-        self._closing.set()
         for stream in (self._proc.stdout, self._proc.stderr):
             if stream is not None and not stream.closed:
                 stream.close()
