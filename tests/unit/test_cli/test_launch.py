@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
+from crossby.ai_tools import AbstractAITool
+from crossby.ai_tools.claude import ClaudeAdapter
+from crossby.ai_tools.copilot import CopilotAdapter
 from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
 from crossby.cli.main import app
 from crossby.models.ai import (
@@ -508,6 +512,149 @@ class TestProfileFlag:
 
         assert result.exit_code == 0, result.output
         adapter.launch.assert_called_once()
+
+
+class TestProfileNativeAllowTools:
+    """Real CLI-to-argv coverage for Copilot profile-native approvals."""
+
+    _ALLOW_TOOLS: ClassVar[list[str]] = ["shell(git:*)", "github", "github(create_issue)"]
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    @staticmethod
+    def _allow_values(cmd: list[str]) -> list[str]:
+        return [cmd[index + 1] for index, arg in enumerate(cmd) if arg == "--allow-tool"]
+
+    def _write_config(
+        self,
+        tmp_path: Path,
+        *,
+        tool: str = "copilot",
+        scenes: dict[str, Any] | None = None,
+    ) -> None:
+        config: dict[str, Any] = {
+            "version": 1,
+            "profiles": {"cop": {"tool": tool, "allow_tools": self._ALLOW_TOOLS}},
+        }
+        if scenes is not None:
+            config["scenes"] = scenes
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(config), encoding="utf-8")
+
+    def test_profile_approvals_reach_real_copilot_plain_launch(self, tmp_path: Path) -> None:
+        self._write_config(tmp_path)
+        assert isinstance(AbstractAITool.get("copilot"), CopilotAdapter)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert self._allow_values(run.call_args.args[0]) == self._ALLOW_TOOLS
+
+    def test_positional_profile_approvals_reach_real_copilot_launch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert self._allow_values(run.call_args.args[0]) == self._ALLOW_TOOLS
+
+    def test_plain_and_noop_scene_launches_share_profile_approvals(self, tmp_path: Path) -> None:
+        self._write_config(
+            tmp_path,
+            scenes={"noop": {"profile": "cop", "mcp": {"include": ["github"]}}},
+        )
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            plain = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+            scene = runner.invoke(app, ["launch", str(tmp_path), "--scene", "noop"])
+
+        assert plain.exit_code == 0, plain.output
+        assert scene.exit_code == 0, scene.output
+        plain_cmd, scene_cmd = [call.args[0] for call in run.call_args_list]
+        assert self._allow_values(plain_cmd) == self._ALLOW_TOOLS
+        assert self._allow_values(scene_cmd) == self._ALLOW_TOOLS
+
+    def test_scene_filters_excluded_mcp_approvals_but_not_other_native_values(
+        self, tmp_path: Path
+    ) -> None:
+        self._write_config(
+            tmp_path,
+            scenes={"narrow": {"mcp": {"include": ["linear"]}}},
+        )
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}}),
+            encoding="utf-8",
+        )
+        # Add Copilot's alternate MCP spelling too; all github variants must go.
+        config = yaml.safe_load((tmp_path / ".crossby.yml").read_text(encoding="utf-8"))
+        config["profiles"]["cop"]["allow_tools"].insert(2, "github__create_issue")
+        (tmp_path / ".crossby.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--profile", "cop", "--scene", "narrow"]
+            )
+
+        assert result.exit_code == 0, result.output
+        cmd = run.call_args.args[0]
+        disable_index = cmd.index("--disable-mcp-server")
+        assert cmd[disable_index : disable_index + 2] == ["--disable-mcp-server", "github"]
+        assert self._allow_values(cmd) == ["shell(git:*)"]
+
+    def test_non_copilot_adapter_ignores_profile_native_approvals(self, tmp_path: Path) -> None:
+        self._write_config(tmp_path, tool="claude")
+        assert isinstance(AbstractAITool.get("claude"), ClaudeAdapter)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert "--allow-tool" not in run.call_args.args[0]
 
 
 class TestPlanFlag:

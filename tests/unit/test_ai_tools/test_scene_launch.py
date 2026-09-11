@@ -54,7 +54,6 @@ def _context(
     selected_mcp: tuple[str, ...] = (),
     selected_skills: tuple[str, ...] = (),
     selected_agents: tuple[str, ...] = (),
-    allow_tools: tuple[str, ...] = (),
 ) -> SceneLaunchContext:
     servers = {n: MCPServerConfig(command="run", args=[n]) for n in all_mcp}
     sync_data = SyncData(
@@ -68,7 +67,6 @@ def _context(
         resolved=resolved,
         project_root=project_root,
         sync_data=sync_data,
-        allow_tools=allow_tools,
     )
 
 
@@ -346,31 +344,27 @@ class TestCopilotSceneLaunch:
         assert result.args.count("--disable-mcp-server") == 2
         assert "linear" in result.args
         assert "sentry" in result.args
+        assert "--allow-tool" not in result.args
 
     def test_profile_allow_of_excluded_tool_is_dropped(self, tmp_path: Path) -> None:
         # The scene excludes `github`; the profile allows both `github` and an
         # unrelated shell tool. The emitted argv must resolve this unambiguously:
         # github is disabled and NOT re-allowed, git shell survives.
-        ctx = _context(
-            tmp_path,
-            all_mcp=("github", "linear"),
-            selected_mcp=("linear",),
-            allow_tools=(
+        ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("linear",))
+        result = CopilotAdapter().allow_tools_args(
+            [
                 "github",
                 "github__create_issue",
                 "github(create_issue)",
                 "shell(git:*)",
-            ),
+            ],
+            ctx,
         )
-        result = CopilotAdapter().scene_launch_args(ctx)
 
-        assert list(result.args[:2]) == ["--disable-mcp-server", "github"]
-        assert "--allow-tool" in result.args
+        assert CopilotAdapter().scene_launch_args(ctx).args == ("--disable-mcp-server", "github")
         # The unrelated tool is still allowed; neither the excluded server nor
         # either per-tool spelling (documented `(...)` or `__` namespacing) is.
-        allow_values = [
-            result.args[i + 1] for i, a in enumerate(result.args) if a == "--allow-tool"
-        ]
+        allow_values = [result[i + 1] for i, a in enumerate(result) if a == "--allow-tool"]
         assert allow_values == ["shell(git:*)"]
 
 

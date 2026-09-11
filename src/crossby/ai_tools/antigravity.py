@@ -92,6 +92,7 @@ class AntigravityAdapter(AbstractAITool):
         scene: SceneLaunchContext | None = None,
         network_access: bool = False,
         plan_output_dir: Path | None = None,
+        allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
     ) -> int:
