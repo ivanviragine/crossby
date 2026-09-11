@@ -376,7 +376,8 @@ sandbox confinement, and approval policy are independent request dimensions; a
 collector either preserves a supported choice or rejects it before spawning.
 Unknown and below-floor CLI versions also fail before a harness process starts.
 `PlanSessionRequest` rejects unknown fields instead of silently applying a
-default. For Antigravity CLI, an explicit `effort` also requires an explicit
+default. Cursor and Antigravity CLI encode effort in model IDs, so an explicit
+`effort` also requires an explicit `model`. Antigravity further requires a
 compatible Gemini model whose native effort tier matches the request; missing,
 non-Gemini, unavailable, or conflicting model tiers are rejected before the
 collector launches.
