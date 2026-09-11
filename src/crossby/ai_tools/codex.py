@@ -797,7 +797,12 @@ def _answer_codex_questions(
             selected = next((option for option in options if option.option_id == option_id), None)
             answer_values.append(selected.label if selected is not None else option_id)
         if (
-            response.outcome in {PlanInteractionOutcome.CANCELLED, PlanInteractionOutcome.SKIPPED}
+            response.outcome
+            in {
+                PlanInteractionOutcome.DENIED,
+                PlanInteractionOutcome.CANCELLED,
+                PlanInteractionOutcome.SKIPPED,
+            }
             or not answer_values
         ):
             raise PlanInteractionRequiredError(

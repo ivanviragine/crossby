@@ -659,6 +659,7 @@ def _answer_cursor_question(
             )
         response = handler(interaction)
         if response.outcome in {
+            PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.CANCELLED,
             PlanInteractionOutcome.SKIPPED,
         }:

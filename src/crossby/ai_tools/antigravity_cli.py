@@ -311,6 +311,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             if (
                 answer_response.outcome
                 in {
+                    PlanInteractionOutcome.DENIED,
                     PlanInteractionOutcome.CANCELLED,
                     PlanInteractionOutcome.SKIPPED,
                 }

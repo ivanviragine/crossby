@@ -301,6 +301,7 @@ class CopilotAdapter(AbstractAITool):
                     if (
                         response.outcome
                         in {
+                            PlanInteractionOutcome.DENIED,
                             PlanInteractionOutcome.CANCELLED,
                             PlanInteractionOutcome.SKIPPED,
                         }

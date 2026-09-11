@@ -298,7 +298,9 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        if request.effort is not None and not caps.supports_effort:
+        if request.effort is not None and (
+            not caps.supports_effort or request.effort not in caps.supported_efforts
+        ):
             raise PlanSessionUnsupportedError(
                 f"{caps.display_name} cannot preserve effort={request.effort.value!r} for "
                 "collected plan sessions. Remove effort or use another adapter.",

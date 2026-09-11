@@ -249,6 +249,18 @@ class TestNormalizedContract:
             adapter.run_plan_session(_request(tmp_path, effort=EffortLevel.HIGH))
         run.assert_not_called()
 
+    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
+    def test_unsupported_effort_tier_is_rejected_before_collection(
+        self, effort: EffortLevel, tmp_path: Path
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanSessionUnsupportedError, match=rf"effort='{effort.value}'"),
+        ):
+            adapter.run_plan_session(_request(tmp_path, effort=effort))
+        run.assert_not_called()
+
     def test_error_excerpt_redacts_and_bounds_secrets(self) -> None:
         excerpt = safe_error_excerpt("API_KEY=super-secret " + ("x" * 1000))
         assert excerpt is not None
@@ -836,6 +848,30 @@ class TestExactSessionCliCollectors:
             assert command[command.index("--model") + 1] == "claude-sonnet-4-6"
             assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
 
+    def test_antigravity_denial_discards_stale_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        waiting = (FIXTURES / "antigravity_waiting.json").read_text(encoding="utf-8")
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            return CapturedProcess(0, waiting, "")
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    answer="stale answer",
+                    option_id="yes",
+                ),
+            )
+
+        assert len(commands) == 1
+
     def test_copilot_uuid_share_is_local_and_cleaned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1019,6 +1055,38 @@ class TestExactSessionCliCollectors:
         assert result.session_id == str(exact_uuid)
         assert timeouts == [9.0, 6.0]
 
+    def test_copilot_question_denial_discards_stale_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        question = json.dumps(
+            {
+                "type": "ask_user",
+                "id": "question-1",
+                "session_id": str(exact_uuid),
+                "data": {"id": "scope", "question": "Include compatibility?"},
+            }
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            return CapturedProcess(0, question, "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    answer="stale answer",
+                ),
+            )
+
+        assert len(commands) == 1
+
 
 class TestProtocolCollectors:
     def test_codex_collects_completed_plan_item(
@@ -1139,6 +1207,25 @@ class TestProtocolCollectors:
                 "result": {"answers": {"architecture": {"answers": ["Adapter"]}}},
             },
         ) in FakeRpc.instances[0].sent
+
+    def test_codex_question_denial_discards_stale_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_question.jsonl", headerless=True)
+
+        with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="adapter",
+                ),
+            )
+
+        assert FakeRpc.instances[0].closed
+        assert not any(
+            kind == "respond" and payload["id"] == 71 for kind, payload in FakeRpc.instances[0].sent
+        )
 
     def test_codex_rejects_cross_turn_plan_and_closes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1298,3 +1385,36 @@ class TestProtocolCollectors:
                 },
             },
         ) in FakeRpc.instances[0].sent
+
+    def test_cursor_question_denial_discards_stale_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_question.jsonl")
+
+        result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="api",
+            ),
+        )
+
+        assert result.artifact_id == "plan-tool-exact-123"
+        assert (
+            "respond",
+            {
+                "id": 90,
+                "result": {
+                    "outcome": {
+                        "outcome": "skipped",
+                        "reason": "Question was not answered.",
+                    }
+                },
+            },
+        ) in FakeRpc.instances[0].sent
+        assert not any(
+            kind == "respond"
+            and payload["id"] == 90
+            and payload["result"]["outcome"]["outcome"] == "answered"
+            for kind, payload in FakeRpc.instances[0].sent
+        )
