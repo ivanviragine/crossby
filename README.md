@@ -375,6 +375,11 @@ Neither surface treats prompt text such as `/plan` as activation. Plan mode,
 sandbox confinement, and approval policy are independent request dimensions; a
 collector either preserves a supported choice or rejects it before spawning.
 Unknown and below-floor CLI versions also fail before a harness process starts.
+`PlanSessionRequest` rejects unknown fields instead of silently applying a
+default. For Antigravity CLI, an explicit `effort` also requires an explicit
+compatible Gemini model whose native effort tier matches the request; missing,
+non-Gemini, unavailable, or conflicting model tiers are rejected before the
+collector launches.
 
 Support matrix (contracts verified against the listed builds on 2026-09-10):
 
