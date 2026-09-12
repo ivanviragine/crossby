@@ -851,6 +851,43 @@ class TestPlanProcess:
 
 
 class TestClaudeCollector:
+    @pytest.mark.skipif(os.name != "posix", reason="directory-descriptor contract")
+    def test_isolated_directory_creation_is_anchored_to_validated_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        working_dir = tmp_path / "workspace"
+        working_dir.mkdir()
+        root = working_dir / ".crossby" / "plan-sessions"
+        original_root = root.with_name("original-plan-sessions")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        real_mkdir = os.mkdir
+        raced = False
+
+        def replace_root_before_session_mkdir(
+            path: Any,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal raced
+            if not raced and Path(path).name == str(session_id):
+                raced = True
+                root.rename(original_root)
+                root.symlink_to(outside, target_is_directory=True)
+            real_mkdir(path, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr("crossby.ai_tools.claude.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(os, "mkdir", replace_root_before_session_mkdir)
+
+        with pytest.raises(PlanBindingMismatchError, match=r"plan root.*replaced"):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(working_dir))
+
+        assert raced
+        assert not (outside / str(session_id)).exists()
+        assert list(original_root.iterdir()) == []
+
     @pytest.mark.parametrize(
         ("failure", "error"),
         [
@@ -1029,20 +1066,20 @@ class TestClaudeCollector:
         output_dir.mkdir()
         session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
         run_dir = output_dir / str(session_id)
-        original_mkdir = Path.mkdir
+        original_mkdir = os.mkdir
 
         def fake_mkdir(
-            path: Path,
+            path: Any,
             mode: int = 0o777,
-            parents: bool = False,
-            exist_ok: bool = False,
+            *,
+            dir_fd: int | None = None,
         ) -> None:
-            if path == run_dir:
+            if Path(path).name == str(session_id):
                 raise PermissionError("read-only plan root")
-            original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+            original_mkdir(path, mode, dir_fd=dir_fd)
 
         monkeypatch.setattr("crossby.ai_tools.claude.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+        monkeypatch.setattr(os, "mkdir", fake_mkdir)
 
         with pytest.raises(PlanTransportError, match="isolated plan directory") as raised:
             AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(
@@ -2106,6 +2143,55 @@ class TestProtocolCollectors:
             "respond",
             {"id": 70, "result": {"decision": "decline"}},
         ) in FakeRpc.instances[0].sent
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                option_id="fabricated",
+            ),
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                option_ids=("accept", "decline"),
+            ),
+        ],
+        ids=("unknown-option", "multiple-options"),
+    )
+    def test_codex_rejects_invalid_answered_approval_options(
+        self,
+        response: PlanInteractionResponse,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        messages.insert(
+            4,
+            {
+                "id": 70,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thr-exact-123",
+                    "turnId": "turn-exact-123",
+                    "approvalId": "approval-1",
+                    "itemId": "command-1",
+                    "reason": "Run a command?",
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanInteractionRequiredError, match="exactly one valid native"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path), lambda _interaction: response
+            )
+
+        assert FakeRpc.instances[0].closed
+        assert not any(
+            kind == "respond" and payload["id"] == 70 for kind, payload in FakeRpc.instances[0].sent
+        )
 
     def test_codex_forwards_native_question_ids_and_options(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

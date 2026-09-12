@@ -73,7 +73,7 @@ def detect_binary_version_info(
             timeout=min(timeout_seconds, _VERSION_TIMEOUT_S),
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         logger.debug("version.probe_failed", binary=binary, error=str(exc))
         return None
     if proc.returncode != 0:

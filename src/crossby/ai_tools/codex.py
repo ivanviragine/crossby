@@ -898,7 +898,6 @@ def _answer_codex_approval(
         )
     else:
         response = handler(interaction)
-        selected_option = response.option_id or next(iter(response.option_ids), None)
         if response.outcome is PlanInteractionOutcome.CANCELLED:
             decision = "cancel"
         elif response.outcome in {
@@ -906,10 +905,19 @@ def _answer_codex_approval(
             PlanInteractionOutcome.SKIPPED,
         }:
             decision = "decline"
-        elif response.outcome is PlanInteractionOutcome.APPROVED or selected_option == "accept":
+        elif response.outcome is PlanInteractionOutcome.APPROVED:
             decision = "accept"
-        elif selected_option == "cancel":
-            decision = "cancel"
         else:
-            decision = "decline"
+            try:
+                selected_options = validate_plan_option_selection(interaction, response)
+                if len(selected_options) != 1:
+                    raise ValueError("permission response must select exactly one option")
+            except ValueError as exc:
+                raise PlanInteractionRequiredError(
+                    "Codex permission decisions require exactly one valid native option ID.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                ) from exc
+            decision = selected_options[0]
     rpc.respond(message["id"], {"decision": decision})

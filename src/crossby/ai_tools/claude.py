@@ -193,11 +193,22 @@ class ClaudeAdapter(AbstractAITool):
                 capability=capability,
                 requested_dir=root,
             )
+        root_fd: int | None = None
+        root_stat: os.stat_result | None = None
         try:
             root.mkdir(parents=True, exist_ok=True)
+            if os.name == "posix":
+                root_stat = root.lstat()
+                if not stat.S_ISDIR(root_stat.st_mode):
+                    raise OSError("plan root is not a directory")
+                root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                if not os.path.samestat(root_stat, os.fstat(root_fd)):
+                    raise OSError("plan root was replaced while opening it")
         except OSError as exc:
+            if root_fd is not None:
+                os.close(root_fd)
             raise PlanTransportError(
-                f"Claude Code plan root could not be created: {exc}",
+                f"Claude Code plan root could not be created or opened safely: {exc}",
                 tool_id=self.TOOL_ID,
                 capability=capability,
                 paths=(root,),
@@ -205,8 +216,13 @@ class ClaudeAdapter(AbstractAITool):
         session_id = str(uuid.uuid4())
         run_dir = root / session_id
         try:
-            run_dir.mkdir(parents=False, exist_ok=False)
+            if root_fd is not None:
+                os.mkdir(session_id, dir_fd=root_fd)
+            else:
+                run_dir.mkdir(parents=False, exist_ok=False)
         except OSError as exc:
+            if root_fd is not None:
+                os.close(root_fd)
             raise PlanTransportError(
                 f"Claude Code isolated plan directory could not be created: {exc}",
                 tool_id=self.TOOL_ID,
@@ -218,32 +234,56 @@ class ClaudeAdapter(AbstractAITool):
         succeeded = False
         run_fd: int | None = None
         try:
-            run_stat = run_dir.lstat()
+            run_stat = (
+                os.stat(session_id, dir_fd=root_fd, follow_symlinks=False)
+                if root_fd is not None
+                else run_dir.lstat()
+            )
             if not stat.S_ISDIR(run_stat.st_mode):
                 raise OSError("isolated plan directory was replaced before launch")
             if os.name == "posix":
-                run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                run_fd = os.open(
+                    session_id if root_fd is not None else run_dir,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=root_fd,
+                )
                 if not os.path.samestat(run_stat, os.fstat(run_fd)):
                     raise OSError("isolated plan directory was replaced before launch")
 
             def validate_run_directory() -> None:
                 try:
                     current = run_dir.lstat()
+                    anchored = (
+                        os.stat(session_id, dir_fd=root_fd, follow_symlinks=False)
+                        if root_fd is not None
+                        else current
+                    )
+                    current_root = root.lstat() if root_stat is not None else None
                 except OSError:
                     current = None
+                    anchored = None
+                    current_root = None
                 if (
                     current is None
+                    or anchored is None
                     or not stat.S_ISDIR(current.st_mode)
                     or not os.path.samestat(run_stat, current)
+                    or not os.path.samestat(run_stat, anchored)
+                    or (
+                        root_stat is not None
+                        and (current_root is None or not os.path.samestat(root_stat, current_root))
+                    )
                 ):
                     raise PlanBindingMismatchError(
-                        "Claude Code's isolated plan directory was replaced during collection.",
+                        "Claude Code's plan root or isolated plan directory was replaced during "
+                        "collection.",
                         tool_id=self.TOOL_ID,
                         capability=capability,
                         session_id=session_id,
                         paths=(run_dir,),
                     )
 
+            validate_run_directory()
             command = self.build_launch_command(
                 model=request.model,
                 initial_message=request.prompt,
@@ -394,7 +434,12 @@ class ClaudeAdapter(AbstractAITool):
                 # Retain failed/partial artifacts for inspection. Removing only
                 # an empty directory cannot destroy a replacement run's files.
                 with suppress(OSError):
-                    run_dir.rmdir()
+                    if root_fd is not None:
+                        os.rmdir(session_id, dir_fd=root_fd)
+                    else:
+                        run_dir.rmdir()
+            if root_fd is not None:
+                os.close(root_fd)
 
     def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
         """Collapse Crossby's Claude settings fragments into one settings source.

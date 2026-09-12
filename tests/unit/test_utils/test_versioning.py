@@ -118,3 +118,12 @@ class TestDetectBinaryVersion:
 
         monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
         assert versioning.detect_binary_version("x") is None
+
+    def test_output_decode_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
+        assert versioning.detect_binary_version_info("x") is None
