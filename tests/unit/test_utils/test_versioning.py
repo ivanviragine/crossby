@@ -45,6 +45,39 @@ class TestDetectBinaryVersion:
         monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
         assert versioning.detect_binary_version("claude") == (2, 1, 218)
 
+    def test_info_preserves_exact_version_line_and_normalized_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+
+        def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Cursor Agent 2026.09.02-c22c1a3\nmore output\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+        detected = versioning.detect_binary_version_info("agent")
+        assert detected is not None
+        assert detected.normalized == (2026, 9, 2)
+        assert detected.text == "Cursor Agent 2026.09.02-c22c1a3"
+        assert detected.raw == detected.text
+
+    def test_caller_can_shorten_probe_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+        observed: list[float] = []
+
+        def fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            observed.append(float(kwargs["timeout"]))
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="v1.2.3", stderr="")
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+
+        assert versioning.detect_binary_version_info("agent", timeout_seconds=0.25) is not None
+        assert observed == [0.25]
+
     def test_falls_back_to_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
 
@@ -85,3 +118,12 @@ class TestDetectBinaryVersion:
 
         monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
         assert versioning.detect_binary_version("x") is None
+
+    def test_output_decode_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
+        assert versioning.detect_binary_version_info("x") is None

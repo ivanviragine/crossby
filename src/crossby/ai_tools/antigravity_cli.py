@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import time
 import warnings
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    parse_plan_question_options,
+    validate_plan_option_selection,
+)
 from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
@@ -15,8 +23,18 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanInteraction,
+    PlanInteractionKind,
+    PlanInteractionOutcome,
+    PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
+    PlanRequestBehavior,
+    PlanSessionBinding,
+    PlanSessionRequest,
+    PlanSessionResult,
+    PlanSessionTransport,
     TokenUsage,
 )
 
@@ -113,16 +131,21 @@ class AntigravityCLIAdapter(AbstractAITool):
                 version_requirement="Antigravity CLI exposing --mode plan.",
                 verified_version="1.2.0",
                 initial_prompt_after_activation=True,
-                artifact_location=PlanArtifactLocation.PRIVATE,
+                artifact_location=PlanArtifactLocation.SESSION,
                 artifact_location_detail=(
-                    "agy confines native plan artifacts to its per-conversation brain directory; "
-                    "--add-dir does not relocate them into the requested workspace."
+                    "Crossby accepts only schema-validated structured_output bound to the "
+                    "conversation ID emitted by this invocation."
                 ),
-                artifact_path_template=("~/.gemini/antigravity-cli/brain/<conversation-id>/"),
                 remediation=(
-                    "Use the private brain artifact after the session, or choose Claude when a "
+                    "Use run_plan_session() for structured collection, or choose Claude when a "
                     "specific filesystem output directory is required."
                 ),
+                transport=PlanSessionTransport.HEADLESS_CLI,
+                artifact_source=PlanArtifactSource.STRUCTURED_OUTPUT,
+                binding=PlanSessionBinding.CONVERSATION_ID,
+                interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
             ),
             supports_accept_edits=True,
             # agy exposes a Claude-style hook system (PreToolUse/PostToolUse/
@@ -160,6 +183,262 @@ class AntigravityCLIAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """agy's ``--mode`` flag accepts ``accept-edits`` or ``plan``."""
         return ["--mode", "plan"]
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Collect schema-validated output from one exact agy conversation."""
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactMalformedError,
+            PlanBindingMismatchError,
+            PlanInteractionRequiredError,
+            PlanSessionUnsupportedError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import run_captured
+
+        capability = self.capabilities().plan_mode
+        if request.model is None or not request.model.strip() or request.effort is None:
+            raise PlanSessionUnsupportedError(
+                "Antigravity CLI requires an explicit model and effort for collected plan "
+                "sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if not _agy_model_encodes_effort(request.model, request.effort):
+            raise PlanSessionUnsupportedError(
+                f"Antigravity CLI cannot preserve effort={request.effort.value!r} with "
+                f"{request.model!r}. Supply a compatible Gemini model/tier.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"plan": {"type": "string", "minLength": 1}},
+            "required": ["plan"],
+            "additionalProperties": False,
+        }
+        command = [
+            "agy",
+            "--print",
+            request.prompt,
+            "--mode",
+            "plan",
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(schema, separators=(",", ":")),
+        ]
+        effective_model = self.resolve_effort_model(request.model, request.effort)
+        if effective_model:
+            command.extend(("--model", effective_model))
+        for path in request.trusted_dirs:
+            command.extend(("--add-dir", str(path)))
+
+        conversation_id: str | None = None
+        response: dict[str, Any] | None = None
+        deadline = time.monotonic() + request.timeout_seconds
+        for _continuation in range(9):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "Antigravity CLI plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=conversation_id,
+                )
+            try:
+                run = run_captured(
+                    command,
+                    cwd=request.working_dir,
+                    timeout=remaining,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlanTransportError(
+                    f"Antigravity CLI plan process timed out after {exc.timeout} seconds.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=conversation_id,
+                ) from None
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PlanTransportError(
+                    f"Antigravity CLI plan process failed: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=conversation_id,
+                ) from exc
+            if run.returncode != 0:
+                raise PlanTransportError(
+                    f"Antigravity CLI exited with status {run.returncode}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                    stderr=run.stderr,
+                )
+            try:
+                loaded = json.loads(run.stdout)
+            except json.JSONDecodeError as exc:
+                raise PlanArtifactMalformedError(
+                    f"Antigravity CLI output was not valid JSON: {exc.msg}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                ) from exc
+            if not isinstance(loaded, dict):
+                raise PlanArtifactMalformedError(
+                    "Antigravity CLI JSON output root was not an object.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                )
+            response = loaded
+            emitted_id = _agy_conversation_id(response)
+            if not emitted_id:
+                raise PlanArtifactMalformedError(
+                    "Antigravity CLI output omitted conversation_id.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                )
+            if conversation_id is not None and emitted_id != conversation_id:
+                raise PlanBindingMismatchError(
+                    "Antigravity CLI continuation changed the captured conversation ID.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                )
+            conversation_id = emitted_id
+            if not _agy_waiting(response):
+                break
+            try:
+                interaction = _agy_interaction(response, conversation_id)
+            except ValueError as exc:
+                raise PlanArtifactMalformedError(
+                    "Antigravity CLI emitted malformed interaction data.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=run.returncode,
+                    session_id=conversation_id,
+                ) from exc
+            if interaction_handler is None:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI requires an answer to continue the planning conversation.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            answer_response = interaction_handler(interaction)
+            if answer_response.outcome in {
+                PlanInteractionOutcome.DENIED,
+                PlanInteractionOutcome.CANCELLED,
+                PlanInteractionOutcome.SKIPPED,
+            }:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI planning question was left unanswered.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            try:
+                selected_ids = validate_plan_option_selection(interaction, answer_response)
+            except ValueError as exc:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI planning question requires valid native option IDs.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                ) from exc
+            answer = answer_response.answer or ", ".join(selected_ids) or None
+            if not answer:
+                raise PlanInteractionRequiredError(
+                    "Antigravity CLI planning question was left unanswered.",
+                    interaction=interaction,
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            command = [
+                "agy",
+                "--conversation",
+                conversation_id,
+                "--print",
+                answer,
+                "--output-format",
+                "json",
+                "--json-schema",
+                json.dumps(schema, separators=(",", ":")),
+            ]
+            if effective_model:
+                command.extend(("--model", effective_model))
+            for path in request.trusted_dirs:
+                command.extend(("--add-dir", str(path)))
+        else:
+            raise PlanTransportError(
+                "Antigravity CLI exceeded the bounded question-continuation limit.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=conversation_id,
+            )
+
+        assert response is not None and conversation_id is not None
+        if not _agy_success(response):
+            raise PlanTransportError(
+                f"Antigravity CLI ended with terminal status {response.get('status')!r}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=0,
+                session_id=conversation_id,
+            )
+        schema_echo = response.get("schema") or response.get("json_schema")
+        if isinstance(schema_echo, str):
+            try:
+                schema_echo = json.loads(schema_echo)
+            except json.JSONDecodeError:
+                schema_echo = None
+        if schema_echo != schema:
+            raise PlanArtifactMalformedError(
+                "Antigravity CLI did not echo the requested plan schema exactly.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=0,
+                session_id=conversation_id,
+            )
+        structured = response.get("structured_output")
+        plan = structured.get("plan") if isinstance(structured, dict) else None
+        if (
+            not isinstance(structured, dict)
+            or set(structured) != {"plan"}
+            or not isinstance(plan, str)
+            or not plan.strip()
+        ):
+            raise PlanArtifactMalformedError(
+                "Antigravity CLI structured_output did not match the requested plan schema.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=0,
+                session_id=conversation_id,
+            )
+        raw_artifact_id = response.get("artifact_id")
+        artifact_id = str(raw_artifact_id).strip() or None if raw_artifact_id is not None else None
+        return PlanSessionResult(
+            tool=self.TOOL_ID,
+            version=version,
+            plan=plan,
+            session_id=conversation_id,
+            native_mode="--mode plan",
+            artifact_source=PlanArtifactSource.STRUCTURED_OUTPUT,
+            binding=PlanSessionBinding.CONVERSATION_ID,
+            exit_code=0,
+            artifact_id=artifact_id,
+        )
 
     def accept_edits_args(self) -> list[str]:
         """agy's ``--mode accept-edits`` auto-applies edits on the execution-mode
@@ -280,3 +559,58 @@ class AntigravityCLIAdapter(AbstractAITool):
         parseable text, so this mirrors the known Gemini-CLI
         transcript-persistence limitation for a different underlying reason."""
         return TokenUsage()
+
+
+def _agy_model_encodes_effort(model: str | None, effort: EffortLevel) -> bool:
+    """Whether *model* can preserve an explicit collected-session effort."""
+    if model is None or model in _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS:
+        return False
+    base, suffix_effort = _split_effort_suffix(model)
+    tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
+    return (
+        tiers is not None and effort in tiers and (suffix_effort is None or suffix_effort is effort)
+    )
+
+
+def _agy_conversation_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("conversation_id") or payload.get("conversationId")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _agy_waiting(payload: dict[str, Any]) -> bool:
+    return _agy_status(payload) in {"waiting", "waiting_for_input", "input_required"} or bool(
+        payload.get("waiting_for_input")
+    )
+
+
+def _agy_success(payload: dict[str, Any]) -> bool:
+    return _agy_status(payload) in {"success", "completed"} and not bool(payload.get("is_error"))
+
+
+def _agy_status(payload: dict[str, Any]) -> str | None:
+    value = payload.get("status")
+    return value.strip().lower() if isinstance(value, str) else None
+
+
+def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInteraction:
+    raw_question = payload.get("question")
+    question = raw_question if isinstance(raw_question, dict) else payload
+    prompt = _agy_required_question_field(question, "prompt", "question", "message")
+    question_id = _agy_required_question_field(question, "id", "question_id")
+    options = parse_plan_question_options(question.get("options"))
+    return PlanInteraction(
+        kind=PlanInteractionKind.QUESTION,
+        question_id=str(question_id),
+        prompt=str(prompt or "Antigravity CLI requires input to continue planning."),
+        options=options,
+        session_id=conversation_id,
+    )
+
+
+def _agy_required_question_field(question: dict[str, Any], *names: str) -> str:
+    """Return the first emitted non-blank string alias for a required question field."""
+    for name in names:
+        value = question.get(name)
+        if isinstance(value, str) and value.strip():
+            return value
+    raise ValueError(f"missing non-blank question field: {'/'.join(names)}")

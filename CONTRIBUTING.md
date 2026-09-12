@@ -76,7 +76,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning is a separate fail-closed contract: `validate_plan_mode_request()` is shared by the builder, launcher, and CLI, probes the installed binary version for supported adapters, and rejects unknown or older-than-verified builds. `AIToolCapabilities.plan_mode` describes the selector, conservative verified-version floor, initial-prompt ordering, artifact location, and remediation; capability models forbid unknown fields so the removed `supports_plan_mode=` constructor keyword fails loudly instead of being ignored.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `AIToolCapabilities.plan_mode` declares these dimensions independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -97,6 +97,134 @@ CLI command
 
 Keep these separate when adding launch logic.
 
+### Collected native plan sessions
+
+`run_plan_session(PlanSessionRequest, interaction_handler)` is the integration
+boundary for automation. Do not change `launch()` to return an artifact: its
+exit-code behavior is public and intentionally remains suitable for human
+interactive sessions. A complete collector must:
+
+1. Activate the documented native mode before the first planning turn. Prompt
+   prefixes and slash-command text are never selectors.
+2. Declare collector activation, transport, artifact source, exact binding,
+   interaction support, sandbox/approval behavior, and the exact
+   `supported_approval_policies` in `PlanModeCapability`. If any requested
+   policy cannot be preserved, reject it before process creation.
+3. Bind collection to an identifier or isolated location created or returned by
+   that invocation. Never inspect a global "latest" plan/session, call an
+   ID-less export, use prefix/name matching, or scrape a harness's private
+   storage as a fallback.
+4. Surface native questions through `PlanInteractionHandler`, preserving native
+   question and option IDs. Model final plan approval as
+   `PlanInteractionKind.PLAN_APPROVAL`; collection must never translate it into
+   permission to implement. Never infer interactive consent from a TTY: callers
+   must explicitly pass `terminal_interaction_handler` when terminal input is
+   intentional.
+5. Return `PlanSessionResult` with non-blank Markdown, the exact text from the
+   single version probe, native-mode evidence, and all available binding IDs.
+   Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
+   cases use the typed errors in `ai_tools/plan_mode.py`.
+6. Apply one request-wide deadline to the version probe, initial invocation,
+   every protocol read/write or continuation wait, and any subprocess-backed export.
+   Always terminate protocol children, isolate captured, interactive, and protocol
+   POSIX subprocesses in run-owned process groups, hard-limit captured
+   stdout/stderr, redact/truncate diagnostics, and remove only run-owned temporary
+   artifacts. Capture-worker joins share the request deadline on every platform;
+   on POSIX, a deadline or output overflow must also terminate descendants
+   retaining inherited pipes, including when their parent already exited.
+   Claude retains successful and partial artifacts and removes only empty UUID
+   directories after failure. Catch `subprocess.TimeoutExpired` before
+   broader subprocess failures and never stringify it: its command field may
+   contain a prompt or continuation answer.
+
+Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
+strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
+headerless JSONL dialect. Captured CLI stdout and stderr have hard byte limits;
+protocol stdout has a per-frame cap and a fixed-size queue so a child that keeps
+emitting while an interaction callback runs receives pipe backpressure instead
+of growing parent-process memory without limit. Protocol stderr is consumed in
+bounded chunks and retained only as a tail; a frame overflow terminates the
+owned process group. Bound protocol writes too: a server that stops reading
+stdin must not trap collection past its deadline. Close stream wrappers only
+after their worker threads stop. Read file-backed plan artifacts through the
+bounded helper before UTF-8 decoding; check regular-file identity and reject
+symlinks/replacements. Claude holds a POSIX directory descriptor from before
+launch and reads relative to it so path replacement cannot redirect collection.
+Keep progress/transcript parsing out of artifact parsers: only
+the adapter's declared authoritative event, export, structured field, or
+isolated path may become `result.plan`.
+
+Lifecycle completion is adapter-specific and must be explicit. Codex waits for
+the matching successful `turn/completed`, rejects a second completed plan item,
+then acknowledges `thread/backgroundTerminals/clean` before returning. Copilot
+requires one UUID-bound `result` event with `status="completed"` before reading
+the local share. Its `--prompt` transport cannot relay tool permission prompts,
+so collection supports only `approval_policy="never"` and runs it in a
+run-owned no-network sandbox with hooks and external MCP disabled. The
+model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell
+permissions are also explicitly denied.
+
+OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
+then creates one native session and selects `agent="plan"` in `prompt_async`.
+The verified `run --format json` command disables questions and cannot implement
+the interaction contract. The native question API preserves `multiple` and
+returns selected labels as arrays; batched question IDs use the native request ID
+plus the question index. Inspect the originating tool call to distinguish
+`plan_exit` from an ordinary question, and never approve a switch to building.
+After a successful terminal plan message, export only that exact session and
+require the exported artifact to match the terminal message ID. Native API calls,
+question handling, and export share one deadline. HTTP response bodies are bounded.
+
+Every complete collector needs sanitized captures from its verified release
+under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
+status casing, plus contract tests covering success, malformed output,
+missing/duplicate artifacts, mismatched identifiers,
+interaction-required behavior, process cleanup, and independent sandbox and
+approval choices. Seed decoy sessions/files to prove exact binding. Tests for an
+unknown or below-floor version must assert that no adapter process was created
+after the version-probe subprocess.
+
+Treat recognized interaction envelopes as protocol data: required identifiers,
+prompts, and every native option must retain their documented types and shape.
+Do not silently drop malformed options, and validate every callback selection
+against the native option IDs before resuming or responding.
+
+When an upstream protocol changes, capture a sanitized fixture from the new
+release, update the parser and positive/negative tests, then raise
+`verified_version` to the oldest release whose exact shape the adapter supports.
+Do not lower or bypass the runtime gate merely because a similarly named CLI
+flag exists in an older build. Record the newly verified selector and protocol
+shape in the README support matrix.
+
+Authenticated smoke tests are opt-in because they use the developer's normal
+CLI credentials and can consume paid model tokens. Authenticate each selected
+harness first (and configure an OpenCode provider/model), then run only the
+tools you intend to exercise in disposable temporary repositories:
+
+```bash
+CROSSBY_PLAN_SMOKE_TOOLS=codex,cursor \
+CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
+  uv run pytest -s tests/integration/test_plan_sessions_smoke.py
+```
+
+The answer variable is needed only when a harness asks an open-ended informational
+planning question. For option-based questions, the smoke handler selects the first
+emitted native option; final plan and permission requests are denied.
+The Copilot case deliberately requests a sentinel write and asserts that its
+read-only collector leaves the disposable workspace unchanged.
+Never enable these tests in the default or unauthenticated CI suite.
+
+OpenCode also has a deterministic native test that uses a local model stub and
+isolated configuration/data directories, without credentials or paid calls:
+
+```bash
+CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
+  uv run pytest tests/integration/test_opencode_plan_http.py
+```
+
+It requires the verified OpenCode binary and exercises a real native multi-select
+question, its reply, and exact-session export.
+
 ## Adding a New AI Tool
 
 The adapter pattern is designed so adding a tool is a single-file change.
@@ -113,14 +241,14 @@ The adapter pattern is designed so adding a tool is a single-file change.
      maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this
      hook. Adapters without the capability may retain a pre-toggle
      `build_launch_command()` override: `launch()` does not forward `sandbox` to it.
-   - If native plan mode is supported, override `plan_mode_args()` with the real
-     selector. Never synthesize a slash-command prompt. The shared validator
-     compares the installed `--version` result with `verified_version`, so add
-     old/unknown-version no-spawn tests alongside command-composition coverage.
-     If plan artifacts live
-     outside ordinary workspace paths, describe the private path and any
-     export/import command in the typed capability; reject `plan_output_dir`
-     when the requested location cannot be guaranteed.
+   - If activation-only native plan mode is supported, override
+     `plan_mode_args()` with the real selector. Never synthesize a slash-command
+     prompt. For complete collection, also declare the collector fields and
+     override `_run_plan_session()` according to the obligations above. The
+     shared validators compare the installed `--version` result with
+     `verified_version`, so add old/unknown-version no-spawn tests alongside
+     command-composition coverage. Describe artifact provenance truthfully and
+     reject `plan_output_dir` when the requested location cannot be guaranteed.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
@@ -435,6 +563,17 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 | `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
 | `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
 | `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+
+The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
+compatibility. Complete collection accepts only `low`, `medium`, and `high`,
+because `run_plan_session()` rejects a requested effort tier that OpenCode's
+native `variant` value cannot preserve exactly.
+
+The Cursor entries also describe interactive launch compatibility. Complete
+collection never collapses two requested tiers onto that generic mapping: it
+passes an already tiered model unchanged or adds Cursor's documented
+`[effort=<tier>]` model override. Conflicting tiers, `auto`, and unknown
+unparameterized models are rejected before the ACP process starts.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

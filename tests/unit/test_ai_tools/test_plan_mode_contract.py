@@ -19,7 +19,9 @@ from crossby.models.ai import (
     AIToolID,
     EffortLevel,
     PlanArtifactLocation,
+    PlanArtifactSource,
     PlanModeActivation,
+    PlanSessionBinding,
 )
 
 SUPPORTED = {
@@ -30,6 +32,14 @@ SUPPORTED = {
     AIToolID.ANTIGRAVITY_CLI: ("--mode", "plan"),
 }
 UNSUPPORTED = {AIToolID.CODEX, AIToolID.VSCODE, AIToolID.ANTIGRAVITY}
+COLLECTED = {
+    AIToolID.CLAUDE,
+    AIToolID.CODEX,
+    AIToolID.CURSOR,
+    AIToolID.COPILOT,
+    AIToolID.OPENCODE,
+    AIToolID.ANTIGRAVITY_CLI,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -71,23 +81,31 @@ class TestPlanModeCapabilityMatrix:
         for tool_id, expected in SUPPORTED.items():
             assert tuple(AbstractAITool.get(tool_id).plan_mode_args()) == expected
 
-    def test_antigravity_private_artifact_contract_is_exportable_metadata(self) -> None:
+    def test_antigravity_uses_structured_conversation_output(self) -> None:
         capability = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).capabilities().plan_mode
-        assert capability.artifact_location is PlanArtifactLocation.PRIVATE
-        assert capability.artifact_path_template == (
-            "~/.gemini/antigravity-cli/brain/<conversation-id>/"
-        )
+        assert capability.artifact_location is PlanArtifactLocation.SESSION
+        assert capability.artifact_source is PlanArtifactSource.STRUCTURED_OUTPUT
+        assert capability.binding is PlanSessionBinding.CONVERSATION_ID
         assert capability.export_command is None
         assert capability.import_command is None
-        assert "filesystem output directory" in capability.remediation.lower()
+        assert "structured collection" in capability.remediation.lower()
+
+    def test_complete_plan_session_support_is_distinct_from_activation(self) -> None:
+        for tool_id in AIToolID:
+            caps = AbstractAITool.get(tool_id).capabilities()
+            assert caps.supports_plan_session is (tool_id in COLLECTED)
+        codex = AbstractAITool.get(AIToolID.CODEX).capabilities()
+        assert codex.supports_plan_mode is False
+        assert codex.supports_plan_session is True
+        assert codex.plan_mode.session_activation is PlanModeActivation.CODEX_APP_SERVER
 
     def test_every_supported_tool_describes_its_artifact_scope(self) -> None:
         expected = {
             AIToolID.CLAUDE: PlanArtifactLocation.REQUESTED_PATH,
             AIToolID.CURSOR: PlanArtifactLocation.SESSION,
-            AIToolID.COPILOT: PlanArtifactLocation.PRIVATE,
-            AIToolID.OPENCODE: PlanArtifactLocation.WORKSPACE_MANAGED,
-            AIToolID.ANTIGRAVITY_CLI: PlanArtifactLocation.PRIVATE,
+            AIToolID.COPILOT: PlanArtifactLocation.SESSION,
+            AIToolID.OPENCODE: PlanArtifactLocation.SESSION,
+            AIToolID.ANTIGRAVITY_CLI: PlanArtifactLocation.SESSION,
         }
         for tool_id, location in expected.items():
             capability = AbstractAITool.get(tool_id).capabilities().plan_mode
@@ -269,7 +287,7 @@ class TestPlanModeFailures:
 
 class TestPlanArtifactRequirements:
     def test_antigravity_rejects_workspace_backed_output(self, tmp_path: Path) -> None:
-        with pytest.raises(PlanArtifactLocationError, match="brain directory"):
+        with pytest.raises(PlanArtifactLocationError, match="structured_output"):
             AbstractAITool.get("antigravity-cli").build_launch_command(
                 plan_mode=True,
                 plan_output_dir=tmp_path / "plans",
