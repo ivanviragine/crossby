@@ -603,6 +603,7 @@ def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInter
         question_id=str(question_id),
         prompt=str(prompt or "Antigravity CLI requires input to continue planning."),
         options=options,
+        allow_other=not options,
         session_id=conversation_id,
     )
 

@@ -293,13 +293,18 @@ def _answer_question(
             raise _interaction_required(interaction, capability)
         try:
             selected = validate_plan_option_selection(interaction, response)
-            if selected:
-                labels = {option.option_id: option.label for option in options}
-                answers.append([labels[option_id] for option_id in selected])
-            elif custom and response.answer and response.answer.strip():
-                answers.append([response.answer])
-            else:
+            custom_answer = response.answer if response.answer and response.answer.strip() else None
+            if custom_answer and not custom:
+                raise ValueError("native question does not allow a custom answer")
+            if selected and custom_answer and not multiple:
+                raise ValueError("single-select native question requires exactly one answer")
+            labels = {option.option_id: option.label for option in options}
+            answer_values = [labels[option_id] for option_id in selected]
+            if custom_answer:
+                answer_values.append(custom_answer)
+            if not answer_values:
                 raise ValueError("native question was not answered")
+            answers.append(answer_values)
         except ValueError:
             raise _interaction_required(interaction, capability) from None
     server.request("POST", f"/question/{quote(request_id, safe='')}/reply", {"answers": answers})

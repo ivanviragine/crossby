@@ -1368,6 +1368,38 @@ class TestExactSessionCliCollectors:
             assert command[command.index("--model") + 1] == "gemini-3.8-flash-medium"
             assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
 
+    def test_antigravity_exposes_open_ended_questions_as_free_form(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        waiting = json.loads((FIXTURES / "antigravity_waiting.json").read_text())
+        waiting["question"]["options"] = []
+        success = (FIXTURES / "antigravity_success.json").read_text()
+        runs = iter((CapturedProcess(0, json.dumps(waiting), ""), CapturedProcess(0, success, "")))
+        commands: list[list[str]] = []
+        seen: list[Any] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            return next(runs)
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            seen.append(interaction)
+            if not interaction.allow_other:
+                return PlanInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED)
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Keep compatibility",
+            )
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+            _antigravity_request(tmp_path), answer
+        )
+
+        assert seen[0].allow_other is True
+        assert commands[1][commands[1].index("--print") + 1] == "Keep compatibility"
+
     def test_antigravity_denial_discards_stale_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1962,6 +1994,49 @@ class TestExactSessionCliCollectors:
 
         assert result.session_id == str(exact_uuid)
         assert timeouts == [9.0, 6.0]
+
+    def test_copilot_exposes_open_ended_questions_as_free_form(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        question = json.dumps(
+            {
+                "type": "ask_user",
+                "id": "question-1",
+                "session_id": str(exact_uuid),
+                "data": {"id": "scope", "question": "Any constraints?", "options": []},
+            }
+        )
+        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = FIXTURES / "copilot_share_success.md"
+        runs = iter((question, success))
+        commands: list[list[str]] = []
+        seen: list[Any] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            export_arg = next(value for value in command if value.startswith("--share="))
+            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
+            return CapturedProcess(0, next(runs), "")
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            seen.append(interaction)
+            if not interaction.allow_other:
+                return PlanInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED)
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Keep compatibility",
+            )
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER), answer
+        )
+
+        assert seen[0].allow_other is True
+        assert commands[1][-2:] == ["--prompt", "Keep compatibility"]
 
     def test_copilot_question_denial_discards_stale_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

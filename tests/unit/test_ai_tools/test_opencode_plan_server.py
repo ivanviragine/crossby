@@ -226,6 +226,47 @@ def test_native_custom_answer_affordance_is_exposed(server: FakeServer, tmp_path
     assert server.closed
 
 
+def test_native_multiple_selection_preserves_custom_answer(
+    server: FakeServer, tmp_path: Path
+) -> None:
+    server.questions = [[_question(multiple=True, custom=True)]]
+
+    _run(
+        tmp_path,
+        lambda _: PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id="Linux",
+            answer="FreeBSD",
+        ),
+    )
+
+    assert (
+        "POST",
+        "/question/que_exact_123/reply",
+        {"answers": [["Linux", "FreeBSD"]]},
+    ) in server.calls
+    assert server.closed
+
+
+def test_native_single_selection_rejects_mixed_custom_answer(
+    server: FakeServer, tmp_path: Path
+) -> None:
+    server.questions = [[_question(multiple=False, custom=True)]]
+
+    with pytest.raises(PlanInteractionRequiredError):
+        _run(
+            tmp_path,
+            lambda _: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                option_id="Linux",
+                answer="FreeBSD",
+            ),
+        )
+
+    assert not any(path.endswith("/reply") for _, path, _ in server.calls)
+    assert server.closed
+
+
 @pytest.mark.parametrize("multiple", [False, None, "false", 1])
 def test_native_multiple_selection_is_validated(
     multiple: Any, server: FakeServer, tmp_path: Path

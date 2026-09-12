@@ -721,6 +721,7 @@ def _copilot_interactions(events: list[dict[str, Any]], session_id: str) -> list
                 question_id=question_id,
                 prompt=prompt,
                 options=options,
+                allow_other=kind is PlanInteractionKind.QUESTION and not options,
                 session_id=session_id,
                 artifact_id=str(event.get("id") or "") or None,
             )
