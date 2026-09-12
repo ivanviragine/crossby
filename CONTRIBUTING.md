@@ -115,7 +115,8 @@ interactive sessions. A complete collector must:
    ID-less export, use prefix/name matching, or scrape a harness's private
    storage as a fallback.
 4. Surface native questions through `PlanInteractionHandler`, preserving native
-   question and option IDs. Model final plan approval as
+   question and option IDs plus the native multi-select and free-form-answer
+   capabilities. Model final plan approval as
    `PlanInteractionKind.PLAN_APPROVAL`; collection must never translate it into
    permission to implement. Never infer interactive consent from a TTY: callers
    must explicitly pass `terminal_interaction_handler` when terminal input is
@@ -173,7 +174,8 @@ plus the question index. Inspect the originating tool call to distinguish
 `plan_exit` from an ordinary question, and never approve a switch to building.
 After a successful terminal plan message, export only that exact session and
 require the exported artifact to match the terminal message ID. Native API calls,
-question handling, and export share one deadline. HTTP response bodies are bounded.
+question handling, and export share one deadline. HTTP response bodies are bounded
+and read incrementally with that deadline recomputed before each receive.
 
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
@@ -185,9 +187,11 @@ unknown or below-floor version must assert that no adapter process was created
 after the version-probe subprocess.
 
 Treat recognized interaction envelopes as protocol data: required identifiers,
-prompts, and every native option must retain their documented types and shape.
-Do not silently drop malformed options, and validate every callback selection
-against the native option IDs before resuming or responding.
+prompts, booleans, and every native option must retain their documented types and
+shape. Reject duplicate question IDs before invoking callbacks. Do not silently
+drop malformed options, and validate every callback selection against the native
+option IDs before resuming or responding. Preserve a native free-form affordance
+as `PlanInteraction.allow_other`, and reject answer text when it is false.
 
 When an upstream protocol changes, capture a sanitized fixture from the new
 release, update the parser and positive/negative tests, then raise

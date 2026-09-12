@@ -416,7 +416,9 @@ separately and an `APPROVED` response is refused by collectors where it would
 transition into execution. Native option lists are parsed without discarding
 malformed entries, and callback option IDs must match those exact choices;
 explicit denied, cancelled, or skipped outcomes take precedence over stale
-selections.
+selections. `PlanInteraction.allow_other` preserves a native free-form-answer
+affordance (including Codex `isOther`); callers must not return `answer` text
+when it is false.
 
 The collected API is the automation surface:
 
@@ -438,11 +440,17 @@ def answer(interaction):
     if interaction.kind is PlanInteractionKind.PLAN_APPROVAL:
         return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
     # A real integration should obtain this from its user or workflow.
-    return PlanInteractionResponse(
-        outcome=PlanInteractionOutcome.ANSWERED,
-        option_id=interaction.options[0].option_id if interaction.options else None,
-        answer=None if interaction.options else "Use the existing public API",
-    )
+    if interaction.options:
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id=interaction.options[0].option_id,
+        )
+    if interaction.allow_other:
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            answer="Use the existing public API",
+        )
+    return PlanInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED)
 
 
 adapter = AbstractAITool.get("codex")
@@ -476,10 +484,11 @@ groups; cleanup kills remaining group members even if the server has already
 exited. Worker joins are bounded, and cleanup never closes a pipe while a reader
 or writer still holds its lock. Protocol writes share the session deadline.
 Each JSON-RPC frame is capped before queueing and an oversized frame terminates
-the owned protocol group. OpenCode HTTP responses and Claude/Copilot file-backed
-plan artifacts are capped at 8 MiB. Claude anchors POSIX artifact reads to a
-directory handle opened before launch, validates file identity, and removes only
-empty run directories after failure.
+the owned protocol group. OpenCode HTTP responses are read incrementally against
+the same request deadline and, like Claude/Copilot file-backed plan artifacts,
+are capped at 8 MiB. Claude anchors POSIX artifact reads to a directory handle
+opened before launch, validates file identity, and removes only empty run
+directories after failure.
 Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
 and are also caught by the collected API's `PlanSessionError` integration
 boundary.
