@@ -757,7 +757,8 @@ def _answer_codex_questions(
             thread_id=thread_id,
             turn_id=turn_id,
         )
-    answers: dict[str, dict[str, list[str]]] = {}
+    interactions: list[PlanInteraction] = []
+    question_ids: set[str] = set()
     for raw_question in questions:
         if not isinstance(raw_question, dict):
             raise PlanTransportError(
@@ -788,20 +789,57 @@ def _answer_codex_questions(
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
+        if question_id in question_ids:
+            raise PlanTransportError(
+                "Codex planning questions contained a duplicate native ID.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+        question_ids.add(question_id)
+        multiple_values: list[bool] = []
+        for field in ("allowMultiple", "isMultiple"):
+            if field not in raw_question:
+                continue
+            value = raw_question[field]
+            if not isinstance(value, bool):
+                raise PlanTransportError(
+                    "Codex planning question had a non-boolean multi-select field.",
+                    tool_id=tool_id,
+                    capability=capability,
+                    session_id=thread_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                )
+            multiple_values.append(value)
+        if len(set(multiple_values)) > 1:
+            raise PlanTransportError(
+                "Codex planning question had conflicting multi-select fields.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
         options = parse_plan_question_options(raw_question.get("options"))
-        interaction = PlanInteraction(
-            kind=PlanInteractionKind.QUESTION,
-            question_id=question_id,
-            prompt=prompt,
-            options=options,
-            allow_multiple=bool(
-                raw_question.get("allowMultiple") or raw_question.get("isMultiple")
-            ),
-            session_id=thread_id,
-            thread_id=thread_id,
-            turn_id=turn_id,
-            artifact_id=str(params.get("itemId") or "") or None,
+        interactions.append(
+            PlanInteraction(
+                kind=PlanInteractionKind.QUESTION,
+                question_id=question_id,
+                prompt=prompt,
+                options=options,
+                allow_multiple=multiple_values[0] if multiple_values else False,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                artifact_id=str(params.get("itemId") or "") or None,
+            )
         )
+
+    answers: dict[str, dict[str, list[str]]] = {}
+    for interaction in interactions:
         if handler is None:
             raise PlanInteractionRequiredError(
                 "Codex requires an answer to continue the native planning turn.",
@@ -832,7 +870,9 @@ def _answer_codex_questions(
             ) from exc
         answer_values = [response.answer] if response.answer else []
         for option_id in selected_ids:
-            selected = next(option for option in options if option.option_id == option_id)
+            selected = next(
+                option for option in interaction.options if option.option_id == option_id
+            )
             answer_values.append(selected.label)
         if not answer_values:
             raise PlanInteractionRequiredError(
@@ -841,7 +881,7 @@ def _answer_codex_questions(
                 tool_id=tool_id,
                 capability=capability,
             )
-        answers[question_id] = {"answers": answer_values}
+        answers[interaction.question_id] = {"answers": answer_values}
     rpc.respond(message["id"], {"answers": answers})
 
 

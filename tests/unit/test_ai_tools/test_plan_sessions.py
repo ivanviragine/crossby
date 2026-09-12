@@ -2232,6 +2232,66 @@ class TestProtocolCollectors:
 
         assert FakeRpc.instances[0].closed
 
+    def test_codex_rejects_duplicate_question_ids_before_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_question.jsonl")
+        duplicate = dict(messages[4]["params"]["questions"][0])
+        duplicate["question"] = "Which boundary should own validation?"
+        messages[4]["params"]["questions"].append(duplicate)
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanTransportError, match="duplicate native ID"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        option_id="adapter",
+                    )
+                ),
+            )
+
+        assert seen == []
+        assert FakeRpc.instances[0].closed
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("allowMultiple", "false"), ("isMultiple", 1)],
+    )
+    def test_codex_rejects_non_boolean_question_cardinality_before_callback(
+        self,
+        field: str,
+        value: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_question.jsonl")
+        messages[4]["params"]["questions"][0][field] = value
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanTransportError, match="non-boolean multi-select"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        option_id="adapter",
+                    )
+                ),
+            )
+
+        assert seen == []
+        assert FakeRpc.instances[0].closed
+
     def test_codex_rejects_unknown_native_question_option_selection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
