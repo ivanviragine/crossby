@@ -1,0 +1,16 @@
+{
+  "id": "que_exact_123",
+  "sessionID": "ses_exact_123",
+  "questions": [
+    {
+      "question": "Which platforms should the plan support?",
+      "header": "Platforms",
+      "options": [
+        {"label": "Linux", "description": "Linux support"},
+        {"label": "macOS", "description": "macOS support"}
+      ],
+      "multiple": true
+    }
+  ],
+  "tool": {"messageID": "msg_question_123", "callID": "call_question_123"}
+}

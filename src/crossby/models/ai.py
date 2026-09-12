@@ -44,6 +44,7 @@ class PlanModeActivation(StrEnum):
 
     CLI_ARGUMENT = "cli_argument"
     CODEX_APP_SERVER = "codex_app_server"
+    OPENCODE_SERVER = "opencode_server"
     ACP = "acp"
     UNSUPPORTED = "unsupported"
 
@@ -81,6 +82,7 @@ class PlanSessionTransport(StrEnum):
 
     INTERACTIVE_CLI = "interactive_cli"
     HEADLESS_CLI = "headless_cli"
+    OPENCODE_SERVER = "opencode_server"
     CODEX_APP_SERVER = "codex_app_server"
     ACP = "acp"
     UNAVAILABLE = "unavailable"

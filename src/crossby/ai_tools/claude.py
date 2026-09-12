@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import subprocess
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -168,6 +171,7 @@ class ClaudeAdapter(AbstractAITool):
             PlanArtifactAmbiguousError,
             PlanArtifactMalformedError,
             PlanArtifactMissingError,
+            PlanBindingMismatchError,
             PlanTransportError,
         )
         from crossby.ai_tools.plan_process import read_text_bounded, run_interactive
@@ -212,7 +216,34 @@ class ClaudeAdapter(AbstractAITool):
             ) from exc
 
         succeeded = False
+        run_fd: int | None = None
         try:
+            run_stat = run_dir.lstat()
+            if not stat.S_ISDIR(run_stat.st_mode):
+                raise OSError("isolated plan directory was replaced before launch")
+            if os.name == "posix":
+                run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                if not os.path.samestat(run_stat, os.fstat(run_fd)):
+                    raise OSError("isolated plan directory was replaced before launch")
+
+            def validate_run_directory() -> None:
+                try:
+                    current = run_dir.lstat()
+                except OSError:
+                    current = None
+                if (
+                    current is None
+                    or not stat.S_ISDIR(current.st_mode)
+                    or not os.path.samestat(run_stat, current)
+                ):
+                    raise PlanBindingMismatchError(
+                        "Claude Code's isolated plan directory was replaced during collection.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                        paths=(run_dir,),
+                    )
+
             command = self.build_launch_command(
                 model=request.model,
                 initial_message=request.prompt,
@@ -257,8 +288,23 @@ class ClaudeAdapter(AbstractAITool):
                     paths=(run_dir,),
                 )
 
-            entries = list(run_dir.iterdir())
-            symlinks = tuple(path for path in entries if path.is_symlink())
+            validate_run_directory()
+            entries = (
+                [run_dir / name for name in os.listdir(run_fd)]
+                if run_fd is not None
+                else list(run_dir.iterdir())
+            )
+            entry_stats = {
+                path: os.stat(
+                    path.name if run_fd is not None else path,
+                    dir_fd=run_fd,
+                    follow_symlinks=False,
+                )
+                for path in entries
+            }
+            symlinks = tuple(
+                path for path, info in entry_stats.items() if stat.S_ISLNK(info.st_mode)
+            )
             if symlinks:
                 raise PlanArtifactMalformedError(
                     "Claude Code produced a symlink in the isolated plan directory; refusing it.",
@@ -268,7 +314,11 @@ class ClaudeAdapter(AbstractAITool):
                     session_id=session_id,
                     paths=symlinks,
                 )
-            candidates = [path for path in entries if path.is_file() and path.suffix == ".md"]
+            candidates = [
+                path
+                for path, info in entry_stats.items()
+                if stat.S_ISREG(info.st_mode) and path.suffix == ".md"
+            ]
             if not candidates:
                 raise PlanArtifactMissingError(
                     "Claude Code exited successfully without a Markdown plan in its isolated "
@@ -291,7 +341,11 @@ class ClaudeAdapter(AbstractAITool):
                 )
             artifact = candidates[0]
             try:
-                plan = read_text_bounded(artifact)
+                plan = read_text_bounded(
+                    Path(artifact.name) if run_fd is not None else artifact,
+                    dir_fd=run_fd,
+                    expected_stat=entry_stats[artifact],
+                )
             except (OSError, UnicodeError) as exc:
                 raise PlanArtifactMalformedError(
                     f"Claude Code plan artifact violated the bounded UTF-8 contract: {exc}",
@@ -301,6 +355,7 @@ class ClaudeAdapter(AbstractAITool):
                     session_id=session_id,
                     paths=(artifact,),
                 ) from exc
+            validate_run_directory()
             if not plan.strip():
                 raise PlanArtifactMalformedError(
                     "Claude Code produced a blank plan artifact.",
@@ -333,8 +388,13 @@ class ClaudeAdapter(AbstractAITool):
                 paths=(run_dir,),
             ) from exc
         finally:
+            if run_fd is not None:
+                os.close(run_fd)
             if not succeeded:
-                shutil.rmtree(run_dir, ignore_errors=True)
+                # Retain failed/partial artifacts for inspection. Removing only
+                # an empty directory cannot destroy a replacement run's files.
+                with suppress(OSError):
+                    run_dir.rmdir()
 
     def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
         """Collapse Crossby's Claude settings fragments into one settings source.

@@ -125,15 +125,15 @@ interactive sessions. A complete collector must:
    Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
    cases use the typed errors in `ai_tools/plan_mode.py`.
 6. Apply one request-wide deadline to the version probe, initial invocation,
-   every protocol or continuation wait, and any subprocess-backed export.
-   Always terminate protocol children, isolate bounded captured and interactive
+   every protocol read/write or continuation wait, and any subprocess-backed export.
+   Always terminate protocol children, isolate captured, interactive, and protocol
    POSIX subprocesses in run-owned process groups, hard-limit captured
    stdout/stderr, redact/truncate diagnostics, and remove only run-owned temporary
    artifacts. Capture-worker joins share the request deadline on every platform;
    on POSIX, a deadline or output overflow must also terminate descendants
-   retaining inherited pipes. Successful Claude artifact
-   directories remain available to the caller, but every failed UUID run
-   directory is removed recursively. Catch `subprocess.TimeoutExpired` before
+   retaining inherited pipes, including when their parent already exited.
+   Claude retains successful and partial artifacts and removes only empty UUID
+   directories after failure. Catch `subprocess.TimeoutExpired` before
    broader subprocess failures and never stringify it: its command field may
    contain a prompt or continuation answer.
 
@@ -144,8 +144,13 @@ protocol stdout has a per-frame cap and a fixed-size queue so a child that keeps
 emitting while an interaction callback runs receives pipe backpressure instead
 of growing parent-process memory without limit. Protocol stderr is consumed in
 bounded chunks and retained only as a tail; a frame overflow terminates the
-owned child. Read file-backed plan artifacts through the bounded helper before
-UTF-8 decoding. Keep progress/transcript parsing out of artifact parsers: only
+owned process group. Bound protocol writes too: a server that stops reading
+stdin must not trap collection past its deadline. Close stream wrappers only
+after their worker threads stop. Read file-backed plan artifacts through the
+bounded helper before UTF-8 decoding; check regular-file identity and reject
+symlinks/replacements. Claude holds a POSIX directory descriptor from before
+launch and reads relative to it so path replacement cannot redirect collection.
+Keep progress/transcript parsing out of artifact parsers: only
 the adapter's declared authoritative event, export, structured field, or
 isolated path may become `result.plan`.
 
@@ -158,6 +163,17 @@ so collection supports only `approval_policy="never"` and runs it in a
 run-owned no-network sandbox with hooks and external MCP disabled. The
 model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell
 permissions are also explicitly denied.
+
+OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
+then creates one native session and selects `agent="plan"` in `prompt_async`.
+The verified `run --format json` command disables questions and cannot implement
+the interaction contract. The native question API preserves `multiple` and
+returns selected labels as arrays; batched question IDs use the native request ID
+plus the question index. Inspect the originating tool call to distinguish
+`plan_exit` from an ordinary question, and never approve a switch to building.
+After a successful terminal plan message, export only that exact session and
+require the exported artifact to match the terminal message ID. Native API calls,
+question handling, and export share one deadline. HTTP response bodies are bounded.
 
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
@@ -197,6 +213,17 @@ emitted native option; final plan and permission requests are denied.
 The Copilot case deliberately requests a sentinel write and asserts that its
 read-only collector leaves the disposable workspace unchanged.
 Never enable these tests in the default or unauthenticated CI suite.
+
+OpenCode also has a deterministic native test that uses a local model stub and
+isolated configuration/data directories, without credentials or paid calls:
+
+```bash
+CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
+  uv run pytest tests/integration/test_opencode_plan_http.py
+```
+
+It requires the verified OpenCode binary and exercises a real native multi-select
+question, its reply, and exact-session export.
 
 ## Adding a New AI Tool
 
@@ -540,7 +567,7 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
 compatibility. Complete collection accepts only `low`, `medium`, and `high`,
 because `run_plan_session()` rejects a requested effort tier that OpenCode's
-native `--variant` value cannot preserve exactly.
+native `variant` value cannot preserve exactly.
 
 The Cursor entries also describe interactive launch compatibility. Complete
 collection never collapses two requested tiers onto that generic mapping: it

@@ -383,19 +383,19 @@ model-encoded tiers before starting ACP. Antigravity requires a compatible
 Gemini model whose native effort tier matches the request; missing, non-Gemini,
 unavailable, or conflicting model tiers are rejected before the collector
 launches. OpenCode collection accepts only `low`, `medium`, and `high` and
-repeats the exact model and variant on every session continuation: interactive
+passes the exact provider/model and variant to its native session API: interactive
 launches retain the legacy `xhigh`/`max` → `high` normalization, but a collected
-session rejects tiers the native `--variant` argument cannot preserve exactly.
+session rejects tiers the adapter cannot preserve exactly.
 
-Support matrix (contracts verified against the listed builds on 2026-09-10):
+Support matrix (contracts verified against the listed builds through 2026-09-12):
 
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; failed UUID directories are removed recursively while successful plan directories remain |
+| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
 | Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs and successful turn completion | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully and its background terminals are cleaned; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; exact session + blocking `cursor/create_plan` request ID + successful `end_turn` | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply a handler for questions and the non-executing final outcome |
 | GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Read-only tool allowlist + isolated sandbox / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection exposes only file viewing/search and questions, explicitly denies writes/shell, disables external MCP/hooks/network, and removes its temporary home/export after normalization |
-| OpenCode | `run --agent plan --dir <workspace>` | Headless JSONL; emitted session ID + `export <exact-id>` + plan-mode assistant text | Resumable callback | Tool-managed / tool-managed | 1.18.29 | Exported session/message directories must match the request; no latest-session lookup is used |
+| OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
 | Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
 | VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
 | Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
@@ -471,12 +471,15 @@ protocol waits, and subprocess-backed export. Caller-visible timeout errors omit
 subprocess command arguments because those arguments can contain prompts or
 continuation answers.
 Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
-stderr. Captured and interactive POSIX children use isolated process groups, and
-capture-worker cleanup is deadline-bounded on every platform, so descendants
-cannot outlive a collector deadline or retain inherited pipes indefinitely.
+stderr. Captured, interactive, and protocol POSIX children use isolated process
+groups; cleanup kills remaining group members even if the server has already
+exited. Worker joins are bounded, and cleanup never closes a pipe while a reader
+or writer still holds its lock. Protocol writes share the session deadline.
 Each JSON-RPC frame is capped before queueing and an oversized frame terminates
-the owned protocol child. Claude and Copilot file-backed plan artifacts are
-capped at 8 MiB before UTF-8 decoding.
+the owned protocol group. OpenCode HTTP responses and Claude/Copilot file-backed
+plan artifacts are capped at 8 MiB. Claude anchors POSIX artifact reads to a
+directory handle opened before launch, validates file identity, and removes only
+empty run directories after failure.
 Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
 and are also caught by the collected API's `PlanSessionError` integration
 boundary.

@@ -234,7 +234,9 @@ class CodexAdapter(AbstractAITool):
 
         try:
             rpc = HeaderlessJsonRpcProcess(
-                ["codex", "app-server", "--stdio"], cwd=request.working_dir
+                ["codex", "app-server", "--stdio"],
+                cwd=request.working_dir,
+                timeout=remaining(),
             )
             rpc.request(
                 1,

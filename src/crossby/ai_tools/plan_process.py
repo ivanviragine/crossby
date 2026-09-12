@@ -7,6 +7,7 @@ import locale
 import os
 import queue
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -70,12 +71,34 @@ class JsonRpcFrameLimitError(ValueError):
         self.limit = limit
 
 
-def read_text_bounded(path: Path, *, limit: int | None = None) -> str:
-    """Read one UTF-8 plan artifact without allocating beyond a fixed byte cap."""
+def read_text_bounded(
+    path: Path,
+    *,
+    limit: int | None = None,
+    dir_fd: int | None = None,
+    expected_stat: os.stat_result | None = None,
+) -> str:
+    """Read a stable regular UTF-8 artifact with a fixed byte cap.
+
+    A directory descriptor anchors relative paths to the run directory that was
+    opened before launch. Identity checks also protect callers on platforms
+    without descriptor-relative filesystem operations.
+    """
     effective_limit = _PLAN_ARTIFACT_TEXT_LIMIT if limit is None else limit
     if effective_limit <= 0:
         raise ValueError("plan artifact limit must be positive")
-    with path.open("rb") as stream:
+    expected = expected_stat or os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+    if not stat.S_ISREG(expected.st_mode):
+        raise OSError("plan artifact must be a regular, non-symlink file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags, dir_fd=dir_fd)
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(expected, opened):
+            raise OSError("plan artifact was replaced before reading")
+        current = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode) or not os.path.samestat(opened, current):
+            raise OSError("plan artifact was replaced before reading")
         content = stream.read(effective_limit + 1)
     if len(content) > effective_limit:
         raise PlanArtifactSizeError(effective_limit)
@@ -254,19 +277,32 @@ class JsonRpcProcess:
 
     _include_jsonrpc_version: ClassVar[bool] = True
 
-    def __init__(self, command: list[str], *, cwd: Path) -> None:
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout: float = 600.0,
+    ) -> None:
         self.command = command
+        self._deadline = time.monotonic() + timeout
+        self._write_thread: threading.Thread | None = None
         self._proc = subprocess.Popen(
             command,
             cwd=cwd,
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=os.name == "posix",
         )
         if self._proc.stdin is None or self._proc.stdout is None or self._proc.stderr is None:
-            self._proc.kill()
+            _kill_process_group(self._proc)
+            with suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
             raise OSError("failed to create JSON-RPC stdio pipes")
         self._stdin: IO[str] = self._proc.stdin
         self._stdout_queue: queue.Queue[str | ValueError | None] = queue.Queue(
@@ -302,9 +338,8 @@ class JsonRpcProcess:
             while line := stream.readline(_JSON_RPC_FRAME_LIMIT + 1):
                 if len(line) > _JSON_RPC_FRAME_LIMIT:
                     proc = getattr(self, "_proc", None)
-                    if proc is not None and proc.poll() is None:
-                        with suppress(OSError):
-                            proc.kill()
+                    if proc is not None:
+                        _kill_process_group(proc)
                     self._queue_stdout(JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT))
                     break
                 if not self._queue_stdout(line):
@@ -339,8 +374,28 @@ class JsonRpcProcess:
         if self._proc.poll() is not None:
             raise EOFError(f"JSON-RPC child exited with status {self._proc.returncode}")
         envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
-        self._stdin.write(json.dumps(envelope, separators=(",", ":")) + "\n")
-        self._stdin.flush()
+        line = json.dumps(envelope, separators=(",", ":")) + "\n"
+        errors: list[OSError | ValueError] = []
+
+        def write() -> None:
+            try:
+                self._stdin.write(line)
+                self._stdin.flush()
+            except (OSError, ValueError) as exc:
+                errors.append(exc)
+
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out writing a JSON-RPC message")
+        self._write_thread = threading.Thread(target=write, daemon=True)
+        self._write_thread.start()
+        self._write_thread.join(timeout=remaining)
+        if self._write_thread.is_alive():
+            _kill_process_group(self._proc)
+            self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            raise TimeoutError("timed out writing a JSON-RPC message")
+        if errors:
+            raise errors[0]
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"method": method}
@@ -360,7 +415,8 @@ class JsonRpcProcess:
     def respond(self, request_id: object, result: Any) -> None:
         self.send({"id": request_id, "result": result})
 
-    def read(self, *, timeout: float) -> dict[str, Any]:
+    def read_line(self, *, timeout: float) -> str:
+        """Read a bounded stdout line, also usable for a server's startup banner."""
         try:
             line = self._stdout_queue.get(timeout=timeout)
         except queue.Empty as exc:
@@ -370,6 +426,10 @@ class JsonRpcProcess:
             raise EOFError(f"JSON-RPC stream closed (exit status {code})")
         if isinstance(line, ValueError):
             raise line
+        return line
+
+    def read(self, *, timeout: float) -> dict[str, Any]:
+        line = self.read_line(timeout=timeout)
         try:
             payload = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -386,29 +446,32 @@ class JsonRpcProcess:
         return payload
 
     def close(self) -> int:
-        """Close stdin, then terminate/kill a server that does not stop itself."""
-        if not self._stdin.closed:
+        """Stop the server and its helpers, then close only drained reader pipes."""
+        writer_finished = self._write_thread is None or not self._write_thread.is_alive()
+        if writer_finished and not self._stdin.closed:
             with suppress(OSError):
                 self._stdin.close()
         if self._proc.poll() is None:
-            try:
+            with suppress(subprocess.TimeoutExpired):
                 self._proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                self._proc.terminate()
-                try:
-                    self._proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1.0)
+        # The server may already have exited while a helper still owns a pipe.
+        _kill_process_group(self._proc)
+        if self._proc.poll() is None:
+            with suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+        if self._write_thread is not None:
+            self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            if not self._write_thread.is_alive() and not self._stdin.closed:
+                with suppress(OSError):
+                    self._stdin.close()
         self._closing.set()
         readers = (self._stdout_thread, self._stderr_thread)
-        for thread in readers:
-            thread.join(timeout=0.2)
-        for stream in (self._proc.stdout, self._proc.stderr):
-            if stream is not None and not stream.closed:
+        _join_until(readers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
+        for stream, thread in zip((self._proc.stdout, self._proc.stderr), readers, strict=True):
+            # Closing an IO wrapper while its reader holds the lock can block
+            # forever (including on non-POSIX hosts without group cleanup).
+            if stream is not None and not thread.is_alive() and not stream.closed:
                 stream.close()
-        for thread in readers:
-            thread.join(timeout=0.2)
         return self._proc.returncode if self._proc.returncode is not None else 0
 
     def __enter__(self) -> JsonRpcProcess:

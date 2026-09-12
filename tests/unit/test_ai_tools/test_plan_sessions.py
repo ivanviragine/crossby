@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import suppress
 from io import StringIO
 from pathlib import Path
 from typing import Any, ClassVar
@@ -110,7 +112,8 @@ class FakeRpc:
     scripts: ClassVar[list[list[dict[str, Any]]]] = []
     instances: ClassVar[list[FakeRpc]] = []
 
-    def __init__(self, command: list[str], *, cwd: Path) -> None:
+    def __init__(self, command: list[str], *, cwd: Path, timeout: float = 600.0) -> None:
+        assert timeout > 0
         self.command = command
         self.cwd = cwd
         self.messages = list(self.scripts.pop(0))
@@ -141,15 +144,6 @@ class FakeRpc:
 
 def _rpc_fixture(name: str) -> list[dict[str, Any]]:
     return parse_jsonl((FIXTURES / name).read_text(encoding="utf-8"))
-
-
-def _opencode_export(working_dir: Path) -> dict[str, Any]:
-    payload = json.loads((FIXTURES / "opencode_export_success.json").read_text())
-    resolved = str(working_dir.resolve())
-    payload["info"]["directory"] = resolved
-    for message in payload["messages"]:
-        message["info"]["path"] = {"cwd": resolved, "root": resolved}
-    return payload
 
 
 def _install_rpc(
@@ -488,7 +482,6 @@ class TestSubprocessTimeoutRedaction:
     @pytest.mark.parametrize(
         ("tool_id", "runner"),
         [
-            (AIToolID.OPENCODE, "run_captured"),
             (AIToolID.ANTIGRAVITY_CLI, "run_captured"),
             (AIToolID.CLAUDE, "run_interactive"),
             (AIToolID.COPILOT, "run_captured"),
@@ -657,7 +650,9 @@ class TestPlanProcess:
 
         assert not reader.is_alive()
 
-    def test_stdout_reader_rejects_an_oversized_json_rpc_frame_and_kills_child(self) -> None:
+    def test_stdout_reader_rejects_an_oversized_json_rpc_frame_and_kills_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         class FakeProcess:
             def __init__(self) -> None:
                 self.killed = False
@@ -672,6 +667,7 @@ class TestPlanProcess:
         rpc._stdout_queue = queue.Queue(maxsize=2)
         rpc._closing = threading.Event()
         rpc._proc = FakeProcess()  # type: ignore[assignment]
+        monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", lambda p: p.kill())
         private_payload = "private-protocol-payload"
         oversized = private_payload * (_JSON_RPC_FRAME_LIMIT // len(private_payload) + 1)
 
@@ -683,6 +679,48 @@ class TestPlanProcess:
         assert private_payload not in str(raised.value)
         assert rpc._proc.killed
         assert rpc._stdout_queue.get_nowait() is None
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+    @pytest.mark.parametrize("failure", ["timeout", "parent-exited", "frame-overflow"])
+    def test_protocol_cleanup_stops_descendants_holding_pipes(
+        self, failure: str, tmp_path: Path
+    ) -> None:
+        script = (
+            "import json,subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "print(json.dumps({'jsonrpc':'2.0','method':'ready','pid':child.pid}),flush=True); "
+        )
+        if failure == "frame-overflow":
+            script += f"sys.stdout.write('x'*{_JSON_RPC_FRAME_LIMIT + 1}); sys.stdout.flush(); "
+        if failure != "parent-exited":
+            script += "time.sleep(30)"
+        rpc = JsonRpcProcess([sys.executable, "-c", script], cwd=tmp_path)
+        child_pid = rpc.read(timeout=5)["pid"]
+        closer = threading.Thread(target=rpc.close, daemon=True)
+        try:
+            if failure == "frame-overflow":
+                with pytest.raises(JsonRpcFrameLimitError):
+                    rpc.read(timeout=5)
+            elif failure == "timeout":
+                with pytest.raises(TimeoutError):
+                    rpc.read(timeout=0.05)
+            else:
+                rpc._proc.wait(timeout=5)
+            closer.start()
+            closer.join(timeout=2)
+            assert not closer.is_alive(), "protocol cleanup blocked on a descendant's pipe"
+            assert not rpc._stdout_thread.is_alive()
+            assert not rpc._stderr_thread.is_alive()
+        finally:
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, 9)
+            if rpc._proc.poll() is None:
+                rpc._proc.kill()
+                rpc._proc.wait(timeout=2)
+            if closer.ident is not None:
+                closer.join(timeout=2)
+            else:
+                rpc.close()
 
     def test_file_artifact_read_is_hard_limited(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -721,7 +759,9 @@ class TestPlanProcess:
         assert len(rpc.stderr) == _STDERR_TAIL_LIMIT
         assert rpc.stderr.endswith(latest)
 
-    def test_close_joins_reader_threads_before_closing_streams(self) -> None:
+    def test_close_joins_reader_threads_before_closing_streams(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         events: list[str] = []
 
         class FakeStream:
@@ -741,6 +781,9 @@ class TestPlanProcess:
                 assert timeout > 0
                 events.append(f"join:{self.name}")
 
+            def is_alive(self) -> bool:
+                return False
+
         class FakeProcess:
             def __init__(self) -> None:
                 self.stdin = FakeStream("stdin")
@@ -754,9 +797,11 @@ class TestPlanProcess:
         rpc = object.__new__(JsonRpcProcess)
         rpc._proc = FakeProcess()  # type: ignore[assignment]
         rpc._stdin = rpc._proc.stdin  # type: ignore[assignment]
+        rpc._write_thread = None
         rpc._closing = threading.Event()
         rpc._stdout_thread = FakeThread("stdout")  # type: ignore[assignment]
         rpc._stderr_thread = FakeThread("stderr")  # type: ignore[assignment]
+        monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", lambda _p: None)
 
         assert rpc.close() == 0
         assert events == [
@@ -765,9 +810,20 @@ class TestPlanProcess:
             "join:stderr",
             "close:stdout",
             "close:stderr",
-            "join:stdout",
-            "join:stderr",
         ]
+
+    def test_protocol_write_cannot_outlive_deadline(self, tmp_path: Path) -> None:
+        script = "import time; print('ready', flush=True); time.sleep(30)"
+        rpc = JsonRpcProcess([sys.executable, "-c", script], cwd=tmp_path, timeout=0.5)
+        assert rpc.read_line(timeout=5).strip() == "ready"
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="writing a JSON-RPC message"):
+                rpc.notify("turn/start", {"text": "x" * (2 * 1024 * 1024)})
+        finally:
+            rpc.close()
+        assert time.monotonic() - started < 2
+        assert rpc._write_thread is not None and not rpc._write_thread.is_alive()
 
 
 class TestClaudeCollector:
@@ -785,7 +841,7 @@ class TestClaudeCollector:
             ("blank", PlanArtifactMalformedError),
         ],
     )
-    def test_failed_collection_removes_only_its_run_directory(
+    def test_failed_collection_preserves_partial_artifacts(
         self,
         failure: str,
         error: type[PlanSessionError],
@@ -829,7 +885,7 @@ class TestClaudeCollector:
 
         root = tmp_path / ".crossby" / "plan-sessions"
         assert root.is_dir()
-        assert list(root.iterdir()) == []
+        assert len(list(root.iterdir())) == 1
         assert outside.read_text(encoding="utf-8") == "# Keep"
 
     @pytest.mark.parametrize("stage", ["command", "enumeration", "result"])
@@ -849,18 +905,18 @@ class TestClaudeCollector:
 
             monkeypatch.setattr(adapter, "build_launch_command", fail_build)
         elif stage == "enumeration":
-            original_iterdir = Path.iterdir
+            original_listdir = os.listdir
             monkeypatch.setattr(
                 "crossby.ai_tools.plan_process.run_interactive",
                 lambda *_args, **_kwargs: 0,
             )
 
-            def fail_run_directory(path: Path):
-                if path == run_dir:
+            def fail_run_directory(path: Any):
+                if isinstance(path, int) or Path(path) == run_dir:
                     raise OSError("plan directory became unreadable")
-                return original_iterdir(path)
+                return original_listdir(path)
 
-            monkeypatch.setattr(Path, "iterdir", fail_run_directory)
+            monkeypatch.setattr(os, "listdir", fail_run_directory)
         else:
 
             def write_plan(*_args: Any, **_kwargs: Any) -> int:
@@ -878,7 +934,69 @@ class TestClaudeCollector:
             adapter.run_plan_session(_request(tmp_path, plan_output_dir=root))
 
         assert root.is_dir()
-        assert list(root.iterdir()) == []
+        if stage == "result":
+            assert (run_dir / "plan.md").read_text() == "# Plan"
+        else:
+            assert list(root.iterdir()) == []
+
+    @pytest.mark.parametrize("replacement", ["symlink", "directory"])
+    def test_replaced_run_directory_is_never_collected_or_deleted(
+        self, replacement: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        decoy = tmp_path / "another-session"
+        decoy.mkdir()
+        (decoy / "plan.md").write_text("# Another run")
+        replaced: list[Path] = []
+
+        def fake_run(command: list[str], *, cwd: Path, **_kwargs: Any) -> int:
+            settings = json.loads(command[command.index("--settings") + 1])
+            run_dir = cwd / settings["plansDirectory"]
+            run_dir.rename(run_dir.with_name("original-run"))
+            if replacement == "symlink":
+                run_dir.symlink_to(decoy, target_is_directory=True)
+            else:
+                decoy.rename(run_dir)
+            replaced.append(run_dir)
+            return 0
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
+        with pytest.raises(PlanBindingMismatchError, match="directory was replaced"):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+
+        assert (replaced[0] / "plan.md").read_text() == "# Another run"
+
+    @pytest.mark.parametrize("replacement", ["symlink", "file"])
+    def test_artifact_replaced_between_validation_and_open_is_rejected(
+        self, replacement: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Another run")
+        original_open = os.open
+        artifacts: list[Path] = []
+
+        def fake_run(command: list[str], *, cwd: Path, **_kwargs: Any) -> int:
+            settings = json.loads(command[command.index("--settings") + 1])
+            artifact = cwd / settings["plansDirectory"] / "plan.md"
+            artifact.write_text("# This run")
+            artifacts.append(artifact)
+            return 0
+
+        def replace_before_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path).name == "plan.md":
+                artifact = artifacts[0]
+                artifact.rename(artifact.with_suffix(".original"))
+                if replacement == "symlink":
+                    artifact.symlink_to(outside)
+                else:
+                    artifact.write_text("# Replacement")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
+        monkeypatch.setattr(os, "open", replace_before_open)
+        with pytest.raises(PlanArtifactMalformedError, match="bounded UTF-8 contract"):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+
+        assert outside.read_text() == "# Another run"
 
     def test_isolated_directory_creation_errors_are_session_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -955,572 +1073,6 @@ class TestClaudeCollector:
 
 
 class TestExactSessionCliCollectors:
-    def test_opencode_exports_only_emitted_session(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(encoding="utf-8"),
-                    "",
-                ),
-                CapturedProcess(
-                    0,
-                    json.dumps(_opencode_export(tmp_path)),
-                    "",
-                ),
-            ]
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return next(runs)
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-        _assert_result(
-            result,
-            tool=AIToolID.OPENCODE,
-            source=PlanArtifactSource.SESSION_EXPORT,
-            binding=PlanSessionBinding.SESSION_ID,
-        )
-        assert result.session_id == "ses_exact_123"
-        assert commands[0][commands[0].index("--dir") + 1] == str(tmp_path.resolve())
-        assert commands[-1] == ["opencode", "export", "ses_exact_123"]
-
-    def test_opencode_ignores_nested_non_envelope_session_ids(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        events = _rpc_fixture("opencode_events_success.jsonl")
-        events[0]["session_id"] = "ses-decoy"
-        events[0]["part"]["metadata"] = {
-            "type": "session",
-            "id": "ses-decoy",
-            "session_id": "ses-decoy",
-        }
-        exported = _opencode_export(tmp_path)
-        exported["sessionID"] = "ses-decoy"
-        exported["messages"][0]["sessionID"] = "ses-decoy"
-        exported["messages"][0]["info"]["session_id"] = "ses-decoy"
-        exported["messages"][0]["parts"][0]["metadata"] = {"sessionID": "ses-decoy"}
-        runs = iter(
-            (
-                CapturedProcess(0, "\n".join(json.dumps(event) for event in events), ""),
-                CapturedProcess(0, json.dumps(exported), ""),
-            )
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-        assert result.session_id == "ses_exact_123"
-
-    def test_opencode_separates_option_like_initial_prompt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(encoding="utf-8"),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(_opencode_export(tmp_path)), ""),
-            ]
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return next(runs)
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-            _request(
-                tmp_path,
-                prompt="--audit-compatibility",
-                model="anthropic/claude-sonnet-4",
-                effort=EffortLevel.HIGH,
-            )
-        )
-
-        assert commands[0] == [
-            "opencode",
-            "run",
-            "--dir",
-            str(tmp_path.resolve()),
-            "--format",
-            "json",
-            "--agent",
-            "plan",
-            "--model",
-            "anthropic/claude-sonnet-4",
-            "--variant",
-            "high",
-            "--",
-            "--audit-compatibility",
-        ]
-
-    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
-    def test_opencode_rejects_unrepresentable_effort_before_collection(
-        self, effort: EffortLevel, tmp_path: Path
-    ) -> None:
-        adapter = AbstractAITool.get(AIToolID.OPENCODE)
-        with (
-            patch.object(adapter, "_run_plan_session") as run,
-            pytest.raises(PlanSessionUnsupportedError, match=rf"effort='{effort.value}'"),
-        ):
-            adapter.run_plan_session(_request(tmp_path, effort=effort))
-
-        run.assert_not_called()
-
-    def test_opencode_rejects_mismatched_export(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exported = _opencode_export(tmp_path)
-        exported["info"]["id"] = "ses-decoy"
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(exported), ""),
-            ]
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-        with pytest.raises(PlanBindingMismatchError):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-    def test_opencode_continuation_separates_option_like_answers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        question = json.dumps(
-            {
-                "type": "question",
-                "id": "question-1",
-                "sessionID": "ses_exact_123",
-                "question": "Which compatibility target?",
-            }
-        )
-        runs = iter(
-            [
-                CapturedProcess(0, question, ""),
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(
-                    0,
-                    json.dumps(_opencode_export(tmp_path)),
-                    "",
-                ),
-            ]
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return next(runs)
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-            _request(
-                tmp_path,
-                model="anthropic/claude-sonnet-4",
-                effort=EffortLevel.HIGH,
-            ),
-            lambda _interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="--keep-compatibility",
-            ),
-        )
-
-        assert result.session_id == "ses_exact_123"
-        assert commands[1] == [
-            "opencode",
-            "run",
-            "--dir",
-            str(tmp_path.resolve()),
-            "--session",
-            "ses_exact_123",
-            "--format",
-            "json",
-            "--agent",
-            "plan",
-            "--model",
-            "anthropic/claude-sonnet-4",
-            "--variant",
-            "high",
-            "--",
-            "--keep-compatibility",
-        ]
-
-    def test_opencode_continuation_timeout_does_not_expose_answer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        question = json.dumps(
-            {
-                "type": "question",
-                "id": "question-1",
-                "sessionID": "ses_exact_123",
-                "question": "Which compatibility target?",
-            }
-        )
-        answer = "private-continuation-answer"
-        calls = 0
-
-        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return CapturedProcess(0, question, "")
-            assert answer in command
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanTransportError, match="continuation timed out") as raised:
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-                _request(tmp_path),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=PlanInteractionOutcome.ANSWERED,
-                    answer=answer,
-                ),
-            )
-
-        assert answer not in str(raised.value)
-        assert "Command '" not in str(raised.value)
-
-    def test_opencode_export_timeout_does_not_stringify_command(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        calls = 0
-
-        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                )
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanTransportError, match="export timed out") as raised:
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-        assert "Command '" not in str(raised.value)
-
-    def test_opencode_continuation_and_export_share_one_timeout_budget(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        question = json.dumps(
-            {
-                "type": "question",
-                "id": "question-1",
-                "sessionID": "ses_exact_123",
-                "question": "Which compatibility target?",
-            }
-        )
-        runs = iter(
-            [
-                CapturedProcess(0, question, ""),
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(
-                    0,
-                    json.dumps(_opencode_export(tmp_path)),
-                    "",
-                ),
-            ]
-        )
-        timeouts: list[float] = []
-
-        def fake_run(_command: list[str], **kwargs: Any) -> CapturedProcess:
-            timeouts.append(kwargs["timeout"])
-            return next(runs)
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 100.0)
-        clock = iter((100.0, 101.0, 104.0, 107.0))
-        monkeypatch.setattr("crossby.ai_tools.opencode.time.monotonic", lambda: next(clock))
-
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-            _request(tmp_path, timeout_seconds=10),
-            lambda _interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Keep compatibility",
-            ),
-        )
-
-        assert result.session_id == "ses_exact_123"
-        assert timeouts == [9.0, 6.0, 3.0]
-
-    def test_opencode_denial_discards_stale_answer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        question = json.dumps(
-            {
-                "type": "question",
-                "id": "question-1",
-                "sessionID": "ses_exact_123",
-                "question": "Which compatibility target?",
-            }
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, question, ""),
-        )
-
-        with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-                _request(tmp_path),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=PlanInteractionOutcome.DENIED,
-                    answer="stale answer",
-                ),
-            )
-
-    @pytest.mark.parametrize(
-        "interaction",
-        [
-            {"id": " ", "question": "Choose a scope"},
-            {"id": "scope", "question": " "},
-            {"question": "Choose a scope"},
-            {"id": 42, "question": "Choose a scope"},
-            {"id": "scope"},
-            {"id": "scope", "question": ["Choose a scope"]},
-        ],
-        ids=(
-            "blank-question-id",
-            "blank-prompt",
-            "missing-question-id",
-            "non-string-question-id",
-            "missing-prompt",
-            "non-string-prompt",
-        ),
-    )
-    def test_opencode_rejects_invalid_question_fields_as_malformed_artifacts(
-        self,
-        interaction: dict[str, Any],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        event = json.dumps(
-            {
-                "type": "question",
-                "sessionID": "ses_exact_123",
-                **interaction,
-            }
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, event, ""),
-        )
-
-        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-    def test_opencode_rejects_malformed_native_options(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        event = {
-            "type": "question",
-            "id": "scope",
-            "sessionID": "ses_exact_123",
-            "question": "Choose a scope",
-            "options": [{"id": "api", "label": "API"}, {"id": "cli"}],
-        }
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
-        )
-
-        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-    def test_opencode_rejects_unknown_native_option_selection(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        event = {
-            "type": "question",
-            "id": "scope",
-            "sessionID": "ses_exact_123",
-            "question": "Choose a scope",
-            "options": [{"id": "api", "label": "API"}],
-        }
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
-        )
-
-        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-                _request(tmp_path),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=PlanInteractionOutcome.ANSWERED,
-                    option_id="fabricated",
-                ),
-            )
-
-    def test_opencode_checks_completion_after_eighth_continuation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def question(number: int) -> str:
-            return json.dumps(
-                {
-                    "type": "question",
-                    "id": f"question-{number}",
-                    "sessionID": "ses_exact_123",
-                    "question": f"Clarification {number}?",
-                }
-            )
-
-        runs = iter(
-            [
-                *(CapturedProcess(0, question(number), "") for number in range(1, 9)),
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(encoding="utf-8"),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(_opencode_export(tmp_path)), ""),
-            ]
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return next(runs)
-
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(
-            _request(tmp_path),
-            lambda interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer=f"Answer {interaction.question_id}",
-            ),
-        )
-
-        assert result.session_id == "ses_exact_123"
-        assert len(commands) == 10
-
-    def test_opencode_rejects_assistant_text_without_plan_metadata(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exported = _opencode_export(tmp_path)
-        exported["messages"][1]["info"].pop("mode")
-        exported["messages"][1]["info"].pop("agent")
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(exported), ""),
-            ]
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        with pytest.raises(PlanArtifactMissingError, match="no assistant plan"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-    def test_opencode_normalizes_blank_plan_artifact_id(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exported = _opencode_export(tmp_path)
-        exported["messages"][1]["info"]["id"] = "   "
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(exported), ""),
-            ]
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-        assert result.artifact_id is None
-
-    def test_opencode_selects_terminal_plan_response(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exported = _opencode_export(tmp_path)
-        preamble = json.loads(json.dumps(exported["messages"][1]))
-        preamble["info"]["id"] = "msg-plan-preamble"
-        preamble["parts"][0]["text"] = "I need one clarification before the final plan."
-        exported["messages"].insert(1, preamble)
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(encoding="utf-8"),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(exported), ""),
-            ]
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        result = AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
-        assert result.plan == "# Native plan\n\n1. Inspect.\n2. Implement."
-        assert result.artifact_id == "msg-plan-1"
-
-    def test_opencode_rejects_mismatched_export_directory(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exported = _opencode_export(tmp_path)
-        exported["info"]["directory"] = str(tmp_path.parent / "decoy")
-        runs = iter(
-            [
-                CapturedProcess(
-                    0,
-                    (FIXTURES / "opencode_events_success.jsonl").read_text(),
-                    "",
-                ),
-                CapturedProcess(0, json.dumps(exported), ""),
-            ]
-        )
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        with pytest.raises(PlanBindingMismatchError, match="working directory"):
-            AbstractAITool.get(AIToolID.OPENCODE).run_plan_session(_request(tmp_path))
-
     def test_antigravity_requires_exact_schema_echo(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2697,6 +2249,46 @@ class TestProtocolCollectors:
                 },
             },
         ) in FakeRpc.instances[0].sent
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"option_id": "stale"},
+            {"option_ids": ("stale",)},
+            {"option_ids": ("rejected", "cancelled")},
+            {"option_id": "rejected", "option_ids": ("rejected",)},
+            {"answer": "free text is not a native selection"},
+        ],
+    )
+    def test_cursor_rejects_invalid_final_plan_selection(
+        self, response: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option ID"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED, **response
+                ),
+            )
+        assert FakeRpc.instances[0].closed
+        assert not any(kind == "respond" for kind, _payload in FakeRpc.instances[0].sent)
+
+    @pytest.mark.parametrize("option_id", ["rejected", "cancelled"])
+    @pytest.mark.parametrize("field", ["option_id", "option_ids"])
+    def test_cursor_preserves_explicit_final_plan_selection(
+        self, option_id: str, field: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+        response = {field: option_id if field == "option_id" else (option_id,)}
+        AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _cursor_request(tmp_path),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED, **response
+            ),
+        )
+        replies = [payload for kind, payload in FakeRpc.instances[0].sent if kind == "respond"]
+        assert replies[0]["result"]["outcome"]["outcome"] == option_id
 
     @pytest.mark.parametrize(
         ("prompt_response", "message"),

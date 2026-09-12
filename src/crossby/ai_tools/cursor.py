@@ -13,6 +13,7 @@ from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import (
     PlanInteractionHandler,
     parse_plan_question_options,
+    validate_plan_option_selection,
 )
 from crossby.data import get_models_for_tool
 from crossby.handoff.models import ConversationTranscript, SessionRef
@@ -338,7 +339,7 @@ class CursorAdapter(AbstractAITool):
                 return result
 
         try:
-            rpc = JsonRpcProcess(command, cwd=request.working_dir)
+            rpc = JsonRpcProcess(command, cwd=request.working_dir, timeout=remaining())
             rpc.request(
                 1,
                 "initialize",
@@ -501,13 +502,23 @@ class CursorAdapter(AbstractAITool):
                             "outcome": "rejected",
                             "reason": outcome.answer or "Plan collected without implementation.",
                         }
-                    elif outcome.option_id == "cancelled":
-                        native_outcome = {"outcome": "cancelled"}
                     else:
-                        native_outcome = {
-                            "outcome": "rejected",
-                            "reason": outcome.answer or "Plan collected without implementation.",
-                        }
+                        try:
+                            selected = validate_plan_option_selection(interaction, outcome)
+                            if len(selected) != 1:
+                                raise ValueError("final plan outcome requires one native option")
+                        except ValueError as exc:
+                            raise PlanInteractionRequiredError(
+                                "Cursor final plan outcomes require one valid native option ID.",
+                                interaction=interaction,
+                                tool_id=self.TOOL_ID,
+                                capability=capability,
+                            ) from exc
+                        native_outcome = {"outcome": selected[0]}
+                        if selected[0] == "rejected":
+                            native_outcome["reason"] = (
+                                outcome.answer or "Plan collected without implementation."
+                            )
                     rpc.respond(message["id"], {"outcome": native_outcome})
                     continue
                 if method == "cursor/ask_question" and "id" in message:

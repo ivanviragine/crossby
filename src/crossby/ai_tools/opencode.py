@@ -10,11 +10,7 @@ from typing import Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.model_utils import classify_tier_universal, has_date_suffix
-from crossby.ai_tools.plan_mode import (
-    PlanInteractionHandler,
-    parse_plan_question_options,
-    validate_plan_option_selection,
-)
+from crossby.ai_tools.plan_mode import PlanInteractionHandler
 from crossby.models.ai import (
     AIModel,
     AIToolCapabilities,
@@ -23,9 +19,6 @@ from crossby.models.ai import (
     EffortLevel,
     PlanArtifactLocation,
     PlanArtifactSource,
-    PlanInteraction,
-    PlanInteractionKind,
-    PlanInteractionOutcome,
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
@@ -83,10 +76,11 @@ class OpenCodeAdapter(AbstractAITool):
                     "Use run_plan_session() to normalize the exact session export, or use Claude "
                     "when a requested filesystem output directory is required."
                 ),
-                transport=PlanSessionTransport.HEADLESS_CLI,
+                collector_activation=PlanModeActivation.OPENCODE_SERVER,
+                transport=PlanSessionTransport.OPENCODE_SERVER,
                 artifact_source=PlanArtifactSource.SESSION_EXPORT,
                 binding=PlanSessionBinding.SESSION_ID,
-                interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
+                interaction=PlanInteractionSupport.CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
             ),
@@ -140,39 +134,25 @@ class OpenCodeAdapter(AbstractAITool):
         version: str,
         interaction_handler: PlanInteractionHandler | None,
     ) -> PlanSessionResult:
-        """Run OpenCode's plan agent and export only its emitted session ID."""
+        """Run the native plan agent with live questions and export its exact session."""
+        from crossby.ai_tools.opencode_server import run_native_plan
         from crossby.ai_tools.plan_mode import (
             PlanArtifactAmbiguousError,
             PlanArtifactMalformedError,
             PlanArtifactMissingError,
             PlanBindingMismatchError,
-            PlanInteractionRequiredError,
             PlanTransportError,
         )
-        from crossby.ai_tools.plan_process import parse_jsonl, run_captured
+        from crossby.ai_tools.plan_process import run_captured
 
         capability = self.capabilities().plan_mode
         working_dir = request.working_dir.resolve()
-        command = [
-            "opencode",
-            "run",
-            "--dir",
-            str(working_dir),
-            "--format",
-            "json",
-            "--agent",
-            "plan",
-        ]
-        execution_args: list[str] = []
-        if request.model:
-            execution_args.extend(("--model", request.model))
-        if request.effort is not None:
-            execution_args.extend(self.effort_args(request.effort))
-        command.extend(execution_args)
-        command.extend(("--", request.prompt))
         deadline = time.monotonic() + request.timeout_seconds
+        session_id, terminal_message_id = run_native_plan(
+            request, interaction_handler, capability, deadline=deadline
+        )
 
-        def remaining_timeout(*, session_id: str | None = None) -> float:
+        def remaining_timeout(*, session_id: str) -> float:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise PlanTransportError(
@@ -183,189 +163,6 @@ class OpenCodeAdapter(AbstractAITool):
                 )
             return remaining
 
-        try:
-            run = run_captured(
-                command,
-                cwd=working_dir,
-                timeout=remaining_timeout(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise PlanTransportError(
-                f"OpenCode plan process timed out after {exc.timeout} seconds.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-            ) from None
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise PlanTransportError(
-                f"OpenCode plan process failed: {exc}",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-            ) from exc
-        if run.returncode != 0:
-            raise PlanTransportError(
-                f"OpenCode plan process exited with status {run.returncode}.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=run.returncode,
-                stderr=run.stderr,
-            )
-        try:
-            events = parse_jsonl(run.stdout)
-        except ValueError as exc:
-            raise PlanArtifactMalformedError(
-                f"OpenCode emitted malformed JSON events: {exc}",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=run.returncode,
-            ) from exc
-        session_ids = {
-            value for event in events for value in _event_session_ids(event) if value.strip()
-        }
-        if not session_ids:
-            raise PlanArtifactMissingError(
-                "OpenCode completed without emitting the launched session ID.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=run.returncode,
-            )
-        if len(session_ids) != 1:
-            raise PlanArtifactAmbiguousError(
-                "OpenCode emitted events for multiple session IDs.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=run.returncode,
-                session_id=",".join(sorted(session_ids)),
-            )
-        session_id = next(iter(session_ids))
-        seen_questions: set[str] = set()
-        max_continuations = 8
-        for continuation_count in range(max_continuations + 1):
-            try:
-                questions = _opencode_questions(events, session_id)
-            except ValueError as exc:
-                raise PlanArtifactMalformedError(
-                    f"OpenCode emitted malformed interaction data: {exc}",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    exit_code=0,
-                    session_id=session_id,
-                ) from exc
-            pending = [
-                question for question in questions if question.question_id not in seen_questions
-            ]
-            if not pending:
-                break
-            if continuation_count == max_continuations:
-                raise PlanTransportError(
-                    "OpenCode exceeded the bounded planning-question continuation limit.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=session_id,
-                )
-            if interaction_handler is None:
-                raise PlanInteractionRequiredError(
-                    "OpenCode requires an answer to continue the exact planning session.",
-                    interaction=pending[0],
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
-            answers: list[str] = []
-            for interaction in pending:
-                response = interaction_handler(interaction)
-                if response.outcome in {
-                    PlanInteractionOutcome.DENIED,
-                    PlanInteractionOutcome.CANCELLED,
-                    PlanInteractionOutcome.SKIPPED,
-                }:
-                    raise PlanInteractionRequiredError(
-                        "OpenCode planning question was left unanswered.",
-                        interaction=interaction,
-                        tool_id=self.TOOL_ID,
-                        capability=capability,
-                    )
-                try:
-                    selected_ids = validate_plan_option_selection(interaction, response)
-                except ValueError as exc:
-                    raise PlanInteractionRequiredError(
-                        "OpenCode planning question requires valid native option IDs.",
-                        interaction=interaction,
-                        tool_id=self.TOOL_ID,
-                        capability=capability,
-                    ) from exc
-                answer = response.answer or ", ".join(selected_ids) or None
-                if not answer:
-                    raise PlanInteractionRequiredError(
-                        "OpenCode planning question was left unanswered.",
-                        interaction=interaction,
-                        tool_id=self.TOOL_ID,
-                        capability=capability,
-                    )
-                answers.append(answer)
-                seen_questions.add(interaction.question_id)
-            continuation_command = [
-                "opencode",
-                "run",
-                "--dir",
-                str(working_dir),
-                "--session",
-                session_id,
-                "--format",
-                "json",
-                "--agent",
-                "plan",
-                *execution_args,
-                "--",
-                *answers,
-            ]
-            try:
-                continued = run_captured(
-                    continuation_command,
-                    cwd=working_dir,
-                    timeout=remaining_timeout(session_id=session_id),
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise PlanTransportError(
-                    f"OpenCode continuation timed out after {exc.timeout} seconds.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=session_id,
-                ) from None
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise PlanTransportError(
-                    f"OpenCode continuation failed for session {session_id}: {exc}",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=session_id,
-                ) from exc
-            if continued.returncode != 0:
-                raise PlanTransportError(
-                    f"OpenCode continuation exited with status {continued.returncode}.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    exit_code=continued.returncode,
-                    session_id=session_id,
-                    stderr=continued.stderr,
-                )
-            try:
-                continued_events = parse_jsonl(continued.stdout)
-            except ValueError as exc:
-                raise PlanArtifactMalformedError(
-                    f"OpenCode continuation emitted malformed JSON events: {exc}",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=session_id,
-                ) from exc
-            continuation_ids = {
-                value for event in continued_events for value in _event_session_ids(event)
-            }
-            if continuation_ids != {session_id}:
-                raise PlanBindingMismatchError(
-                    "OpenCode continuation changed or omitted the captured session ID.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                    session_id=session_id,
-                )
-            events.extend(continued_events)
         try:
             exported = run_captured(
                 ["opencode", "export", session_id],
@@ -478,6 +275,14 @@ class OpenCodeAdapter(AbstractAITool):
                 artifact_id=",".join(item_id or "unknown" for _, item_id in plans),
             )
         plan, artifact_id = plans[0]
+        if artifact_id != terminal_message_id:
+            raise PlanBindingMismatchError(
+                "OpenCode export did not contain the completed planning message.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                artifact_id=artifact_id,
+            )
         if not plan.strip():
             raise PlanArtifactMalformedError(
                 "OpenCode's exact session export contained a blank plan.",
@@ -492,7 +297,7 @@ class OpenCodeAdapter(AbstractAITool):
             version=version,
             plan=plan,
             session_id=session_id,
-            native_mode="--agent plan",
+            native_mode="OpenCode native API agent=plan",
             artifact_source=PlanArtifactSource.SESSION_EXPORT,
             binding=PlanSessionBinding.SESSION_ID,
             exit_code=0,
@@ -515,16 +320,6 @@ class OpenCodeAdapter(AbstractAITool):
         """OpenCode uses ``--variant <level>`` (xhigh/max map to high for launches)."""
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
-
-
-def _event_session_ids(event: dict[str, Any]) -> list[str]:
-    """Collect IDs from exact documented event and ``part`` fields."""
-    part = event.get("part")
-    values = (
-        event.get("sessionID"),
-        part.get("sessionID") if isinstance(part, dict) else None,
-    )
-    return [value for value in values if isinstance(value, str)]
 
 
 def _export_session_ids(payload: dict[str, Any]) -> list[str]:
@@ -582,30 +377,3 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
         if plan_parts:
             return [("\n".join(plan_parts), candidate_id)]
     return []
-
-
-def _opencode_questions(events: list[dict[str, Any]], session_id: str) -> list[PlanInteraction]:
-    questions: list[PlanInteraction] = []
-    for event in events:
-        part = event.get("part")
-        source = part if isinstance(part, dict) and part.get("type") == "question" else event
-        if source.get("type") not in {"question", "ask_question"}:
-            continue
-        question_id = source.get("id") or source.get("questionID") or source.get("questionId")
-        prompt = source.get("question") or source.get("prompt")
-        if not isinstance(question_id, str) or not isinstance(prompt, str):
-            raise ValueError("recognized question omitted a string question ID or prompt")
-        if not question_id.strip() or not prompt.strip():
-            raise ValueError("recognized question contained a blank question ID or prompt")
-        options = parse_plan_question_options(source.get("options"))
-        questions.append(
-            PlanInteraction(
-                kind=PlanInteractionKind.QUESTION,
-                question_id=question_id,
-                prompt=prompt,
-                options=options,
-                session_id=session_id,
-                artifact_id=str(source.get("id") or "") or None,
-            )
-        )
-    return questions

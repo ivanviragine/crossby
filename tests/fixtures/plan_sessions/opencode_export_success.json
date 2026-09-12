@@ -31,6 +31,8 @@
         "sessionID": "ses_exact_123",
         "mode": "plan",
         "agent": "plan",
+        "finish": "stop",
+        "time": {"created": 1, "completed": 2},
         "path": {
           "cwd": "/workspace",
           "root": "/workspace"
