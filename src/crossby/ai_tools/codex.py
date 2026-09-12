@@ -886,6 +886,13 @@ def _answer_codex_questions(
                 tool_id=tool_id,
                 capability=capability,
             ) from exc
+        if response.answer and selected_ids and not interaction.allow_multiple:
+            raise PlanInteractionRequiredError(
+                "Codex single-select planning questions require exactly one answer.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
         answer_values = [response.answer] if response.answer else []
         for option_id in selected_ids:
             selected = next(

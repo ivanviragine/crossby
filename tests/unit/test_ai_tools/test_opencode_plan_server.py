@@ -204,6 +204,28 @@ def test_native_multiple_questions_and_multiple_rounds(server: FakeServer, tmp_p
     assert server.closed
 
 
+def test_native_custom_answer_affordance_is_exposed(server: FakeServer, tmp_path: Path) -> None:
+    server.questions = [[_question(options=[], multiple=False)]]
+    seen: list[Any] = []
+
+    def answer(interaction: Any) -> PlanInteractionResponse:
+        seen.append(interaction)
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            answer="Keep compatibility",
+        )
+
+    _run(tmp_path, answer)
+
+    assert seen[0].allow_other is True
+    assert (
+        "POST",
+        "/question/que_exact_123/reply",
+        {"answers": [["Keep compatibility"]]},
+    ) in server.calls
+    assert server.closed
+
+
 @pytest.mark.parametrize("multiple", [False, None, "false", 1])
 def test_native_multiple_selection_is_validated(
     multiple: Any, server: FakeServer, tmp_path: Path

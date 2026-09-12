@@ -1587,6 +1587,41 @@ class TestExactSessionCliCollectors:
                 _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
             )
 
+    def test_copilot_rejects_duplicate_question_ids_before_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        events = [
+            {
+                "type": "ask_user",
+                "session_id": str(session_id),
+                "data": {"id": "scope", "question": prompt},
+            }
+            for prompt in ("Choose a scope", "Confirm the scope")
+        ]
+        seen: list[Any] = []
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: CapturedProcess(
+                0, "\n".join(json.dumps(event) for event in events), ""
+            ),
+        )
+
+        with pytest.raises(PlanArtifactMalformedError, match="duplicate question ID"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        answer="API",
+                    )
+                ),
+            )
+
+        assert seen == []
+
     def test_copilot_rejects_unknown_native_option_selection(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2251,6 +2286,26 @@ class TestProtocolCollectors:
             },
         ) in FakeRpc.instances[0].sent
 
+    def test_codex_rejects_mixed_answer_for_single_select_question(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_question.jsonl", headerless=True)
+
+        with pytest.raises(PlanInteractionRequiredError, match="exactly one answer"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    answer="Keep collection in the native adapter",
+                    option_id="adapter",
+                ),
+            )
+
+        assert not any(
+            kind == "respond" and payload["id"] == 71 for kind, payload in FakeRpc.instances[0].sent
+        )
+        assert FakeRpc.instances[0].closed
+
     def test_codex_rejects_disallowed_free_form_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2275,8 +2330,7 @@ class TestProtocolCollectors:
 
         assert seen[0].allow_other is False
         assert not any(
-            kind == "respond" and payload["id"] == 71
-            for kind, payload in FakeRpc.instances[0].sent
+            kind == "respond" and payload["id"] == 71 for kind, payload in FakeRpc.instances[0].sent
         )
         assert FakeRpc.instances[0].closed
 

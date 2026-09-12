@@ -270,6 +270,7 @@ def _answer_question(
             if final_approval
             else options,
             allow_multiple=multiple,
+            allow_other=custom if not final_approval else False,
             session_id=session_id,
             artifact_id=artifact_id,
         )
