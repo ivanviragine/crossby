@@ -454,21 +454,33 @@ class JsonRpcProcess:
             with suppress(OSError):
                 self._stdin.close()
         if self._proc.poll() is None:
-            with suppress(subprocess.TimeoutExpired):
-                self._proc.wait(timeout=1.0)
+            remaining = self._deadline - time.monotonic()
+            if remaining > 0:
+                with suppress(subprocess.TimeoutExpired):
+                    self._proc.wait(timeout=min(1.0, remaining))
         # The server may already have exited while a helper still owns a pipe.
         _kill_process_group(self._proc)
         if self._proc.poll() is None:
-            with suppress(subprocess.TimeoutExpired):
-                self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            remaining = self._deadline - time.monotonic()
+            if remaining > 0:
+                with suppress(subprocess.TimeoutExpired):
+                    self._proc.wait(timeout=min(_CAPTURE_CLEANUP_GRACE_SECONDS, remaining))
         if self._write_thread is not None:
-            self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            remaining = self._deadline - time.monotonic()
+            if remaining > 0:
+                self._write_thread.join(timeout=min(_CAPTURE_CLEANUP_GRACE_SECONDS, remaining))
             if not self._write_thread.is_alive() and not self._stdin.closed:
                 with suppress(OSError):
                     self._stdin.close()
         self._closing.set()
         readers = (self._stdout_thread, self._stderr_thread)
-        _join_until(readers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
+        _join_until(
+            readers,
+            min(
+                self._deadline,
+                time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS,
+            ),
+        )
         for stream, thread in zip((self._proc.stdout, self._proc.stderr), readers, strict=True):
             # Closing an IO wrapper while its reader holds the lock can block
             # forever (including on non-POSIX hosts without group cleanup).

@@ -822,6 +822,7 @@ class TestPlanProcess:
         rpc._proc = FakeProcess()  # type: ignore[assignment]
         rpc._stdin = rpc._proc.stdin  # type: ignore[assignment]
         rpc._write_thread = None
+        rpc._deadline = time.monotonic() + 1
         rpc._closing = threading.Event()
         rpc._stdout_thread = FakeThread("stdout")  # type: ignore[assignment]
         rpc._stderr_thread = FakeThread("stderr")  # type: ignore[assignment]
@@ -835,6 +836,59 @@ class TestPlanProcess:
             "close:stdout",
             "close:stderr",
         ]
+
+    def test_protocol_cleanup_does_not_wait_after_session_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[str] = []
+
+        class FakeStream:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.closed = False
+
+            def close(self) -> None:
+                events.append(f"close:{self.name}")
+                self.closed = True
+
+        class FakeThread:
+            def join(self, *, timeout: float) -> None:
+                raise AssertionError(f"cleanup waited {timeout}s after its deadline")
+
+            def is_alive(self) -> bool:
+                return False
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = FakeStream("stdin")
+                self.stdout = FakeStream("stdout")
+                self.stderr = FakeStream("stderr")
+                self.returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def wait(self, *, timeout: float) -> int:
+                raise AssertionError(f"cleanup waited {timeout}s after its deadline")
+
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._proc = FakeProcess()  # type: ignore[assignment]
+        rpc._stdin = rpc._proc.stdin  # type: ignore[assignment]
+        rpc._write_thread = None
+        rpc._deadline = 0.0
+        rpc._closing = threading.Event()
+        rpc._stdout_thread = FakeThread()  # type: ignore[assignment]
+        rpc._stderr_thread = FakeThread()  # type: ignore[assignment]
+
+        def kill(process: FakeProcess) -> None:
+            events.append("kill")
+            process.returncode = -9
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.time.monotonic", lambda: 1.0)
+        monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", kill)
+
+        assert rpc.close() == -9
+        assert events == ["close:stdin", "kill", "close:stdout", "close:stderr"]
 
     def test_protocol_write_cannot_outlive_deadline(self, tmp_path: Path) -> None:
         script = "import time; print('ready', flush=True); time.sleep(30)"
@@ -851,6 +905,48 @@ class TestPlanProcess:
 
 
 class TestClaudeCollector:
+    @pytest.mark.skipif(os.name != "posix", reason="directory-descriptor contract")
+    def test_plan_root_creation_is_anchored_to_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        working_dir = tmp_path / "workspace"
+        working_dir.mkdir()
+        crossby_dir = working_dir / ".crossby"
+        original_crossby = working_dir / "original-crossby"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        real_mkdir = os.mkdir
+        raced = False
+
+        def replace_intermediate_before_plan_root_mkdir(
+            path: Any,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal raced
+            if not raced and Path(path).name == "plan-sessions" and crossby_dir.is_dir():
+                raced = True
+                crossby_dir.rename(original_crossby)
+                crossby_dir.symlink_to(outside, target_is_directory=True)
+            real_mkdir(path, mode, dir_fd=dir_fd)
+
+        def write_plan(command: list[str], *, cwd: Path, **_kwargs: Any) -> int:
+            settings = json.loads(command[command.index("--settings") + 1])
+            run_dir = cwd / settings["plansDirectory"]
+            (run_dir / "plan.md").write_text("# Escaped plan", encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr(os, "mkdir", replace_intermediate_before_plan_root_mkdir)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+
+        with pytest.raises(PlanTransportError, match="plan root could not be created or opened"):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(working_dir))
+
+        assert raced
+        assert not (outside / "plan-sessions").exists()
+        assert (original_crossby / "plan-sessions").is_dir()
+
     @pytest.mark.skipif(os.name != "posix", reason="directory-descriptor contract")
     def test_isolated_directory_creation_is_anchored_to_validated_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

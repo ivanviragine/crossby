@@ -52,6 +52,40 @@ def _encode_claude_path(path: Path) -> str:
     return str(path).replace("/", "-").replace(".", "-")
 
 
+def _open_posix_directory(path: Path) -> int:
+    """Open an absolute directory without following any path component."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    except OSError:
+        os.close(current_fd)
+        raise
+    return current_fd
+
+
+def _open_or_create_posix_directories(parent_fd: int, components: tuple[str, ...]) -> int:
+    """Create and open descendants relative to one anchored directory descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.dup(parent_fd)
+    try:
+        for component in components:
+            if component in {"", ".", ".."}:
+                raise OSError(f"unsafe plan-root path component: {component!r}")
+            with suppress(FileExistsError):
+                os.mkdir(component, dir_fd=current_fd)
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    except OSError:
+        os.close(current_fd)
+        raise
+    return current_fd
+
+
 class ClaudeAdapter(AbstractAITool):
     """Adapter for Claude Code CLI."""
 
@@ -195,15 +229,20 @@ class ClaudeAdapter(AbstractAITool):
             )
         root_fd: int | None = None
         root_stat: os.stat_result | None = None
+        workspace_fd: int | None = None
         try:
-            root.mkdir(parents=True, exist_ok=True)
             if os.name == "posix":
-                root_stat = root.lstat()
-                if not stat.S_ISDIR(root_stat.st_mode):
-                    raise OSError("plan root is not a directory")
-                root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                if not os.path.samestat(root_stat, os.fstat(root_fd)):
-                    raise OSError("plan root was replaced while opening it")
+                workspace_fd = _open_posix_directory(working_dir)
+                workspace_stat = os.fstat(workspace_fd)
+                if not os.path.samestat(workspace_stat, working_dir.lstat()):
+                    raise OSError("working directory was replaced while opening it")
+                relative_root = root.relative_to(working_dir)
+                root_fd = _open_or_create_posix_directories(workspace_fd, relative_root.parts)
+                root_stat = os.fstat(root_fd)
+                if not os.path.samestat(root_stat, root.lstat()):
+                    raise OSError("plan root was replaced while creating or opening it")
+            else:
+                root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             if root_fd is not None:
                 os.close(root_fd)
@@ -213,6 +252,9 @@ class ClaudeAdapter(AbstractAITool):
                 capability=capability,
                 paths=(root,),
             ) from exc
+        finally:
+            if workspace_fd is not None:
+                os.close(workspace_fd)
         session_id = str(uuid.uuid4())
         run_dir = root / session_id
         try:
