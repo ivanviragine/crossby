@@ -752,8 +752,9 @@ def _answer_cursor_question(
             capability=capability,
             session_id=session_id,
         )
-    native_answers: list[dict[str, Any]] = []
     tool_call_id = str(params.get("toolCallId") or message.get("id"))
+    interactions: list[PlanInteraction] = []
+    question_ids: set[str] = set()
     for raw_question in raw_questions:
         if not isinstance(raw_question, dict):
             raise PlanTransportError(
@@ -778,19 +779,40 @@ def _answer_cursor_question(
                 capability=capability,
                 session_id=session_id,
             )
+        if question_id in question_ids:
+            raise PlanTransportError(
+                "Cursor ACP planning questions contained a duplicate native ID.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        question_ids.add(question_id)
+        allow_multiple = raw_question.get("allowMultiple", False)
+        if not isinstance(allow_multiple, bool):
+            raise PlanTransportError(
+                "Cursor ACP planning question had a non-boolean multi-select field.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
         options = parse_plan_question_options(
             raw_question.get("options"),
             require_id=True,
         )
-        interaction = PlanInteraction(
-            kind=PlanInteractionKind.QUESTION,
-            question_id=question_id,
-            prompt=prompt,
-            options=options,
-            allow_multiple=bool(raw_question.get("allowMultiple")),
-            session_id=session_id,
-            artifact_id=tool_call_id,
+        interactions.append(
+            PlanInteraction(
+                kind=PlanInteractionKind.QUESTION,
+                question_id=question_id,
+                prompt=prompt,
+                options=options,
+                allow_multiple=allow_multiple,
+                session_id=session_id,
+                artifact_id=tool_call_id,
+            )
         )
+
+    native_answers: list[dict[str, Any]] = []
+    for interaction in interactions:
         if handler is None:
             raise PlanInteractionRequiredError(
                 "Cursor requires an answer to continue the planning session.",
@@ -825,10 +847,10 @@ def _answer_cursor_question(
         if response.answer and not selected_ids:
             selected_ids = tuple(
                 option.option_id
-                for option in options
+                for option in interaction.options
                 if response.answer in {option.option_id, option.label}
             )
-        valid_ids = {option.option_id for option in options}
+        valid_ids = {option.option_id for option in interaction.options}
         if (
             not selected_ids
             or len(set(selected_ids)) != len(selected_ids)
@@ -841,7 +863,12 @@ def _answer_cursor_question(
                 tool_id=tool_id,
                 capability=capability,
             )
-        native_answers.append({"questionId": question_id, "selectedOptionIds": list(selected_ids)})
+        native_answers.append(
+            {
+                "questionId": interaction.question_id,
+                "selectedOptionIds": list(selected_ids),
+            }
+        )
     rpc.respond(
         message["id"],
         {"outcome": {"outcome": "answered", "answers": native_answers}},

@@ -2053,7 +2053,14 @@ class TestProtocolCollectors:
                     "threadId": "thr-exact-123",
                     "turnId": "turn-exact-123",
                     "itemId": "question-item-late",
-                    "questions": [{"id": "late", "question": "One more choice?", "options": []}],
+                    "questions": [
+                        {
+                            "id": "late",
+                            "question": "One more choice?",
+                            "options": [],
+                            "isOther": True,
+                        }
+                    ],
                 },
             },
         )
@@ -2209,6 +2216,7 @@ class TestProtocolCollectors:
         result = AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path), answer)
         assert result.artifact_id == "plan-exact-123"
         assert seen[0].question_id == "architecture"
+        assert seen[0].allow_other is True
         assert [option.option_id for option in seen[0].options] == ["adapter", "service"]
         assert (
             "respond",
@@ -2217,6 +2225,85 @@ class TestProtocolCollectors:
                 "result": {"answers": {"architecture": {"answers": ["Adapter"]}}},
             },
         ) in FakeRpc.instances[0].sent
+
+    def test_codex_forwards_allowed_free_form_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_question.jsonl", headerless=True)
+
+        AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+            _request(tmp_path),
+            lambda interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Keep collection in the native adapter",
+            ),
+        )
+
+        assert (
+            "respond",
+            {
+                "id": 71,
+                "result": {
+                    "answers": {
+                        "architecture": {"answers": ["Keep collection in the native adapter"]}
+                    }
+                },
+            },
+        ) in FakeRpc.instances[0].sent
+
+    def test_codex_rejects_disallowed_free_form_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_question.jsonl")
+        messages[4]["params"]["questions"][0]["isOther"] = False
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanInteractionRequiredError, match="does not allow a free-form"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        answer="Keep collection in the native adapter",
+                    )
+                ),
+            )
+
+        assert seen[0].allow_other is False
+        assert not any(
+            kind == "respond" and payload["id"] == 71
+            for kind, payload in FakeRpc.instances[0].sent
+        )
+        assert FakeRpc.instances[0].closed
+
+    def test_codex_rejects_non_boolean_free_form_field_before_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_question.jsonl")
+        messages[4]["params"]["questions"][0]["isOther"] = "true"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanTransportError, match="non-boolean free-form"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(
+                _request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        option_id="adapter",
+                    )
+                ),
+            )
+
+        assert seen == []
+        assert FakeRpc.instances[0].closed
 
     def test_codex_rejects_malformed_native_question_options(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2817,6 +2904,60 @@ class TestProtocolCollectors:
         with pytest.raises(PlanTransportError, match="native question options"):
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path))
 
+        assert FakeRpc.instances[0].closed
+
+    @pytest.mark.parametrize("value", ["false", 1, None])
+    def test_cursor_rejects_non_boolean_question_cardinality_before_callback(
+        self,
+        value: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_question.jsonl")
+        messages[3]["params"]["questions"][1]["allowMultiple"] = value
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanTransportError, match="non-boolean multi-select"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        option_id="api",
+                    )
+                ),
+            )
+
+        assert seen == []
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_rejects_duplicate_question_ids_before_callback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_question.jsonl")
+        messages[3]["params"]["questions"][1]["id"] = "scope"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+        seen: list[Any] = []
+
+        with pytest.raises(PlanTransportError, match="duplicate native ID"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda interaction: (
+                    seen.append(interaction)
+                    or PlanInteractionResponse(
+                        outcome=PlanInteractionOutcome.ANSWERED,
+                        option_id="api",
+                    )
+                ),
+            )
+
+        assert seen == []
         assert FakeRpc.instances[0].closed
 
     def test_cursor_rejects_unknown_native_question_option_selection(

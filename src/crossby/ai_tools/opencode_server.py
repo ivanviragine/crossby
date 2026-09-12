@@ -35,6 +35,7 @@ from crossby.models.ai import (
 )
 
 _HTTP_BODY_LIMIT = 8 * 1024 * 1024
+_HTTP_BODY_CHUNK_SIZE = 64 * 1024
 
 
 class OpenCodeServer:
@@ -87,13 +88,25 @@ class OpenCodeServer:
                 body=json.dumps(payload) if payload is not None else None,
                 headers={"Authorization": self.authorization, "Content-Type": "application/json"},
             )
+            response_socket = connection.sock
+            if response_socket is None:
+                raise OSError("OpenCode native API connection closed before its response")
+            response_socket.settimeout(self.remaining())
             response = connection.getresponse()
             if not 200 <= response.status < 300:
                 raise OSError(f"OpenCode native API returned HTTP {response.status}")
-            content = response.read(_HTTP_BODY_LIMIT + 1)
-            if len(content) > _HTTP_BODY_LIMIT:
-                raise ValueError("OpenCode native API exceeded the response size limit")
-            self.remaining()
+            content = bytearray()
+            while len(content) <= _HTTP_BODY_LIMIT:
+                response_socket.settimeout(self.remaining())
+                chunk = response.read1(
+                    min(_HTTP_BODY_CHUNK_SIZE, _HTTP_BODY_LIMIT + 1 - len(content))
+                )
+                self.remaining()
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > _HTTP_BODY_LIMIT:
+                    raise ValueError("OpenCode native API exceeded the response size limit")
             return json.loads(content) if content else None
         finally:
             connection.close()

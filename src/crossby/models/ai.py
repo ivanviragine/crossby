@@ -260,6 +260,7 @@ class PlanInteraction(BaseModel, frozen=True):
     prompt: str
     options: tuple[PlanQuestionOption, ...] = ()
     allow_multiple: bool = False
+    allow_other: bool = False
     session_id: str
     thread_id: str | None = None
     turn_id: str | None = None

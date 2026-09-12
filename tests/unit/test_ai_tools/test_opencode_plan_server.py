@@ -425,3 +425,73 @@ def test_server_uses_fresh_loopback_auth_and_keeps_questions_enabled(tmp_path: P
     assert len(environment["OPENCODE_SERVER_PASSWORD"]) > 32
     assert environment["OPENCODE_SERVER_PASSWORD"] not in repr(command)
     assert native.authorization.startswith("Basic ")
+
+
+def test_server_recomputes_deadline_while_reading_http_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [100.0]
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.timeout = 0.0
+            self.timeouts: list[float] = []
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeout = timeout
+            self.timeouts.append(timeout)
+
+    transport = FakeSocket()
+
+    class TrickledResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.successful_reads = 0
+
+        def read1(self, _amount: int) -> bytes:
+            delay = 6.0
+            if delay > transport.timeout:
+                clock[0] += transport.timeout
+                raise TimeoutError("simulated trickled response exceeded the socket timeout")
+            clock[0] += delay
+            self.successful_reads += 1
+            return b'{"ok":' if self.successful_reads == 1 else b"true}"
+
+        def read(self, _amount: int) -> bytes:
+            raise AssertionError("response bodies must be read incrementally")
+
+    response = TrickledResponse()
+    connections: list[Any] = []
+
+    class FakeConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            assert timeout == pytest.approx(10.0)
+            self.sock: FakeSocket | None = transport
+            self.closed = False
+            connections.append(self)
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> TrickledResponse:
+            return response
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
+    )
+    with patch("crossby.ai_tools.opencode_server.JsonRpcProcess"):
+        native = OpenCodeServer(_request(tmp_path), 110.0)
+    native.port = 1234
+
+    with pytest.raises(TimeoutError, match="trickled response"):
+        native.request("GET", "/slow")
+
+    assert response.successful_reads == 1
+    assert transport.timeouts == pytest.approx([10.0, 10.0, 4.0])
+    assert clock[0] == pytest.approx(110.0)
+    assert connections[0].closed

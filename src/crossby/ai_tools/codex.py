@@ -823,6 +823,16 @@ def _answer_codex_questions(
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
+        allow_other = raw_question.get("isOther", False)
+        if not isinstance(allow_other, bool):
+            raise PlanTransportError(
+                "Codex planning question had a non-boolean free-form field.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
         options = parse_plan_question_options(raw_question.get("options"))
         interactions.append(
             PlanInteraction(
@@ -831,6 +841,7 @@ def _answer_codex_questions(
                 prompt=prompt,
                 options=options,
                 allow_multiple=multiple_values[0] if multiple_values else False,
+                allow_other=allow_other,
                 session_id=thread_id,
                 thread_id=thread_id,
                 turn_id=turn_id,
@@ -855,6 +866,13 @@ def _answer_codex_questions(
         }:
             raise PlanInteractionRequiredError(
                 "Codex planning question was left unanswered.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
+        if response.answer and not interaction.allow_other:
+            raise PlanInteractionRequiredError(
+                "Codex planning question does not allow a free-form answer.",
                 interaction=interaction,
                 tool_id=tool_id,
                 capability=capability,
