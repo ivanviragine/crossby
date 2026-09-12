@@ -593,6 +593,30 @@ class TestPlanProcess:
         time.sleep(0.8)
         assert not survived.exists()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_interactive_process_success_kills_descendants(self, tmp_path: Path) -> None:
+        started = tmp_path / "descendant-started"
+        survived = tmp_path / "descendant-survived"
+        child = (
+            "import pathlib,time; "
+            f"pathlib.Path({str(started)!r}).write_text('started'); "
+            "time.sleep(0.5); "
+            f"pathlib.Path({str(survived)!r}).write_text('survived')"
+        )
+        parent = (
+            "import pathlib,subprocess,sys,time\n"
+            f"started=pathlib.Path({str(started)!r})\n"
+            f"subprocess.Popen([sys.executable,'-c',{child!r}])\n"
+            "while not started.exists():\n"
+            "    time.sleep(0.01)\n"
+        )
+
+        assert run_interactive([sys.executable, "-c", parent], cwd=tmp_path, timeout=5) == 0
+
+        assert started.is_file()
+        time.sleep(0.8)
+        assert not survived.exists()
+
     def test_captured_process_encodes_input_before_spawning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

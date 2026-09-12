@@ -247,12 +247,14 @@ def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:
         start_new_session=os.name == "posix",
     )
     try:
-        return proc.wait(timeout=timeout)
+        returncode = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
+    _kill_process_group(proc)
+    return returncode
 
 
 def parse_jsonl(text: str) -> list[dict[str, Any]]:
