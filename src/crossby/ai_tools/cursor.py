@@ -845,11 +845,13 @@ def _answer_cursor_question(
             *response.option_ids,
         )
         if response.answer and not selected_ids:
-            selected_ids = tuple(
+            textual_matches = tuple(
                 option.option_id
                 for option in interaction.options
                 if response.answer in {option.option_id, option.label}
             )
+            if len(textual_matches) == 1:
+                selected_ids = textual_matches
         valid_ids = {option.option_id for option in interaction.options}
         if (
             not selected_ids

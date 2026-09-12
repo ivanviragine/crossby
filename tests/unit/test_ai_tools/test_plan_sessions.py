@@ -571,6 +571,35 @@ class TestPlanProcess:
         assert time.monotonic() - started < 2
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_captured_process_success_kills_descendants_with_redirected_pipes(
+        self, tmp_path: Path
+    ) -> None:
+        started = tmp_path / "descendant-started"
+        survived = tmp_path / "descendant-survived"
+        child = (
+            "import pathlib,time; "
+            f"pathlib.Path({str(started)!r}).write_text('started'); "
+            "time.sleep(0.5); "
+            f"pathlib.Path({str(survived)!r}).write_text('survived')"
+        )
+        parent = (
+            "import pathlib,subprocess,sys,time\n"
+            f"started=pathlib.Path({str(started)!r})\n"
+            "subprocess.Popen("
+            f"[sys.executable,'-c',{child!r}],"
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "while not started.exists():\n"
+            "    time.sleep(0.01)\n"
+        )
+
+        result = run_captured([sys.executable, "-c", parent], cwd=tmp_path, timeout=5)
+
+        assert result.returncode == 0
+        assert started.is_file()
+        time.sleep(0.8)
+        assert not survived.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
     def test_interactive_process_timeout_kills_descendants(self, tmp_path: Path) -> None:
         started = tmp_path / "descendant-started"
         survived = tmp_path / "descendant-survived"
@@ -664,6 +693,7 @@ class TestPlanProcess:
         rpc = object.__new__(JsonRpcProcess)
         rpc._stdout_queue = SignalingQueue(maxsize=1)
         rpc._closing = threading.Event()
+        rpc._discard_stdout = threading.Event()
         reader = threading.Thread(target=rpc._read_stdout, args=(StringIO("one\ntwo\n"),))
 
         reader.start()
@@ -690,6 +720,7 @@ class TestPlanProcess:
         rpc = object.__new__(JsonRpcProcess)
         rpc._stdout_queue = queue.Queue(maxsize=2)
         rpc._closing = threading.Event()
+        rpc._discard_stdout = threading.Event()
         rpc._proc = FakeProcess()  # type: ignore[assignment]
         monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", lambda p: p.kill())
         private_payload = "private-protocol-payload"
@@ -770,6 +801,18 @@ class TestPlanProcess:
             rpc = JsonRpcProcess(["fake-json-rpc"], cwd=tmp_path)
 
         assert rpc._stdout_queue.maxsize == _STDOUT_QUEUE_LIMIT
+
+    def test_stdout_discard_mode_drains_queued_and_future_output(self) -> None:
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._stdout_queue = queue.Queue(maxsize=1)
+        rpc._stdout_queue.put_nowait("already queued\n")
+        rpc._closing = threading.Event()
+        rpc._discard_stdout = threading.Event()
+
+        rpc.discard_stdout()
+        rpc._read_stdout(StringIO("later output\n"))
+
+        assert rpc._stdout_queue.empty()
 
     def test_stderr_reader_retains_only_a_bounded_tail(self) -> None:
         rpc = object.__new__(JsonRpcProcess)
@@ -3054,6 +3097,40 @@ class TestProtocolCollectors:
         with pytest.raises(PlanTransportError, match="native question options"):
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path))
 
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_rejects_ambiguous_textual_option_answer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_question.jsonl")
+        for option in messages[3]["params"]["questions"][1]["options"]:
+            option["label"] = "Required"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            if interaction.kind is PlanInteractionKind.PLAN_APPROVAL:
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                )
+            if interaction.question_id == "scope":
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_id="api",
+                )
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Required",
+            )
+
+        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), answer)
+
+        assert not any(
+            kind == "respond" and payload["id"] == 90 for kind, payload in FakeRpc.instances[0].sent
+        )
         assert FakeRpc.instances[0].closed
 
     @pytest.mark.parametrize("value", ["false", 1, None])

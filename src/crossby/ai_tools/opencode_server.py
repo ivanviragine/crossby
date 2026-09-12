@@ -76,6 +76,7 @@ class OpenCodeServer:
                 if not 0 < port < 65536:
                     raise ValueError("OpenCode advertised an invalid loopback port")
                 self.port = port
+                self.process.discard_stdout()
 
     def request(self, method: str, path: str, payload: Any = None) -> Any:
         if self.port is None:

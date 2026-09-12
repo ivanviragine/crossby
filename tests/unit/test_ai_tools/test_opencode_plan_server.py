@@ -449,6 +449,34 @@ def test_server_uses_fresh_loopback_auth_and_keeps_questions_enabled(tmp_path: P
     assert native.authorization.startswith("Basic ")
 
 
+def test_server_discards_stdout_after_startup_banner(tmp_path: Path) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.lines = iter(
+                (
+                    "startup warning\n",
+                    "opencode server listening on http://127.0.0.1:4321\n",
+                )
+            )
+            self.discarded = False
+
+        def read_line(self, *, timeout: float) -> str:
+            assert timeout > 0
+            return next(self.lines)
+
+        def discard_stdout(self) -> None:
+            self.discarded = True
+
+    process = FakeProcess()
+    with patch("crossby.ai_tools.opencode_server.JsonRpcProcess", return_value=process):
+        server = OpenCodeServer(_request(tmp_path), time.monotonic() + 10)
+
+    server.start()
+
+    assert server.port == 4321
+    assert process.discarded
+
+
 def test_server_recomputes_deadline_while_reading_http_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

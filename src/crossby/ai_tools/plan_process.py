@@ -226,6 +226,9 @@ def run_captured(
         if overflow:
             raise CapturedOutputLimitError(*overflow[0])
         raise subprocess.TimeoutExpired(command, timeout) from None
+    # The direct child may exit after spawning a helper that redirects the
+    # capture pipes. Always clear the run-owned process group before returning.
+    _kill_process_group(proc)
     if overflow:
         raise CapturedOutputLimitError(*overflow[0])
 
@@ -313,6 +316,7 @@ class JsonRpcProcess:
         self._stderr_tail = ""
         self._stderr_lock = threading.Lock()
         self._closing = threading.Event()
+        self._discard_stdout = threading.Event()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
             args=(self._proc.stdout,),
@@ -338,6 +342,8 @@ class JsonRpcProcess:
     def _read_stdout(self, stream: IO[str]) -> None:
         try:
             while line := stream.readline(_JSON_RPC_FRAME_LIMIT + 1):
+                if self._discard_stdout.is_set():
+                    continue
                 if len(line) > _JSON_RPC_FRAME_LIMIT:
                     proc = getattr(self, "_proc", None)
                     if proc is not None:
@@ -355,12 +361,23 @@ class JsonRpcProcess:
     def _queue_stdout(self, line: str | ValueError | None) -> bool:
         """Queue one stdout record, applying backpressure until read or closed."""
         while not self._closing.is_set():
+            if self._discard_stdout.is_set():
+                return True
             try:
                 self._stdout_queue.put(line, timeout=_QUEUE_PUT_TIMEOUT_SECONDS)
             except queue.Full:
                 continue
             return True
         return False
+
+    def discard_stdout(self) -> None:
+        """Drain queued stdout and discard subsequent records until shutdown."""
+        self._discard_stdout.set()
+        while True:
+            try:
+                self._stdout_queue.get_nowait()
+            except queue.Empty:
+                return
 
     def _read_stderr(self, stream: IO[str]) -> None:
         try:
