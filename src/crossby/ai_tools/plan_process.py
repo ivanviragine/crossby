@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import locale
 import os
 import queue
 import signal
@@ -47,7 +46,7 @@ class CapturedOutputLimitError(subprocess.SubprocessError):
 
 
 class CapturedOutputDecodeError(subprocess.SubprocessError):
-    """A captured child emitted bytes invalid for the selected locale encoding."""
+    """A captured child emitted bytes invalid for the native UTF-8 contract."""
 
     def __init__(self, stream: str, encoding: str) -> None:
         super().__init__(f"captured {stream} was not valid {encoding} text")
@@ -138,7 +137,7 @@ def run_captured(
 ) -> CapturedProcess:
     """Run a bounded child with hard stdout/stderr memory limits and no shell."""
     deadline = time.monotonic() + timeout
-    encoding = locale.getpreferredencoding(False)
+    encoding = "utf-8"
     input_bytes = input_text.encode(encoding) if input_text is not None else None
     proc = subprocess.Popen(
         command,
@@ -301,6 +300,8 @@ class JsonRpcProcess:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             bufsize=1,
             start_new_session=os.name == "posix",
         )
@@ -478,10 +479,10 @@ class JsonRpcProcess:
         # The server may already have exited while a helper still owns a pipe.
         _kill_process_group(self._proc)
         if self._proc.poll() is None:
-            remaining = self._deadline - time.monotonic()
-            if remaining > 0:
-                with suppress(subprocess.TimeoutExpired):
-                    self._proc.wait(timeout=min(_CAPTURE_CLEANUP_GRACE_SECONDS, remaining))
+            # Reaping is cleanup, not session work: retain one fixed grace after
+            # SIGKILL even when the request deadline has already expired.
+            with suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         if self._write_thread is not None:
             remaining = self._deadline - time.monotonic()
             if remaining > 0:

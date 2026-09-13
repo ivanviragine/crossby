@@ -43,6 +43,7 @@ from crossby.ai_tools import (
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import (
+    _CAPTURE_CLEANUP_GRACE_SECONDS,
     _JSON_RPC_FRAME_LIMIT,
     _STDERR_TAIL_LIMIT,
     _STDOUT_QUEUE_LIMIT,
@@ -655,35 +656,45 @@ class TestPlanProcess:
         time.sleep(0.8)
         assert not survived.exists()
 
-    def test_captured_process_encodes_input_before_spawning(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.locale.getpreferredencoding", lambda _: "ascii"
+    def test_captured_process_uses_utf8_independent_of_host_locale(self, tmp_path: Path) -> None:
+        script = (
+            "import sys; "
+            "received=sys.stdin.buffer.read(); "
+            "sys.stdout.buffer.write('café'.encode('utf-8') + b':' + received.hex().encode())"
         )
 
-        with (
-            patch("crossby.ai_tools.plan_process.subprocess.Popen") as popen,
-            pytest.raises(UnicodeEncodeError),
-        ):
-            run_captured(["unused"], cwd=tmp_path, timeout=5, input_text="café")
+        with patch("locale.getpreferredencoding", return_value="cp1252"):
+            result = run_captured(
+                [sys.executable, "-c", script],
+                cwd=tmp_path,
+                timeout=5,
+                input_text="crème",
+            )
 
-        popen.assert_not_called()
+        assert result.stdout == "café:6372c3a86d65"
 
     @pytest.mark.parametrize("stream", ["stdout", "stderr"])
-    def test_captured_process_translates_invalid_output_encoding(
-        self, stream: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.locale.getpreferredencoding", lambda _: "ascii"
-        )
+    def test_captured_process_translates_invalid_utf8(self, stream: str, tmp_path: Path) -> None:
         script = f"import sys; sys.{stream}.buffer.write(bytes([255]))"
 
         with pytest.raises(CapturedOutputDecodeError) as raised:
             run_captured([sys.executable, "-c", script], cwd=tmp_path, timeout=5)
 
         assert raised.value.stream == stream
-        assert raised.value.encoding == "ascii"
+        assert raised.value.encoding == "utf-8"
+
+    def test_json_rpc_process_configures_strict_utf8_stdio(self, tmp_path: Path) -> None:
+        with (
+            patch(
+                "crossby.ai_tools.plan_process.subprocess.Popen",
+                side_effect=OSError("stop after capturing arguments"),
+            ) as popen,
+            pytest.raises(OSError, match="stop after capturing arguments"),
+        ):
+            JsonRpcProcess(["unused"], cwd=tmp_path)
+
+        assert popen.call_args.kwargs["encoding"] == "utf-8"
+        assert popen.call_args.kwargs["errors"] == "strict"
 
     def test_stdout_reader_applies_bounded_backpressure_until_closed(self) -> None:
         blocked = threading.Event()
@@ -889,7 +900,7 @@ class TestPlanProcess:
             "close:stderr",
         ]
 
-    def test_protocol_cleanup_does_not_wait_after_session_deadline(
+    def test_protocol_cleanup_reaps_after_session_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         events: list[str] = []
@@ -921,7 +932,9 @@ class TestPlanProcess:
                 return self.returncode
 
             def wait(self, *, timeout: float) -> int:
-                raise AssertionError(f"cleanup waited {timeout}s after its deadline")
+                events.append(f"wait:{timeout}")
+                self.returncode = -9
+                return self.returncode
 
         rpc = object.__new__(JsonRpcProcess)
         rpc._proc = FakeProcess()  # type: ignore[assignment]
@@ -934,13 +947,31 @@ class TestPlanProcess:
 
         def kill(process: FakeProcess) -> None:
             events.append("kill")
-            process.returncode = -9
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.time.monotonic", lambda: 1.0)
         monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", kill)
 
         assert rpc.close() == -9
-        assert events == ["close:stdin", "kill", "close:stdout", "close:stderr"]
+        assert events == [
+            "close:stdin",
+            "kill",
+            f"wait:{_CAPTURE_CLEANUP_GRACE_SECONDS}",
+            "close:stdout",
+            "close:stderr",
+        ]
+
+    def test_protocol_cleanup_reaps_real_child_after_session_deadline(self, tmp_path: Path) -> None:
+        rpc = JsonRpcProcess(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=tmp_path,
+        )
+        process = rpc._proc
+        rpc._deadline = 0.0
+
+        returncode = rpc.close()
+
+        assert returncode != 0
+        assert process.returncode == returncode
 
     def test_protocol_cleanup_never_reports_success_while_child_is_alive(
         self, monkeypatch: pytest.MonkeyPatch
@@ -963,6 +994,10 @@ class TestPlanProcess:
 
             def poll(self) -> None:
                 return None
+
+            def wait(self, *, timeout: float) -> None:
+                assert timeout == _CAPTURE_CLEANUP_GRACE_SECONDS
+                raise subprocess.TimeoutExpired("unused", timeout)
 
         rpc = object.__new__(JsonRpcProcess)
         rpc._proc = FakeProcess()  # type: ignore[assignment]
