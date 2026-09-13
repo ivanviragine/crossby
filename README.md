@@ -373,7 +373,9 @@ Native planning has two deliberately separate surfaces:
 
 Neither surface treats prompt text such as `/plan` as activation. Plan mode,
 sandbox confinement, and approval policy are independent request dimensions; a
-collector either preserves a supported choice or rejects it before spawning.
+collector either preserves a supported choice or rejects it. Static unsupported
+requests fail before spawning; native model-availability checks finish before
+the first planning prompt.
 Unknown and below-floor CLI versions also fail before a harness process starts.
 `PlanSessionRequest` rejects unknown fields instead of silently applying a
 default. Cursor and Antigravity CLI require an explicit `model` with explicit
@@ -388,6 +390,13 @@ the collector launches. OpenCode collection accepts only `low`, `medium`, and
 `high` and passes the exact provider/model and variant to its native session API:
 interactive launches retain the legacy `xhigh`/`max` → `high` normalization, but
 a collected session rejects tiers the adapter cannot preserve exactly.
+OpenCode also requires that the selected model advertise the requested variant
+through its native provider API. Disabled or missing variants fail before
+prompting. With effort but no explicit model, Crossby uses the native plan
+agent's configured model, then the configured default model, and pins the model
+it validated. If neither is configured, supply `model="provider/model"`;
+Crossby does not guess from private recent-model state. Omitting effort keeps
+OpenCode's native default selection unchanged.
 
 Support matrix (contracts verified against the listed builds through 2026-09-13):
 

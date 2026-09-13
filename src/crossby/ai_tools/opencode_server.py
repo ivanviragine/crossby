@@ -161,6 +161,8 @@ def run_native_plan(
     try:
         server = OpenCodeServer(request, deadline)
         server.start()
+        if request.effort is not None:
+            prompt["model"] = _validated_effort_model(server, request, capability)
         session = server.request("POST", "/session", {})
         session_id = _required_text(session, "id")
         session_path = "/session/" + quote(session_id, safe="")
@@ -208,6 +210,76 @@ def run_native_plan(
     finally:
         if server is not None:
             server.close()
+
+
+def _validated_effort_model(
+    server: OpenCodeServer, request: PlanSessionRequest, capability: PlanModeCapability
+) -> dict[str, str]:
+    """Pin the native selected model and require its advertised effort variant."""
+    assert request.effort is not None
+    selected: dict[str, str] | None = None
+    model_name = request.model
+    if model_name is None:
+        agents = server.request("GET", "/agent")
+        if not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents):
+            raise ValueError("OpenCode returned malformed native agents")
+        planning = [agent for agent in agents if agent.get("name") == "plan"]
+        if len(planning) != 1:
+            raise ValueError("OpenCode did not advertise one native plan agent")
+        agent_model = planning[0].get("model")
+        if agent_model is not None:
+            selected = {
+                "providerID": _required_text(agent_model, "providerID"),
+                "modelID": _required_text(agent_model, "modelID"),
+            }
+        else:
+            config = server.request("GET", "/config")
+            model_name = config.get("model") if isinstance(config, dict) else None
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise PlanSessionUnsupportedError(
+                    "OpenCode effort validation requires an explicit model or a configured "
+                    "native plan/default model. Supply model='provider/model'; Crossby will "
+                    "not guess from private recent-model state.",
+                    tool_id=AIToolID.OPENCODE,
+                    capability=capability,
+                )
+    if selected is None:
+        assert model_name is not None
+        provider, separator, model = model_name.partition("/")
+        if not separator or not provider.strip() or not model.strip():
+            raise ValueError("OpenCode configured model is not a provider/model identifier")
+        selected = {"providerID": provider, "modelID": model}
+
+    advertised = server.request("GET", "/provider")
+    providers = advertised.get("all") if isinstance(advertised, dict) else None
+    connected = advertised.get("connected") if isinstance(advertised, dict) else None
+    if (
+        not isinstance(providers, list)
+        or any(not isinstance(provider, dict) for provider in providers)
+        or not isinstance(connected, list)
+        or any(not isinstance(provider, str) for provider in connected)
+    ):
+        raise ValueError("OpenCode returned malformed native providers")
+    matches = [provider for provider in providers if provider.get("id") == selected["providerID"]]
+    if len(matches) > 1:
+        raise ValueError("OpenCode advertised duplicate native provider IDs")
+    models = matches[0].get("models") if matches else None
+    metadata = models.get(selected["modelID"]) if isinstance(models, dict) else None
+    variants = metadata.get("variants") if isinstance(metadata, dict) else None
+    variant = variants.get(request.effort.value) if isinstance(variants, dict) else None
+    if (
+        selected["providerID"] not in connected
+        or not isinstance(variant, dict)
+        or variant.get("disabled", False) is not False
+    ):
+        raise PlanSessionUnsupportedError(
+            f"OpenCode model {selected['providerID']}/{selected['modelID']} does not advertise "
+            f"an available effort={request.effort.value!r} variant. Choose an advertised "
+            "model/effort combination or omit effort.",
+            tool_id=AIToolID.OPENCODE,
+            capability=capability,
+        )
+    return selected
 
 
 def _required_text(value: Any, field: str) -> str:

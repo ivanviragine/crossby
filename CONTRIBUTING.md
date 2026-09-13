@@ -191,6 +191,16 @@ deadline timer interrupts status/header parsing that trickles data indefinitely.
 Pending question and permission batches reject duplicate request IDs before any
 interaction callback runs.
 
+For explicit OpenCode effort, validate the selected model's advertised variants
+from `GET /provider` before creating the session or submitting the prompt.
+The adapter-wide `low`/`medium`/`high` list is not a model-specific guarantee:
+OpenCode silently ignores unavailable variants. Resolve the model from the
+request, then the native plan agent (`GET /agent`), then configured default
+(`GET /config`), and pin that validated model in the prompt. If no public
+configured default exists, reject with explicit-model remediation instead of
+scraping recent-model state or choosing an arbitrary provider. No-effort
+requests retain native default behavior.
+
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
 status casing, plus contract tests covering success, malformed output,
@@ -242,7 +252,9 @@ CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
 ```
 
 It requires the verified OpenCode binary and exercises a real native multi-select
-question with preceding progress text, its reply, and exact-session export.
+question with preceding progress text, its reply, and exact-session export. It
+also checks supported and disabled effort variants for explicit, default, and
+plan-agent models, including the actual local model request options.
 
 Codex also has a local policy test with isolated configuration. It checks the
 actual app-server sandbox response and stops before any model inference:

@@ -51,6 +51,19 @@ class FakeServer:
         self.deadline = 0.0
         self.tool_name = "question"
         self.tool_session = "ses_exact_123"
+        self.agents: Any = [{"name": "plan"}]
+        self.config: Any = {"model": "anthropic/claude-sonnet-4"}
+        self.providers: Any = {
+            "all": [
+                {
+                    "id": "anthropic",
+                    "models": {
+                        "claude-sonnet-4": {"variants": {"high": {"thinkingBudget": 16000}}}
+                    },
+                }
+            ],
+            "connected": ["anthropic"],
+        }
 
     def start(self) -> None:
         self.started = True
@@ -63,6 +76,12 @@ class FakeServer:
 
     def request(self, method: str, path: str, payload: Any = None) -> Any:
         self.calls.append((method, path, payload))
+        if path == "/agent":
+            return self.agents
+        if path == "/config":
+            return self.config
+        if path == "/provider":
+            return self.providers
         if path == "/session":
             assert method == "POST"
             return deepcopy(self.export["info"]) | {"id": "ses_exact_123"}
@@ -158,6 +177,82 @@ def test_unsupported_effort_is_rejected_before_start(
     with pytest.raises(PlanSessionUnsupportedError):
         _run(tmp_path, effort=effort)
     assert not server.started
+
+
+@pytest.mark.parametrize("source", ["explicit", "agent", "default"])
+def test_effort_pins_the_validated_native_model(
+    source: str, server: FakeServer, tmp_path: Path
+) -> None:
+    model = "anthropic/claude-sonnet-4" if source == "explicit" else None
+    if source == "agent":
+        server.agents[0]["model"] = {
+            "providerID": "anthropic",
+            "modelID": "claude-sonnet-4",
+        }
+        server.config = {"model": "unavailable/other-model"}
+    elif source == "explicit":
+        server.agents = []  # Explicit request takes priority over native defaults.
+    _run(tmp_path, model=model, effort=EffortLevel.HIGH)
+
+    prompt = next(payload for _, path, payload in server.calls if path.endswith("/prompt_async"))
+    assert prompt["model"] == {"providerID": "anthropic", "modelID": "claude-sonnet-4"}
+    assert prompt["variant"] == "high"
+    assert server.calls.index(("GET", "/provider", None)) < server.calls.index(
+        ("POST", "/session", {})
+    )
+    assert server.closed
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "disabled", "malformed", "unknown-model", "disconnected"]
+)
+def test_unavailable_model_effort_stops_before_session_or_prompt(
+    failure: str, server: FakeServer, tmp_path: Path
+) -> None:
+    variants = server.providers["all"][0]["models"]["claude-sonnet-4"]["variants"]
+    if failure == "missing":
+        variants.clear()
+    elif failure == "disabled":
+        variants["high"] = {"disabled": True}
+    elif failure == "malformed":
+        variants["high"] = None
+    elif failure == "unknown-model":
+        server.providers["all"][0]["models"] = {}
+    else:
+        server.providers["connected"] = []
+
+    with pytest.raises(PlanSessionUnsupportedError, match="does not advertise"):
+        _run(tmp_path, model="anthropic/claude-sonnet-4", effort=EffortLevel.HIGH)
+
+    assert not any(method == "POST" for method, _, _ in server.calls)
+    assert not server.exports
+    assert server.closed
+
+
+def test_effort_requires_a_publicly_resolvable_default_model(
+    server: FakeServer, tmp_path: Path
+) -> None:
+    server.config = {}
+    with pytest.raises(PlanSessionUnsupportedError, match="explicit model"):
+        _run(tmp_path, effort=EffortLevel.HIGH)
+    assert not any(method == "POST" for method, _, _ in server.calls)
+    assert server.closed
+
+
+@pytest.mark.parametrize("providers", [{}, {"all": [None], "connected": []}])
+def test_malformed_effort_metadata_stops_before_prompt(
+    providers: Any, server: FakeServer, tmp_path: Path
+) -> None:
+    server.providers = providers
+    with pytest.raises(PlanTransportError):
+        _run(tmp_path, model="anthropic/claude-sonnet-4", effort=EffortLevel.HIGH)
+    assert not any(method == "POST" for method, _, _ in server.calls)
+    assert server.closed
+
+
+def test_no_effort_keeps_native_default_selection(server: FakeServer, tmp_path: Path) -> None:
+    _run(tmp_path)
+    assert not any(path in {"/provider", "/agent", "/config"} for _, path, _ in server.calls)
 
 
 @pytest.mark.parametrize("model", ["", "default-alias", "/model", "provider/"])
