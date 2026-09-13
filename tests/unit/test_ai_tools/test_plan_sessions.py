@@ -1473,6 +1473,7 @@ class TestExactSessionCliCollectors:
         assert timeouts == [9.0, 7.0, 5.0]
         for command in commands[1:]:
             assert command[command.index("--conversation") + 1] == "conv-exact-123"
+            assert command[command.index("--print") + 1] == "Yes"
             assert command[command.index("--mode") + 1] == "plan"
             assert command[command.index("--model") + 1] == "gemini-3.8-flash-medium"
             assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
@@ -1963,6 +1964,46 @@ class TestExactSessionCliCollectors:
                     option_id="fabricated",
                 ),
             )
+
+    def test_copilot_continues_native_options_by_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        question = json.dumps(
+            {
+                "type": "ask_user",
+                "id": "question-1",
+                "session_id": str(exact_uuid),
+                "data": {
+                    "id": "scope",
+                    "question": "Choose a scope",
+                    "options": [{"id": "opaque-api-id", "label": "API surface"}],
+                },
+            }
+        )
+        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = FIXTURES / "copilot_share_success.md"
+        runs = iter((question, success))
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            export_arg = next(value for value in command if value.startswith("--share="))
+            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
+            return CapturedProcess(0, next(runs), "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                option_id="opaque-api-id",
+            ),
+        )
+
+        assert commands[1][-2:] == ["--prompt", "API surface"]
 
     def test_copilot_preserves_nested_plan_headings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2673,6 +2714,32 @@ class TestProtocolCollectors:
                 },
             },
         )
+
+        with pytest.raises(PlanArtifactAmbiguousError, match="multiple authoritative"):
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+    def test_codex_rejects_completed_plan_item_while_waiting_for_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        messages.insert(
+            -1,
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact-123",
+                    "turnId": "turn-exact-123",
+                    "item": {
+                        "type": "plan",
+                        "id": "plan-late-conflict-789",
+                        "text": "# Late conflicting plan\n\n1. Replace the prior plan.",
+                    },
+                },
+            },
+        )
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
 
         with pytest.raises(PlanArtifactAmbiguousError, match="multiple authoritative"):
             AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))

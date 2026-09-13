@@ -372,7 +372,14 @@ class CopilotAdapter(AbstractAITool):
                             tool_id=self.TOOL_ID,
                             capability=capability,
                         ) from exc
-                    answer = response.answer or ", ".join(selected_ids) or None
+                    option_labels = {
+                        option.option_id: option.label for option in interaction.options
+                    }
+                    answer = (
+                        response.answer
+                        or ", ".join(option_labels[option_id] for option_id in selected_ids)
+                        or None
+                    )
                     if not answer:
                         raise PlanInteractionRequiredError(
                             "GitHub Copilot planning question was left unanswered.",

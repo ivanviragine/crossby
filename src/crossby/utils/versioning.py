@@ -9,9 +9,12 @@ failure-safe probe instead of duplicating it.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import signal
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 
 import structlog
@@ -25,6 +28,7 @@ _SEMVER_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
 # Bound the subprocess so a hung binary can never stall a caller.
 _VERSION_TIMEOUT_S = 5.0
+_VERSION_CLEANUP_GRACE_S = 0.2
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,47 @@ def parse_semver(text: str) -> tuple[int, int, int] | None:
     return (int(major), int(minor), int(patch) if patch is not None else 0)
 
 
+def _kill_version_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the probe-owned process group so helper processes cannot escape."""
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    if proc.poll() is None:
+        with suppress(OSError):
+            proc.kill()
+
+
+def _run_version_probe(binary: str, *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Capture one version probe and clean every process in its owned group."""
+    proc = subprocess.Popen(
+        [binary, "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        start_new_session=os.name == "posix",
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        _kill_version_process_group(proc)
+        with suppress(OSError, subprocess.SubprocessError, UnicodeError):
+            proc.communicate(timeout=_VERSION_CLEANUP_GRACE_S)
+        raise
+    _kill_version_process_group(proc)
+    assert proc.returncode is not None
+    return subprocess.CompletedProcess(
+        args=proc.args,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def detect_binary_version_info(
     binary: str, *, timeout_seconds: float = _VERSION_TIMEOUT_S
 ) -> BinaryVersion | None:
@@ -66,12 +111,9 @@ def detect_binary_version_info(
     if timeout_seconds <= 0:
         return None
     try:
-        proc = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
+        proc = _run_version_probe(
+            binary,
             timeout=min(timeout_seconds, _VERSION_TIMEOUT_S),
-            check=False,
         )
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         logger.debug("version.probe_failed", binary=binary, error=str(exc))

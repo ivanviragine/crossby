@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -204,7 +205,11 @@ class CodexAdapter(AbstractAITool):
                 raise TimeoutError("Codex plan session exceeded its timeout")
             return wait
 
-        def wait_response(request_id: int) -> dict[str, Any]:
+        def wait_response(
+            request_id: int,
+            *,
+            notification_handler: Callable[[dict[str, Any]], None] | None = None,
+        ) -> dict[str, Any]:
             assert rpc is not None
             while True:
                 message = rpc.read(timeout=remaining())
@@ -216,6 +221,8 @@ class CodexAdapter(AbstractAITool):
                             tool_id=self.TOOL_ID,
                             capability=capability,
                         )
+                    if "id" not in message and notification_handler is not None:
+                        notification_handler(message)
                     continue
                 if "error" in message:
                     raise PlanTransportError(
@@ -328,14 +335,15 @@ class CodexAdapter(AbstractAITool):
                 )
 
             completed_plan: tuple[str, str] | None = None
-            while True:
-                message = rpc.read(timeout=remaining())
+
+            def capture_completed_plan(message: dict[str, Any]) -> None:
+                nonlocal completed_plan
                 method = message.get("method")
                 params = message.get("params")
                 if method == "item/completed" and isinstance(params, dict):
                     item = params.get("item")
                     if not isinstance(item, dict) or item.get("type") != "plan":
-                        continue
+                        return
                     if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
                         raise PlanBindingMismatchError(
                             "Codex emitted a plan item for a different thread or turn.",
@@ -373,7 +381,14 @@ class CodexAdapter(AbstractAITool):
                             artifact_id=artifact_id,
                         )
                     completed_plan = (artifact_id, text)
+
+            while True:
+                message = rpc.read(timeout=remaining())
+                if message.get("method") == "item/completed":
+                    capture_completed_plan(message)
                     continue
+                method = message.get("method")
+                params = message.get("params")
                 if method == "turn/completed" and isinstance(params, dict):
                     completed_thread = params.get("threadId")
                     completed_turn = params.get("turn")
@@ -473,7 +488,7 @@ class CodexAdapter(AbstractAITool):
                 "thread/backgroundTerminals/clean",
                 {"threadId": thread_id},
             )
-            wait_response(5)
+            wait_response(5, notification_handler=capture_completed_plan)
             exit_code = rpc.close()
             rpc_closed = True
             if exit_code != 0:
