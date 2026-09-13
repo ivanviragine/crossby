@@ -800,7 +800,6 @@ def _copilot_export_plan(exported: str, session_id: str) -> str | None:
         headed.append(remainder[:end])
     authoritative = marked if marked else headed
     candidates = [candidate.strip() for candidate in authoritative if candidate.strip()]
-    unique = list(dict.fromkeys(candidates))
-    if len(unique) > 1:
+    if len(candidates) > 1:
         raise RuntimeError("GitHub Copilot share export contained conflicting Plan sections.")
-    return unique[0] if unique else None
+    return candidates[0] if candidates else None

@@ -2120,6 +2120,36 @@ class TestExactSessionCliCollectors:
             ]
         )
 
+    def test_copilot_rejects_identical_duplicate_plan_sections(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
+        share = "\n".join(
+            [
+                f"session_id: {exact_uuid}",
+                "",
+                "# Plan",
+                "Same plan",
+                "",
+                "# Plan",
+                "Same plan",
+            ]
+        )
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            export_arg = next(value for value in command if value.startswith("--share="))
+            Path(export_arg.removeprefix("--share=")).write_text(share, encoding="utf-8")
+            return CapturedProcess(0, events, "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanArtifactAmbiguousError, match="conflicting Plan sections"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
+            )
+
     def test_copilot_prefers_marked_plan_over_nested_heading_parser(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
