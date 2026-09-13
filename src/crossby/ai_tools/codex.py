@@ -463,6 +463,12 @@ class CodexAdapter(AbstractAITool):
                         turn_id=turn_id,
                     )
 
+            rpc.request(
+                5,
+                "thread/backgroundTerminals/clean",
+                {"threadId": thread_id},
+            )
+            wait_response(5, notification_handler=capture_completed_plan)
             if completed_plan is None:
                 raise PlanArtifactMissingError(
                     "Codex turn completed without an authoritative completed plan item.",
@@ -483,12 +489,6 @@ class CodexAdapter(AbstractAITool):
                     turn_id=turn_id,
                     artifact_id=artifact_id,
                 )
-            rpc.request(
-                5,
-                "thread/backgroundTerminals/clean",
-                {"threadId": thread_id},
-            )
-            wait_response(5, notification_handler=capture_completed_plan)
             exit_code = rpc.close()
             rpc_closed = True
             if exit_code != 0:

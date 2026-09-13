@@ -212,33 +212,37 @@ def run_captured(
         if remaining <= 0:
             raise subprocess.TimeoutExpired(command, timeout)
         returncode = proc.wait(timeout=remaining)
+
+        if not _join_until(workers, deadline):
+            if overflow:
+                raise CapturedOutputLimitError(*overflow[0])
+            raise subprocess.TimeoutExpired(command, timeout)
+        # The direct child may exit after spawning a helper that redirects the
+        # capture pipes. Always clear the run-owned process group before returning.
+        _kill_process_group(proc)
+        if overflow:
+            raise CapturedOutputLimitError(*overflow[0])
+
+        decoded: dict[str, str] = {}
+        for name, output in outputs.items():
+            try:
+                decoded[name] = output.decode(encoding)
+            except UnicodeDecodeError as exc:
+                raise CapturedOutputDecodeError(name, encoding) from exc
+
+        return CapturedProcess(returncode, decoded["stdout"], decoded["stderr"])
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
-
-    if not _join_until(workers, deadline):
+    except BaseException:
         _kill_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
-        if overflow:
-            raise CapturedOutputLimitError(*overflow[0])
-        raise subprocess.TimeoutExpired(command, timeout) from None
-    # The direct child may exit after spawning a helper that redirects the
-    # capture pipes. Always clear the run-owned process group before returning.
-    _kill_process_group(proc)
-    if overflow:
-        raise CapturedOutputLimitError(*overflow[0])
-
-    decoded: dict[str, str] = {}
-    for name, output in outputs.items():
-        try:
-            decoded[name] = output.decode(encoding)
-        except UnicodeDecodeError as exc:
-            raise CapturedOutputDecodeError(name, encoding) from exc
-
-    return CapturedProcess(returncode, decoded["stdout"], decoded["stderr"])
+        raise
 
 
 def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:
@@ -255,6 +259,11 @@ def run_interactive(command: list[str], *, cwd: Path, timeout: float) -> int:
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
+    except BaseException:
+        _kill_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+        raise
     _kill_process_group(proc)
     return returncode
 

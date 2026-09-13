@@ -346,11 +346,12 @@ def _export_session_ids(payload: dict[str, Any]) -> list[str]:
 
 
 def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
-    """Return the terminal assistant response explicitly bound to plan mode."""
+    """Return all nonblank assistant responses explicitly bound to plan mode."""
     info = payload.get("info")
     messages = payload.get("messages")
     if not isinstance(info, dict) or not isinstance(messages, list):
         return []
+    plans: list[tuple[str, str | None]] = []
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
@@ -375,5 +376,5 @@ def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
         artifact_id = message_info.get("id")
         candidate_id = (str(artifact_id).strip() or None) if artifact_id is not None else None
         if plan_parts:
-            return [("\n".join(plan_parts), candidate_id)]
-    return []
+            plans.append(("\n".join(plan_parts), candidate_id))
+    return plans

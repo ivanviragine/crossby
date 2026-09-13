@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -567,6 +567,41 @@ class TestPlanProcess:
         assert result.stdout == "hello\n"
         assert result.stderr == "diagnostic\n"
 
+    def test_captured_process_interrupt_kills_and_reaps_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = None
+                self.stdout = BytesIO()
+                self.stderr = BytesIO()
+                self.returncode: int | None = None
+                self.wait_calls = 0
+
+            def wait(self, *, timeout: float) -> int:
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise KeyboardInterrupt
+                assert timeout == _CAPTURE_CLEANUP_GRACE_SECONDS
+                self.returncode = -9
+                return self.returncode
+
+        process = FakeProcess()
+        killed: list[FakeProcess] = []
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.subprocess.Popen", lambda *_a, **_k: process
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process._kill_process_group", lambda proc: killed.append(proc)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            run_captured(["interrupted"], cwd=tmp_path, timeout=5)
+
+        assert killed == [process]
+        assert process.wait_calls == 2
+        assert process.returncode == -9
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
     def test_captured_process_timeout_kills_descendants_holding_pipes(self, tmp_path: Path) -> None:
         script = (
@@ -655,6 +690,38 @@ class TestPlanProcess:
         assert started.is_file()
         time.sleep(0.8)
         assert not survived.exists()
+
+    def test_interactive_process_interrupt_kills_and_reaps_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.wait_calls = 0
+
+            def wait(self, *, timeout: float) -> int:
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise KeyboardInterrupt
+                assert timeout == _CAPTURE_CLEANUP_GRACE_SECONDS
+                self.returncode = -9
+                return self.returncode
+
+        process = FakeProcess()
+        killed: list[FakeProcess] = []
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.subprocess.Popen", lambda *_a, **_k: process
+        )
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process._kill_process_group", lambda proc: killed.append(proc)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            run_interactive(["interrupted"], cwd=tmp_path, timeout=5)
+
+        assert killed == [process]
+        assert process.wait_calls == 2
+        assert process.returncode == -9
 
     def test_captured_process_uses_utf8_independent_of_host_locale(self, tmp_path: Path) -> None:
         script = (
@@ -2674,6 +2741,22 @@ class TestProtocolCollectors:
             "jsonrpc" not in message for message in _rpc_fixture("codex_app_server_success.jsonl")
         )
         assert rpc.closed
+
+    def test_codex_collects_completed_plan_item_while_waiting_for_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("codex_app_server_success.jsonl")
+        completed_plan = messages.pop(-3)
+        messages.insert(-1, completed_plan)
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", FakeRpc)
+
+        result = AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+        assert result.artifact_id == "plan-exact-123"
+        assert result.plan.startswith("# Native plan")
+        assert FakeRpc.instances[0].closed
 
     def test_codex_rejects_nonzero_protocol_exit_after_successful_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

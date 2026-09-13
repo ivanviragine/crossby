@@ -15,6 +15,7 @@ import pytest
 
 from crossby.ai_tools import (
     AbstractAITool,
+    PlanArtifactAmbiguousError,
     PlanArtifactMalformedError,
     PlanArtifactMissingError,
     PlanBindingMismatchError,
@@ -426,18 +427,24 @@ def test_export_cannot_substitute_another_artifact(
     assert server.closed
 
 
-def test_export_ignores_decoy_metadata_and_earlier_plan_text(
-    server: FakeServer, tmp_path: Path
-) -> None:
+def test_export_ignores_decoy_metadata(server: FakeServer, tmp_path: Path) -> None:
     server.export["sessionID"] = "ses_decoy"
     server.export["messages"][0]["parts"][0]["metadata"] = {"sessionID": "ses_decoy"}
+
+    result = _run(tmp_path)
+
+    assert result.artifact_id == "msg-plan-1"
+    assert result.plan.startswith("# Native plan")
+
+
+def test_export_rejects_multiple_plan_candidates(server: FakeServer, tmp_path: Path) -> None:
     preamble = deepcopy(server.export["messages"][-1])
     preamble["info"]["id"] = "msg_old_plan"
     preamble["parts"][0]["text"] = "I will inspect the project."
     server.export["messages"].insert(1, preamble)
-    result = _run(tmp_path)
-    assert result.artifact_id == "msg-plan-1"
-    assert result.plan.startswith("# Native plan")
+
+    with pytest.raises(PlanArtifactAmbiguousError, match="multiple authoritative"):
+        _run(tmp_path)
 
 
 @pytest.mark.parametrize("failure", ["error", "length", "build"])
