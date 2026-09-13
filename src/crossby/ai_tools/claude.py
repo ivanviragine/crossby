@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -216,9 +217,22 @@ class ClaudeAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import read_text_bounded, run_interactive
 
+        deadline = time.monotonic() + request.timeout_seconds
         capability = self.capabilities().plan_mode
         working_dir = request.working_dir.resolve()
         session_id = str(uuid.uuid4())
+
+        def remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "Claude Code plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            return remaining
+
         if interaction_handler is not terminal_interaction_handler:
             interaction = PlanInteraction(
                 kind=PlanInteractionKind.QUESTION,
@@ -363,7 +377,7 @@ class ClaudeAdapter(AbstractAITool):
                 exit_code = run_interactive(
                     command,
                     cwd=working_dir,
-                    timeout=request.timeout_seconds,
+                    timeout=remaining_timeout(),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise PlanTransportError(
@@ -392,7 +406,9 @@ class ClaudeAdapter(AbstractAITool):
                     paths=(run_dir,),
                 )
 
+            remaining_timeout()
             validate_run_directory()
+            remaining_timeout()
             entries = (
                 [run_dir / name for name in os.listdir(run_fd)]
                 if run_fd is not None
@@ -406,6 +422,7 @@ class ClaudeAdapter(AbstractAITool):
                 )
                 for path in entries
             }
+            remaining_timeout()
             symlinks = tuple(
                 path for path, info in entry_stats.items() if stat.S_ISLNK(info.st_mode)
             )
@@ -459,7 +476,9 @@ class ClaudeAdapter(AbstractAITool):
                     session_id=session_id,
                     paths=(artifact,),
                 ) from exc
+            remaining_timeout()
             validate_run_directory()
+            remaining_timeout()
             if not plan.strip():
                 raise PlanArtifactMalformedError(
                     "Claude Code produced a blank plan artifact.",

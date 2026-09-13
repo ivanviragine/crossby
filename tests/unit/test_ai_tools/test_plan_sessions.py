@@ -1154,6 +1154,71 @@ class TestClaudeCollector:
         assert not attached
         assert not (tmp_path / ".crossby").exists()
 
+    def test_setup_time_is_subtracted_from_process_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = iter((100.0, 103.0))
+        now = [100.0]
+        seen_timeouts: list[float] = []
+
+        def monotonic() -> float:
+            now[0] = next(clock, now[0])
+            return now[0]
+
+        def write_plan(command: list[str], *, cwd: Path, timeout: float) -> int:
+            seen_timeouts.append(timeout)
+            settings = json.loads(command[command.index("--settings") + 1])
+            (cwd / settings["plansDirectory"] / "plan.md").write_text("# Plan")
+            return 0
+
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 50.0)
+        monkeypatch.setattr("crossby.ai_tools.claude.time.monotonic", monotonic)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+
+        _run_claude_session(_request(tmp_path, timeout_seconds=10))
+
+        assert seen_timeouts == [7.0]
+
+    @pytest.mark.parametrize("stage", ["enumeration", "read"])
+    def test_artifact_collection_cannot_outlive_request_deadline(
+        self,
+        stage: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = [100.0]
+        real_listdir = os.listdir
+        real_read = read_text_bounded
+
+        def write_plan(command: list[str], *, cwd: Path, timeout: float) -> int:
+            assert timeout == 10.0
+            settings = json.loads(command[command.index("--settings") + 1])
+            (cwd / settings["plansDirectory"] / "plan.md").write_text("# Plan")
+            return 0
+
+        def expire_during_listdir(path: Any) -> list[str]:
+            entries = real_listdir(path)
+            now[0] = 111.0
+            return entries
+
+        def expire_during_read(*args: Any, **kwargs: Any) -> str:
+            plan = real_read(*args, **kwargs)
+            now[0] = 111.0
+            return plan
+
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 50.0)
+        monkeypatch.setattr("crossby.ai_tools.claude.time.monotonic", lambda: now[0])
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+        if stage == "enumeration":
+            monkeypatch.setattr(os, "listdir", expire_during_listdir)
+        else:
+            monkeypatch.setattr(
+                "crossby.ai_tools.plan_process.read_text_bounded", expire_during_read
+            )
+
+        with pytest.raises(PlanTransportError, match="exceeded its timeout"):
+            _run_claude_session(_request(tmp_path, timeout_seconds=10))
+
     @pytest.mark.skipif(os.name != "posix", reason="directory-descriptor contract")
     def test_plan_root_creation_is_anchored_to_workspace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
