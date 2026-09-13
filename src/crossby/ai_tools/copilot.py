@@ -344,6 +344,13 @@ class CopilotAdapter(AbstractAITool):
                             tool_id=self.TOOL_ID,
                             capability=capability,
                         )
+                    if response.answer and not interaction.allow_other:
+                        raise PlanInteractionRequiredError(
+                            "GitHub Copilot planning question does not allow a free-form answer.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        )
                     try:
                         selected_ids = validate_plan_option_selection(interaction, response)
                     except ValueError as exc:

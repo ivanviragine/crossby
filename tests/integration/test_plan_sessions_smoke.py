@@ -31,6 +31,7 @@ from crossby.ai_tools import (
     PlanInteractionResponse,
     PlanQuestionOption,
     PlanSessionRequest,
+    terminal_interaction_handler,
 )
 from crossby.models.ai import AIToolID, EffortLevel, PlanApprovalPolicy
 
@@ -142,6 +143,10 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     elif tool_id is AIToolID.ANTIGRAVITY_CLI:
         request_options.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
 
+    interaction_handler = (
+        terminal_interaction_handler if tool_id is AIToolID.CLAUDE else _answer_interaction
+    )
+
     result = adapter.run_plan_session(
         PlanSessionRequest(
             prompt=prompt,
@@ -149,7 +154,7 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
             timeout_seconds=300,
             **request_options,
         ),
-        _answer_interaction,
+        interaction_handler,
     )
 
     assert result.plan.strip()

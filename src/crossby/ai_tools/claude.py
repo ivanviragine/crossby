@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.plan_mode import PlanInteractionHandler
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    PlanInteractionRequiredError,
+    terminal_interaction_handler,
+)
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import claude as claude_reader
 from crossby.models.ai import (
@@ -27,6 +31,8 @@ from crossby.models.ai import (
     HookStopDialect,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanInteraction,
+    PlanInteractionKind,
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
@@ -210,9 +216,26 @@ class ClaudeAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import read_text_bounded, run_interactive
 
-        del interaction_handler  # Claude keeps its native TTY attached.
         capability = self.capabilities().plan_mode
         working_dir = request.working_dir.resolve()
+        session_id = str(uuid.uuid4())
+        if interaction_handler is not terminal_interaction_handler:
+            interaction = PlanInteraction(
+                kind=PlanInteractionKind.QUESTION,
+                question_id="terminal-interaction-consent",
+                prompt=(
+                    "Pass terminal_interaction_handler to allow Claude Code to use the attached "
+                    "terminal during plan collection."
+                ),
+                session_id=session_id,
+            )
+            raise PlanInteractionRequiredError(
+                "Claude Code collection requires explicit terminal interaction consent; pass "
+                "terminal_interaction_handler.",
+                interaction=interaction,
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         root = (
             request.plan_output_dir
             if request.plan_output_dir is not None
@@ -255,7 +278,6 @@ class ClaudeAdapter(AbstractAITool):
         finally:
             if workspace_fd is not None:
                 os.close(workspace_fd)
-        session_id = str(uuid.uuid4())
         run_dir = root / session_id
         try:
             if root_fd is not None:

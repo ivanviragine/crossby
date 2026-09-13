@@ -38,6 +38,7 @@ from crossby.ai_tools import (
     PlanSessionResult,
     PlanSessionUnsupportedError,
     PlanTransportError,
+    terminal_interaction_handler,
 )
 from crossby.ai_tools.plan_mode import safe_error_excerpt
 from crossby.ai_tools.plan_process import (
@@ -87,6 +88,12 @@ def _antigravity_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
 def _cursor_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
     values = {"model": "sonnet-4.6", "effort": EffortLevel.MEDIUM, **updates}
     return _request(tmp_path, **values)
+
+
+def _run_claude_session(request: PlanSessionRequest) -> PlanSessionResult:
+    return AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(
+        request, terminal_interaction_handler
+    )
 
 
 def _assert_result(
@@ -509,7 +516,8 @@ class TestSubprocessTimeoutRedaction:
             updates.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
         with pytest.raises(PlanTransportError, match="timed out") as raised:
             AbstractAITool.get(tool_id).run_plan_session(
-                _request(tmp_path, prompt=prompt, **updates)
+                _request(tmp_path, prompt=prompt, **updates),
+                terminal_interaction_handler if tool_id is AIToolID.CLAUDE else None,
             )
 
         message = str(raised.value)
@@ -948,6 +956,35 @@ class TestPlanProcess:
 
 
 class TestClaudeCollector:
+    @pytest.mark.parametrize("handler_kind", ["missing", "callback"])
+    def test_requires_explicit_terminal_handler_before_attaching(
+        self,
+        handler_kind: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        attached = False
+
+        def fake_run(*_args: Any, **_kwargs: Any) -> int:
+            nonlocal attached
+            attached = True
+            return 0
+
+        handler = (
+            None
+            if handler_kind == "missing"
+            else lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.SKIPPED
+            )
+        )
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
+
+        with pytest.raises(PlanInteractionRequiredError, match="terminal_interaction_handler"):
+            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path), handler)
+
+        assert not attached
+        assert not (tmp_path / ".crossby").exists()
+
     @pytest.mark.skipif(os.name != "posix", reason="directory-descriptor contract")
     def test_plan_root_creation_is_anchored_to_workspace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -984,7 +1021,7 @@ class TestClaudeCollector:
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
 
         with pytest.raises(PlanTransportError, match="plan root could not be created or opened"):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(working_dir))
+            _run_claude_session(_request(working_dir))
 
         assert raced
         assert not (outside / "plan-sessions").exists()
@@ -1021,7 +1058,7 @@ class TestClaudeCollector:
         monkeypatch.setattr(os, "mkdir", replace_root_before_session_mkdir)
 
         with pytest.raises(PlanBindingMismatchError, match=r"plan root.*replaced"):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(working_dir))
+            _run_claude_session(_request(working_dir))
 
         assert raced
         assert not (outside / str(session_id)).exists()
@@ -1081,7 +1118,7 @@ class TestClaudeCollector:
             monkeypatch.setattr("crossby.ai_tools.plan_process._PLAN_ARTIFACT_TEXT_LIMIT", 64)
 
         with pytest.raises(error):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+            _run_claude_session(_request(tmp_path))
 
         root = tmp_path / ".crossby" / "plan-sessions"
         assert root.is_dir()
@@ -1131,7 +1168,9 @@ class TestClaudeCollector:
             monkeypatch.setattr("crossby.ai_tools.claude.PlanSessionResult", fail_result)
 
         with pytest.raises(PlanTransportError, match="after creating its isolated directory"):
-            adapter.run_plan_session(_request(tmp_path, plan_output_dir=root))
+            adapter.run_plan_session(
+                _request(tmp_path, plan_output_dir=root), terminal_interaction_handler
+            )
 
         assert root.is_dir()
         if stage == "result":
@@ -1161,7 +1200,7 @@ class TestClaudeCollector:
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
         with pytest.raises(PlanBindingMismatchError, match="directory was replaced"):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+            _run_claude_session(_request(tmp_path))
 
         assert (replaced[0] / "plan.md").read_text() == "# Another run"
 
@@ -1194,7 +1233,7 @@ class TestClaudeCollector:
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
         monkeypatch.setattr(os, "open", replace_before_open)
         with pytest.raises(PlanArtifactMalformedError, match="bounded UTF-8 contract"):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+            _run_claude_session(_request(tmp_path))
 
         assert outside.read_text() == "# Another run"
 
@@ -1221,9 +1260,7 @@ class TestClaudeCollector:
         monkeypatch.setattr(os, "mkdir", fake_mkdir)
 
         with pytest.raises(PlanTransportError, match="isolated plan directory") as raised:
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(
-                _request(tmp_path, plan_output_dir=output_dir)
-            )
+            _run_claude_session(_request(tmp_path, plan_output_dir=output_dir))
 
         assert raised.value.session_id == str(session_id)
         assert raised.value.paths == (run_dir,)
@@ -1245,7 +1282,7 @@ class TestClaudeCollector:
             return 0
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
-        result = AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+        result = _run_claude_session(_request(tmp_path))
         _assert_result(
             result,
             tool=AIToolID.CLAUDE,
@@ -1269,7 +1306,7 @@ class TestClaudeCollector:
 
         monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", fake_run)
         with pytest.raises(PlanArtifactAmbiguousError):
-            AbstractAITool.get(AIToolID.CLAUDE).run_plan_session(_request(tmp_path))
+            _run_claude_session(_request(tmp_path))
 
 
 class TestExactSessionCliCollectors:
@@ -1399,6 +1436,39 @@ class TestExactSessionCliCollectors:
 
         assert seen[0].allow_other is True
         assert commands[1][commands[1].index("--print") + 1] == "Keep compatibility"
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Maybe",
+            ),
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Maybe",
+                option_id="yes",
+            ),
+        ],
+        ids=("text-only", "mixed"),
+    )
+    def test_antigravity_rejects_free_text_for_option_only_questions(
+        self,
+        response: PlanInteractionResponse,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        waiting = (FIXTURES / "antigravity_waiting.json").read_text(encoding="utf-8")
+        runs = iter((CapturedProcess(0, waiting, ""),))
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        with pytest.raises(PlanInteractionRequiredError, match="free-form"):
+            AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_plan_session(
+                _antigravity_request(tmp_path), lambda _interaction: response
+            )
 
     def test_antigravity_denial_discards_stale_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2037,6 +2107,53 @@ class TestExactSessionCliCollectors:
 
         assert seen[0].allow_other is True
         assert commands[1][-2:] == ["--prompt", "Keep compatibility"]
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Maybe",
+            ),
+            PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.ANSWERED,
+                answer="Maybe",
+                option_id="api",
+            ),
+        ],
+        ids=("text-only", "mixed"),
+    )
+    def test_copilot_rejects_free_text_for_option_only_questions(
+        self,
+        response: PlanInteractionResponse,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        question = json.dumps(
+            {
+                "type": "ask_user",
+                "id": "question-1",
+                "session_id": str(exact_uuid),
+                "data": {
+                    "id": "scope",
+                    "question": "Choose a scope",
+                    "options": [{"id": "api", "label": "API"}],
+                },
+            }
+        )
+        runs = iter((CapturedProcess(0, question, ""),))
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.run_captured",
+            lambda *_args, **_kwargs: next(runs),
+        )
+
+        with pytest.raises(PlanInteractionRequiredError, match="free-form"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+                lambda _interaction: response,
+            )
 
     def test_copilot_question_denial_discards_stale_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
