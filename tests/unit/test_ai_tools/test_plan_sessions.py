@@ -2323,6 +2323,11 @@ class TestProtocolCollectors:
                 EffortLevel.HIGH,
                 "conflicting effort encodings",
             ),
+            (
+                "gpt-5.3-codex[context=300k]",
+                EffortLevel.MEDIUM,
+                "unsupported bracket override 'context'",
+            ),
             ("auto", EffortLevel.HIGH, "selected model is not known"),
         ],
     )
@@ -2426,6 +2431,63 @@ class TestProtocolCollectors:
         with pytest.raises(PlanTransportError, match="reset the requested reasoning effort"):
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
                 _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                ),
+            )
+
+        assert not any(
+            kind == "request" and payload["method"] == "session/set_mode"
+            for kind, payload in FakeRpc.instances[0].sent
+        )
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_requires_configured_variants_in_final_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        thinking_option = {
+            "id": "thinking",
+            "category": "model_config",
+            "currentValue": "false",
+            "options": [{"value": "false"}, {"value": "true"}],
+        }
+        for index in (1, 2, 3, 4):
+            options = messages[index]["result"]["configOptions"]
+            options[0]["options"].append({"value": "claude-sonnet-4-6"})
+            if index > 1:
+                options[0]["currentValue"] = "claude-sonnet-4-6"
+            options.insert(2, {**thinking_option})
+        messages[3]["result"]["configOptions"][1]["currentValue"] = "high"
+        messages[4]["result"]["configOptions"][1]["currentValue"] = "high"
+        messages[4]["result"]["configOptions"][2]["currentValue"] = "true"
+        messages[4]["result"]["configOptions"][3]["currentValue"] = "true"
+        final_state = {
+            **messages[4],
+            "id": 7,
+            "result": {
+                "configOptions": [
+                    option
+                    for option in messages[4]["result"]["configOptions"]
+                    if option["id"] != "thinking"
+                ]
+            },
+        }
+        messages.insert(5, final_state)
+        messages[6]["id"] = 8
+        messages[-1]["id"] = 9
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="thinking"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _request(
+                    tmp_path,
+                    model="claude-sonnet-4-6-thinking-fast",
+                    effort=EffortLevel.HIGH,
+                ),
                 lambda _interaction: PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.DENIED,
                     option_id="rejected",
@@ -3532,6 +3594,36 @@ class TestProtocolCollectors:
             )
 
         with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), answer)
+
+        assert not any(
+            kind == "respond" and payload["id"] == 90 for kind, payload in FakeRpc.instances[0].sent
+        )
+        assert FakeRpc.instances[0].closed
+
+    def test_cursor_rejects_text_with_explicit_question_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "cursor_acp_question.jsonl")
+
+        def answer(interaction: Any) -> PlanInteractionResponse:
+            if interaction.question_id == "scope":
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    answer="Use the public API with compatibility shims",
+                    option_id="api",
+                )
+            if interaction.question_id == "tests":
+                return PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.ANSWERED,
+                    option_ids=("unit", "integration"),
+                )
+            return PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            )
+
+        with pytest.raises(PlanInteractionRequiredError, match="cannot combine answer text"):
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(_cursor_request(tmp_path), answer)
 
         assert not any(

@@ -77,8 +77,10 @@ def _parameterized_effort(model: str) -> EffortLevel | None:
     efforts: list[EffortLevel] = []
     for parameter in parameters.split(","):
         key, separator, value = parameter.partition("=")
-        if separator and key.strip() == "effort":
-            efforts.append(EffortLevel(value.strip()))
+        key = key.strip()
+        if not separator or key != "effort":
+            raise ValueError(f"unsupported bracket override {key or parameter.strip()!r}")
+        efforts.append(EffortLevel(value.strip()))
     if len(efforts) > 1:
         raise ValueError("multiple effort overrides")
     return efforts[0] if efforts else None
@@ -519,6 +521,7 @@ class CursorAdapter(AbstractAITool):
                     session_id=session_id,
                 )
             next_request_id = 6
+            configured_variants: dict[str, str] = {}
             for variant_id, variant_value in (
                 ("thinking", thinking_value),
                 ("fast", fast_value),
@@ -566,6 +569,7 @@ class CursorAdapter(AbstractAITool):
                         capability=capability,
                         session_id=session_id,
                     )
+                configured_variants[variant_id] = variant_value
                 next_request_id += 1
             final_model = _cursor_config_option(configuration_state, option_id="model")
             final_effort = _cursor_effort_option(configuration_state, request.effort)
@@ -588,15 +592,12 @@ class CursorAdapter(AbstractAITool):
                     capability=capability,
                     session_id=session_id,
                 )
-            for variant_id, variant_value in (
-                ("thinking", thinking_value),
-                ("fast", fast_value),
-            ):
-                final_variant = _cursor_optional_config_option(
+            for variant_id, variant_value in configured_variants.items():
+                final_variant = _cursor_config_option(
                     configuration_state,
                     option_id=variant_id,
                 )
-                if final_variant is not None and final_variant["currentValue"] != variant_value:
+                if final_variant["currentValue"] != variant_value:
                     raise PlanTransportError(
                         f"Cursor ACP reset the requested {variant_id} model setting while "
                         "configuring the session.",
@@ -1077,6 +1078,13 @@ def _answer_cursor_question(
             *((response.option_id,) if response.option_id is not None else ()),
             *response.option_ids,
         )
+        if response.answer and selected_ids:
+            raise PlanInteractionRequiredError(
+                "Cursor planning questions cannot combine answer text with native option IDs.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
         if response.answer and not selected_ids:
             textual_matches = tuple(
                 option.option_id
