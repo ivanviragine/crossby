@@ -155,6 +155,15 @@ Keep progress/transcript parsing out of artifact parsers: only
 the adapter's declared authoritative event, export, structured field, or
 isolated path may become `result.plan`.
 
+The common session boundary runs callback-based interaction handlers in daemon
+workers and waits only until the original request deadline. Never resume the
+native session from that worker: only the collecting thread may forward a
+timely response. A timeout must unwind the adapter's cleanup even while caller
+code remains blocked. Python cannot cancel such code, so caller-owned waits
+must support cancellation or their own timeout; callbacks need not run on the
+main thread. Keep Claude's terminal-handler identity check intact, since its
+actual interactive process is bounded separately.
+
 Lifecycle completion is adapter-specific and must be explicit. Codex waits for
 the matching successful `turn/completed`, rejects a second completed plan item,
 then acknowledges `thread/backgroundTerminals/clean` and requires app-server to

@@ -29,6 +29,7 @@ from crossby.ai_tools import (
     PlanArtifactMissingError,
     PlanArtifactSource,
     PlanBindingMismatchError,
+    PlanInteraction,
     PlanInteractionOutcome,
     PlanInteractionRequiredError,
     PlanInteractionResponse,
@@ -164,6 +165,35 @@ def _install_rpc(
 
 
 class TestNormalizedContract:
+    @pytest.mark.parametrize("failure", [RuntimeError("callback failed"), KeyboardInterrupt()])
+    def test_callback_exceptions_propagate_to_collector_cleanup(
+        self, failure: BaseException, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.CODEX)
+        closed: list[bool] = []
+
+        def collect(_request: Any, _version: str, handler: Any) -> Any:
+            try:
+                handler(
+                    PlanInteraction(
+                        kind=PlanInteractionKind.QUESTION,
+                        question_id="question",
+                        prompt="Choose a scope",
+                        session_id="session",
+                    )
+                )
+            finally:
+                closed.append(True)
+
+        def answer(_interaction: Any) -> Any:
+            raise failure
+
+        monkeypatch.setattr(adapter, "_run_plan_session", collect)
+        with pytest.raises(type(failure)) as raised:
+            adapter.run_plan_session(_request(tmp_path), answer)
+        assert raised.value is failure
+        assert closed == [True]
+
     def test_request_rejects_unknown_fields(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError, match="approvalPolicy"):
             PlanSessionRequest.model_validate(

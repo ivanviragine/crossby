@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -438,6 +439,50 @@ def test_missing_handler_surfaces_native_question(server: FakeServer, tmp_path: 
     assert raised.value.interaction.question_id == "que_exact_123"
     assert raised.value.interaction.allow_multiple
     assert server.closed
+
+
+@pytest.mark.parametrize("kind", ["question", "permission"])
+def test_blocked_callback_times_out_and_closes_before_handler_returns(
+    kind: str, server: FakeServer, tmp_path: Path
+) -> None:
+    if kind == "question":
+        server.questions = [[_question()]]
+    else:
+        server.permissions = [
+            {"id": "permission", "sessionID": "ses_exact_123", "permission": "bash"}
+        ]
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    errors: list[BaseException] = []
+
+    def answer(_interaction: Any) -> PlanInteractionResponse:
+        entered.set()
+        release.wait()
+        return PlanInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    def collect() -> None:
+        try:
+            _run(tmp_path, answer, timeout_seconds=0.1)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    collector = threading.Thread(target=collect, daemon=True)
+    collector.start()
+    try:
+        assert entered.wait(timeout=1)
+        assert completed.wait(timeout=1), "blocked callback prevented the session deadline"
+        assert len(errors) == 1 and isinstance(errors[0], PlanTransportError)
+        assert "timed out" in str(errors[0])
+        assert server.closed
+        assert not any(path.endswith("/reply") for _, path, _ in server.calls)
+    finally:
+        release.set()
+        collector.join(timeout=2)
+    assert not collector.is_alive()
+    assert not any(path.endswith("/reply") for _, path, _ in server.calls)
 
 
 def test_malformed_native_options_stop(server: FakeServer, tmp_path: Path) -> None:

@@ -491,6 +491,13 @@ shared by the version probe, initial invocation, question continuations,
 protocol waits, and subprocess-backed export. Caller-visible timeout errors omit
 subprocess command arguments because those arguments can contain prompts or
 continuation answers.
+Callback-based collectors also bound the time spent waiting for the interaction
+handler. Handlers run on daemon worker threads; timeout unwinds collection and
+closes the native process, and a late callback result is never forwarded.
+Python cannot forcibly stop caller code, so integrations must make external
+input waits cancellable or independently bounded and must not assume callback
+execution on the main thread. Claude's explicit native-terminal consent remains
+unchanged.
 Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
 stderr. Captured, interactive, and protocol POSIX children use isolated process
 groups; cleanup kills remaining group members even if the server has already

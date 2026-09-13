@@ -12,7 +12,13 @@ from typing import Any
 
 import pytest
 
-from crossby.ai_tools import AbstractAITool, PlanSessionRequest, PlanSessionUnsupportedError
+from crossby.ai_tools import (
+    AbstractAITool,
+    PlanSessionRequest,
+    PlanSessionUnsupportedError,
+    PlanTransportError,
+)
+from crossby.ai_tools.opencode_server import OpenCodeServer
 from crossby.models.ai import AIToolID, EffortLevel, PlanInteractionOutcome, PlanInteractionResponse
 
 pytestmark = pytest.mark.skipif(
@@ -21,8 +27,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("model_source", ["explicit", "default", "agent"])
-@pytest.mark.parametrize("effort", [None, EffortLevel.HIGH, EffortLevel.LOW])
+@pytest.mark.parametrize(
+    ("model_source", "effort"),
+    [
+        (source, effort)
+        for source in ["explicit", "default", "agent"]
+        for effort in [None, EffortLevel.HIGH, EffortLevel.LOW]
+    ]
+    + [("blocked-callback", None)],
+)
 def test_real_opencode_forwards_native_multiselect_and_exports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -153,9 +166,25 @@ def test_real_opencode_forwards_native_multiselect_and_exports(
         ),
     )
     interactions: list[Any] = []
+    callback_entered = threading.Event()
+    callback_release = threading.Event()
+    closed_processes: list[Any] = []
+    original_close = OpenCodeServer.close
+
+    def observe_close(server: OpenCodeServer) -> None:
+        original_close(server)
+        closed_processes.append(server.process._proc)
+
+    monkeypatch.setattr(OpenCodeServer, "close", observe_close)
+    # Release even on a regression, so a broken deadline cannot hang the test.
+    safety_release = threading.Timer(12, callback_release.set)
+    safety_release.daemon = True
 
     def answer(interaction: Any) -> PlanInteractionResponse:
         interactions.append(interaction)
+        if model_source == "blocked-callback":
+            callback_entered.set()
+            callback_release.wait()
         return PlanInteractionResponse(
             outcome=PlanInteractionOutcome.ANSWERED,
             option_ids=("Linux", "macOS"),
@@ -167,9 +196,18 @@ def test_real_opencode_forwards_native_multiselect_and_exports(
             working_dir=tmp_path,
             model="crossbyfixture/fixture-model" if model_source == "explicit" else None,
             effort=effort,
-            timeout_seconds=30,
+            timeout_seconds=10 if model_source == "blocked-callback" else 30,
         )
         adapter = AbstractAITool.get(AIToolID.OPENCODE)
+        if model_source == "blocked-callback":
+            safety_release.start()
+            with pytest.raises(PlanTransportError, match=r"timed out.*interaction callback"):
+                adapter.run_plan_session(request, answer)
+            assert callback_entered.is_set()
+            assert not callback_release.is_set()
+            assert len(closed_processes) == 1
+            assert closed_processes[0].returncode is not None
+            return
         if effort is EffortLevel.LOW:
             with pytest.raises(PlanSessionUnsupportedError, match="does not advertise"):
                 adapter.run_plan_session(request, answer)
@@ -198,6 +236,8 @@ def test_real_opencode_forwards_native_multiselect_and_exports(
         else:
             assert all("reasoning_effort" not in payload for payload in planning_requests)
     finally:
+        callback_release.set()
+        safety_release.cancel()
         stub.shutdown()
         stub.server_close()
         worker.join(timeout=2)

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import inspect
 import os
+import queue
 import shutil
+import threading
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -34,6 +36,9 @@ from crossby.models.ai import (
     ModelTier,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanInteraction,
+    PlanInteractionResponse,
+    PlanInteractionSupport,
     PlanModeActivation,
     PlanRequestBehavior,
     PlanSessionRequest,
@@ -383,6 +388,50 @@ class AbstractAITool(ABC):
             )
 
         request = request.model_copy(update={"timeout_seconds": remaining_timeout})
+        if (
+            interaction_handler is not None
+            and capability.interaction is not PlanInteractionSupport.TERMINAL
+        ):
+            original_handler = interaction_handler
+
+            def bounded_handler(interaction: PlanInteraction) -> PlanInteractionResponse:
+                def timed_out() -> PlanTransportError:
+                    return PlanTransportError(
+                        f"{caps.display_name} plan session timed out waiting for an "
+                        "interaction callback.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=interaction.session_id,
+                        thread_id=interaction.thread_id,
+                        turn_id=interaction.turn_id,
+                        artifact_id=interaction.artifact_id,
+                    )
+
+                if deadline - monotonic() <= 0:
+                    raise timed_out()
+                responses: queue.Queue[PlanInteractionResponse | BaseException] = queue.Queue(1)
+
+                def invoke() -> None:
+                    try:
+                        responses.put(original_handler(interaction))
+                    except BaseException as exc:
+                        responses.put(exc)
+
+                # Python cannot forcibly stop caller code. A daemon worker may
+                # finish later, but only this waiting collector can send its
+                # result to the native process, which is closed on timeout.
+                threading.Thread(target=invoke, daemon=True, name="crossby-plan-callback").start()
+                try:
+                    response = responses.get(timeout=max(0.0, deadline - monotonic()))
+                except queue.Empty:
+                    raise timed_out() from None
+                if deadline - monotonic() <= 0:
+                    raise timed_out()
+                if isinstance(response, BaseException):
+                    raise response
+                return response
+
+            interaction_handler = bounded_handler
         result = self._run_plan_session(request, detected.text, interaction_handler)
         if result.tool is not self.TOOL_ID:
             raise PlanModeAdapterContractError(
