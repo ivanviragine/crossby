@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import time
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import structlog
 
@@ -84,14 +84,98 @@ def _parameterized_effort(model: str) -> EffortLevel | None:
     return efforts[0] if efforts else None
 
 
-def _with_parameterized_effort(model: str, effort: EffortLevel) -> str:
-    """Add an exact per-run effort override without changing the model identity."""
-    if model.endswith("]") and "[" in model:
-        prefix, parameters = model.rsplit("[", 1)
-        existing = parameters[:-1].strip()
-        separator = "," if existing else ""
-        return f"{prefix}[{existing}{separator}effort={effort.value}]"
-    return f"{model}[effort={effort.value}]"
+def _cursor_model_base(model: str) -> str:
+    """Translate a CLI variant ID to the base ID exposed by ACP's model picker."""
+    base = model.split("[", 1)[0].removesuffix("-fast")
+    effort_suffixes = (
+        "-extra-high",
+        "-xhigh",
+        "-medium",
+        "-high",
+        "-low",
+        "-max",
+    )
+    for _pass in range(2):
+        if base.endswith("-thinking"):
+            base = base.removesuffix("-thinking")
+        for suffix in effort_suffixes:
+            if base.endswith(suffix):
+                base = base.removesuffix(suffix)
+                break
+    return base
+
+
+def _cursor_config_option(
+    result: dict[str, Any],
+    *,
+    option_id: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """Return one validated Cursor ACP configuration option from a response."""
+    options = result.get("configOptions")
+    if not isinstance(options, list) or any(not isinstance(item, dict) for item in options):
+        raise ValueError("Cursor ACP omitted valid session configuration options")
+    matches = [
+        item
+        for item in options
+        if (option_id is None or item.get("id") == option_id)
+        and (category is None or item.get("category") == category)
+    ]
+    if len(matches) != 1:
+        target = option_id or category or "requested"
+        raise ValueError(f"Cursor ACP did not advertise exactly one {target} configuration option")
+    option = matches[0]
+    if not isinstance(option.get("id"), str) or not isinstance(option.get("currentValue"), str):
+        raise ValueError("Cursor ACP returned malformed session configuration state")
+    values = option.get("options")
+    if not isinstance(values, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("value"), str) for item in values
+    ):
+        raise ValueError("Cursor ACP returned malformed session configuration choices")
+    return cast(dict[str, Any], option)
+
+
+def _cursor_optional_config_option(
+    result: dict[str, Any], *, option_id: str
+) -> dict[str, Any] | None:
+    """Return one validated option when the selected model exposes it."""
+    options = result.get("configOptions")
+    if not isinstance(options, list) or any(not isinstance(item, dict) for item in options):
+        raise ValueError("Cursor ACP omitted valid session configuration options")
+    matches = [item for item in options if item.get("id") == option_id]
+    if not matches:
+        return None
+    return _cursor_config_option(result, option_id=option_id)
+
+
+def _cursor_effort_value(option: dict[str, Any], effort: EffortLevel) -> str | None:
+    """Map Crossby's effort vocabulary to one exact ACP option value."""
+    values = {item["value"] for item in option["options"]}
+    candidates = ("xhigh", "extra-high") if effort is EffortLevel.XHIGH else (effort.value,)
+    return next((candidate for candidate in candidates if candidate in values), None)
+
+
+def _cursor_effort_option(
+    result: dict[str, Any], effort: EffortLevel
+) -> tuple[dict[str, Any], str] | None:
+    """Select the one thought-level option whose choices encode ``effort``."""
+    options = result.get("configOptions")
+    if not isinstance(options, list) or any(not isinstance(item, dict) for item in options):
+        raise ValueError("Cursor ACP omitted valid session configuration options")
+    matches: list[tuple[dict[str, Any], str]] = []
+    for item in options:
+        if item.get("category") != "thought_level":
+            continue
+        option_id = item.get("id")
+        if not isinstance(option_id, str) or not option_id:
+            raise ValueError("Cursor ACP returned malformed thought-level configuration")
+        option = _cursor_config_option(result, option_id=option_id)
+        value = _cursor_effort_value(option, effort)
+        if value is not None:
+            matches.append((option, value))
+    if len(matches) > 1:
+        raise ValueError("Cursor ACP advertised ambiguous reasoning-effort configuration")
+    return matches[0] if matches else None
 
 
 class CursorAdapter(AbstractAITool):
@@ -100,8 +184,9 @@ class CursorAdapter(AbstractAITool):
     Cursor is an AI-powered IDE with a terminal CLI that supports plan mode,
     model selection, headless execution, and skill discovery.
 
-    Cursor uses its own model ID namespace — e.g. ``sonnet-4.6``, ``opus-4.6``,
-    ``gpt-5.3-codex`` — so no format normalization is needed.
+    Cursor uses its own model ID namespace — e.g. ``claude-sonnet-4-6``,
+    ``claude-opus-4-6``, ``gpt-5.3-codex`` — so no format normalization is
+    needed.
 
     For high/max effort, Cursor uses thinking model variants (e.g.,
     ``sonnet-4.6-thinking``) rather than a separate effort flag.
@@ -286,22 +371,13 @@ class CursorAdapter(AbstractAITool):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            if declared_effort is None and effective_model.split("[", 1)[
-                0
-            ] not in get_models_for_tool(AIToolID.CURSOR):
-                raise PlanSessionUnsupportedError(
-                    f"Cursor cannot verify parameterized effort support for unknown model "
-                    f"{request.model!r} in a collected plan session.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
-            if declared_effort is None:
-                effective_model = _with_parameterized_effort(effective_model, request.effort)
-        if effective_model:
-            command.extend(("--model", effective_model))
+        model_base = _cursor_model_base(effective_model)
+        thinking_value = "true" if "-thinking" in effective_model.split("[", 1)[0] else "false"
+        fast_value = "true" if effective_model.split("[", 1)[0].endswith("-fast") else "false"
         command.append("acp")
         deadline = time.monotonic() + request.timeout_seconds
         rpc: JsonRpcProcess | None = None
+        rpc_closed = False
 
         def remaining() -> float:
             wait = deadline - time.monotonic()
@@ -345,7 +421,7 @@ class CursorAdapter(AbstractAITool):
                 "initialize",
                 {
                     "protocolVersion": 1,
-                    "clientCapabilities": {},
+                    "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
                     "clientInfo": {"name": "crossby", "version": "plan-session-v1"},
                 },
             )
@@ -387,10 +463,119 @@ class CursorAdapter(AbstractAITool):
                     capability=capability,
                     session_id=session_id,
                 )
-            rpc.request(4, "session/set_mode", {"sessionId": session_id, "modeId": "plan"})
-            wait_response(4)
+            model_option = _cursor_config_option(session_result, option_id="model")
+            model_values = {item["value"] for item in model_option["options"]}
+            if model_base not in model_values:
+                raise PlanSessionUnsupportedError(
+                    f"Cursor ACP did not advertise requested model {request.model!r}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            rpc.request(
+                4,
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": "model", "value": model_base},
+            )
+            configured_model = wait_response(4)
+            model_option = _cursor_config_option(configured_model, option_id="model")
+            if model_option["currentValue"] != model_base:
+                raise PlanTransportError(
+                    "Cursor ACP did not preserve the requested model.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            effort_config = _cursor_effort_option(configured_model, request.effort)
+            if effort_config is None:
+                raise PlanSessionUnsupportedError(
+                    f"Cursor ACP model {request.model!r} cannot preserve "
+                    f"effort={request.effort.value!r}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            effort_option, effort_value = effort_config
             rpc.request(
                 5,
+                "session/set_config_option",
+                {
+                    "sessionId": session_id,
+                    "configId": effort_option["id"],
+                    "value": effort_value,
+                },
+            )
+            configured_effort = wait_response(5)
+            confirmed_effort = _cursor_effort_option(configured_effort, request.effort)
+            if (
+                confirmed_effort is None
+                or confirmed_effort[0]["id"] != effort_option["id"]
+                or confirmed_effort[0]["currentValue"] != effort_value
+            ):
+                raise PlanTransportError(
+                    "Cursor ACP did not preserve the requested reasoning effort.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            next_request_id = 6
+            for variant_id, variant_value in (
+                ("thinking", thinking_value),
+                ("fast", fast_value),
+            ):
+                variant_option = _cursor_optional_config_option(
+                    configured_effort,
+                    option_id=variant_id,
+                )
+                if variant_option is None:
+                    if variant_value == "true":
+                        raise PlanSessionUnsupportedError(
+                            f"Cursor ACP model {request.model!r} cannot preserve its "
+                            f"{variant_id} setting.",
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                            session_id=session_id,
+                        )
+                    continue
+                if variant_value not in {item["value"] for item in variant_option["options"]}:
+                    raise PlanSessionUnsupportedError(
+                        f"Cursor ACP model {request.model!r} cannot preserve its "
+                        f"{variant_id} setting.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                    )
+                rpc.request(
+                    next_request_id,
+                    "session/set_config_option",
+                    {
+                        "sessionId": session_id,
+                        "configId": variant_option["id"],
+                        "value": variant_value,
+                    },
+                )
+                configured_variant = wait_response(next_request_id)
+                confirmed_variant = _cursor_config_option(
+                    configured_variant,
+                    option_id=variant_id,
+                )
+                if confirmed_variant["currentValue"] != variant_value:
+                    raise PlanTransportError(
+                        f"Cursor ACP did not preserve the requested {variant_id} model setting.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                    )
+                next_request_id += 1
+            rpc.request(
+                next_request_id,
+                "session/set_mode",
+                {"sessionId": session_id, "modeId": "plan"},
+            )
+            wait_response(next_request_id)
+            prompt_request_id = next_request_id + 1
+            rpc.request(
+                prompt_request_id,
                 "session/prompt",
                 {
                     "sessionId": session_id,
@@ -402,7 +587,7 @@ class CursorAdapter(AbstractAITool):
             prompt_completed = False
             while not prompt_completed:
                 message = rpc.read(timeout=remaining())
-                if message.get("id") == 5 and "method" not in message:
+                if message.get("id") == prompt_request_id and "method" not in message:
                     if "error" in message:
                         raise PlanTransportError(
                             "Cursor ACP session/prompt failed.",
@@ -577,6 +762,17 @@ class CursorAdapter(AbstractAITool):
                     session_id=session_id,
                     artifact_id=artifact_id,
                 )
+            exit_code = rpc.close()
+            rpc_closed = True
+            if exit_code != 0:
+                raise PlanTransportError(
+                    f"Cursor ACP exited with status {exit_code} after completing the session.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    stderr=rpc.stderr,
+                )
             return PlanSessionResult(
                 tool=self.TOOL_ID,
                 version=version,
@@ -585,7 +781,7 @@ class CursorAdapter(AbstractAITool):
                 native_mode="ACP session/set_mode plan",
                 artifact_source=PlanArtifactSource.PROTOCOL_EVENT,
                 binding=PlanSessionBinding.SESSION_ID,
-                exit_code=0,
+                exit_code=exit_code,
                 artifact_id=artifact_id,
             )
         except PlanSessionError:
@@ -598,7 +794,7 @@ class CursorAdapter(AbstractAITool):
                 stderr=rpc.stderr if rpc is not None else None,
             ) from exc
         finally:
-            if rpc is not None:
+            if rpc is not None and not rpc_closed:
                 rpc.close()
 
     def yolo_args(self) -> list[str]:

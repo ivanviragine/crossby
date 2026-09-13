@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import time
 from copy import deepcopy
@@ -201,6 +202,37 @@ def test_native_multiple_questions_and_multiple_rounds(server: FakeServer, tmp_p
     ) in server.calls
     assert ("POST", "/question/que_second_123/reply", {"answers": [["Linux"]]}) in server.calls
     assert len([call for call in server.calls if call[1].endswith("prompt_async")]) == 1
+    assert server.closed
+
+
+@pytest.mark.parametrize("kind", ["question", "permission"])
+def test_duplicate_pending_request_ids_stop_before_callback(
+    kind: str, server: FakeServer, tmp_path: Path
+) -> None:
+    if kind == "question":
+        request = _question()
+        server.questions = [[request, deepcopy(request)]]
+    else:
+        permission = {
+            "id": "per_exact_123",
+            "sessionID": "ses_exact_123",
+            "permission": "bash",
+            "patterns": ["git status"],
+        }
+        server.permissions = [permission, deepcopy(permission)]
+    seen: list[Any] = []
+
+    with pytest.raises(PlanTransportError):
+        _run(
+            tmp_path,
+            lambda interaction: (
+                seen.append(interaction)
+                or PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+            ),
+        )
+
+    assert seen == []
+    assert not any(path.endswith("/reply") for _, path, _ in server.calls)
     assert server.closed
 
 
@@ -586,3 +618,67 @@ def test_server_recomputes_deadline_while_reading_http_body(
     assert transport.timeouts == pytest.approx([10.0, 10.0, 4.0])
     assert clock[0] == pytest.approx(110.0)
     assert connections[0].closed
+
+
+def test_server_interrupts_trickled_headers_at_absolute_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timers: list[Any] = []
+
+    class FakeTimer:
+        def __init__(self, interval: float, function: Any) -> None:
+            self.interval = interval
+            self.function = function
+            self.daemon = False
+            self.cancelled = False
+
+        def start(self) -> None:
+            timers.append(self)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+            self.shutdown_mode: int | None = None
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def shutdown(self, mode: int) -> None:
+            self.shutdown_mode = mode
+
+    transport = FakeSocket()
+
+    class FakeConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            assert timeout == pytest.approx(10.0)
+            self.sock = transport
+            self.closed = False
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> Any:
+            timers[0].function()
+            raise TimeoutError("simulated absolute header deadline")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.threading.Timer", FakeTimer)
+    monkeypatch.setattr(
+        "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
+    )
+    with patch("crossby.ai_tools.opencode_server.JsonRpcProcess"):
+        native = OpenCodeServer(_request(tmp_path), 110.0)
+    native.port = 1234
+
+    with pytest.raises(TimeoutError, match="absolute header deadline"):
+        native.request("GET", "/slow-headers")
+
+    assert timers[0].interval == pytest.approx(10.0)
+    assert timers[0].cancelled
+    assert transport.shutdown_mode == socket.SHUT_RDWR

@@ -503,7 +503,11 @@ class JsonRpcProcess:
             # forever (including on non-POSIX hosts without group cleanup).
             if stream is not None and not thread.is_alive() and not stream.closed:
                 stream.close()
-        return self._proc.returncode if self._proc.returncode is not None else 0
+        returncode = self._proc.poll()
+        # Never report success while the child is still observable as alive.
+        # The process group has already received SIGKILL, so use that status as
+        # the fail-closed result when the OS has not reaped the direct child yet.
+        return returncode if returncode is not None else -getattr(signal, "SIGKILL", 9)
 
     def __enter__(self) -> JsonRpcProcess:
         return self

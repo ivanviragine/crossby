@@ -8,7 +8,10 @@ import json
 import os
 import re
 import secrets
+import socket
+import threading
 import time
+from contextlib import suppress
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -93,7 +96,21 @@ class OpenCodeServer:
             if response_socket is None:
                 raise OSError("OpenCode native API connection closed before its response")
             response_socket.settimeout(self.remaining())
-            response = connection.getresponse()
+            # ``HTTPResponse.begin()`` can perform multiple receives while parsing
+            # a trickled status line or header block. A socket timeout bounds only
+            # each inactive receive, so interrupt that phase at the absolute
+            # request deadline as well.
+            header_timer = threading.Timer(
+                self.remaining(),
+                lambda: _shutdown_socket(response_socket),
+            )
+            header_timer.daemon = True
+            header_timer.start()
+            try:
+                response = connection.getresponse()
+                self.remaining()
+            finally:
+                header_timer.cancel()
             if not 200 <= response.status < 300:
                 raise OSError(f"OpenCode native API returned HTTP {response.status}")
             content = bytearray()
@@ -205,7 +222,17 @@ def _bound_requests(value: Any, session_id: str) -> list[dict[str, Any]]:
         raise ValueError("OpenCode returned malformed pending requests")
     # The API lists pending requests, never artifacts. Service only the fresh
     # session returned by POST /session; other sessions cannot supply its plan.
-    return [item for item in value if _required_text(item, "sessionID") == session_id]
+    bound = [item for item in value if _required_text(item, "sessionID") == session_id]
+    request_ids = [_required_text(item, "id") for item in bound]
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError("OpenCode returned duplicate pending request IDs")
+    return bound
+
+
+def _shutdown_socket(transport: socket.socket) -> None:
+    """Interrupt a header parser that reached the request-wide deadline."""
+    with suppress(OSError):
+        transport.shutdown(socket.SHUT_RDWR)
 
 
 def _answer_question(

@@ -378,6 +378,8 @@ class AntigravityCLIAdapter(AbstractAITool):
                 conversation_id,
                 "--print",
                 answer,
+                "--mode",
+                "plan",
                 "--output-format",
                 "json",
                 "--json-schema",

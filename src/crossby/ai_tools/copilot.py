@@ -198,6 +198,7 @@ class CopilotAdapter(AbstractAITool):
         base = [
             "copilot",
             "--plan",
+            "--experimental",
             "--sandbox",
             "--available-tools=view,grep,glob,ask_user",
             "--deny-tool=write",
@@ -327,6 +328,17 @@ class CopilotAdapter(AbstractAITool):
                         raise PlanInteractionRequiredError(
                             "Approving Copilot's final plan would authorize implementation; "
                             "choose a non-executing outcome.",
+                            interaction=interaction,
+                            tool_id=self.TOOL_ID,
+                            capability=capability,
+                        )
+                    if response.outcome in {
+                        PlanInteractionOutcome.DENIED,
+                        PlanInteractionOutcome.CANCELLED,
+                        PlanInteractionOutcome.SKIPPED,
+                    }:
+                        raise PlanInteractionRequiredError(
+                            "GitHub Copilot final plan outcome did not authorize a continuation.",
                             interaction=interaction,
                             tool_id=self.TOOL_ID,
                             capability=capability,

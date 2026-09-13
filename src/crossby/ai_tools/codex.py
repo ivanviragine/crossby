@@ -196,6 +196,7 @@ class CodexAdapter(AbstractAITool):
         capability = self.capabilities().plan_mode
         deadline = time.monotonic() + request.timeout_seconds
         rpc: HeaderlessJsonRpcProcess | None = None
+        rpc_closed = False
 
         def remaining() -> float:
             wait = deadline - time.monotonic()
@@ -473,6 +474,19 @@ class CodexAdapter(AbstractAITool):
                 {"threadId": thread_id},
             )
             wait_response(5)
+            exit_code = rpc.close()
+            rpc_closed = True
+            if exit_code != 0:
+                raise PlanTransportError(
+                    f"Codex app-server exited with status {exit_code} after completing the turn.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=thread_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    stderr=rpc.stderr,
+                )
             return PlanSessionResult(
                 tool=self.TOOL_ID,
                 version=version,
@@ -481,7 +495,7 @@ class CodexAdapter(AbstractAITool):
                 native_mode="collaborationMode.mode=plan",
                 artifact_source=PlanArtifactSource.PROTOCOL_EVENT,
                 binding=PlanSessionBinding.THREAD_TURN_IDS,
-                exit_code=0,
+                exit_code=exit_code,
                 thread_id=thread_id,
                 turn_id=turn_id,
                 artifact_id=artifact_id,
@@ -496,7 +510,7 @@ class CodexAdapter(AbstractAITool):
                 stderr=rpc.stderr if rpc is not None else None,
             ) from exc
         finally:
-            if rpc is not None:
+            if rpc is not None and not rpc_closed:
                 rpc.close()
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:

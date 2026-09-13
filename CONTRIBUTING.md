@@ -157,13 +157,16 @@ isolated path may become `result.plan`.
 
 Lifecycle completion is adapter-specific and must be explicit. Codex waits for
 the matching successful `turn/completed`, rejects a second completed plan item,
-then acknowledges `thread/backgroundTerminals/clean` before returning. Copilot
-requires one UUID-bound `result` event with `status="completed"` before reading
-the local share. Its `--prompt` transport cannot relay tool permission prompts,
-so collection supports only `approval_policy="never"` and runs it in a
-run-owned no-network sandbox with hooks and external MCP disabled. The
-model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell
-permissions are also explicitly denied.
+then acknowledges `thread/backgroundTerminals/clean` and requires app-server to
+exit zero before returning. Cursor likewise configures and verifies the requested
+model, thought level, and thinking/fast state through ACP and requires a zero
+protocol-process exit. Copilot requires one UUID-bound `result` event with
+`status="completed"` before reading the local share. Its `--prompt` transport
+cannot relay tool permission prompts, so collection supports only
+`approval_policy="never"` and runs it in a run-owned no-network sandbox with
+Copilot's experimental feature enabled and hooks and external MCP disabled. The
+model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell permissions
+are also explicitly denied.
 
 OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
 then creates one native session and selects `agent="plan"` in `prompt_async`.
@@ -175,7 +178,10 @@ plus the question index. Inspect the originating tool call to distinguish
 After a successful terminal plan message, export only that exact session and
 require the exported artifact to match the terminal message ID. Native API calls,
 question handling, and export share one deadline. HTTP response bodies are bounded
-and read incrementally with that deadline recomputed before each receive.
+and read incrementally with that deadline recomputed before each receive; a
+deadline timer interrupts status/header parsing that trickles data indefinitely.
+Pending question and permission batches reject duplicate request IDs before any
+interaction callback runs.
 
 Every complete collector needs sanitized captures from its verified release
 under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
@@ -575,9 +581,11 @@ native `variant` value cannot preserve exactly.
 
 The Cursor entries also describe interactive launch compatibility. Complete
 collection never collapses two requested tiers onto that generic mapping: it
-passes an already tiered model unchanged or adds Cursor's documented
-`[effort=<tier>]` model override. Conflicting tiers, `auto`, and unknown
-unparameterized models are rejected before the ACP process starts.
+opts into ACP's parameterized model picker, maps a tiered CLI ID back to its base
+model, selects that advertised model plus its thought-level and fast/non-fast
+variant options, and verifies all returned values before prompting. Conflicting
+tiers and `auto` fail before ACP starts; models or tiers unavailable to the
+authenticated ACP session fail before the first prompt.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

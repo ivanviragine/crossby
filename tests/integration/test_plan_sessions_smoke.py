@@ -139,7 +139,7 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     if tool_id is AIToolID.COPILOT:
         request_options["approval_policy"] = PlanApprovalPolicy.NEVER
     elif tool_id is AIToolID.CURSOR:
-        request_options.update(model="sonnet-4.6", effort=EffortLevel.MEDIUM)
+        request_options.update(model="claude-sonnet-4-6", effort=EffortLevel.MEDIUM)
     elif tool_id is AIToolID.ANTIGRAVITY_CLI:
         request_options.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
 

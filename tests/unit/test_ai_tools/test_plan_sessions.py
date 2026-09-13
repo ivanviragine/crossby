@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -86,7 +87,7 @@ def _antigravity_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
 
 
 def _cursor_request(tmp_path: Path, **updates: Any) -> PlanSessionRequest:
-    values = {"model": "sonnet-4.6", "effort": EffortLevel.MEDIUM, **updates}
+    values = {"model": "gpt-5.3-codex", "effort": EffortLevel.MEDIUM, **updates}
     return _request(tmp_path, **values)
 
 
@@ -941,6 +942,41 @@ class TestPlanProcess:
         assert rpc.close() == -9
         assert events == ["close:stdin", "kill", "close:stdout", "close:stderr"]
 
+    def test_protocol_cleanup_never_reports_success_while_child_is_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeStream:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeThread:
+            def is_alive(self) -> bool:
+                return False
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = FakeStream()
+                self.stdout = FakeStream()
+                self.stderr = FakeStream()
+
+            def poll(self) -> None:
+                return None
+
+        rpc = object.__new__(JsonRpcProcess)
+        rpc._proc = FakeProcess()  # type: ignore[assignment]
+        rpc._stdin = rpc._proc.stdin  # type: ignore[assignment]
+        rpc._write_thread = None
+        rpc._deadline = 0.0
+        rpc._closing = threading.Event()
+        rpc._stdout_thread = FakeThread()  # type: ignore[assignment]
+        rpc._stderr_thread = FakeThread()  # type: ignore[assignment]
+        monkeypatch.setattr("crossby.ai_tools.plan_process._kill_process_group", lambda _p: None)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.time.monotonic", lambda: 1.0)
+
+        assert rpc.close() == -getattr(signal, "SIGKILL", 9)
+
     def test_protocol_write_cannot_outlive_deadline(self, tmp_path: Path) -> None:
         script = "import time; print('ready', flush=True); time.sleep(30)"
         rpc = JsonRpcProcess([sys.executable, "-c", script], cwd=tmp_path, timeout=0.5)
@@ -1402,6 +1438,7 @@ class TestExactSessionCliCollectors:
         assert timeouts == [9.0, 7.0, 5.0]
         for command in commands[1:]:
             assert command[command.index("--conversation") + 1] == "conv-exact-123"
+            assert command[command.index("--mode") + 1] == "plan"
             assert command[command.index("--model") + 1] == "gemini-3.8-flash-medium"
             assert command[command.index("--add-dir") + 1] == str(tmp_path / "reference")
 
@@ -1596,6 +1633,7 @@ class TestExactSessionCliCollectors:
         assert result.session_id == str(exact_uuid)
         assert "--no-remote" in commands[0]
         assert "--no-remote-export" in commands[0]
+        assert "--experimental" in commands[0]
         assert "--sandbox" in commands[0]
         assert "--allow-all-tools" not in commands[0]
         assert "--available-tools=view,grep,glob,ask_user" in commands[0]
@@ -1970,18 +2008,8 @@ class TestExactSessionCliCollectors:
 
         assert result.plan == "# Plan\n\n## Steps\n1. Inspect."
 
-    @pytest.mark.parametrize(
-        "outcome",
-        [
-            PlanInteractionOutcome.ANSWERED,
-            PlanInteractionOutcome.DENIED,
-            PlanInteractionOutcome.CANCELLED,
-            PlanInteractionOutcome.SKIPPED,
-        ],
-    )
-    def test_copilot_discards_stale_answer_after_non_approving_plan_outcome(
+    def test_copilot_explicit_plan_answer_uses_safe_nonexecuting_continuation(
         self,
-        outcome: PlanInteractionOutcome,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2011,7 +2039,7 @@ class TestExactSessionCliCollectors:
         result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
             _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
             lambda _interaction: PlanInteractionResponse(
-                outcome=outcome,
+                outcome=PlanInteractionOutcome.ANSWERED,
                 answer="Implement it",
             ),
         )
@@ -2021,6 +2049,49 @@ class TestExactSessionCliCollectors:
             "--prompt",
             "Do not implement. Finish and export the plan.",
         ]
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.CANCELLED,
+            PlanInteractionOutcome.SKIPPED,
+        ],
+    )
+    def test_copilot_non_answered_plan_outcome_stops_without_fabricated_answer(
+        self,
+        outcome: PlanInteractionOutcome,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        approval = json.dumps(
+            {
+                "type": "plan.approval",
+                "id": "approval-1",
+                "session_id": str(exact_uuid),
+                "data": {"id": "approval-1", "prompt": "Implement this plan?"},
+            }
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
+            commands.append(command)
+            return CapturedProcess(0, approval, "")
+
+        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
+
+        with pytest.raises(PlanInteractionRequiredError, match="did not authorize"):
+            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
+                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=outcome,
+                    answer="stale answer",
+                ),
+            )
+
+        assert len(commands) == 1
 
     def test_copilot_continuations_share_one_timeout_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2253,7 +2324,6 @@ class TestProtocolCollectors:
                 "conflicting effort encodings",
             ),
             ("auto", EffortLevel.HIGH, "selected model is not known"),
-            ("future-model", EffortLevel.MAX, "unknown model"),
         ],
     )
     def test_cursor_rejects_incompatible_effort_model_before_protocol_process(
@@ -2273,38 +2343,46 @@ class TestProtocolCollectors:
 
         process.assert_not_called()
 
-    def test_cursor_untiered_model_preserves_low_and_medium_as_distinct_launches(
+    def test_cursor_configures_low_and_medium_as_distinct_acp_efforts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        commands: dict[EffortLevel, list[str]] = {}
+        configured: dict[EffortLevel, dict[str, Any]] = {}
         for effort in (EffortLevel.LOW, EffortLevel.MEDIUM):
-            _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+            messages = _rpc_fixture("cursor_acp_success.jsonl")
+            messages[3]["result"]["configOptions"][1]["currentValue"] = effort.value
+            FakeRpc.scripts = [messages]
+            FakeRpc.instances = []
+            monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
             AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
-                _request(tmp_path, model="sonnet-4.6", effort=effort),
+                _request(tmp_path, model="gpt-5.3-codex", effort=effort),
                 lambda _interaction: PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.DENIED,
                     option_id="rejected",
                 ),
             )
-            commands[effort] = FakeRpc.instances[0].command
+            configured[effort] = next(
+                payload
+                for kind, payload in FakeRpc.instances[0].sent
+                if kind == "request" and payload["id"] == 5
+            )
 
-        assert commands[EffortLevel.LOW] != commands[EffortLevel.MEDIUM]
-        assert commands[EffortLevel.LOW][3:5] == [
-            "--model",
-            "sonnet-4.6[effort=low]",
-        ]
-        assert commands[EffortLevel.MEDIUM][3:5] == [
-            "--model",
-            "sonnet-4.6[effort=medium]",
-        ]
+        assert configured[EffortLevel.LOW]["params"]["value"] == "low"
+        assert configured[EffortLevel.MEDIUM]["params"]["value"] == "medium"
 
     def test_cursor_accepts_tier_specific_effort_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_rpc(monkeypatch, "cursor_acp_success.jsonl")
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        for index in (2, 3, 4):
+            messages[index]["result"]["configOptions"][0]["currentValue"] = "gpt-5.4"
+        messages[3]["result"]["configOptions"][1]["currentValue"] = "extra-high"
+        messages[4]["result"]["configOptions"][2]["currentValue"] = "true"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
 
         result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
-            _request(tmp_path, model="gpt-5.4-xhigh", effort=EffortLevel.XHIGH),
+            _request(tmp_path, model="gpt-5.4-xhigh-fast", effort=EffortLevel.XHIGH),
             lambda _interaction: PlanInteractionResponse(
                 outcome=PlanInteractionOutcome.DENIED,
                 option_id="rejected",
@@ -2312,13 +2390,79 @@ class TestProtocolCollectors:
         )
 
         assert result.artifact_id == "plan-tool-exact-123"
-        assert FakeRpc.instances[0].command[:5] == [
-            "agent",
-            "--sandbox",
-            "enabled",
-            "--model",
-            "gpt-5.4-xhigh",
-        ]
+        assert FakeRpc.instances[0].command == ["agent", "--sandbox", "enabled", "acp"]
+        requests = [payload for kind, payload in FakeRpc.instances[0].sent if kind == "request"]
+        assert requests[2]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "configId": "model",
+            "value": "gpt-5.4",
+        }
+        assert requests[3]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "configId": "reasoning",
+            "value": "extra-high",
+        }
+        assert requests[4]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "configId": "fast",
+            "value": "true",
+        }
+        assert requests[5]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "modeId": "plan",
+        }
+
+    def test_cursor_accepts_a_model_advertised_only_by_acp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        for index in (1, 2, 3, 4):
+            config_options = messages[index]["result"]["configOptions"]
+            model_option = config_options[0]
+            model_option["options"].append({"value": "claude-sonnet-4-6"})
+            if index > 1:
+                model_option["currentValue"] = "claude-sonnet-4-6"
+            config_options.insert(
+                1,
+                {
+                    "id": "thinking",
+                    "category": "thought_level",
+                    "currentValue": "true",
+                    "options": [{"value": "false"}, {"value": "true"}],
+                },
+            )
+            config_options[:] = [item for item in config_options if item["id"] != "fast"]
+            if index == 4:
+                config_options[1]["currentValue"] = "false"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        result = AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+            _request(tmp_path, model="claude-sonnet-4-6", effort=EffortLevel.MEDIUM),
+            lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED,
+                option_id="rejected",
+            ),
+        )
+
+        assert result.artifact_id == "plan-tool-exact-123"
+        requests = [payload for kind, payload in FakeRpc.instances[0].sent if kind == "request"]
+        assert requests[2]["params"]["value"] == "claude-sonnet-4-6"
+        assert requests[3]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "configId": "reasoning",
+            "value": "medium",
+        }
+        assert requests[4]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "configId": "thinking",
+            "value": "false",
+        }
+        assert requests[5]["params"] == {
+            "sessionId": "cursor-exact-123",
+            "modeId": "plan",
+        }
 
     def test_codex_collects_completed_plan_item_after_successful_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2366,6 +2510,26 @@ class TestProtocolCollectors:
             "jsonrpc" not in message for message in _rpc_fixture("codex_app_server_success.jsonl")
         )
         assert rpc.closed
+
+    def test_codex_rejects_nonzero_protocol_exit_after_successful_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class NonzeroCloseRpc(FakeRpc):
+            def close(self) -> int:
+                self.closed = True
+                return 17
+
+        NonzeroCloseRpc.scripts = [_rpc_fixture("codex_app_server_success.jsonl")]
+        NonzeroCloseRpc.instances = []
+        monkeypatch.setattr(
+            "crossby.ai_tools.plan_process.HeaderlessJsonRpcProcess", NonzeroCloseRpc
+        )
+
+        with pytest.raises(PlanTransportError, match="exited with status 17") as raised:
+            AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+        assert raised.value.exit_code == 17
+        assert NonzeroCloseRpc.instances[0].closed
 
     def test_codex_rejects_multiple_completed_plan_items_for_bound_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2866,6 +3030,30 @@ class TestProtocolCollectors:
             },
         ) in FakeRpc.instances[0].sent
 
+    def test_cursor_rejects_nonzero_protocol_exit_after_successful_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class NonzeroCloseRpc(FakeRpc):
+            def close(self) -> int:
+                self.closed = True
+                return 23
+
+        NonzeroCloseRpc.scripts = [_rpc_fixture("cursor_acp_success.jsonl")]
+        NonzeroCloseRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", NonzeroCloseRpc)
+
+        with pytest.raises(PlanTransportError, match="exited with status 23") as raised:
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                ),
+            )
+
+        assert raised.value.exit_code == 23
+        assert NonzeroCloseRpc.instances[0].closed
+
     def test_cursor_final_plan_denial_overrides_stale_cancel_option(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2935,31 +3123,31 @@ class TestProtocolCollectors:
     @pytest.mark.parametrize(
         ("prompt_response", "message"),
         [
-            ({"jsonrpc": "2.0", "id": 5}, "malformed session/prompt response"),
+            ({"jsonrpc": "2.0", "id": 8}, "malformed session/prompt response"),
             (
-                {"jsonrpc": "2.0", "id": 5, "result": {}},
+                {"jsonrpc": "2.0", "id": 8, "result": {}},
                 "malformed session/prompt stopReason",
             ),
             (
-                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": 42}},
+                {"jsonrpc": "2.0", "id": 8, "result": {"stopReason": 42}},
                 "malformed session/prompt stopReason",
             ),
             (
-                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "cancelled"}},
+                {"jsonrpc": "2.0", "id": 8, "result": {"stopReason": "cancelled"}},
                 "stop reason 'cancelled'",
             ),
             (
-                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "refusal"}},
+                {"jsonrpc": "2.0", "id": 8, "result": {"stopReason": "refusal"}},
                 "stop reason 'refusal'",
             ),
             (
-                {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "max_tokens"}},
+                {"jsonrpc": "2.0", "id": 8, "result": {"stopReason": "max_tokens"}},
                 "stop reason 'max_tokens'",
             ),
             (
                 {
                     "jsonrpc": "2.0",
-                    "id": 5,
+                    "id": 8,
                     "result": {"stopReason": "max_turn_requests"},
                 },
                 "stop reason 'max_turn_requests'",
@@ -3004,7 +3192,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         messages.insert(
-            3,
+            6,
             {
                 "jsonrpc": "2.0",
                 "id": 90,
@@ -3085,7 +3273,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         messages.insert(
-            3,
+            6,
             {
                 "jsonrpc": "2.0",
                 "id": 90,
@@ -3122,7 +3310,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         messages.insert(
-            3,
+            6,
             {
                 "jsonrpc": "2.0",
                 "id": 90,
@@ -3153,7 +3341,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         messages.insert(
-            3,
+            6,
             {
                 "jsonrpc": "2.0",
                 "id": 90,
@@ -3198,7 +3386,7 @@ class TestProtocolCollectors:
     ) -> None:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         messages.insert(
-            3,
+            6,
             {
                 "jsonrpc": "2.0",
                 "id": 90,
@@ -3281,7 +3469,7 @@ class TestProtocolCollectors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         messages = _rpc_fixture("cursor_acp_question.jsonl")
-        messages[3]["params"]["questions"][0]["options"].append({"id": "missing-label"})
+        messages[6]["params"]["questions"][0]["options"].append({"id": "missing-label"})
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
@@ -3295,7 +3483,7 @@ class TestProtocolCollectors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         messages = _rpc_fixture("cursor_acp_question.jsonl")
-        for option in messages[3]["params"]["questions"][1]["options"]:
+        for option in messages[6]["params"]["questions"][1]["options"]:
             option["label"] = "Required"
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
@@ -3333,7 +3521,7 @@ class TestProtocolCollectors:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         messages = _rpc_fixture("cursor_acp_question.jsonl")
-        messages[3]["params"]["questions"][1]["allowMultiple"] = value
+        messages[6]["params"]["questions"][1]["allowMultiple"] = value
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
@@ -3358,7 +3546,7 @@ class TestProtocolCollectors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         messages = _rpc_fixture("cursor_acp_question.jsonl")
-        messages[3]["params"]["questions"][1]["id"] = "scope"
+        messages[6]["params"]["questions"][1]["id"] = "scope"
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
         monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
