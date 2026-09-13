@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import shutil
 import signal
 import subprocess
 import sys
@@ -225,7 +224,6 @@ class TestNormalizedContract:
             AIToolID.CLAUDE,
             AIToolID.CODEX,
             AIToolID.CURSOR,
-            AIToolID.COPILOT,
             AIToolID.OPENCODE,
             AIToolID.ANTIGRAVITY_CLI,
         ],
@@ -238,11 +236,8 @@ class TestNormalizedContract:
         monkeypatch.setattr(
             "crossby.utils.versioning.detect_binary_version_info", lambda _b, **_kwargs: None
         )
-        updates = (
-            {"approval_policy": PlanApprovalPolicy.NEVER} if tool_id is AIToolID.COPILOT else {}
-        )
         with collector as run, pytest.raises(PlanSessionUnsupportedError, match="version unknown"):
-            adapter.run_plan_session(_request(tmp_path, **updates))
+            adapter.run_plan_session(_request(tmp_path))
         run.assert_not_called()
 
     def test_below_floor_version_fails_before_adapter_process(
@@ -331,7 +326,7 @@ class TestNormalizedContract:
             adapter.run_plan_session(_request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER))
         run.assert_not_called()
 
-    @pytest.mark.parametrize("tool_id", [AIToolID.CODEX, AIToolID.CURSOR, AIToolID.COPILOT])
+    @pytest.mark.parametrize("tool_id", [AIToolID.CODEX, AIToolID.CURSOR])
     def test_untrusted_policy_is_rejected_before_collection(
         self, tool_id: AIToolID, tmp_path: Path
     ) -> None:
@@ -345,19 +340,28 @@ class TestNormalizedContract:
             )
         run.assert_not_called()
 
-    def test_copilot_rejects_on_request_approval_before_collection(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("policy", list(PlanApprovalPolicy))
+    def test_copilot_collection_is_unsupported_before_any_process(
+        self, policy: PlanApprovalPolicy, tmp_path: Path
+    ) -> None:
         adapter = AbstractAITool.get(AIToolID.COPILOT)
+        assert adapter.capabilities().supports_plan_mode
+        assert not adapter.capabilities().supports_plan_session
         with (
             patch.object(adapter, "_run_plan_session") as run,
-            pytest.raises(PlanSessionUnsupportedError, match="approval_policy='on-request'"),
+            patch("crossby.utils.versioning.detect_binary_version_info") as probe,
+            pytest.raises(PlanSessionUnsupportedError, match="--prompt omits ask_user"),
         ):
-            adapter.run_plan_session(_request(tmp_path))
+            adapter.run_plan_session(_request(tmp_path, approval_policy=policy))
 
         run.assert_not_called()
+        probe.assert_not_called()
 
     def test_unsupported_effort_is_rejected_before_collection(self, tmp_path: Path) -> None:
-        adapter = AbstractAITool.get(AIToolID.COPILOT)
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        caps = adapter.capabilities().model_copy(update={"supports_effort": False})
         with (
+            patch.object(adapter, "capabilities", return_value=caps),
             patch.object(adapter, "_run_plan_session") as run,
             pytest.raises(PlanSessionUnsupportedError, match="effort='high'"),
         ):
@@ -493,7 +497,6 @@ class TestSubprocessTimeoutRedaction:
         [
             (AIToolID.ANTIGRAVITY_CLI, "run_captured"),
             (AIToolID.CLAUDE, "run_interactive"),
-            (AIToolID.COPILOT, "run_captured"),
         ],
     )
     def test_initial_prompt_is_not_exposed_by_timeout_error(
@@ -512,9 +515,7 @@ class TestSubprocessTimeoutRedaction:
         monkeypatch.setattr(f"crossby.ai_tools.plan_process.{runner}", time_out)
 
         updates: dict[str, Any] = {}
-        if tool_id is AIToolID.COPILOT:
-            updates["approval_policy"] = PlanApprovalPolicy.NEVER
-        elif tool_id is AIToolID.ANTIGRAVITY_CLI:
+        if tool_id is AIToolID.ANTIGRAVITY_CLI:
             updates.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
         with pytest.raises(PlanTransportError, match="timed out") as raised:
             AbstractAITool.get(tool_id).run_plan_session(
@@ -1695,744 +1696,25 @@ class TestExactSessionCliCollectors:
                 ),
             )
 
-    def test_copilot_uuid_share_is_local_and_cleaned(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = FIXTURES / "copilot_share_success.md"
-        commands: list[list[str]] = []
-        sandbox_settings: list[dict[str, Any]] = []
-        isolated_homes: list[Path] = []
-        (tmp_path / ".vscode").mkdir()
-        (tmp_path / ".vscode" / "mcp.json").write_text(
-            json.dumps({"servers": {"remote-review": {"url": "https://example.invalid"}}}),
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "source-copilot-home"))
-
-        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            isolated_home = Path(kwargs["env"]["COPILOT_HOME"])
-            isolated_homes.append(isolated_home)
-            sandbox_settings.append(
-                json.loads((isolated_home / "settings.json").read_text(encoding="utf-8"))
-            )
-            export_arg = next(value for value in command if value.startswith("--share="))
-            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
-            return CapturedProcess(0, events, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-        )
-        _assert_result(
-            result,
-            tool=AIToolID.COPILOT,
-            source=PlanArtifactSource.SESSION_EXPORT,
-            binding=PlanSessionBinding.SESSION_ID,
-        )
-        assert result.session_id == str(exact_uuid)
-        assert "--no-remote" in commands[0]
-        assert "--no-remote-export" in commands[0]
-        assert "--experimental" in commands[0]
-        assert "--sandbox" in commands[0]
-        assert "--allow-all-tools" not in commands[0]
-        assert "--available-tools=view,grep,glob,ask_user" in commands[0]
-        assert "--deny-tool=write" in commands[0]
-        assert "--deny-tool=shell" in commands[0]
-        assert "--disable-builtin-mcps" in commands[0]
-        disabled_index = commands[0].index("--disable-mcp-server")
-        assert commands[0][disabled_index + 1] == "remote-review"
-        assert "--deny-tool=*" not in commands[0]
-        sandbox = sandbox_settings[0]["sandbox"]
-        assert sandbox["enabled"] is True
-        assert sandbox["allowBypass"] is False
-        assert sandbox["userPolicy"]["network"] == {
-            "allowLocalNetwork": False,
-            "allowOutbound": False,
-        }
-        assert not isolated_homes[0].exists()
-        assert result.artifact_path is None
-
-    def test_copilot_ignores_nested_non_envelope_session_ids(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        event = {
-            "type": "result",
-            "session_id": str(exact_uuid),
-            "status": "completed",
-            "data": {"tool_result": {"session_id": "decoy-session"}},
-        }
-        share = {
-            "session_id": str(exact_uuid),
-            "plan": "# Plan\n\n1. Inspect.",
-            "metadata": {"session_id": "decoy-session"},
-        }
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            export_arg = next(value for value in command if value.startswith("--share="))
-            Path(export_arg.removeprefix("--share=")).write_text(
-                json.dumps(share), encoding="utf-8"
-            )
-            return CapturedProcess(0, json.dumps(event), "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-        )
-
-        assert result.session_id == str(exact_uuid)
-
-    @pytest.mark.parametrize(
-        ("events", "error", "message"),
-        [
-            ([], PlanArtifactMissingError, "no terminal result"),
-            (
-                [
-                    {
-                        "type": "result",
-                        "session_id": "12345678-1234-5678-1234-567812345678",
-                        "status": "failed",
-                    }
-                ],
-                PlanTransportError,
-                "status 'failed'",
-            ),
-            (
-                [
-                    {
-                        "type": "result",
-                        "session_id": "12345678-1234-5678-1234-567812345678",
-                        "status": "completed",
-                    },
-                    {
-                        "type": "result",
-                        "session_id": "12345678-1234-5678-1234-567812345678",
-                        "status": "completed",
-                    },
-                ],
-                PlanArtifactAmbiguousError,
-                "multiple terminal results",
-            ),
-        ],
-        ids=("missing", "failed", "ambiguous"),
-    )
-    def test_copilot_requires_one_successful_bound_terminal_result(
-        self,
-        events: list[dict[str, Any]],
-        error: type[PlanSessionError],
-        message: str,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(
-                0,
-                "\n".join(json.dumps(event) for event in events),
-                "",
-            ),
-        )
-
-        with pytest.raises(error, match=message):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-    def test_copilot_temp_directory_errors_are_session_errors(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-
-        def fail_mkdtemp(*_args: Any, **_kwargs: Any) -> str:
-            raise OSError("temporary filesystem is full")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.tempfile.mkdtemp", fail_mkdtemp)
-
-        with pytest.raises(PlanTransportError, match="temporary share directory") as raised:
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-        assert raised.value.session_id == str(session_id)
-
-    def test_copilot_rejects_oversized_share_and_removes_temporary_artifacts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        temporary_roots: list[Path] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            export_arg = next(value for value in command if value.startswith("--share="))
-            export_path = Path(export_arg.removeprefix("--share="))
-            temporary_roots.append(export_path.parent)
-            export_path.write_bytes(b"private-export-payload" * 4)
-            return CapturedProcess(
-                0,
-                json.dumps(
-                    {
-                        "type": "result",
-                        "session_id": str(session_id),
-                        "status": "completed",
-                    }
-                ),
-                "",
-            )
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr("crossby.ai_tools.plan_process._PLAN_ARTIFACT_TEXT_LIMIT", 64)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanArtifactMalformedError, match="byte limit") as raised:
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-        assert "private-export-payload" not in str(raised.value)
-        assert temporary_roots and not temporary_roots[0].exists()
-
-    @pytest.mark.parametrize(
-        "interaction",
-        [
-            {"id": " ", "question": "Choose a scope"},
-            {"id": "scope", "question": " "},
-            {"question": "Choose a scope"},
-            {"id": 42, "question": "Choose a scope"},
-            {"id": "scope"},
-            {"id": "scope", "question": ["Choose a scope"]},
-        ],
-        ids=(
-            "blank-question-id",
-            "blank-prompt",
-            "missing-question-id",
-            "non-string-question-id",
-            "missing-prompt",
-            "non-string-prompt",
-        ),
-    )
-    def test_copilot_rejects_invalid_interaction_fields_as_malformed_artifacts(
-        self,
-        interaction: dict[str, Any],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        event = json.dumps(
-            {
-                "type": "ask_user",
-                "session_id": str(session_id),
-                "data": interaction,
-            }
-        )
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, event, ""),
-        )
-
-        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-    def test_copilot_rejects_malformed_native_options(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        event = {
-            "type": "ask_user",
-            "session_id": str(session_id),
-            "data": {
-                "id": "scope",
-                "question": "Choose a scope",
-                "options": [{"id": "api", "label": "API"}, {"id": "cli"}],
-            },
-        }
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
-        )
-
-        with pytest.raises(PlanArtifactMalformedError, match="malformed interaction data"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-    def test_copilot_rejects_duplicate_question_ids_before_callback(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        events = [
-            {
-                "type": "ask_user",
-                "session_id": str(session_id),
-                "data": {"id": "scope", "question": prompt},
-            }
-            for prompt in ("Choose a scope", "Confirm the scope")
-        ]
-        seen: list[Any] = []
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(
-                0, "\n".join(json.dumps(event) for event in events), ""
-            ),
-        )
-
-        with pytest.raises(PlanArtifactMalformedError, match="duplicate question ID"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-                lambda interaction: (
-                    seen.append(interaction)
-                    or PlanInteractionResponse(
-                        outcome=PlanInteractionOutcome.ANSWERED,
-                        answer="API",
-                    )
-                ),
-            )
-
-        assert seen == []
-
-    def test_copilot_rejects_unknown_native_option_selection(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        event = {
-            "type": "ask_user",
-            "session_id": str(session_id),
-            "data": {
-                "id": "scope",
-                "question": "Choose a scope",
-                "options": [{"id": "api", "label": "API"}],
-            },
-        }
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: session_id)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: CapturedProcess(0, json.dumps(event), ""),
-        )
-
-        with pytest.raises(PlanInteractionRequiredError, match="valid native option IDs"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=PlanInteractionOutcome.ANSWERED,
-                    option_id="fabricated",
-                ),
-            )
-
-    def test_copilot_continues_native_options_by_label(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        question = json.dumps(
-            {
-                "type": "ask_user",
-                "id": "question-1",
-                "session_id": str(exact_uuid),
-                "data": {
-                    "id": "scope",
-                    "question": "Choose a scope",
-                    "options": [{"id": "opaque-api-id", "label": "API surface"}],
-                },
-            }
-        )
-        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = FIXTURES / "copilot_share_success.md"
-        runs = iter((question, success))
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            export_arg = next(value for value in command if value.startswith("--share="))
-            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
-            return CapturedProcess(0, next(runs), "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-            lambda _interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                option_id="opaque-api-id",
-            ),
-        )
-
-        assert commands[1][-2:] == ["--prompt", "API surface"]
-
-    def test_copilot_preserves_nested_plan_headings(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = "\n".join(
-            [
-                f"session_id: {exact_uuid}",
-                "",
-                "# Plan",
-                "",
-                "## Summary",
-                "Keep the complete plan.",
-                "",
-                "## Steps",
-                "1. Inspect.",
-                "2. Implement.",
-                "session_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                "",
-                "# Notes",
-                "Exclude this section.",
-            ]
-        )
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            export_arg = next(value for value in command if value.startswith("--share="))
-            Path(export_arg.removeprefix("--share=")).write_text(share, encoding="utf-8")
-            return CapturedProcess(0, events, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-        )
-
-        assert result.plan == "\n".join(
-            [
-                "## Summary",
-                "Keep the complete plan.",
-                "",
-                "## Steps",
-                "1. Inspect.",
-                "2. Implement.",
-                "session_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            ]
-        )
-
-    def test_copilot_rejects_identical_duplicate_plan_sections(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = "\n".join(
-            [
-                f"session_id: {exact_uuid}",
-                "",
-                "# Plan",
-                "Same plan",
-                "",
-                "# Plan",
-                "Same plan",
-            ]
-        )
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            export_arg = next(value for value in command if value.startswith("--share="))
-            Path(export_arg.removeprefix("--share=")).write_text(share, encoding="utf-8")
-            return CapturedProcess(0, events, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanArtifactAmbiguousError, match="conflicting Plan sections"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-            )
-
-    def test_copilot_prefers_marked_plan_over_nested_heading_parser(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        events = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = "\n".join(
-            [
-                f"session_id: {exact_uuid}",
-                "<!-- plan:start -->",
-                "# Plan",
-                "",
-                "## Steps",
-                "1. Inspect.",
-                "<!-- plan:end -->",
-            ]
-        )
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            export_arg = next(value for value in command if value.startswith("--share="))
-            Path(export_arg.removeprefix("--share=")).write_text(share, encoding="utf-8")
-            return CapturedProcess(0, events, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER)
-        )
-
-        assert result.plan == "# Plan\n\n## Steps\n1. Inspect."
-
-    def test_copilot_explicit_plan_answer_uses_safe_nonexecuting_continuation(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        approval = json.dumps(
-            {
-                "type": "plan.approval",
-                "id": "approval-1",
-                "session_id": str(exact_uuid),
-                "data": {"id": "approval-1", "prompt": "Implement this plan?"},
-            }
-        )
-        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = FIXTURES / "copilot_share_success.md"
-        runs = iter((approval, success))
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            export_arg = next(value for value in command if value.startswith("--share="))
-            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
-            return CapturedProcess(0, next(runs), "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-            lambda _interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Implement it",
-            ),
-        )
-
-        assert result.session_id == str(exact_uuid)
-        assert commands[1][-2:] == [
-            "--prompt",
-            "Do not implement. Finish and export the plan.",
-        ]
-
-    @pytest.mark.parametrize(
-        "outcome",
-        [
-            PlanInteractionOutcome.DENIED,
-            PlanInteractionOutcome.CANCELLED,
-            PlanInteractionOutcome.SKIPPED,
-        ],
-    )
-    def test_copilot_non_answered_plan_outcome_stops_without_fabricated_answer(
-        self,
-        outcome: PlanInteractionOutcome,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        approval = json.dumps(
-            {
-                "type": "plan.approval",
-                "id": "approval-1",
-                "session_id": str(exact_uuid),
-                "data": {"id": "approval-1", "prompt": "Implement this plan?"},
-            }
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return CapturedProcess(0, approval, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanInteractionRequiredError, match="did not authorize"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=outcome,
-                    answer="stale answer",
-                ),
-            )
-
-        assert len(commands) == 1
-
-    def test_copilot_continuations_share_one_timeout_budget(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        question = json.dumps(
-            {
-                "type": "ask_user",
-                "id": "question-1",
-                "session_id": str(exact_uuid),
-                "data": {"id": "scope", "question": "Include compatibility?"},
-            }
-        )
-        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = FIXTURES / "copilot_share_success.md"
-        runs = iter((question, success))
-        timeouts: list[float] = []
-
-        def fake_run(command: list[str], **kwargs: Any) -> CapturedProcess:
-            timeouts.append(kwargs["timeout"])
-            export_arg = next(value for value in command if value.startswith("--share="))
-            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
-            return CapturedProcess(0, next(runs), "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: 100.0)
-        clock = iter((100.0, 101.0, 104.0))
-        monkeypatch.setattr("crossby.ai_tools.copilot.time.monotonic", lambda: next(clock))
-        result = AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(
-                tmp_path,
-                timeout_seconds=10,
-                approval_policy=PlanApprovalPolicy.NEVER,
-            ),
-            lambda _interaction: PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Yes",
-            ),
-        )
-
-        assert result.session_id == str(exact_uuid)
-        assert timeouts == [9.0, 6.0]
-
-    def test_copilot_exposes_open_ended_questions_as_free_form(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        question = json.dumps(
-            {
-                "type": "ask_user",
-                "id": "question-1",
-                "session_id": str(exact_uuid),
-                "data": {"id": "scope", "question": "Any constraints?", "options": []},
-            }
-        )
-        success = (FIXTURES / "copilot_events_success.jsonl").read_text(encoding="utf-8")
-        share = FIXTURES / "copilot_share_success.md"
-        runs = iter((question, success))
-        commands: list[list[str]] = []
-        seen: list[Any] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            export_arg = next(value for value in command if value.startswith("--share="))
-            shutil.copyfile(share, Path(export_arg.removeprefix("--share=")))
-            return CapturedProcess(0, next(runs), "")
-
-        def answer(interaction: Any) -> PlanInteractionResponse:
-            seen.append(interaction)
-            if not interaction.allow_other:
-                return PlanInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED)
-            return PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Keep compatibility",
-            )
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-            _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER), answer
-        )
-
-        assert seen[0].allow_other is True
-        assert commands[1][-2:] == ["--prompt", "Keep compatibility"]
-
-    @pytest.mark.parametrize(
-        "response",
-        [
-            PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Maybe",
-            ),
-            PlanInteractionResponse(
-                outcome=PlanInteractionOutcome.ANSWERED,
-                answer="Maybe",
-                option_id="api",
-            ),
-        ],
-        ids=("text-only", "mixed"),
-    )
-    def test_copilot_rejects_free_text_for_option_only_questions(
-        self,
-        response: PlanInteractionResponse,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        question = json.dumps(
-            {
-                "type": "ask_user",
-                "id": "question-1",
-                "session_id": str(exact_uuid),
-                "data": {
-                    "id": "scope",
-                    "question": "Choose a scope",
-                    "options": [{"id": "api", "label": "API"}],
-                },
-            }
-        )
-        runs = iter((CapturedProcess(0, question, ""),))
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr(
-            "crossby.ai_tools.plan_process.run_captured",
-            lambda *_args, **_kwargs: next(runs),
-        )
-
-        with pytest.raises(PlanInteractionRequiredError, match="free-form"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-                lambda _interaction: response,
-            )
-
-    def test_copilot_question_denial_discards_stale_answer(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        exact_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        question = json.dumps(
-            {
-                "type": "ask_user",
-                "id": "question-1",
-                "session_id": str(exact_uuid),
-                "data": {"id": "scope", "question": "Include compatibility?"},
-            }
-        )
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: Any) -> CapturedProcess:
-            commands.append(command)
-            return CapturedProcess(0, question, "")
-
-        monkeypatch.setattr("crossby.ai_tools.copilot.uuid.uuid4", lambda: exact_uuid)
-        monkeypatch.setattr("crossby.ai_tools.plan_process.run_captured", fake_run)
-
-        with pytest.raises(PlanInteractionRequiredError, match="left unanswered"):
-            AbstractAITool.get(AIToolID.COPILOT).run_plan_session(
-                _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER),
-                lambda _interaction: PlanInteractionResponse(
-                    outcome=PlanInteractionOutcome.DENIED,
-                    answer="stale answer",
-                ),
-            )
-
-        assert len(commands) == 1
-
 
 class TestProtocolCollectors:
+    def test_codex_clears_unrequested_writable_roots(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_rpc(monkeypatch, "codex_app_server_success.jsonl", headerless=True)
+
+        AbstractAITool.get(AIToolID.CODEX).run_plan_session(_request(tmp_path))
+
+        thread_start = next(
+            payload
+            for kind, payload in FakeRpc.instances[0].sent
+            if kind == "request" and payload["id"] == 3
+        )
+        assert thread_start["params"]["config"]["sandbox_workspace_write"] == {
+            "network_access": False,
+            "writable_roots": [],
+        }
+
     def test_cursor_normalizes_frame_overflow_to_a_session_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

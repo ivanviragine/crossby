@@ -437,13 +437,28 @@ def test_export_ignores_decoy_metadata(server: FakeServer, tmp_path: Path) -> No
     assert result.plan.startswith("# Native plan")
 
 
-def test_export_rejects_multiple_plan_candidates(server: FakeServer, tmp_path: Path) -> None:
+def test_export_ignores_earlier_plan_agent_prose(server: FakeServer, tmp_path: Path) -> None:
     preamble = deepcopy(server.export["messages"][-1])
     preamble["info"]["id"] = "msg_old_plan"
     preamble["parts"][0]["text"] = "I will inspect the project."
     server.export["messages"].insert(1, preamble)
 
-    with pytest.raises(PlanArtifactAmbiguousError, match="multiple authoritative"):
+    result = _run(tmp_path)
+
+    assert result.artifact_id == "msg-plan-1"
+    assert result.plan.startswith("# Native plan")
+
+
+@pytest.mark.parametrize("duplicate_text", ["# Conflicting plan", "", None])
+def test_export_rejects_duplicate_terminal_message_records(
+    duplicate_text: str | None, server: FakeServer, tmp_path: Path
+) -> None:
+    duplicate = deepcopy(server.export["messages"][-1])
+    if duplicate_text is not None:
+        duplicate["parts"][0]["text"] = duplicate_text
+    server.export["messages"].insert(1, duplicate)
+
+    with pytest.raises(PlanArtifactAmbiguousError, match="multiple records"):
         _run(tmp_path)
 
 

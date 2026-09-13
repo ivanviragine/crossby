@@ -160,13 +160,18 @@ the matching successful `turn/completed`, rejects a second completed plan item,
 then acknowledges `thread/backgroundTerminals/clean` and requires app-server to
 exit zero before returning. Cursor likewise configures and verifies the requested
 model, thought level, and thinking/fast state through ACP and requires a zero
-protocol-process exit. Copilot requires one UUID-bound `result` event with
-`status="completed"` before reading the local share. Its `--prompt` transport
-cannot relay tool permission prompts, so collection supports only
-`approval_policy="never"` and runs it in a run-owned no-network sandbox with
-Copilot's experimental feature enabled and hooks and external MCP disabled. The
-model sees only `view`, `grep`, `glob`, and `ask_user`; write and shell permissions
-are also explicitly denied.
+protocol-process exit. Codex must always send the complete
+`sandbox_workspace_write.writable_roots` list, including `[]` when no extra roots
+were requested: omission lets app-server retain ambient configuration roots.
+
+Copilot supports interactive native `--plan` activation only. CLI 1.0.83's
+`--prompt` transport does not expose `ask_user` to the model, so the collected
+API fails before spawning. A future collector must verify a real native question
+→ callback → continuation → plan flow before declaring support. Local-provider
+runs of 1.0.83 emit `result.sessionId` and integer `exitCode` (not
+`status="completed"`), and Markdown shares start with `# Copilot CLI Session`
+and a quoted `> - **Session ID:**` metadata line. Do not revive the prior
+synthetic event/share fixtures or infer question support from a tool allowlist.
 
 OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
 then creates one native session and selects `agent="plan"` in `prompt_async`.
@@ -176,7 +181,10 @@ returns selected labels as arrays; batched question IDs use the native request I
 plus the question index. Inspect the originating tool call to distinguish
 `plan_exit` from an ordinary question, and never approve a switch to building.
 After a successful terminal plan message, export only that exact session and
-require the exported artifact to match the terminal message ID. Native API calls,
+require the exported artifact to match the terminal message ID. Progress before
+a clarification/tool call may create several assistant messages. Select the
+unique export record with the completed message ID; reject
+duplicate records for that ID, not earlier plan-agent prose. Native API calls,
 question handling, and export share one deadline. HTTP response bodies are bounded
 and read incrementally with that deadline recomputed before each receive; a
 deadline timer interrupts status/header parsing that trickles data indefinitely.
@@ -198,6 +206,9 @@ shape. Reject duplicate question IDs before invoking callbacks. Do not silently
 drop malformed options, and validate every callback selection against the native
 option IDs before resuming or responding. Preserve a native free-form affordance
 as `PlanInteraction.allow_other`, and reject answer text when it is false.
+This also applies to permission callbacks: reject text on an `ANSWERED` or
+`APPROVED` response before sending approval, while keeping explicit denial and
+cancellation precedence over stale response fields.
 
 When an upstream protocol changes, capture a sanitized fixture from the new
 release, update the parser and positive/negative tests, then raise
@@ -220,8 +231,6 @@ CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
 The answer variable is needed only when a harness asks an open-ended informational
 planning question. For option-based questions, the smoke handler selects the first
 emitted native option; final plan and permission requests are denied.
-The Copilot case deliberately requests a sentinel write and asserts that its
-read-only collector leaves the disposable workspace unchanged.
 Never enable these tests in the default or unauthenticated CI suite.
 
 OpenCode also has a deterministic native test that uses a local model stub and
@@ -233,7 +242,15 @@ CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
 ```
 
 It requires the verified OpenCode binary and exercises a real native multi-select
-question, its reply, and exact-session export.
+question with preceding progress text, its reply, and exact-session export.
+
+Codex also has a local policy test with isolated configuration. It checks the
+actual app-server sandbox response and stops before any model inference:
+
+```bash
+CROSSBY_CODEX_LOCAL_SMOKE=1 \
+  uv run pytest tests/integration/test_codex_plan_policy.py
+```
 
 ## Adding a New AI Tool
 

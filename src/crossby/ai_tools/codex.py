@@ -278,9 +278,8 @@ class CodexAdapter(AbstractAITool):
                     # Pin both values so ambient config cannot silently widen a
                     # Crossby-managed planning thread.
                     "network_access": request.network_access,
+                    "writable_roots": [str(path) for path in request.trusted_dirs],
                 }
-                if request.trusted_dirs:
-                    sandbox_config["writable_roots"] = [str(path) for path in request.trusted_dirs]
                 config["sandbox_workspace_write"] = sandbox_config
             thread_params: dict[str, Any] = {
                 "cwd": str(request.working_dir.resolve()),
@@ -999,6 +998,13 @@ def _answer_codex_approval(
             PlanInteractionOutcome.SKIPPED,
         }:
             decision = "decline"
+        elif response.answer is not None:
+            raise PlanInteractionRequiredError(
+                "Codex permission decisions do not accept free text.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
         elif response.outcome is PlanInteractionOutcome.APPROVED:
             decision = "accept"
         else:

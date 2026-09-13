@@ -256,7 +256,37 @@ class OpenCodeAdapter(AbstractAITool):
                     exit_code=exported.returncode,
                     session_id=session_id,
                 )
-        plans = _opencode_plans(payload)
+        messages = payload.get("messages")
+        matching = (
+            [
+                message
+                for message in messages
+                if isinstance(message, dict)
+                and isinstance(message.get("info"), dict)
+                and message["info"].get("id") == terminal_message_id
+            ]
+            if isinstance(messages, list)
+            else []
+        )
+        if not matching:
+            raise PlanBindingMismatchError(
+                "OpenCode export did not contain the completed planning message.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                artifact_id=terminal_message_id,
+            )
+        if len(matching) != 1:
+            raise PlanArtifactAmbiguousError(
+                "OpenCode export contained multiple records for the completed planning message.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                artifact_id=terminal_message_id,
+            )
+        # Progress and question/tool-call messages belong to the session, but
+        # only the exact terminal message observed through the API is a plan.
+        plans = _opencode_plans({"info": export_info, "messages": matching})
         if not plans:
             raise PlanArtifactMissingError(
                 "OpenCode's exact session export contained no assistant plan.",
@@ -265,24 +295,7 @@ class OpenCodeAdapter(AbstractAITool):
                 exit_code=exported.returncode,
                 session_id=session_id,
             )
-        if len(plans) != 1:
-            raise PlanArtifactAmbiguousError(
-                "OpenCode's exact session export contained multiple authoritative plans.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                exit_code=exported.returncode,
-                session_id=session_id,
-                artifact_id=",".join(item_id or "unknown" for _, item_id in plans),
-            )
         plan, artifact_id = plans[0]
-        if artifact_id != terminal_message_id:
-            raise PlanBindingMismatchError(
-                "OpenCode export did not contain the completed planning message.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-                session_id=session_id,
-                artifact_id=artifact_id,
-            )
         if not plan.strip():
             raise PlanArtifactMalformedError(
                 "OpenCode's exact session export contained a blank plan.",

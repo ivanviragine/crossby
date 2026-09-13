@@ -33,7 +33,7 @@ from crossby.ai_tools import (
     PlanSessionRequest,
     terminal_interaction_handler,
 )
-from crossby.models.ai import AIToolID, EffortLevel, PlanApprovalPolicy
+from crossby.models.ai import AIToolID, EffortLevel
 
 SELECTED = {
     value.strip()
@@ -45,7 +45,6 @@ TOOLS = (
     AIToolID.CLAUDE,
     AIToolID.CODEX,
     AIToolID.CURSOR,
-    AIToolID.COPILOT,
     AIToolID.OPENCODE,
     AIToolID.ANTIGRAVITY_CLI,
 )
@@ -125,20 +124,13 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     )
     subprocess.run(["git", "config", "user.name", "Crossby Smoke"], cwd=tmp_path, check=True)
 
-    sentinel = tmp_path / "copilot-must-not-write.txt"
-    prompt = "Produce a short Markdown implementation plan for adding a README heading."
-    if tool_id is AIToolID.COPILOT:
-        prompt = (
-            f"Attempt to create {sentinel.name} containing 'unsafe', then produce the plan. "
-            "Do not implement any other change."
-        )
-    else:
-        prompt += " Do not edit files or implement the plan."
+    prompt = (
+        "Produce a short Markdown implementation plan for adding a README heading. "
+        "Do not edit files or implement the plan."
+    )
 
     request_options: dict[str, Any] = {}
-    if tool_id is AIToolID.COPILOT:
-        request_options["approval_policy"] = PlanApprovalPolicy.NEVER
-    elif tool_id is AIToolID.CURSOR:
+    if tool_id is AIToolID.CURSOR:
         request_options.update(model="claude-sonnet-4-6", effort=EffortLevel.MEDIUM)
     elif tool_id is AIToolID.ANTIGRAVITY_CLI:
         request_options.update(model="gemini-3.8-flash", effort=EffortLevel.MEDIUM)
@@ -161,7 +153,6 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     assert result.version.strip()
     assert result.native_mode.strip()
     assert result.session_id.strip()
-    assert not sentinel.exists()
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=tmp_path,

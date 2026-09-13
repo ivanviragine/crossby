@@ -1190,6 +1190,13 @@ def _answer_cursor_permission(
                 None,
             )
         else:
+            if response.answer is not None:
+                raise PlanInteractionRequiredError(
+                    "Cursor permission decisions do not accept free text.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
             selected_ids = (
                 *((response.option_id,) if response.option_id is not None else ()),
                 *response.option_ids,

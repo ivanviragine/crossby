@@ -41,6 +41,7 @@ def test_real_opencode_forwards_native_multiselect_and_exports(
             has_answer = any(message.get("role") == "tool" for message in payload["messages"])
             if has_question_tool and not has_answer:
                 delta = {
+                    "content": "Before I finalize the plan, which platforms should I support?",
                     "tool_calls": [
                         {
                             "index": 0,

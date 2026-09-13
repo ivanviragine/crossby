@@ -359,6 +359,15 @@ def _answer_permission(
     if handler is None:
         raise _interaction_required(interaction, capability)
     response = handler(interaction)
+    if (
+        response.outcome
+        in {
+            PlanInteractionOutcome.APPROVED,
+            PlanInteractionOutcome.ANSWERED,
+        }
+        and response.answer is not None
+    ):
+        raise _interaction_required(interaction, capability)
     if response.outcome is PlanInteractionOutcome.APPROVED:
         reply = "once"
     elif response.outcome is PlanInteractionOutcome.ANSWERED:

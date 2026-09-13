@@ -396,19 +396,20 @@ Support matrix (contracts verified against the listed builds through 2026-09-13)
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
 | Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; configured model + thought level + thinking/fast state, exact session + blocking `cursor/create_plan` request ID + successful `end_turn` + zero process exit | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply an ACP-advertised model and effort plus a handler for questions and the non-executing final outcome |
-| GitHub Copilot CLI | `--plan` | Headless CLI; assigned UUID + one successful terminal result + unique local `--share` export | Resumable callback | Read-only tool allowlist + isolated experimental sandbox / preserved (`never`) | 1.0.83 | Pass `approval_policy="never"`; collection enables Copilot's experimental sandbox, exposes only file viewing/search and questions, explicitly denies writes/shell, disables external MCP/hooks/network, and removes its temporary home/export after normalization |
+| GitHub Copilot CLI | Interactive `--plan` | Collected sessions unsupported | Native terminal for interactive launch only | No collected-session policy | 1.0.83 (interactive activation) | Use interactive `launch(..., plan_mode=True)` or another collector; the verified headless transport omits `ask_user`, so native question callbacks and continuation are unavailable |
 | OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
 | Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
 | VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
 | Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
-its safe default is accepted. Copilot's collector supplies that default through
-a run-owned no-network sandbox with hooks and external MCP disabled; its
-non-interactive transport cannot surface tool permission prompts, so
-`on-request` is rejected and `never` is the only preserved approval policy.
+its safe default is accepted.
 `preserved` means Crossby enforces the listed caller choices explicitly; an
-unlisted approval policy is rejected before collection.
+unlisted approval policy is rejected before collection. Codex explicitly replaces
+configured extra writable roots with `trusted_dirs`, including an empty list,
+so ambient configuration cannot add unrequested directories.
+Copilot reports `supports_plan_session=False` and rejects collection before
+spawning, while its interactive native plan selector remains available.
 Protocol and resumable collectors never invent an answer or auto-approve
 implementation. A missing handler produces
 `PlanInteractionRequiredError`, including when the caller's stdin is a TTY. A
@@ -418,8 +419,8 @@ separately and an `APPROVED` response is refused by collectors where it would
 transition into execution. Native option lists are parsed without discarding
 malformed entries, and callback option IDs must match those exact choices;
 explicit denied, cancelled, or skipped outcomes take precedence over stale
-selections and stop Copilot plan-approval continuation instead of becoming a
-fabricated answer. `PlanInteraction.allow_other` preserves a native free-form-answer
+selections. Option-only permission callbacks reject free text before sending an
+approval. `PlanInteraction.allow_other` preserves a native free-form-answer
 affordance (including Codex `isOther`); callers must not return `answer` text
 when it is false.
 
@@ -491,10 +492,13 @@ share the session deadline.
 Each JSON-RPC frame is capped before queueing and an oversized frame terminates
 the owned protocol group. OpenCode interrupts status/header parsing at the
 absolute deadline and reads response bodies incrementally against that same
-deadline; like Claude/Copilot file-backed plan artifacts, bodies are capped at
+deadline; like Claude file-backed plan artifacts, bodies are capped at
 8 MiB. Claude anchors POSIX artifact reads to a directory handle
 opened before launch, validates file identity, and removes only empty run
 directories after failure.
+OpenCode selects the unique exported record matching the completed native message
+ID. Earlier progress and clarification messages are not competing plan artifacts;
+duplicate records of the completed message are rejected even when identical.
 Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
 and are also caught by the collected API's `PlanSessionError` integration
 boundary.
