@@ -505,8 +505,8 @@ class CursorAdapter(AbstractAITool):
                     "value": effort_value,
                 },
             )
-            configured_effort = wait_response(5)
-            confirmed_effort = _cursor_effort_option(configured_effort, request.effort)
+            configuration_state = wait_response(5)
+            confirmed_effort = _cursor_effort_option(configuration_state, request.effort)
             if (
                 confirmed_effort is None
                 or confirmed_effort[0]["id"] != effort_option["id"]
@@ -524,7 +524,7 @@ class CursorAdapter(AbstractAITool):
                 ("fast", fast_value),
             ):
                 variant_option = _cursor_optional_config_option(
-                    configured_effort,
+                    configuration_state,
                     option_id=variant_id,
                 )
                 if variant_option is None:
@@ -554,9 +554,9 @@ class CursorAdapter(AbstractAITool):
                         "value": variant_value,
                     },
                 )
-                configured_variant = wait_response(next_request_id)
+                configuration_state = wait_response(next_request_id)
                 confirmed_variant = _cursor_config_option(
-                    configured_variant,
+                    configuration_state,
                     option_id=variant_id,
                 )
                 if confirmed_variant["currentValue"] != variant_value:
@@ -567,6 +567,43 @@ class CursorAdapter(AbstractAITool):
                         session_id=session_id,
                     )
                 next_request_id += 1
+            final_model = _cursor_config_option(configuration_state, option_id="model")
+            final_effort = _cursor_effort_option(configuration_state, request.effort)
+            if final_model["currentValue"] != model_base:
+                raise PlanTransportError(
+                    "Cursor ACP reset the requested model while configuring the session.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            if (
+                final_effort is None
+                or final_effort[0]["id"] != effort_option["id"]
+                or final_effort[0]["currentValue"] != effort_value
+            ):
+                raise PlanTransportError(
+                    "Cursor ACP reset the requested reasoning effort while configuring the "
+                    "session.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            for variant_id, variant_value in (
+                ("thinking", thinking_value),
+                ("fast", fast_value),
+            ):
+                final_variant = _cursor_optional_config_option(
+                    configuration_state,
+                    option_id=variant_id,
+                )
+                if final_variant is not None and final_variant["currentValue"] != variant_value:
+                    raise PlanTransportError(
+                        f"Cursor ACP reset the requested {variant_id} model setting while "
+                        "configuring the session.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                    )
             rpc.request(
                 next_request_id,
                 "session/set_mode",

@@ -380,7 +380,8 @@ default. Cursor and Antigravity CLI require an explicit `model` with explicit
 `effort`. Cursor opts into ACP's parameterized model picker, selects the exact
 advertised base model, applies the advertised reasoning-effort and optional
 thinking/fast variant options, and verifies all returned values before prompting;
-`auto`, unavailable models/tiers, and conflicting model-encoded tiers are rejected. Antigravity
+`auto`, unavailable models/tiers, and conflicting model-encoded tiers are rejected.
+Antigravity
 requires a compatible Gemini model whose native effort tier matches the request;
 missing, non-Gemini, unavailable, or conflicting model tiers are rejected before
 the collector launches. OpenCode collection accepts only `low`, `medium`, and
@@ -388,7 +389,7 @@ the collector launches. OpenCode collection accepts only `low`, `medium`, and
 interactive launches retain the legacy `xhigh`/`max` → `high` normalization, but
 a collected session rejects tiers the adapter cannot preserve exactly.
 
-Support matrix (contracts verified against the listed builds through 2026-09-12):
+Support matrix (contracts verified against the listed builds through 2026-09-13):
 
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- |

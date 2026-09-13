@@ -2349,7 +2349,8 @@ class TestProtocolCollectors:
         configured: dict[EffortLevel, dict[str, Any]] = {}
         for effort in (EffortLevel.LOW, EffortLevel.MEDIUM):
             messages = _rpc_fixture("cursor_acp_success.jsonl")
-            messages[3]["result"]["configOptions"][1]["currentValue"] = effort.value
+            for index in (3, 4):
+                messages[index]["result"]["configOptions"][1]["currentValue"] = effort.value
             FakeRpc.scripts = [messages]
             FakeRpc.instances = []
             monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
@@ -2375,7 +2376,8 @@ class TestProtocolCollectors:
         messages = _rpc_fixture("cursor_acp_success.jsonl")
         for index in (2, 3, 4):
             messages[index]["result"]["configOptions"][0]["currentValue"] = "gpt-5.4"
-        messages[3]["result"]["configOptions"][1]["currentValue"] = "extra-high"
+        for index in (3, 4):
+            messages[index]["result"]["configOptions"][1]["currentValue"] = "extra-high"
         messages[4]["result"]["configOptions"][2]["currentValue"] = "true"
         FakeRpc.scripts = [messages]
         FakeRpc.instances = []
@@ -2411,6 +2413,30 @@ class TestProtocolCollectors:
             "sessionId": "cursor-exact-123",
             "modeId": "plan",
         }
+
+    def test_cursor_rejects_configuration_drift_before_plan_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        messages = _rpc_fixture("cursor_acp_success.jsonl")
+        messages[4]["result"]["configOptions"][1]["currentValue"] = "low"
+        FakeRpc.scripts = [messages]
+        FakeRpc.instances = []
+        monkeypatch.setattr("crossby.ai_tools.plan_process.JsonRpcProcess", FakeRpc)
+
+        with pytest.raises(PlanTransportError, match="reset the requested reasoning effort"):
+            AbstractAITool.get(AIToolID.CURSOR).run_plan_session(
+                _cursor_request(tmp_path),
+                lambda _interaction: PlanInteractionResponse(
+                    outcome=PlanInteractionOutcome.DENIED,
+                    option_id="rejected",
+                ),
+            )
+
+        assert not any(
+            kind == "request" and payload["method"] == "session/set_mode"
+            for kind, payload in FakeRpc.instances[0].sent
+        )
+        assert FakeRpc.instances[0].closed
 
     def test_cursor_accepts_a_model_advertised_only_by_acp(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

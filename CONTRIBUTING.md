@@ -582,10 +582,10 @@ native `variant` value cannot preserve exactly.
 The Cursor entries also describe interactive launch compatibility. Complete
 collection never collapses two requested tiers onto that generic mapping: it
 opts into ACP's parameterized model picker, maps a tiered CLI ID back to its base
-model, selects that advertised model plus its thought-level and fast/non-fast
-variant options, and verifies all returned values before prompting. Conflicting
-tiers and `auto` fail before ACP starts; models or tiers unavailable to the
-authenticated ACP session fail before the first prompt.
+model, selects that advertised model plus its reasoning-effort and optional
+thinking/fast variant options, and verifies all returned values before
+prompting. Conflicting tiers and `auto` fail before ACP starts; models or tiers
+unavailable to the authenticated ACP session fail before the first prompt.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed
