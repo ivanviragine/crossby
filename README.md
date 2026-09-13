@@ -488,9 +488,9 @@ Crossby returns Markdown and the available session, turn, item, conversation,
 or path evidence. It does not impose WADE validation and does not require the
 harness itself to create `PLAN.md`. `timeout_seconds` is one collector deadline
 shared by the version probe, initial invocation, question continuations,
-protocol waits, and subprocess-backed export. Caller-visible timeout errors omit
-subprocess command arguments because those arguments can contain prompts or
-continuation answers.
+protocol waits, file-backed artifact collection, and subprocess-backed export.
+Caller-visible timeout errors omit subprocess command arguments because those
+arguments can contain prompts or continuation answers.
 Callback-based collectors also bound the time spent waiting for the interaction
 handler. Handlers run on daemon worker threads; timeout unwinds collection and
 closes the native process, and a late callback result is never forwarded.

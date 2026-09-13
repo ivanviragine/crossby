@@ -126,7 +126,8 @@ interactive sessions. A complete collector must:
    Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
    cases use the typed errors in `ai_tools/plan_mode.py`.
 6. Apply one request-wide deadline to the version probe, initial invocation,
-   every protocol read/write or continuation wait, and any subprocess-backed export.
+   every protocol read/write or continuation wait, file-backed artifact
+   collection, and any subprocess-backed export.
    Always terminate protocol children, isolate captured, interactive, and protocol
    POSIX subprocesses in run-owned process groups, hard-limit captured
    stdout/stderr, redact/truncate diagnostics, and remove only run-owned temporary
