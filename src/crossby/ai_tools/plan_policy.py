@@ -93,8 +93,11 @@ def operation_matches_command_policy(
         return False
     if not operation.execution_dir.is_absolute():
         return False
-    execution_dir = operation.execution_dir.resolve()
-    roots = tuple(path.resolve() for path in allowed_execution_roots)
+    try:
+        execution_dir = operation.execution_dir.resolve()
+        roots = tuple(path.resolve() for path in allowed_execution_roots)
+    except (OSError, RuntimeError):
+        return False
     if not any(execution_dir == root or execution_dir.is_relative_to(root) for root in roots):
         return False
 

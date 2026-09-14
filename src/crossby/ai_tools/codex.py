@@ -1136,19 +1136,10 @@ def _codex_approval_options(
     else:
         decision_ids = tuple(value for value in available if isinstance(value, str))
         structured = tuple(value for value in available if isinstance(value, dict))
-        recognized_structured = {
-            "acceptWithExecpolicyAmendment",
-            "applyNetworkPolicyAmendment",
-        }
         if (
             any(not value.strip() for value in decision_ids)
             or len(set(decision_ids)) != len(decision_ids)
-            or any(
-                len(value) != 1
-                or next(iter(value)) not in recognized_structured
-                or not isinstance(next(iter(value.values())), dict)
-                for value in structured
-            )
+            or structured
             or len(decision_ids) + len(structured) != len(available)
             or not decision_ids
         ):

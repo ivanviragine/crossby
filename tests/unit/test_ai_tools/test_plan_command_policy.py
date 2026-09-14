@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -153,4 +154,29 @@ def test_operation_rejects_two_command_representations() -> None:
             kind=PlanOperationKind.COMMAND,
             argv=("git", "status"),
             shell_expression="git status",
+        )
+
+
+@pytest.mark.parametrize(
+    "resolve_results",
+    [
+        (RuntimeError("symlink loop"),),
+        (Path("/workspace"), OSError("filesystem unavailable")),
+    ],
+    ids=("execution-directory", "allowed-root"),
+)
+def test_resolution_failures_never_match_command_policy(
+    resolve_results: tuple[Path | BaseException, ...],
+) -> None:
+    operation = PlanOperation(
+        kind=PlanOperationKind.COMMAND,
+        argv=("git", "status"),
+        execution_dir=Path("/workspace"),
+    )
+
+    with patch.object(Path, "resolve", side_effect=resolve_results):
+        assert not operation_matches_command_policy(
+            PlanCommandPolicy(allowed_commands=("git status",)),
+            operation,
+            allowed_execution_roots=(Path("/workspace"),),
         )

@@ -13,6 +13,7 @@ from crossby.ai_tools import (
     PlanCommandPolicyUnsupportedError,
     PlanInteraction,
     PlanInteractionRequiredError,
+    PlanTransportError,
 )
 from crossby.ai_tools.codex import _answer_codex_approval
 from crossby.ai_tools.cursor import _answer_cursor_permission
@@ -240,7 +241,9 @@ def test_codex_policy_rejects_a_match_without_native_approve_once(tmp_path: Path
     assert not native.mock_calls
 
 
-def test_codex_preserves_advertised_native_decision_ids(tmp_path: Path) -> None:
+def test_codex_rejects_structured_native_decisions_instead_of_hiding_them(
+    tmp_path: Path,
+) -> None:
     native = Mock()
     message = _codex_command_message(tmp_path, "git status")
     assert isinstance(message["params"], dict)
@@ -249,28 +252,24 @@ def test_codex_preserves_advertised_native_decision_ids(tmp_path: Path) -> None:
         {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": {}}},
         "decline",
     ]
-    seen: list[PlanInteraction] = []
-
-    def approve_for_session(interaction: PlanInteraction) -> PlanInteractionResponse:
-        seen.append(interaction)
-        return PlanInteractionResponse(
-            outcome=PlanInteractionOutcome.ANSWERED,
-            option_id="acceptForSession",
+    with pytest.raises(
+        PlanTransportError,
+        match="unrepresentable native approval decisions",
+    ):
+        _answer_codex_approval(
+            native,
+            message,
+            thread_id="thread",
+            turn_id="turn",
+            handler=lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED
+            ),
+            tool_id=AIToolID.CODEX,
+            capability=AbstractAITool.get(AIToolID.CODEX).capabilities().plan_mode,
+            deny_automatically=False,
         )
 
-    _answer_codex_approval(
-        native,
-        message,
-        thread_id="thread",
-        turn_id="turn",
-        handler=approve_for_session,
-        tool_id=AIToolID.CODEX,
-        capability=AbstractAITool.get(AIToolID.CODEX).capabilities().plan_mode,
-        deny_automatically=False,
-    )
-
-    assert [option.option_id for option in seen[0].options] == ["acceptForSession", "decline"]
-    native.respond.assert_called_once_with(42, {"decision": "acceptForSession"})
+    assert not native.mock_calls
 
 
 def test_codex_unknown_operation_kind_never_matches_policy(tmp_path: Path) -> None:
@@ -410,10 +409,119 @@ def test_cursor_forwards_raw_operation_fields_without_parsing_title(tmp_path: Pa
     assert seen[0].operation.argv == ("git", "status")
     assert seen[0].operation.shell_expression is None
     assert seen[0].operation.execution_dir == tmp_path
+    assert [(binding.name, binding.value) for binding in seen[0].operation.native_binding_ids] == [
+        ("request_id", "42"),
+        ("tool_call_id", "call"),
+    ]
     native.respond.assert_called_once_with(
         42,
         {"outcome": {"outcome": "selected", "optionId": "deny-once"}},
     )
+
+
+def test_cursor_rejects_conflicting_native_command_representations(tmp_path: Path) -> None:
+    native = Mock()
+
+    with pytest.raises(PlanTransportError, match="conflicting command representations"):
+        _answer_cursor_permission(
+            native,
+            {
+                "id": 42,
+                "params": {
+                    "sessionId": "session",
+                    "toolCall": {
+                        "kind": "execute",
+                        "rawInput": {
+                            "argv": ["git", "status"],
+                            "command": "git status && curl example.invalid",
+                            "cwd": str(tmp_path),
+                        },
+                    },
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+            session_id="session",
+            handler=lambda _interaction: PlanInteractionResponse(
+                outcome=PlanInteractionOutcome.DENIED
+            ),
+            tool_id=AIToolID.CURSOR,
+            capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().plan_mode,
+            deny_automatically=False,
+        )
+
+    assert not native.mock_calls
+
+
+def test_cursor_keeps_request_binding_distinct_without_tool_call_id(tmp_path: Path) -> None:
+    native = Mock()
+    seen: list[PlanInteraction] = []
+
+    def deny(interaction: PlanInteraction) -> PlanInteractionResponse:
+        seen.append(interaction)
+        return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+
+    _answer_cursor_permission(
+        native,
+        {
+            "id": 42,
+            "params": {
+                "sessionId": "session",
+                "toolCall": {
+                    "toolCallId": " ",
+                    "kind": "execute",
+                    "rawInput": {"argv": ["git", "status"], "cwd": str(tmp_path)},
+                },
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once"},
+                    {"optionId": "deny-once", "name": "Deny once"},
+                ],
+            },
+        },
+        session_id="session",
+        handler=deny,
+        tool_id=AIToolID.CURSOR,
+        capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().plan_mode,
+        deny_automatically=False,
+    )
+
+    assert seen[0].artifact_id == "42"
+    assert seen[0].operation is not None
+    assert [(binding.name, binding.value) for binding in seen[0].operation.native_binding_ids] == [
+        ("request_id", "42"),
+    ]
+
+
+def test_opencode_external_directory_does_not_invent_write_authority(
+    tmp_path: Path,
+) -> None:
+    native = Mock()
+    seen: list[PlanInteraction] = []
+
+    def deny(interaction: PlanInteraction) -> PlanInteractionResponse:
+        seen.append(interaction)
+        return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+
+    _answer_permission(
+        native,
+        {
+            "id": "permission",
+            "permission": "external_directory",
+            "patterns": [str(tmp_path / "external")],
+        },
+        "session",
+        deny,
+        AbstractAITool.get(AIToolID.OPENCODE).capabilities().plan_mode,
+        execution_dir=tmp_path,
+    )
+
+    assert seen[0].operation is not None
+    assert seen[0].operation.kind is PlanOperationKind.OTHER
+    assert [target.kind for target in seen[0].operation.permission_targets] == [
+        PlanPermissionTargetKind.RESOURCE
+    ]
 
 
 def test_opencode_forwards_permission_targets_and_native_bindings(tmp_path: Path) -> None:

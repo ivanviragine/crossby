@@ -459,7 +459,6 @@ def _answer_permission(
         "shell": PlanPermissionTargetKind.COMMAND_PATTERN,
         "read": PlanPermissionTargetKind.FILESYSTEM_READ,
         "edit": PlanPermissionTargetKind.FILESYSTEM_WRITE,
-        "external_directory": PlanPermissionTargetKind.FILESYSTEM_WRITE,
         "webfetch": PlanPermissionTargetKind.NETWORK_HOST,
         "websearch": PlanPermissionTargetKind.NETWORK_HOST,
     }.get(permission, PlanPermissionTargetKind.RESOURCE)
@@ -467,7 +466,6 @@ def _answer_permission(
         "bash": PlanOperationKind.COMMAND,
         "shell": PlanOperationKind.COMMAND,
         "edit": PlanOperationKind.FILE_CHANGE,
-        "external_directory": PlanOperationKind.FILE_CHANGE,
         "webfetch": PlanOperationKind.NETWORK,
         "websearch": PlanOperationKind.NETWORK,
     }.get(permission, PlanOperationKind.OTHER)

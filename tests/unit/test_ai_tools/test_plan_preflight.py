@@ -43,6 +43,25 @@ def _version(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.parametrize("timeout_seconds", [0.0, -1.0, float("nan"), float("inf")])
+def test_preflight_rejects_non_positive_or_non_finite_timeout(
+    timeout_seconds: float,
+    tmp_path: Path,
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.CODEX)
+
+    with (
+        patch("crossby.utils.versioning.detect_binary_version_info") as probe,
+        pytest.raises(ValueError, match="timeout must be positive and finite"),
+    ):
+        adapter.preflight_plan_session(
+            _request(tmp_path / "future"),
+            timeout_seconds=timeout_seconds,
+        )
+
+    probe.assert_not_called()
+
+
 @pytest.mark.parametrize("tool_id", [AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.OPENCODE])
 def test_policy_preflight_succeeds_without_creating_future_directory(
     tool_id: AIToolID, tmp_path: Path

@@ -1145,7 +1145,7 @@ def _answer_cursor_permission(
     capability: PlanModeCapability,
     deny_automatically: bool,
 ) -> None:
-    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError
+    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError, PlanTransportError
 
     params = _cursor_bound_params(
         message,
@@ -1180,13 +1180,24 @@ def _answer_cursor_permission(
     if isinstance(raw_input, dict):
         raw_argv = raw_input.get("argv")
         raw_command = raw_input.get("command")
+        parsed_argv: tuple[str, ...] | None = None
         if (
             isinstance(raw_argv, list)
             and raw_argv
             and all(isinstance(value, str) for value in raw_argv)
         ):
-            argv = tuple(raw_argv)
-        elif isinstance(raw_command, str) and raw_command.strip():
+            parsed_argv = tuple(raw_argv)
+        has_command = isinstance(raw_command, str) and bool(raw_command.strip())
+        if parsed_argv is not None and has_command:
+            raise PlanTransportError(
+                "Cursor ACP permission request contained conflicting command representations.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        if parsed_argv is not None:
+            argv = parsed_argv
+        elif has_command:
             shell_expression = raw_command
         raw_cwd = raw_input.get("cwd") or raw_input.get("workingDirectory")
         if isinstance(raw_cwd, str) and raw_cwd.strip():
@@ -1207,10 +1218,16 @@ def _answer_cursor_permission(
                         value=path,
                     )
                 )
-    binding_value = str(tool_call_id or message.get("id"))
+    request_id = str(message.get("id"))
+    binding_value = (
+        tool_call_id if isinstance(tool_call_id, str) and tool_call_id.strip() else request_id
+    )
+    native_binding_ids = [PlanNativeBindingID(name="request_id", value=request_id)]
+    if isinstance(tool_call_id, str) and tool_call_id.strip():
+        native_binding_ids.append(PlanNativeBindingID(name="tool_call_id", value=tool_call_id))
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
-        question_id=str(message.get("id")),
+        question_id=request_id,
         prompt=str(title or params.get("reason") or "Cursor requests permission during planning."),
         options=options,
         session_id=session_id,
@@ -1221,7 +1238,7 @@ def _answer_cursor_permission(
             shell_expression=shell_expression,
             execution_dir=execution_dir,
             permission_targets=tuple(permission_targets),
-            native_binding_ids=(PlanNativeBindingID(name="tool_call_id", value=binding_value),),
+            native_binding_ids=tuple(native_binding_ids),
         ),
     )
     if deny_automatically:

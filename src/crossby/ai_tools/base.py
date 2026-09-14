@@ -7,6 +7,7 @@ The `__init_subclass__` hook auto-registers each concrete adapter.
 from __future__ import annotations
 
 import inspect
+import math
 import os
 import queue
 import shutil
@@ -389,8 +390,8 @@ class AbstractAITool(ABC):
         check and additionally validates filesystem state, authentication,
         model availability, native protocol negotiation, and artifact binding.
         """
-        if timeout_seconds <= 0:
-            raise ValueError("plan-session preflight timeout must be positive")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("plan-session preflight timeout must be positive and finite")
         self._validate_collected_plan_request(
             request,
             require_existing_working_dir=False,
