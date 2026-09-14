@@ -209,7 +209,9 @@ documented command-approval payload with a simple authoritative shell expression
 an absolute in-scope `cwd`, no additional targets, and an advertised `accept`
 decision. Respond with `accept` (once), never `acceptForSession`; unmatched or
 ambiguous operations continue through `on-request` or `never` normally. Preserve
-`availableDecisions` IDs in callback interactions when app-server provides them.
+representable string `availableDecisions` IDs in callback interactions when
+app-server provides them; reject the whole approval request if it also advertises
+a structured choice whose required payload cannot be represented.
 
 Copilot supports interactive native `--plan` activation only. CLI 1.0.83's
 `--prompt` transport does not expose `ask_user` to the model, so the collected

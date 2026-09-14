@@ -491,11 +491,12 @@ result = AbstractAITool.get("codex").run_plan_session(request)
 Preflight validates complete-session capability, statically knowable request and
 command-policy compatibility, and a bounded exact CLI version against the
 adapter's published floor. It does not start a planning session or create files,
-directories, or configuration. Its result explicitly lists what was checked and
-what remains deferred: filesystem state, authentication, model availability,
-protocol negotiation, and artifact collection. Runtime repeats static validation
-and version detection; callers must not treat a prior result as an authorization
-token or assume model/effort availability from static success.
+directories, or configuration; `timeout_seconds` must be positive and finite. Its
+result explicitly lists what was checked and what remains deferred: filesystem
+state, authentication, model availability, protocol negotiation, and artifact
+collection. Runtime repeats static validation and version detection; callers must
+not treat a prior result as an authorization token or assume model/effort
+availability from static success.
 
 The collected API is the automation surface:
 
