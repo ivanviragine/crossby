@@ -1199,25 +1199,53 @@ def _answer_cursor_permission(
             argv = parsed_argv
         elif has_command:
             shell_expression = raw_command
-        raw_cwd = raw_input.get("cwd") or raw_input.get("workingDirectory")
-        if isinstance(raw_cwd, str) and raw_cwd.strip():
-            execution_dir = Path(raw_cwd)
+        raw_cwd = raw_input.get("cwd")
+        raw_working_directory = raw_input.get("workingDirectory")
+        cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else None
+        working_directory = (
+            raw_working_directory
+            if isinstance(raw_working_directory, str) and raw_working_directory.strip()
+            else None
+        )
+        if cwd is not None and working_directory is not None and cwd != working_directory:
+            raise PlanTransportError(
+                "Cursor ACP permission request contained conflicting working directories.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        selected_directory = cwd if cwd is not None else working_directory
+        if selected_directory is not None:
+            execution_dir = Path(selected_directory)
     locations = tool_call.get("locations") if isinstance(tool_call, dict) else None
     permission_targets: list[PlanPermissionTarget] = []
-    if isinstance(locations, list):
+    if locations is not None:
+        if not isinstance(locations, list):
+            raise PlanTransportError(
+                "Cursor ACP permission request contained malformed locations.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
         for location in locations:
             path = location.get("path") if isinstance(location, dict) else None
-            if isinstance(path, str) and path.strip():
-                permission_targets.append(
-                    PlanPermissionTarget(
-                        kind=(
-                            PlanPermissionTargetKind.FILESYSTEM_WRITE
-                            if operation_kind is PlanOperationKind.FILE_CHANGE
-                            else PlanPermissionTargetKind.RESOURCE
-                        ),
-                        value=path,
-                    )
+            if not isinstance(path, str) or not path.strip():
+                raise PlanTransportError(
+                    "Cursor ACP permission request contained malformed locations.",
+                    tool_id=tool_id,
+                    capability=capability,
+                    session_id=session_id,
                 )
+            permission_targets.append(
+                PlanPermissionTarget(
+                    kind=(
+                        PlanPermissionTargetKind.FILESYSTEM_WRITE
+                        if operation_kind is PlanOperationKind.FILE_CHANGE
+                        else PlanPermissionTargetKind.RESOURCE
+                    ),
+                    value=path,
+                )
+            )
     request_id = str(message.get("id"))
     binding_value = (
         tool_call_id if isinstance(tool_call_id, str) and tool_call_id.strip() else request_id

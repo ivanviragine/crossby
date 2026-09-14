@@ -455,6 +455,83 @@ def test_cursor_rejects_conflicting_native_command_representations(tmp_path: Pat
     assert not native.mock_calls
 
 
+def test_cursor_rejects_conflicting_native_working_directories(tmp_path: Path) -> None:
+    native = Mock()
+    handler = Mock()
+
+    with pytest.raises(PlanTransportError, match="conflicting working directories"):
+        _answer_cursor_permission(
+            native,
+            {
+                "id": 42,
+                "params": {
+                    "sessionId": "session",
+                    "toolCall": {
+                        "kind": "execute",
+                        "rawInput": {
+                            "argv": ["git", "status"],
+                            "cwd": str(tmp_path),
+                            "workingDirectory": str(tmp_path / "outside"),
+                        },
+                    },
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+            session_id="session",
+            handler=handler,
+            tool_id=AIToolID.CURSOR,
+            capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().plan_mode,
+            deny_automatically=False,
+        )
+
+    handler.assert_not_called()
+    assert not native.mock_calls
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [
+        {"path": "/valid"},
+        [{"path": "/valid"}, {"uri": "file:///unrepresentable"}],
+        [{"path": "/valid"}, {"path": " "}],
+        [{"path": "/valid"}, "unrepresentable"],
+    ],
+)
+def test_cursor_rejects_malformed_native_locations(locations: object) -> None:
+    native = Mock()
+    handler = Mock()
+
+    with pytest.raises(PlanTransportError, match="malformed locations"):
+        _answer_cursor_permission(
+            native,
+            {
+                "id": 42,
+                "params": {
+                    "sessionId": "session",
+                    "toolCall": {
+                        "kind": "edit",
+                        "locations": locations,
+                    },
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+            session_id="session",
+            handler=handler,
+            tool_id=AIToolID.CURSOR,
+            capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().plan_mode,
+            deny_automatically=False,
+        )
+
+    handler.assert_not_called()
+    assert not native.mock_calls
+
+
 def test_cursor_keeps_request_binding_distinct_without_tool_call_id(tmp_path: Path) -> None:
     native = Mock()
     seen: list[PlanInteraction] = []
