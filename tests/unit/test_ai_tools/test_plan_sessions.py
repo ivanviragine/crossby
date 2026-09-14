@@ -319,6 +319,25 @@ class TestNormalizedContract:
         assert probe_timeouts == [8.0]
         assert run.call_args.args[0].timeout_seconds == 7.5
 
+    def test_failed_version_probe_that_exhausts_deadline_is_transport_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.CODEX)
+        clock = iter((100.0, 100.0, 110.0))
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: next(clock))
+        monkeypatch.setattr(
+            "crossby.utils.versioning.detect_binary_version_info",
+            lambda _binary, **_kwargs: None,
+        )
+
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanTransportError, match="timed out during version probing"),
+        ):
+            adapter.run_plan_session(_request(tmp_path, timeout_seconds=10))
+
+        run.assert_not_called()
+
     def test_tty_does_not_install_an_implicit_interaction_handler(self, tmp_path: Path) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
         result = PlanSessionResult(

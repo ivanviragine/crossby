@@ -296,7 +296,10 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        detected = self._detect_collected_plan_version(timeout_seconds=probe_timeout)
+        detected = self._detect_collected_plan_version(
+            timeout_seconds=probe_timeout,
+            deadline=deadline,
+        )
         remaining_timeout = deadline - monotonic()
         if remaining_timeout <= 0:
             raise PlanTransportError(
@@ -522,11 +525,17 @@ class AbstractAITool(ABC):
         """Adapter hook for request facts knowable without filesystem or protocol I/O."""
         return None
 
-    def _detect_collected_plan_version(self, *, timeout_seconds: float) -> BinaryVersion:
+    def _detect_collected_plan_version(
+        self,
+        *,
+        timeout_seconds: float,
+        deadline: float | None = None,
+    ) -> BinaryVersion:
         """Probe and validate the exact CLI version against public capability metadata."""
         from crossby.ai_tools.plan_mode import (
             PlanModeAdapterContractError,
             PlanSessionUnsupportedError,
+            PlanTransportError,
         )
         from crossby.utils.versioning import detect_binary_version_info, parse_semver
 
@@ -541,6 +550,12 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         detected = detect_binary_version_info(caps.binary, timeout_seconds=timeout_seconds)
+        if detected is None and deadline is not None and deadline - monotonic() <= 0:
+            raise PlanTransportError(
+                f"{caps.display_name} plan session timed out during version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         if detected is None or detected.normalized < floor:
             raise PlanSessionUnsupportedError.for_installed_version(
                 tool_id=self.TOOL_ID,
