@@ -76,7 +76,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `AIToolCapabilities.plan_mode` declares these dimensions independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `preflight_plan_session()` shares the static request/capability/version boundary without requiring the prospective working directory to exist; runtime always repeats it. `AIToolCapabilities.plan_mode` declares these dimensions, including `command_policy_support`, independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -107,16 +107,22 @@ interactive sessions. A complete collector must:
 1. Activate the documented native mode before the first planning turn. Prompt
    prefixes and slash-command text are never selectors.
 2. Declare collector activation, transport, artifact source, exact binding,
-   interaction support, sandbox/approval behavior, and the exact
-   `supported_approval_policies` in `PlanModeCapability`. If any requested
-   policy cannot be preserved, reject it before process creation.
+   interaction support, sandbox/approval behavior, the exact
+   `supported_approval_policies`, and truthful `command_policy_support` plus
+   detail in `PlanModeCapability`. If any requested policy cannot be preserved,
+   reject it before process creation. A legacy launch flag builder or persistent
+   project allowlist does not prove collected-session support.
 3. Bind collection to an identifier or isolated location created or returned by
    that invocation. Never inspect a global "latest" plan/session, call an
    ID-less export, use prefix/name matching, or scrape a harness's private
    storage as a fallback.
 4. Surface native questions through `PlanInteractionHandler`, preserving native
    question and option IDs plus the native multi-select and free-form-answer
-   capabilities. Model final plan approval as
+   capabilities. For permission events, attach a `PlanOperation` containing only
+   authoritative provider fields: distinguish `argv` from `shell_expression`,
+   preserve the execution directory, targets, operation kind, and binding IDs,
+   and leave unavailable evidence unset. Never parse display prose into command
+   evidence. Model final plan approval as
    `PlanInteractionKind.PLAN_APPROVAL`; collection must never translate it into
    permission to implement. Never infer interactive consent from a TTY: callers
    must explicitly pass `terminal_interaction_handler` when terminal input is
@@ -138,6 +144,26 @@ interactive sessions. A complete collector must:
    directories after failure. Catch `subprocess.TimeoutExpired` before
    broader subprocess failures and never stringify it: its command field may
    contain a prompt or continuation answer.
+
+The public preflight boundary validates complete-session capability, the
+statically knowable request/policy combination, and a bounded exact CLI version.
+Put adapter-only static requirements in
+`_validate_collected_plan_requirements()` so preflight can reject them without a
+dummy worktree. Do not perform authentication, provider/model discovery,
+protocol negotiation, or configuration/artifact writes there. A successful
+`PlanSessionPreflight` must continue to report those runtime checks as deferred;
+never cache it as authority or skip runtime validation.
+
+`PlanCommandPolicy` accepts only the portable simple-command subset implemented
+in `ai_tools/plan_policy.py`: exact commands or one trailing argument wildcard.
+Native implementations must scope rules to the new session/invocation and leave
+project/global permission files untouched. Callback implementations may approve
+only authoritative command operations, only inside the request's working or
+trusted directories, only without extra permission targets, and only with a
+native one-operation approval. Missing metadata, compound shell syntax, unknown
+operation kinds, and unmatched commands stay on the requested approval-policy
+path. Command policy never substitutes for sandbox, network, directory trust,
+or final plan approval.
 
 Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
 strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
@@ -164,6 +190,11 @@ code remains blocked. Python cannot cancel such code, so caller-owned waits
 must support cancellation or their own timeout; callbacks need not run on the
 main thread. Keep Claude's terminal-handler identity check intact, since its
 actual interactive process is bounded separately.
+Claude's collected-session command policy reuses its per-invocation
+`--allowedTools` translation and adds `--setting-sources ""` to exclude user,
+project, and local settings allowlists. It must not invoke the persistent
+permission writer. This extra isolation is policy-only; omitted-policy command
+construction remains byte-for-byte compatible.
 
 Lifecycle completion is adapter-specific and must be explicit. Codex waits for
 the matching successful `turn/completed`, rejects a second completed plan item,
@@ -173,6 +204,12 @@ model, thought level, and thinking/fast state through ACP and requires a zero
 protocol-process exit. Codex must always send the complete
 `sandbox_workspace_write.writable_roots` list, including `[]` when no extra roots
 were requested: omission lets app-server retain ambient configuration roots.
+Codex collected-session command policy is callback-backed: match only a
+documented command-approval payload with a simple authoritative shell expression,
+an absolute in-scope `cwd`, no additional targets, and an advertised `accept`
+decision. Respond with `accept` (once), never `acceptForSession`; unmatched or
+ambiguous operations continue through `on-request` or `never` normally. Preserve
+`availableDecisions` IDs in callback interactions when app-server provides them.
 
 Copilot supports interactive native `--plan` activation only. CLI 1.0.83's
 `--prompt` transport does not expose `ask_user` to the model, so the collected
@@ -185,6 +222,10 @@ synthetic event/share fixtures or infer question support from a tool allowlist.
 
 OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
 then creates one native session and selects `agent="plan"` in `prompt_async`.
+An explicit command policy is supplied in that session's `permission` ruleset:
+put a `bash` catch-all `ask` rule first and the narrow `allow` rules after it,
+because OpenCode resolves the last matching rule. Do not write `opencode.json`
+or reuse the ordinary launch allowlist path.
 The verified `run --format json` command disables questions and cannot implement
 the interaction contract. The native question API preserves `multiple` and
 returns selected labels as arrays; batched question IDs use the native request ID
@@ -252,6 +293,14 @@ The answer variable is needed only when a harness asks an open-ended information
 planning question. For option-based questions, the smoke handler selects the first
 emitted native option; final plan and permission requests are denied.
 Never enable these tests in the default or unauthenticated CI suite.
+To exercise Claude's real per-invocation command policy, select Claude alone and
+set a canonical pattern; `-s` records the exact detected CLI version:
+
+```bash
+CROSSBY_PLAN_SMOKE_TOOLS=claude \
+CROSSBY_PLAN_SMOKE_ALLOWED_COMMANDS="git status" \
+  uv run pytest -s tests/integration/test_plan_sessions_smoke.py
+```
 
 OpenCode also has a deterministic native test that uses a local model stub and
 isolated configuration/data directories, without credentials or paid calls:
@@ -264,7 +313,9 @@ CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
 It requires the verified OpenCode binary and exercises a real native multi-select
 question with preceding progress text, its reply, and exact-session export. It
 also checks supported and disabled effort variants for explicit, default, and
-plan-agent models, including the actual local model request options.
+plan-agent models, including the actual local model request options and a native
+session-scoped command policy. The current fixture was exercised with OpenCode
+1.18.29; it performs real local protocol/model work, not a mocked adapter run.
 
 Codex also has a local policy test with isolated configuration. It checks the
 actual app-server sandbox response and stops before any model inference:
@@ -273,6 +324,14 @@ actual app-server sandbox response and stops before any model inference:
 CROSSBY_CODEX_LOCAL_SMOKE=1 \
   uv run pytest tests/integration/test_codex_plan_policy.py
 ```
+
+The current no-inference check was exercised with Codex CLI 0.154.0 and includes
+a public callback-backed command policy. It validates real app-server request
+compatibility and sandbox metadata; command matching itself remains deterministic
+unit coverage because this smoke deliberately stops before a model turn. Claude
+command construction is likewise unit-tested; the authenticated command above is
+the opt-in real harness check and must not be reported as run unless it actually
+was.
 
 ## Adding a New AI Tool
 
@@ -296,8 +355,10 @@ The adapter pattern is designed so adding a tool is a single-file change.
      override `_run_plan_session()` according to the obligations above. The
      shared validators compare the installed `--version` result with
      `verified_version`, so add old/unknown-version no-spawn tests alongside
-     command-composition coverage. Describe artifact provenance truthfully and
-     reject `plan_output_dir` when the requested location cannot be guaranteed.
+     command-composition coverage. Add prospective-directory preflight tests,
+     declare command-policy support or rejection explicitly, describe artifact
+     provenance truthfully, and reject `plan_output_dir` when the requested
+     location cannot be guaranteed.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.

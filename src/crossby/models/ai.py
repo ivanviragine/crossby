@@ -105,6 +105,14 @@ class PlanRequestBehavior(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class PlanCommandPolicySupport(StrEnum):
+    """How a collector preserves session-scoped command preauthorization."""
+
+    NATIVE = "native"
+    CALLBACK = "callback"
+    UNSUPPORTED = "unsupported"
+
+
 class PlanApprovalPolicy(StrEnum):
     """Portable approval posture for collected planning sessions."""
 
@@ -129,6 +137,28 @@ class PlanInteractionOutcome(StrEnum):
     DENIED = "denied"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+
+
+class PlanOperationKind(StrEnum):
+    """Authoritative native operation category, when a provider supplies one."""
+
+    COMMAND = "command"
+    FILE_CHANGE = "file_change"
+    NETWORK = "network"
+    MCP = "mcp"
+    WRITE_STDIN = "write_stdin"
+    OTHER = "other"
+
+
+class PlanPermissionTargetKind(StrEnum):
+    """Kind of resource covered by a native permission request."""
+
+    COMMAND_PATTERN = "command_pattern"
+    FILESYSTEM_READ = "filesystem_read"
+    FILESYSTEM_WRITE = "filesystem_write"
+    FILESYSTEM_DENY = "filesystem_deny"
+    NETWORK_HOST = "network_host"
+    RESOURCE = "resource"
 
 
 class ModelTier(StrEnum):
@@ -252,6 +282,60 @@ class PlanQuestionOption(BaseModel, frozen=True):
         return value
 
 
+class PlanPermissionTarget(BaseModel, frozen=True):
+    """One authoritative resource named by a native permission request."""
+
+    kind: PlanPermissionTargetKind
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def _value_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("permission targets must be non-blank")
+        return value
+
+
+class PlanNativeBindingID(BaseModel, frozen=True):
+    """One provider-defined identifier binding operation evidence to a session."""
+
+    name: str
+    value: str
+
+    @field_validator("name", "value")
+    @classmethod
+    def _binding_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("native binding names and values must be non-blank")
+        return value
+
+
+class PlanOperation(BaseModel, frozen=True):
+    """Structured native evidence for an operation awaiting permission.
+
+    ``argv`` and ``shell_expression`` are deliberately distinct. Providers that
+    only supply display prose leave both unset; callers must never reconstruct
+    executable input from :attr:`PlanInteraction.prompt`.
+    """
+
+    kind: PlanOperationKind
+    argv: tuple[str, ...] | None = None
+    shell_expression: str | None = None
+    execution_dir: Path | None = None
+    permission_targets: tuple[PlanPermissionTarget, ...] = ()
+    native_binding_ids: tuple[PlanNativeBindingID, ...] = ()
+
+    @model_validator(mode="after")
+    def _command_representation_is_unambiguous(self) -> Self:
+        if self.argv is not None and self.shell_expression is not None:
+            raise ValueError("an operation cannot contain both argv and a shell expression")
+        if self.argv is not None and (not self.argv or not self.argv[0].strip()):
+            raise ValueError("authoritative argv requires a non-blank executable")
+        if self.shell_expression is not None and not self.shell_expression.strip():
+            raise ValueError("authoritative shell expressions must be non-blank")
+        return self
+
+
 class PlanInteraction(BaseModel, frozen=True):
     """A session-bound native question or approval request."""
 
@@ -265,6 +349,7 @@ class PlanInteraction(BaseModel, frozen=True):
     thread_id: str | None = None
     turn_id: str | None = None
     artifact_id: str | None = None
+    operation: PlanOperation | None = None
 
     @field_validator("question_id", "prompt", "session_id")
     @classmethod
@@ -314,6 +399,7 @@ class PlanSessionRequest(BaseModel):
     sandbox: bool = True
     network_access: bool = False
     approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.ON_REQUEST
+    command_policy: PlanCommandPolicy | None = None
     timeout_seconds: float = Field(default=600.0, gt=0, le=3600.0)
 
     @field_validator("prompt")
@@ -322,6 +408,61 @@ class PlanSessionRequest(BaseModel):
         if not value.strip():
             raise ValueError("a collected plan session requires a non-blank prompt")
         return value
+
+
+class PlanCommandPolicy(BaseModel):
+    """Canonical commands preauthorized for one collected planning session.
+
+    Patterns use Crossby's existing command grammar. This contract accepts
+    exact commands and a single trailing ``:*`` or `` *`` wildcard. Compound
+    shell syntax and other wildcard placements are rejected because they do not
+    have portable, safe semantics across the supported collectors.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_commands: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("allowed_commands")
+    @classmethod
+    def _commands_are_portable(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        from crossby.ai_tools.plan_policy import validate_plan_command_pattern
+
+        if len(set(value)) != len(value):
+            raise ValueError("command policy patterns must be unique")
+        for pattern in value:
+            validate_plan_command_pattern(pattern)
+        return value
+
+
+class PlanPreflightCheck(StrEnum):
+    """Statically validated part of a collected-session request."""
+
+    SESSION_CAPABILITY = "session_capability"
+    REQUEST_COMPATIBILITY = "request_compatibility"
+    COMMAND_POLICY = "command_policy"
+    CLI_VERSION = "cli_version"
+
+
+class PlanPreflightDeferredCheck(StrEnum):
+    """Runtime fact that successful static preflight does not promise."""
+
+    FILESYSTEM = "filesystem"
+    AUTHENTICATION = "authentication"
+    MODEL_AVAILABILITY = "model_availability"
+    PROTOCOL_NEGOTIATION = "protocol_negotiation"
+    ARTIFACT_COLLECTION = "artifact_collection"
+
+
+class PlanSessionPreflight(BaseModel, frozen=True):
+    """Evidence returned after bounded, non-mutating session preflight."""
+
+    tool: AIToolID
+    detected_version: str
+    normalized_version: tuple[int, int, int]
+    capability: PlanModeCapability
+    checked: tuple[PlanPreflightCheck, ...]
+    deferred: tuple[PlanPreflightDeferredCheck, ...]
 
 
 class PlanSessionResult(BaseModel, frozen=True):
@@ -415,6 +556,10 @@ class PlanModeCapability(BaseModel, frozen=True):
     sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
     approval_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
     supported_approval_policies: tuple[PlanApprovalPolicy, ...] = (PlanApprovalPolicy.ON_REQUEST,)
+    command_policy_support: PlanCommandPolicySupport = PlanCommandPolicySupport.UNSUPPORTED
+    command_policy_detail: str = (
+        "No verified session-scoped command preauthorization mechanism is declared."
+    )
 
     @property
     def activation_supported(self) -> bool:

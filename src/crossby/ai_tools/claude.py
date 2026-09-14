@@ -32,6 +32,7 @@ from crossby.models.ai import (
     HookStopDialect,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicySupport,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionSupport,
@@ -133,6 +134,11 @@ class ClaudeAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.TERMINAL,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                command_policy_detail=(
+                    "Uses per-invocation --allowedTools while excluding user, project, and "
+                    "local settings sources so ambient allowlists cannot widen the request."
+                ),
             ),
             supports_accept_edits=True,
             supports_auto=True,
@@ -366,6 +372,11 @@ class ClaudeAdapter(AbstractAITool):
                 model=request.model,
                 initial_message=request.prompt,
                 plan_mode=True,
+                allowed_commands=(
+                    list(request.command_policy.allowed_commands)
+                    if request.command_policy is not None
+                    else None
+                ),
                 trusted_dirs=[str(path) for path in request.trusted_dirs] or None,
                 effort=request.effort,
                 working_dir=working_dir,
@@ -373,6 +384,8 @@ class ClaudeAdapter(AbstractAITool):
                 sandbox=request.sandbox,
                 _skip_plan_version_check=True,
             )
+            if request.command_policy is not None:
+                command.extend(("--setting-sources", ""))
             try:
                 exit_code = run_interactive(
                     command,

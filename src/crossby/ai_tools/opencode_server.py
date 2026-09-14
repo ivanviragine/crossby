@@ -12,6 +12,7 @@ import socket
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -26,6 +27,7 @@ from crossby.ai_tools.plan_mode import (
     parse_plan_question_options,
     validate_plan_option_selection,
 )
+from crossby.ai_tools.plan_policy import command_pattern_to_shell_pattern
 from crossby.ai_tools.plan_process import JsonRpcProcess
 from crossby.models.ai import (
     AIToolID,
@@ -33,6 +35,11 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanModeCapability,
+    PlanNativeBindingID,
+    PlanOperation,
+    PlanOperationKind,
+    PlanPermissionTarget,
+    PlanPermissionTargetKind,
     PlanQuestionOption,
     PlanSessionRequest,
 )
@@ -163,7 +170,20 @@ def run_native_plan(
         server.start()
         if request.effort is not None:
             prompt["model"] = _validated_effort_model(server, request, capability)
-        session = server.request("POST", "/session", {})
+        session_request: dict[str, Any] = {}
+        if request.command_policy is not None:
+            session_request["permission"] = [
+                {"permission": "bash", "pattern": "*", "action": "ask"},
+                *(
+                    {
+                        "permission": "bash",
+                        "pattern": command_pattern_to_shell_pattern(pattern),
+                        "action": "allow",
+                    }
+                    for pattern in request.command_policy.allowed_commands
+                ),
+            ]
+        session = server.request("POST", "/session", session_request)
         session_id = _required_text(session, "id")
         session_path = "/session/" + quote(session_id, safe="")
         server.request("POST", session_path + "/prompt_async", prompt)
@@ -171,7 +191,14 @@ def run_native_plan(
             for question in _bound_requests(server.request("GET", "/question"), session_id):
                 _answer_question(server, question, session_id, handler, capability)
             for permission in _bound_requests(server.request("GET", "/permission"), session_id):
-                _answer_permission(server, permission, session_id, handler, capability)
+                _answer_permission(
+                    server,
+                    permission,
+                    session_id,
+                    handler,
+                    capability,
+                    execution_dir=request.working_dir,
+                )
             messages = server.request("GET", session_path + "/message")
             if not isinstance(messages, list):
                 raise ValueError("OpenCode returned malformed session messages")
@@ -415,18 +442,59 @@ def _answer_permission(
     session_id: str,
     handler: PlanInteractionHandler | None,
     capability: PlanModeCapability,
+    *,
+    execution_dir: Path | None = None,
 ) -> None:
     request_id = _required_text(request, "id")
+    permission = _required_text(request, "permission")
+    patterns = request.get("patterns")
+    if patterns is None:
+        patterns = []
+    if not isinstance(patterns, list) or any(
+        not isinstance(pattern, str) or not pattern.strip() for pattern in patterns
+    ):
+        raise ValueError("OpenCode permission request contained malformed native patterns")
+    target_kind = {
+        "bash": PlanPermissionTargetKind.COMMAND_PATTERN,
+        "shell": PlanPermissionTargetKind.COMMAND_PATTERN,
+        "read": PlanPermissionTargetKind.FILESYSTEM_READ,
+        "edit": PlanPermissionTargetKind.FILESYSTEM_WRITE,
+        "external_directory": PlanPermissionTargetKind.FILESYSTEM_WRITE,
+        "webfetch": PlanPermissionTargetKind.NETWORK_HOST,
+        "websearch": PlanPermissionTargetKind.NETWORK_HOST,
+    }.get(permission, PlanPermissionTargetKind.RESOURCE)
+    operation_kind = {
+        "bash": PlanOperationKind.COMMAND,
+        "shell": PlanOperationKind.COMMAND,
+        "edit": PlanOperationKind.FILE_CHANGE,
+        "external_directory": PlanOperationKind.FILE_CHANGE,
+        "webfetch": PlanOperationKind.NETWORK,
+        "websearch": PlanOperationKind.NETWORK,
+    }.get(permission, PlanOperationKind.OTHER)
+    tool = request.get("tool")
+    native_binding_ids = [PlanNativeBindingID(name="request_id", value=request_id)]
+    if isinstance(tool, dict):
+        for field, name in (("messageID", "message_id"), ("callID", "call_id")):
+            value = tool.get(field)
+            if isinstance(value, str) and value.strip():
+                native_binding_ids.append(PlanNativeBindingID(name=name, value=value))
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
         question_id=request_id,
-        prompt=f"OpenCode requests {_required_text(request, 'permission')}: "
-        f"{request.get('patterns', [])}",
+        prompt=f"OpenCode requests {permission}: {patterns}",
         options=(
             PlanQuestionOption(option_id="once", label="Approve once"),
             PlanQuestionOption(option_id="reject", label="Deny"),
         ),
         session_id=session_id,
+        operation=PlanOperation(
+            kind=operation_kind,
+            execution_dir=execution_dir.resolve() if execution_dir is not None else None,
+            permission_targets=tuple(
+                PlanPermissionTarget(kind=target_kind, value=pattern) for pattern in patterns
+            ),
+            native_binding_ids=tuple(native_binding_ids),
+        ),
     )
     if handler is None:
         raise _interaction_required(interaction, capability)

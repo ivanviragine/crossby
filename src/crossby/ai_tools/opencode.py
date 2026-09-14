@@ -19,6 +19,7 @@ from crossby.models.ai import (
     EffortLevel,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicySupport,
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
@@ -83,6 +84,11 @@ class OpenCodeAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                command_policy_detail=(
+                    "Pins a session permission catch-all to ask, then appends scoped native shell "
+                    "allow rules without changing project or global configuration."
+                ),
             ),
             # No session-scoped scene lever. OpenCode loads the OPENCODE_CONFIG
             # file *between* its global and project config layers, so a project
@@ -127,6 +133,20 @@ class OpenCodeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Select OpenCode's built-in, read-only ``plan`` agent."""
         return ["--agent", "plan"]
+
+    def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
+        """Validate a caller-supplied public model identifier without server I/O."""
+        if request.model is None:
+            return
+        provider, separator, model = request.model.partition("/")
+        if not separator or not provider.strip() or not model.strip():
+            from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
+
+            raise PlanSessionUnsupportedError(
+                "OpenCode requires a provider/model identifier for collected plan sessions.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            )
 
     def _run_plan_session(
         self,

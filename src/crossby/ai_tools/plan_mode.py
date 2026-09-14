@@ -322,6 +322,26 @@ class PlanSessionUnsupportedError(PlanSessionError):
         )
 
 
+class PlanCommandPolicyUnsupportedError(PlanSessionUnsupportedError):
+    """A collector cannot preserve an explicit scoped command policy."""
+
+    @classmethod
+    def for_tool(
+        cls,
+        *,
+        tool_id: AIToolID,
+        display_name: str,
+        capability: PlanModeCapability,
+    ) -> PlanCommandPolicyUnsupportedError:
+        return cls(
+            f"{display_name} cannot preserve command_policy for collected plan sessions: "
+            f"{capability.command_policy_detail} Remove command_policy or use a collector "
+            "that declares native or callback support.",
+            tool_id=tool_id,
+            capability=capability,
+        )
+
+
 class PlanInteractionRequiredError(PlanSessionError):
     """A native question cannot continue without an explicit caller response."""
 

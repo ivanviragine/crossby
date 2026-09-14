@@ -20,6 +20,7 @@ from crossby.ai_tools import (
     PlanArtifactMalformedError,
     PlanArtifactMissingError,
     PlanBindingMismatchError,
+    PlanCommandPolicy,
     PlanInteractionOutcome,
     PlanInteractionRequiredError,
     PlanInteractionResponse,
@@ -169,6 +170,34 @@ def test_native_mode_model_effort_and_exact_export(server: FakeServer, tmp_path:
     ) in server.calls
     assert server.exports == [["opencode", "export", "ses_exact_123"]]
     assert server.closed
+
+
+def test_command_policy_is_session_scoped_and_ordered_fail_closed(
+    server: FakeServer, tmp_path: Path
+) -> None:
+    _run(
+        tmp_path,
+        command_policy=PlanCommandPolicy(
+            allowed_commands=("git status", "python:-m pytest:*"),
+        ),
+    )
+
+    assert (
+        "POST",
+        "/session",
+        {
+            "permission": [
+                {"permission": "bash", "pattern": "*", "action": "ask"},
+                {"permission": "bash", "pattern": "git status", "action": "allow"},
+                {
+                    "permission": "bash",
+                    "pattern": "python -m pytest *",
+                    "action": "allow",
+                },
+            ]
+        },
+    ) in server.calls
+    assert not (tmp_path / "opencode.json").exists()
 
 
 @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])

@@ -378,7 +378,24 @@ requests fail before spawning; native model-availability checks finish before
 the first planning prompt.
 Unknown and below-floor CLI versions also fail before a harness process starts.
 `PlanSessionRequest` rejects unknown fields instead of silently applying a
-default. Cursor and Antigravity CLI require an explicit `model` with explicit
+default. An optional `command_policy=PlanCommandPolicy(...)` preauthorizes only
+the named commands for that collected session. It accepts exact simple commands
+and the existing canonical `command:arguments:*` form (a trailing ` *` is also
+accepted); compound shell syntax, expansions, internal wildcards, blank entries,
+and duplicates fail Pydantic validation. Preauthorization suppresses permission
+prompts for matched operations. It is not a sandbox and does not claim that an
+unmatched command can never run.
+
+Command policy, sandbox, network access, trusted directories, and approval policy
+compose independently. Sandbox/network select the execution environment;
+`trusted_dirs` extends the directories explicitly available to a collector and,
+for callback matching, the valid execution roots; command policy handles only
+command preauthorization; `approval_policy` controls unmatched permission
+requests. A match never grants file, network, MCP, or extra filesystem targets.
+Explicit conflicts fail instead of selecting a broader mode. `tool-managed` in
+the matrix describes native harness behavior, not guaranteed confinement.
+
+Cursor and Antigravity CLI require an explicit `model` with explicit
 `effort`. Cursor opts into ACP's parameterized model picker, selects the exact
 advertised base model, applies the advertised reasoning-effort and optional
 thinking/fast variant options, and verifies all returned values before prompting;
@@ -398,18 +415,18 @@ it validated. If neither is configured, supply `model="provider/model"`;
 Crossby does not guess from private recent-model state. Omitting effort keeps
 OpenCode's native default selection unchanged.
 
-Support matrix (contracts verified against the listed builds through 2026-09-13):
+Support matrix (contracts verified against the listed builds through 2026-09-14):
 
-| Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Verified floor | Remediation |
-| --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
-| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
-| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; configured model + thought level + thinking/fast state, exact session + blocking `cursor/create_plan` request ID + successful `end_turn` + zero process exit | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | 2026.09.02-c22c1a3 | Supply an ACP-advertised model and effort plus a handler for questions and the non-executing final outcome |
-| GitHub Copilot CLI | Interactive `--plan` | Collected sessions unsupported | Native terminal for interactive launch only | No collected-session policy | 1.0.83 (interactive activation) | Use interactive `launch(..., plan_mode=True)` or another collector; the verified headless transport omits `ask_user`, so native question callbacks and continuation are unavailable |
-| OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
-| Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | 1.2.0 | Free text and private brain storage are not artifact fallbacks |
-| VS Code | Unsupported | None | None | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
-| Antigravity IDE | Unsupported | None | None | Unsupported | — | Select plan mode manually or use a complete terminal collector |
+| Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Command preauthorization | Verified floor | Remediation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | Native per-invocation `--allowedTools`; user/project/local settings sources excluded | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
+| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | Callback matching of authoritative simple commands; approve once only | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
+| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; configured model + thought level + thinking/fast state, exact session + blocking `cursor/create_plan` request ID + successful `end_turn` + zero process exit | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | Unsupported; verified permission requests omit authoritative command input | 2026.09.02-c22c1a3 | Supply an ACP-advertised model and effort plus a handler for questions and the non-executing final outcome; remove explicit command policy or choose another collector |
+| GitHub Copilot CLI | Interactive `--plan` | Collected sessions unsupported | Native terminal for interactive launch only | No collected-session policy | Unsupported | 1.0.83 (interactive activation) | Use interactive `launch(..., plan_mode=True)` or another collector; the verified headless transport omits `ask_user`, so native question callbacks and continuation are unavailable |
+| OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | Native session rules: catch-all ask, then scoped shell allows | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
+| Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | Unsupported; no authoritative permission channel | 1.2.0 | Free text and private brain storage are not artifact fallbacks; remove explicit command policy or choose another collector |
+| VS Code | Unsupported | None | None | Unsupported | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
+| Antigravity IDE | Unsupported | None | None | Unsupported | Unsupported | — | Select plan mode manually or use a complete terminal collector |
 
 `tool-managed` means the harness's native plan posture owns that dimension; only
 its safe default is accepted.
@@ -433,6 +450,53 @@ approval. `PlanInteraction.allow_other` preserves a native free-form-answer
 affordance (including Codex `isOther`); callers must not return `answer` text
 when it is false.
 
+Permission interactions may include `interaction.operation`. The typed operation
+separates authoritative `argv` from an authoritative `shell_expression`, and can
+also carry its execution directory, permission targets, operation kind, and
+native binding IDs. Missing fields stay missing: display prompts and labels are
+never parsed into executable evidence. Consequently, a missing or ambiguous
+operation cannot automatically match a callback-backed command policy. Compound
+shell expressions also fail closed rather than being split on whitespace or
+matched by string prefix.
+
+Consumers that must decide before creating a future worktree can use the public
+preflight helper (or the equivalent adapter method):
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    PlanCommandPolicy,
+    PlanSessionRequest,
+    preflight_plan_session,
+)
+
+future_worktree = Path.cwd() / ".future-plan-worktree"
+request = PlanSessionRequest(
+    prompt="Plan the change",
+    working_dir=future_worktree,
+    command_policy=PlanCommandPolicy(
+        allowed_commands=("git status", "python:-m pytest:*"),
+    ),
+)
+preflight = preflight_plan_session("codex", request, timeout_seconds=5)
+print(preflight.detected_version, preflight.checked, preflight.deferred)
+
+# Only after preflight succeeds does the consumer create/configure its worktree.
+future_worktree.mkdir()
+result = AbstractAITool.get("codex").run_plan_session(request)
+```
+
+Preflight validates complete-session capability, statically knowable request and
+command-policy compatibility, and a bounded exact CLI version against the
+adapter's published floor. It does not start a planning session or create files,
+directories, or configuration. Its result explicitly lists what was checked and
+what remains deferred: filesystem state, authentication, model availability,
+protocol negotiation, and artifact collection. Runtime repeats static validation
+and version detection; callers must not treat a prior result as an authorization
+token or assume model/effort availability from static success.
+
 The collected API is the automation surface:
 
 ```python
@@ -440,6 +504,7 @@ from pathlib import Path
 
 from crossby.ai_tools import (
     AbstractAITool,
+    PlanCommandPolicy,
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionRequiredError,
@@ -472,6 +537,7 @@ try:
         PlanSessionRequest(
             prompt="Plan issue #176",
             working_dir=Path.cwd(),
+            command_policy=PlanCommandPolicy(allowed_commands=("git status",)),
         ),
         answer,
     )
@@ -526,6 +592,12 @@ handle `PlanModeLaunchError`. `--plan` remains mutually exclusive with
 launch option only for Claude. The collected Claude API also accepts a
 project-contained `plan_output_dir`, but creates a unique run-owned child
 directory within it so a concurrent or newer artifact cannot be selected.
+Existing callers that omit `command_policy` keep the prior collected-session
+behavior. Ordinary `launch(..., allowed_commands=...)` also remains unchanged;
+new collected-session consumers should use `PlanCommandPolicy`, inspect
+`capabilities().plan_mode.command_policy_support`, and handle the exported
+`PlanCommandPolicyUnsupportedError` instead of translating private flags or
+writing persistent tool permissions.
 
 When a Claude scene also narrows skills, Crossby combines `plansDirectory` and
 the scene's `skillOverrides` into one `--settings` JSON source. Claude treats

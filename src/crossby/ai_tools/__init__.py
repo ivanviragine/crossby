@@ -19,6 +19,7 @@ from crossby.ai_tools.plan_mode import (
     PlanArtifactMalformedError,
     PlanArtifactMissingError,
     PlanBindingMismatchError,
+    PlanCommandPolicyUnsupportedError,
     PlanInteractionHandler,
     PlanInteractionRequiredError,
     PlanModeAdapterContractError,
@@ -31,17 +32,42 @@ from crossby.ai_tools.plan_mode import (
     terminal_interaction_handler,
 )
 from crossby.models.ai import (
+    AIToolID,
     PlanApprovalPolicy,
     PlanArtifactSource,
+    PlanCommandPolicy,
+    PlanCommandPolicySupport,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    PlanNativeBindingID,
+    PlanOperation,
+    PlanOperationKind,
+    PlanPermissionTarget,
+    PlanPermissionTargetKind,
+    PlanPreflightCheck,
+    PlanPreflightDeferredCheck,
     PlanQuestionOption,
     PlanSessionBinding,
+    PlanSessionPreflight,
     PlanSessionRequest,
     PlanSessionResult,
 )
+
+
+def preflight_plan_session(
+    tool: AIToolID | str,
+    request: PlanSessionRequest,
+    *,
+    timeout_seconds: float = 5.0,
+) -> PlanSessionPreflight:
+    """Preflight a complete collected session without creating workspace artifacts."""
+    return AbstractAITool.get(tool).preflight_plan_session(
+        request,
+        timeout_seconds=timeout_seconds,
+    )
+
 
 __all__ = [
     "AbstractAITool",
@@ -52,6 +78,9 @@ __all__ = [
     "PlanArtifactMissingError",
     "PlanArtifactSource",
     "PlanBindingMismatchError",
+    "PlanCommandPolicy",
+    "PlanCommandPolicySupport",
+    "PlanCommandPolicyUnsupportedError",
     "PlanInteraction",
     "PlanInteractionHandler",
     "PlanInteractionKind",
@@ -62,13 +91,22 @@ __all__ = [
     "PlanModeConflictError",
     "PlanModeLaunchError",
     "PlanModeUnsupportedError",
+    "PlanNativeBindingID",
+    "PlanOperation",
+    "PlanOperationKind",
+    "PlanPermissionTarget",
+    "PlanPermissionTargetKind",
+    "PlanPreflightCheck",
+    "PlanPreflightDeferredCheck",
     "PlanQuestionOption",
     "PlanSessionBinding",
     "PlanSessionError",
+    "PlanSessionPreflight",
     "PlanSessionRequest",
     "PlanSessionResult",
     "PlanSessionUnsupportedError",
     "PlanTransportError",
     "pick_best_model",
+    "preflight_plan_session",
     "terminal_interaction_handler",
 ]

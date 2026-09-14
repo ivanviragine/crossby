@@ -24,6 +24,7 @@ from crossby.models.ai import (
     HookStopDialect,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicySupport,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
@@ -146,6 +147,11 @@ class AntigravityCLIAdapter(AbstractAITool):
                 interaction=PlanInteractionSupport.RESUMABLE_CALLBACK,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                command_policy_detail=(
+                    "The verified headless continuation transport exposes planning questions but "
+                    "no authoritative command-permission callback or session allowlist."
+                ),
             ),
             supports_accept_edits=True,
             # agy exposes a Claude-style hook system (PreToolUse/PostToolUse/
@@ -184,21 +190,9 @@ class AntigravityCLIAdapter(AbstractAITool):
         """agy's ``--mode`` flag accepts ``accept-edits`` or ``plan``."""
         return ["--mode", "plan"]
 
-    def _run_plan_session(
-        self,
-        request: PlanSessionRequest,
-        version: str,
-        interaction_handler: PlanInteractionHandler | None,
-    ) -> PlanSessionResult:
-        """Collect schema-validated output from one exact agy conversation."""
-        from crossby.ai_tools.plan_mode import (
-            PlanArtifactMalformedError,
-            PlanBindingMismatchError,
-            PlanInteractionRequiredError,
-            PlanSessionUnsupportedError,
-            PlanTransportError,
-        )
-        from crossby.ai_tools.plan_process import run_captured
+    def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
+        """Validate model/effort pairing before preflight creates any workspace."""
+        from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
 
         capability = self.capabilities().plan_mode
         if request.model is None or not request.model.strip() or request.effort is None:
@@ -215,6 +209,24 @@ class AntigravityCLIAdapter(AbstractAITool):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Collect schema-validated output from one exact agy conversation."""
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactMalformedError,
+            PlanBindingMismatchError,
+            PlanInteractionRequiredError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import run_captured
+
+        capability = self.capabilities().plan_mode
+        assert request.model is not None and request.effort is not None
 
         schema: dict[str, Any] = {
             "type": "object",

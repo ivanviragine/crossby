@@ -7,6 +7,9 @@ repositories, for example::
     CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
       uv run pytest -s tests/integration/test_plan_sessions_smoke.py
 
+Set ``CROSSBY_PLAN_SMOKE_ALLOWED_COMMANDS`` to a comma-separated canonical
+policy only when every selected collector declares command-policy support.
+
 Each selected CLI must already be authenticated in the invoking user's normal
 configuration. OpenCode additionally needs a configured provider/model. These
 tests can consume paid model tokens and are therefore never selected by the
@@ -25,6 +28,7 @@ import pytest
 
 from crossby.ai_tools import (
     AbstractAITool,
+    PlanCommandPolicy,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
@@ -40,6 +44,11 @@ SELECTED = {
     for value in os.environ.get("CROSSBY_PLAN_SMOKE_TOOLS", "").split(",")
     if value.strip()
 }
+POLICY_PATTERNS = tuple(
+    value.strip()
+    for value in os.environ.get("CROSSBY_PLAN_SMOKE_ALLOWED_COMMANDS", "").split(",")
+    if value.strip()
+)
 
 TOOLS = (
     AIToolID.CLAUDE,
@@ -130,6 +139,8 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     )
 
     request_options: dict[str, Any] = {}
+    if POLICY_PATTERNS:
+        request_options["command_policy"] = PlanCommandPolicy(allowed_commands=POLICY_PATTERNS)
     if tool_id is AIToolID.CURSOR:
         request_options.update(model="claude-sonnet-4-6", effort=EffortLevel.MEDIUM)
     elif tool_id is AIToolID.ANTIGRAVITY_CLI:
@@ -153,6 +164,7 @@ def test_authenticated_native_plan_collection(tool_id: AIToolID, tmp_path: Path)
     assert result.version.strip()
     assert result.native_mode.strip()
     assert result.session_id.strip()
+    print(f"{tool_id.value}: {result.version}")
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=tmp_path,

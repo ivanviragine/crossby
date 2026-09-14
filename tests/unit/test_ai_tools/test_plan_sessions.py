@@ -29,6 +29,7 @@ from crossby.ai_tools import (
     PlanArtifactMissingError,
     PlanArtifactSource,
     PlanBindingMismatchError,
+    PlanCommandPolicy,
     PlanInteraction,
     PlanInteractionOutcome,
     PlanInteractionRequiredError,
@@ -1178,6 +1179,37 @@ class TestClaudeCollector:
         _run_claude_session(_request(tmp_path, timeout_seconds=10))
 
         assert seen_timeouts == [7.0]
+
+    def test_command_policy_uses_only_invocation_scoped_native_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen_commands: list[list[str]] = []
+
+        def write_plan(command: list[str], *, cwd: Path, timeout: float) -> int:
+            seen_commands.append(command)
+            settings = json.loads(command[command.index("--settings") + 1])
+            (cwd / settings["plansDirectory"] / "plan.md").write_text("# Plan")
+            return 0
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+
+        _run_claude_session(
+            _request(
+                tmp_path,
+                command_policy=PlanCommandPolicy(
+                    allowed_commands=("git status", "python:-m pytest:*"),
+                ),
+            )
+        )
+
+        command = seen_commands[0]
+        allowed_index = command.index("--allowedTools")
+        assert command[allowed_index + 1 : allowed_index + 3] == [
+            "Bash(git status)",
+            "Bash(python:-m pytest:*)",
+        ]
+        assert command[command.index("--setting-sources") + 1] == ""
+        assert not (tmp_path / ".claude" / "settings.json").exists()
 
     @pytest.mark.parametrize("stage", ["enumeration", "read"])
     def test_artifact_collection_cannot_outlive_request_deadline(

@@ -14,6 +14,7 @@ import pytest
 
 from crossby.ai_tools import (
     AbstractAITool,
+    PlanCommandPolicy,
     PlanSessionRequest,
     PlanSessionUnsupportedError,
     PlanTransportError,
@@ -197,6 +198,7 @@ def test_real_opencode_forwards_native_multiselect_and_exports(
             model="crossbyfixture/fixture-model" if model_source == "explicit" else None,
             effort=effort,
             timeout_seconds=10 if model_source == "blocked-callback" else 30,
+            command_policy=PlanCommandPolicy(allowed_commands=("git status",)),
         )
         adapter = AbstractAITool.get(AIToolID.OPENCODE)
         if model_source == "blocked-callback":
