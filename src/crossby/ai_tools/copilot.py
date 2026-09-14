@@ -49,14 +49,15 @@ class CopilotAdapter(AbstractAITool):
                 version_requirement="GitHub Copilot CLI exposing --plan.",
                 verified_version="1.0.83",
                 initial_prompt_after_activation=True,
-                artifact_location=PlanArtifactLocation.PRIVATE,
+                artifact_location=PlanArtifactLocation.SESSION,
                 artifact_location_detail=(
-                    "Copilot protects project files in plan mode and writes the draft in its own "
-                    "private planning workspace; --add-dir does not relocate that plan."
+                    "Interactive plans remain in Copilot-managed session storage. "
+                    "No complete collected-session transport is verified."
                 ),
                 remediation=(
-                    "Review or copy the plan from Copilot's planning workspace, or use Claude "
-                    "when a specific filesystem output directory is required."
+                    "Use interactive launch(..., plan_mode=True), or another adapter for "
+                    "collected sessions. Copilot 1.0.83 --prompt omits ask_user; its result and "
+                    "share formats do not establish a native question/continuation contract."
                 ),
             ),
             supports_accept_edits=True,

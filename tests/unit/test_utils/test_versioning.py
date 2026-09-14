@@ -7,6 +7,9 @@ probe now lives in and where ``shutil`` / ``subprocess`` are imported.
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -42,8 +45,41 @@ class TestDetectBinaryVersion:
                 args=[], returncode=0, stdout="2.1.218 (Claude Code)\n", stderr=""
             )
 
-        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", fake_run)
         assert versioning.detect_binary_version("claude") == (2, 1, 218)
+
+    def test_info_preserves_exact_version_line_and_normalized_tuple(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+
+        def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Cursor Agent 2026.09.02-c22c1a3\nmore output\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", fake_run)
+        detected = versioning.detect_binary_version_info("agent")
+        assert detected is not None
+        assert detected.normalized == (2026, 9, 2)
+        assert detected.text == "Cursor Agent 2026.09.02-c22c1a3"
+        assert detected.raw == detected.text
+
+    def test_caller_can_shorten_probe_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/usr/bin/agent")
+        observed: list[float] = []
+
+        def fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            observed.append(float(kwargs["timeout"]))
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="v1.2.3", stderr="")
+
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", fake_run)
+
+        assert versioning.detect_binary_version_info("agent", timeout_seconds=0.25) is not None
+        assert observed == [0.25]
 
     def test_falls_back_to_stderr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
@@ -51,7 +87,7 @@ class TestDetectBinaryVersion:
         def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="v0.9.1")
 
-        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", fake_run)
         assert versioning.detect_binary_version("x") == (0, 9, 1)
 
     def test_nonzero_exit_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,7 +100,7 @@ class TestDetectBinaryVersion:
                 args=[], returncode=1, stdout="", stderr="error: unknown flag near v9.9.9"
             )
 
-        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", fake_run)
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", fake_run)
         assert versioning.detect_binary_version("x") is None
 
     def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,7 +109,7 @@ class TestDetectBinaryVersion:
         def boom(*_a: object, **_k: object) -> object:
             raise subprocess.TimeoutExpired(cmd="x", timeout=5)
 
-        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", boom)
         assert versioning.detect_binary_version("x") is None
 
     def test_oserror_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,5 +119,77 @@ class TestDetectBinaryVersion:
         def boom(*_a: object, **_k: object) -> object:
             raise OSError("permission denied")
 
-        monkeypatch.setattr("crossby.utils.versioning.subprocess.run", boom)
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", boom)
         assert versioning.detect_binary_version("x") is None
+
+    def test_output_decode_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("crossby.utils.versioning.shutil.which", lambda _b: "/x")
+
+        def boom(*_a: object, **_k: object) -> object:
+            raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "ordinal not in range")
+
+        monkeypatch.setattr("crossby.utils.versioning._run_version_probe", boom)
+        assert versioning.detect_binary_version_info("x") is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_successful_probe_kills_detached_helper(self, tmp_path: Path) -> None:
+        marker = tmp_path / "helper-survived"
+        probe = tmp_path / "version-probe"
+        child_code = (
+            "import pathlib,time; "
+            "time.sleep(0.5); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive', encoding='utf-8')"
+        )
+        probe.write_text(
+            "\n".join(
+                [
+                    f"#!{sys.executable}",
+                    "import subprocess, sys",
+                    "subprocess.Popen(",
+                    f"    [sys.executable, '-c', {child_code!r}],",
+                    "    stdin=subprocess.DEVNULL,",
+                    "    stdout=subprocess.DEVNULL,",
+                    "    stderr=subprocess.DEVNULL,",
+                    ")",
+                    "print('probe 1.2.3')",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+
+        assert versioning.detect_binary_version(str(probe)) == (1, 2, 3)
+        time.sleep(0.8)
+        assert not marker.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
+    def test_timed_out_probe_kills_detached_helper(self, tmp_path: Path) -> None:
+        marker = tmp_path / "timeout-helper-survived"
+        probe = tmp_path / "slow-version-probe"
+        child_code = (
+            "import pathlib,time; "
+            "time.sleep(0.5); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive', encoding='utf-8')"
+        )
+        probe.write_text(
+            "\n".join(
+                [
+                    f"#!{sys.executable}",
+                    "import subprocess, sys, time",
+                    "subprocess.Popen(",
+                    f"    [sys.executable, '-c', {child_code!r}],",
+                    "    stdin=subprocess.DEVNULL,",
+                    "    stdout=subprocess.DEVNULL,",
+                    "    stderr=subprocess.DEVNULL,",
+                    ")",
+                    "print('probe 1.2.3', flush=True)",
+                    "time.sleep(30)",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
+
+        assert versioning.detect_binary_version_info(str(probe), timeout_seconds=0.1) is None
+        time.sleep(0.8)
+        assert not marker.exists()

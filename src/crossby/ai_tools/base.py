@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import inspect
 import os
+import queue
 import shutil
+import threading
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
@@ -20,7 +23,11 @@ if TYPE_CHECKING:
 
 import structlog
 
-from crossby.ai_tools.plan_mode import PlanModeAdapterContractError
+from crossby.ai_tools.plan_mode import (
+    PlanArtifactLocationError,
+    PlanInteractionHandler,
+    PlanModeAdapterContractError,
+)
 from crossby.models.ai import (
     AIModel,
     AIToolCapabilities,
@@ -28,7 +35,14 @@ from crossby.models.ai import (
     EffortLevel,
     ModelTier,
     PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanInteraction,
+    PlanInteractionResponse,
+    PlanInteractionSupport,
     PlanModeActivation,
+    PlanRequestBehavior,
+    PlanSessionRequest,
+    PlanSessionResult,
     TokenUsage,
 )
 from crossby.models.config import ComplexityModelMapping
@@ -248,6 +262,216 @@ class AbstractAITool(ABC):
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
         return run_with_transcript(cmd, transcript_path, cwd=working_dir, env=child_env)
 
+    def run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        interaction_handler: PlanInteractionHandler | None = None,
+    ) -> PlanSessionResult:
+        """Run and collect one native planning session without changing ``launch``.
+
+        The base boundary owns capability/version/request validation and final
+        provenance checks. Concrete adapters implement only their native wire or
+        artifact lifecycle in :meth:`_run_plan_session`.
+        """
+        from crossby.ai_tools.plan_mode import (
+            PlanModeAdapterContractError,
+            PlanSessionUnsupportedError,
+            PlanTransportError,
+        )
+        from crossby.utils.versioning import detect_binary_version_info, parse_semver
+
+        deadline = monotonic() + request.timeout_seconds
+        caps = self.capabilities()
+        capability = caps.plan_mode
+        if not capability.session_supported:
+            raise PlanSessionUnsupportedError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+            )
+
+        working_dir = request.working_dir.resolve()
+        if not working_dir.is_dir():
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} requires an existing working directory: {working_dir}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.plan_output_dir is not None and (
+            capability.artifact_source is not PlanArtifactSource.REQUESTED_PATH
+            or not request.plan_output_dir.resolve().is_relative_to(working_dir)
+        ):
+            raise PlanArtifactLocationError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+                requested_dir=request.plan_output_dir,
+            )
+        if request.trusted_dirs and not caps.supports_trusted_dirs:
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve trusted-directory choices for collected "
+                "plan sessions. Remove trusted_dirs or use another adapter.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.effort is not None and (
+            not caps.supports_effort or request.effort not in caps.supported_efforts
+        ):
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve effort={request.effort.value!r} for "
+                "collected plan sessions. Remove effort or use another adapter.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.network_access and not caps.supports_network_access:
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve network_access=True for collected plan "
+                "sessions. Disable network access or use another adapter.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if not request.sandbox and capability.sandbox_behavior is not PlanRequestBehavior.PRESERVED:
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve sandbox=False for collected plan sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.approval_policy not in capability.supported_approval_policies:
+            raise PlanSessionUnsupportedError(
+                f"{caps.display_name} cannot preserve approval_policy="
+                f"{request.approval_policy.value!r} for collected plan sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
+        request = request.model_copy(
+            update={
+                "working_dir": working_dir,
+                "trusted_dirs": tuple(path.resolve() for path in request.trusted_dirs),
+                "plan_output_dir": (
+                    request.plan_output_dir.resolve()
+                    if request.plan_output_dir is not None
+                    else None
+                ),
+            }
+        )
+
+        floor = parse_semver(capability.verified_version or "")
+        if floor is None:
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} declares collected plan support without a parseable "
+                "verified_version.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        probe_timeout = deadline - monotonic()
+        if probe_timeout <= 0:
+            raise PlanTransportError(
+                f"{caps.display_name} plan session timed out before version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        detected = detect_binary_version_info(caps.binary, timeout_seconds=probe_timeout)
+        remaining_timeout = deadline - monotonic()
+        if remaining_timeout <= 0:
+            raise PlanTransportError(
+                f"{caps.display_name} plan session timed out during version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if detected is None or detected.normalized < floor:
+            raise PlanSessionUnsupportedError.for_installed_version(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+                installed_version=detected.text if detected is not None else None,
+            )
+
+        request = request.model_copy(update={"timeout_seconds": remaining_timeout})
+        if (
+            interaction_handler is not None
+            and capability.interaction is not PlanInteractionSupport.TERMINAL
+        ):
+            original_handler = interaction_handler
+
+            def bounded_handler(interaction: PlanInteraction) -> PlanInteractionResponse:
+                def timed_out() -> PlanTransportError:
+                    return PlanTransportError(
+                        f"{caps.display_name} plan session timed out waiting for an "
+                        "interaction callback.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=interaction.session_id,
+                        thread_id=interaction.thread_id,
+                        turn_id=interaction.turn_id,
+                        artifact_id=interaction.artifact_id,
+                    )
+
+                if deadline - monotonic() <= 0:
+                    raise timed_out()
+                responses: queue.Queue[PlanInteractionResponse | BaseException] = queue.Queue(1)
+
+                def invoke() -> None:
+                    try:
+                        responses.put(original_handler(interaction))
+                    except BaseException as exc:
+                        responses.put(exc)
+
+                # Python cannot forcibly stop caller code. A daemon worker may
+                # finish later, but only this waiting collector can send its
+                # result to the native process, which is closed on timeout.
+                threading.Thread(target=invoke, daemon=True, name="crossby-plan-callback").start()
+                try:
+                    response = responses.get(timeout=max(0.0, deadline - monotonic()))
+                except queue.Empty:
+                    raise timed_out() from None
+                if deadline - monotonic() <= 0:
+                    raise timed_out()
+                if isinstance(response, BaseException):
+                    raise response
+                return response
+
+            interaction_handler = bounded_handler
+        result = self._run_plan_session(request, detected.text, interaction_handler)
+        if result.tool is not self.TOOL_ID:
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} collector returned the wrong tool identifier.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if result.version != detected.text:
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} collector did not preserve the exact probed version text.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if (
+            result.artifact_source is not capability.artifact_source
+            or result.binding is not capability.binding
+        ):
+            raise PlanModeAdapterContractError(
+                f"{caps.display_name} collector provenance disagrees with its capability.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        return result
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Adapter hook for a complete native planning lifecycle."""
+        from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
+
+        caps = self.capabilities()
+        raise PlanSessionUnsupportedError.for_tool(
+            tool_id=self.TOOL_ID,
+            display_name=caps.display_name,
+            capability=caps.plan_mode,
+        )
+
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         """Parse a transcript file for token usage.
 
@@ -314,6 +538,7 @@ class AbstractAITool(ABC):
         initial_message: str | None = None,
         plan_output_dir: Path | None = None,
         working_dir: Path | None = None,
+        verify_version: bool = True,
     ) -> None:
         """Reject any plan request the adapter cannot honor truthfully.
 
@@ -398,6 +623,9 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+
+        if not verify_version:
+            return
 
         from crossby.utils.versioning import detect_binary_version, parse_semver
 
@@ -779,6 +1007,7 @@ class AbstractAITool(ABC):
         plan_output_dir: Path | None = None,
         *,
         sandbox: bool = True,
+        _skip_plan_version_check: bool = False,
     ) -> list[str]:
         """Build the command line for launching this tool.
 
@@ -801,6 +1030,7 @@ class AbstractAITool(ABC):
             initial_message=initial_message or prompt,
             plan_output_dir=plan_output_dir,
             working_dir=working_dir,
+            verify_version=not _skip_plan_version_check,
         )
 
         caps = self.capabilities()
