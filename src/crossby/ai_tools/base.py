@@ -399,7 +399,11 @@ class AbstractAITool(ABC):
             request,
             require_existing_working_dir=False,
         )
-        detected = self._detect_collected_plan_version(timeout_seconds=timeout_seconds)
+        deadline = monotonic() + timeout_seconds
+        detected = self._detect_collected_plan_version(
+            timeout_seconds=timeout_seconds,
+            deadline=deadline,
+        )
         capability = self.capabilities().plan_mode
         return PlanSessionPreflight(
             tool=self.TOOL_ID,

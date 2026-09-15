@@ -18,6 +18,7 @@ from crossby.ai_tools import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionUnsupportedError,
+    PlanTransportError,
     preflight_plan_session,
 )
 from crossby.models.ai import (
@@ -148,6 +149,25 @@ def test_unknown_or_below_floor_version_fails_without_artifacts(
     with pytest.raises(PlanSessionUnsupportedError, match="installed version"):
         preflight_plan_session(AIToolID.CODEX, _request(future))
     assert not future.exists()
+
+
+def test_probe_that_exhausts_preflight_deadline_is_transport_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((100.0, 105.0))
+    monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        "crossby.utils.versioning.detect_binary_version_info",
+        lambda _binary, **_kwargs: None,
+    )
+
+    with pytest.raises(PlanTransportError, match="timed out during version probing"):
+        preflight_plan_session(
+            AIToolID.CODEX,
+            _request(tmp_path / "future"),
+            timeout_seconds=5.0,
+        )
 
 
 def test_preflight_does_not_replace_mandatory_runtime_validation(
