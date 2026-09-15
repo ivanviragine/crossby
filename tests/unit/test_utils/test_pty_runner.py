@@ -11,13 +11,17 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from crossby.utils.pty_runner import (
     SCROLLBACK_LIMIT,
+    SUBSCRIBER_QUEUE_LIMIT,
     PtySession,
+    SubscriberDesyncError,
     WindowSize,
+    _Signal,
     pty_supported,
 )
 
@@ -49,6 +53,12 @@ def _collect(session: PtySession) -> list[bytes]:
     thread = threading.Thread(target=lambda: chunks.extend(session.subscribe()), daemon=True)
     thread.start()
     return chunks
+
+
+def _fill(channel: Any) -> None:
+    """Saturate a subscriber queue so the next broadcast finds it full."""
+    while channel.qsize() < SUBSCRIBER_QUEUE_LIMIT:
+        channel.put_nowait(b"x")
 
 
 def _await(chunks: list[bytes], needle: str, timeout: float = 5.0) -> bool:
@@ -139,6 +149,34 @@ class TestSubscribers:
         assert probe.wait(timeout=5) == 5
         replayed = b"".join(probe.subscribe())  # must not hang
         assert b"isatty" in replayed
+
+    def test_slow_subscriber_is_cut_not_silently_truncated(self, probe: PtySession) -> None:
+        """Terminal bytes are a stateful escape stream.
+
+        Dropping chunks to keep a slow viewer alive would desynchronize its
+        emulator permanently and invisibly, so an overrun subscriber is cut and
+        told to resync instead.
+        """
+        stream = probe.subscribe()
+        next(stream, None)  # register, then never drain again
+        channel = probe._subscribers[0]
+        _fill(channel)
+
+        probe._broadcast(b"overflow")  # the chunk that finds the queue full
+
+        assert channel not in probe._subscribers, "overrun subscriber must be dropped"
+        assert _Signal.DESYNC in list(channel.queue)
+
+    def test_desync_surfaces_to_the_consumer(self, probe: PtySession) -> None:
+        stream = probe.subscribe()
+        next(stream, None)
+        channel = probe._subscribers[0]
+        _fill(channel)
+        probe._broadcast(b"overflow")
+
+        with pytest.raises(SubscriberDesyncError, match="resubscribe"):
+            for _ in stream:
+                pass
 
     def test_scrollback_is_bounded(self, tmp_path: Path) -> None:
         noisy = PtySession(

@@ -147,6 +147,25 @@ fetched so `pip install crossby` yields a working offline UI with no npm and no
 CDN dependency. `data/ui/vendor/README.md` records versions and the refresh
 command.
 
+**Backpressure is not drop-oldest.** The obvious policy for a slow subscriber —
+discard its oldest pending chunk — is wrong here. Terminal output is a stateful
+escape-sequence stream, so dropping bytes mid-sequence desynchronizes that
+viewer's emulator permanently *and invisibly*. An overrun subscriber is cut with
+`SubscriberDesyncError` instead; the server ends the SSE response without an
+exit frame, `EventSource` reconnects on its own, and the fresh scrollback plus
+the next repaint restores a correct screen. Preserve that property if you touch
+`_offer`/`_broadcast`.
+
+**Testing the terminal.** Unit tests drive a real child on a real PTY, because
+the behaviours that matter (controlling terminal, SIGWINCH, signal-generated
+exits) are invisible to mocks. Beyond that, the stack has been driven in a real
+browser against real full-screen TUIs — `vim`, `top`, `less` — which is what
+validates the parts a line-oriented stub cannot: alternate screen, modal input,
+self-driven repaint, mouse reporting, and resize confirmed against the running
+program's own `columns`/`lines`. A line-oriented fake binary proves the PTY and
+the transport and nothing about TUI rendering; do not treat it as sufficient.
+Interactive login flows for the real AI CLIs remain unverified.
+
 ### Collected native plan sessions
 
 `run_plan_session(PlanSessionRequest, interaction_handler)` is the integration

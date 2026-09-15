@@ -50,7 +50,7 @@ import structlog
 
 from crossby import data as _data
 from crossby.config.json_utils import PathContainmentError, assert_within
-from crossby.utils.pty_runner import PtyUnsupportedError
+from crossby.utils.pty_runner import PtyUnsupportedError, SubscriberDesyncError
 from crossby.web.sessions import (
     LaunchRequest,
     LaunchValidationError,
@@ -265,6 +265,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             heartbeat.write(
                 f"event: exit\ndata: {json.dumps({'exit_code': session.exit_code})}\n\n".encode()
             )
+        except SubscriberDesyncError:
+            # Close without an exit frame: EventSource reconnects on its own and
+            # repaints from scrollback, which beats rendering corrupted output.
+            logger.warning("web.stream.desync", session=session_id)
         except (BrokenPipeError, ConnectionResetError):
             logger.debug("web.stream.disconnected", session=session_id)
         finally:

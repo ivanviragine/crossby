@@ -157,4 +157,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; min-height: 100vh; }
   .panel { border-right: none; border-bottom: 1px solid var(--line); }
   .stage { min-height: 70vh; }
+
+  /* The single-column layout stacks the form above the terminal, which is right
+     while choosing what to launch and wrong the moment something is running —
+     a tall form would push the terminal off-screen. Once a session is live the
+     terminal leads and the form becomes a scrollable strip beneath it. */
+  body[data-session="live"] .stage { order: -1; }
+  body[data-session="live"] .panel {
+    max-height: 40vh;
+    overflow-y: auto;
+    border-bottom: none;
+    border-top: 1px solid var(--line);
+  }
 }

@@ -700,6 +700,19 @@ token. Do not expose it through a tunnel or reverse proxy.
 Windows would need a ConPTY backend, which crossby does not ship yet — the
 command fails with a clear message rather than degrading silently.
 
+### What has been verified
+
+The terminal stack is exercised against real full-screen TUIs — `vim`, `top`
+and `less` — covering alternate-screen rendering, modal input, self-driven
+repaint, mouse reporting, and resize (a resized window is reflected in the
+running program's own idea of `columns`/`lines`).
+
+**Not yet exercised against a real AI CLI's first-run flow.** Interactive login,
+OAuth browser redirects and device-code prompts have not been tested through the
+browser terminal. Authenticate the tool once in a normal shell before launching
+it here. If a tool tries to open a browser during login, it opens on the machine
+running the server.
+
 ## Update installed tools
 
 Keep your AI CLIs current without remembering each tool's own updater (`claude update`, `codex update`, `agent update`, `agy update`, `copilot update`, `opencode upgrade`, …):

@@ -48,6 +48,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import structlog
@@ -75,6 +76,21 @@ DEFAULT_TERM = "xterm-256color"
 
 class PtyUnsupportedError(RuntimeError):
     """Raised on platforms without POSIX pseudo-terminal support."""
+
+
+class SubscriberDesyncError(RuntimeError):
+    """Raised in :meth:`PtySession.subscribe` when a viewer fell too far behind.
+
+    The stream is cut rather than silently losing bytes. Callers should resubscribe;
+    the fresh scrollback plus the next repaint restores a correct screen.
+    """
+
+
+class _Signal(Enum):
+    """Non-data markers multiplexed into a subscriber's queue."""
+
+    END = "end"
+    DESYNC = "desync"
 
 
 @dataclass(frozen=True)
@@ -139,7 +155,7 @@ class PtySession:
 
         self._lock = threading.Lock()
         self._scrollback = bytearray()
-        self._subscribers: list[queue.Queue[bytes | None]] = []
+        self._subscribers: list[queue.Queue[bytes | _Signal]] = []
         self._exited = threading.Event()
         self._exit_code: int | None = None
         self._size = size
@@ -263,10 +279,10 @@ class PtySession:
         """Yield output chunks, starting with the current scrollback.
 
         The iterator ends when the child exits and its output is drained. A
-        subscriber that cannot keep up loses its oldest pending chunks rather
-        than stalling the reader thread.
+        subscriber that cannot keep up raises :class:`SubscriberDesyncError`
+        rather than stalling the reader thread or silently losing bytes.
         """
-        channel: queue.Queue[bytes | None] = queue.Queue(maxsize=SUBSCRIBER_QUEUE_LIMIT)
+        channel: queue.Queue[bytes | _Signal] = queue.Queue(maxsize=SUBSCRIBER_QUEUE_LIMIT)
         with self._lock:
             backlog = bytes(self._scrollback)
             already_done = self._exited.is_set()
@@ -280,8 +296,13 @@ class PtySession:
                 return
             while True:
                 chunk = channel.get()
-                if chunk is None:
+                if chunk is _Signal.END:
                     return
+                if chunk is _Signal.DESYNC:
+                    raise SubscriberDesyncError(
+                        "terminal output outpaced this viewer; resubscribe to resync"
+                    )
+                assert isinstance(chunk, bytes)
                 yield chunk
         finally:
             with self._lock:
@@ -317,7 +338,22 @@ class PtySession:
                 del self._scrollback[: len(self._scrollback) - SCROLLBACK_LIMIT]
             targets = list(self._subscribers)
         for channel in targets:
-            _offer(channel, chunk)
+            if not _offer(channel, chunk):
+                self._cut(channel)
+
+    def _cut(self, channel: queue.Queue[bytes | _Signal]) -> None:
+        """Drop a subscriber that fell behind, telling it to resync."""
+        with self._lock:
+            if channel in self._subscribers:
+                self._subscribers.remove(channel)
+        # The consumer may drain concurrently, so neither call is guaranteed:
+        # make room if we can, then signal if we can. An unsuppressed Empty here
+        # would propagate into _broadcast and kill the reader thread.
+        with suppress(queue.Empty):
+            channel.get_nowait()
+        with suppress(queue.Full):
+            channel.put_nowait(_Signal.DESYNC)
+        logger.warning("pty.subscriber.desync", session=self.id)
 
     def _finish(self, code: int | None) -> None:
         """Record the exit status once and release every waiting subscriber."""
@@ -329,20 +365,22 @@ class PtySession:
             self._subscribers.clear()
         self._exited.set()
         for channel in targets:
-            _offer(channel, None)
+            _offer(channel, _Signal.END)
 
 
-def _offer(channel: queue.Queue[bytes | None], item: bytes | None) -> None:
-    """Enqueue *item*, discarding the oldest entry when the queue is full."""
-    while True:
-        try:
-            channel.put_nowait(item)
-            return
-        except queue.Full:
-            try:
-                channel.get_nowait()
-            except queue.Empty:  # pragma: no cover - drained concurrently
-                continue
+def _offer(channel: queue.Queue[bytes | _Signal], item: bytes | _Signal) -> bool:
+    """Enqueue *item*. Returns ``False`` when the subscriber has fallen behind.
+
+    Dropping the oldest chunk would be the usual answer, and it is the wrong one
+    here: terminal output is a stateful escape-sequence stream, so discarding
+    bytes mid-sequence desynchronizes the emulator's screen permanently and
+    silently. A subscriber that cannot keep up is cut instead.
+    """
+    try:
+        channel.put_nowait(item)
+        return True
+    except queue.Full:
+        return False
 
 
 def _set_window_size(fd: int, size: WindowSize) -> None:

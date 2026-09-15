@@ -161,6 +161,7 @@ async function startSession(event) {
     term.reset();
     term.focus();
     ui.placeholder.hidden = true;
+    document.body.dataset.session = "live";
     ui.stop.hidden = false;
     ui.meta.hidden = false;
     ui.metaCommand.hidden = false;
@@ -171,6 +172,8 @@ async function startSession(event) {
     ui.metaStatus.textContent = "running";
     openStream(session.id);
     scheduleFit();
+    // On a single-column layout the terminal may start below the fold.
+    el("terminal").scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (err) {
     showError(err.message);
     setStatus("idle", "No session");
@@ -199,6 +202,7 @@ function markExited(code) {
   setStatus("exited", `Session ended${suffix}`);
   ui.metaStatus.textContent = `exited${suffix}`;
   ui.stop.hidden = true;
+  document.body.dataset.session = "ended";
   term.write(`\r\n\x1b[2m── session ended${suffix} ──\x1b[0m\r\n`);
 }
 
