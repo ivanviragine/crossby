@@ -554,7 +554,7 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         detected = detect_binary_version_info(caps.binary, timeout_seconds=timeout_seconds)
-        if detected is None and deadline is not None and deadline - monotonic() <= 0:
+        if deadline is not None and deadline - monotonic() <= 0:
             raise PlanTransportError(
                 f"{caps.display_name} plan session timed out during version probing.",
                 tool_id=self.TOOL_ID,

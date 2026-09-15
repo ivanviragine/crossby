@@ -290,7 +290,7 @@ class TestNormalizedContract:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
-        clock = iter((100.0, 102.0, 102.5))
+        clock = iter((100.0, 102.0, 102.5, 102.5))
         probe_timeouts: list[float] = []
 
         def detect(_binary: str, *, timeout_seconds: float) -> BinaryVersion:

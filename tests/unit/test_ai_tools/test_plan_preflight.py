@@ -170,6 +170,21 @@ def test_probe_that_exhausts_preflight_deadline_is_transport_error(
         )
 
 
+def test_successful_probe_that_exhausts_preflight_deadline_is_transport_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((100.0, 105.0))
+    monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: next(clock))
+
+    with pytest.raises(PlanTransportError, match="timed out during version probing"):
+        preflight_plan_session(
+            AIToolID.CODEX,
+            _request(tmp_path / "future"),
+            timeout_seconds=5.0,
+        )
+
+
 def test_preflight_does_not_replace_mandatory_runtime_validation(
     tmp_path: Path,
 ) -> None:
