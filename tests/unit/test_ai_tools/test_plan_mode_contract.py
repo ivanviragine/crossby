@@ -20,6 +20,7 @@ from crossby.models.ai import (
     EffortLevel,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicySupport,
     PlanModeActivation,
     PlanSessionBinding,
 )
@@ -110,6 +111,19 @@ class TestPlanModeCapabilityMatrix:
             capability = AbstractAITool.get(tool_id).capabilities().plan_mode
             assert capability.artifact_location is location
             assert capability.artifact_location_detail
+
+    def test_every_collector_declares_command_policy_preservation_or_rejection(self) -> None:
+        expected = {
+            AIToolID.CLAUDE: PlanCommandPolicySupport.NATIVE,
+            AIToolID.CODEX: PlanCommandPolicySupport.CALLBACK,
+            AIToolID.CURSOR: PlanCommandPolicySupport.UNSUPPORTED,
+            AIToolID.OPENCODE: PlanCommandPolicySupport.NATIVE,
+            AIToolID.ANTIGRAVITY_CLI: PlanCommandPolicySupport.UNSUPPORTED,
+        }
+        for tool_id, support in expected.items():
+            capability = AbstractAITool.get(tool_id).capabilities().plan_mode
+            assert capability.command_policy_support is support
+            assert capability.command_policy_detail
 
 
 class TestCompletePlanCommands:

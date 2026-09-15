@@ -29,6 +29,7 @@ from crossby.ai_tools import (
     PlanArtifactMissingError,
     PlanArtifactSource,
     PlanBindingMismatchError,
+    PlanCommandPolicy,
     PlanInteraction,
     PlanInteractionOutcome,
     PlanInteractionRequiredError,
@@ -289,7 +290,7 @@ class TestNormalizedContract:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
-        clock = iter((100.0, 102.0, 102.5))
+        clock = iter((100.0, 102.0, 102.5, 102.5))
         probe_timeouts: list[float] = []
 
         def detect(_binary: str, *, timeout_seconds: float) -> BinaryVersion:
@@ -317,6 +318,25 @@ class TestNormalizedContract:
 
         assert probe_timeouts == [8.0]
         assert run.call_args.args[0].timeout_seconds == 7.5
+
+    def test_failed_version_probe_that_exhausts_deadline_is_transport_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = AbstractAITool.get(AIToolID.CODEX)
+        clock = iter((100.0, 100.0, 110.0))
+        monkeypatch.setattr("crossby.ai_tools.base.monotonic", lambda: next(clock))
+        monkeypatch.setattr(
+            "crossby.utils.versioning.detect_binary_version_info",
+            lambda _binary, **_kwargs: None,
+        )
+
+        with (
+            patch.object(adapter, "_run_plan_session") as run,
+            pytest.raises(PlanTransportError, match="timed out during version probing"),
+        ):
+            adapter.run_plan_session(_request(tmp_path, timeout_seconds=10))
+
+        run.assert_not_called()
 
     def test_tty_does_not_install_an_implicit_interaction_handler(self, tmp_path: Path) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
@@ -1178,6 +1198,37 @@ class TestClaudeCollector:
         _run_claude_session(_request(tmp_path, timeout_seconds=10))
 
         assert seen_timeouts == [7.0]
+
+    def test_command_policy_uses_only_invocation_scoped_native_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen_commands: list[list[str]] = []
+
+        def write_plan(command: list[str], *, cwd: Path, timeout: float) -> int:
+            seen_commands.append(command)
+            settings = json.loads(command[command.index("--settings") + 1])
+            (cwd / settings["plansDirectory"] / "plan.md").write_text("# Plan")
+            return 0
+
+        monkeypatch.setattr("crossby.ai_tools.plan_process.run_interactive", write_plan)
+
+        _run_claude_session(
+            _request(
+                tmp_path,
+                command_policy=PlanCommandPolicy(
+                    allowed_commands=("git status", "python:-m pytest:*"),
+                ),
+            )
+        )
+
+        command = seen_commands[0]
+        allowed_index = command.index("--allowedTools")
+        assert command[allowed_index + 1 : allowed_index + 3] == [
+            "Bash(git status)",
+            "Bash(python:-m pytest:*)",
+        ]
+        assert command[command.index("--setting-sources") + 1] == ""
+        assert not (tmp_path / ".claude" / "settings.json").exists()
 
     @pytest.mark.parametrize("stage", ["enumeration", "read"])
     def test_artifact_collection_cannot_outlive_request_deadline(

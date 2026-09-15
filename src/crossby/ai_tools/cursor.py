@@ -28,12 +28,18 @@ from crossby.models.ai import (
     PlanApprovalPolicy,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicySupport,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
+    PlanNativeBindingID,
+    PlanOperation,
+    PlanOperationKind,
+    PlanPermissionTarget,
+    PlanPermissionTargetKind,
     PlanQuestionOption,
     PlanRequestBehavior,
     PlanSessionBinding,
@@ -238,6 +244,11 @@ class CursorAdapter(AbstractAITool):
                     PlanApprovalPolicy.ON_REQUEST,
                     PlanApprovalPolicy.NEVER,
                 ),
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                command_policy_detail=(
+                    "The verified Cursor ACP permission request omits authoritative raw command "
+                    "input and exposes only display text."
+                ),
             ),
             supports_accept_edits=True,
             supports_sandbox_toggle=True,
@@ -310,6 +321,53 @@ class CursorAdapter(AbstractAITool):
         """Cursor supports ``--mode plan``."""
         return ["--mode", "plan"]
 
+    def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
+        """Validate model/effort encodings before prospective workspace creation."""
+        from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
+
+        capability = self.capabilities().plan_mode
+        if request.model is None or not request.model.strip() or request.effort is None:
+            raise PlanSessionUnsupportedError(
+                "Cursor requires an explicit model and effort for collected plan sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        try:
+            parameterized_effort = _parameterized_effort(request.model)
+        except ValueError as exc:
+            raise PlanSessionUnsupportedError(
+                f"Cursor model {request.model!r} has invalid effort overrides: {exc}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            ) from exc
+        encoded_effort = _encoded_effort(request.model)
+        if (
+            parameterized_effort is not None
+            and encoded_effort is not None
+            and parameterized_effort is not encoded_effort
+        ):
+            raise PlanSessionUnsupportedError(
+                f"Cursor model {request.model!r} contains conflicting effort encodings.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        declared_effort = parameterized_effort or encoded_effort
+        if declared_effort is not None and declared_effort is not request.effort:
+            raise PlanSessionUnsupportedError(
+                f"Cursor model {request.model!r} encodes effort={declared_effort.value!r}, "
+                f"which conflicts with requested effort={request.effort.value!r} for a "
+                "collected plan session.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.model.split("[", 1)[0] == "auto":
+            raise PlanSessionUnsupportedError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
+                "because the selected model is not known before launch.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
     def _run_plan_session(
         self,
         request: PlanSessionRequest,
@@ -329,50 +387,9 @@ class CursorAdapter(AbstractAITool):
         from crossby.ai_tools.plan_process import JsonRpcProcess
 
         capability = self.capabilities().plan_mode
-        if request.model is None or not request.model.strip() or request.effort is None:
-            raise PlanSessionUnsupportedError(
-                "Cursor requires an explicit model and effort for collected plan sessions.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-            )
+        assert request.model is not None and request.effort is not None
         command = ["agent", "--sandbox", "enabled" if request.sandbox else "disabled"]
         effective_model = request.model
-        if request.effort is not None:
-            try:
-                parameterized_effort = _parameterized_effort(effective_model)
-            except ValueError as exc:
-                raise PlanSessionUnsupportedError(
-                    f"Cursor model {effective_model!r} has invalid effort overrides: {exc}.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                ) from exc
-            encoded_effort = _encoded_effort(effective_model)
-            if (
-                parameterized_effort is not None
-                and encoded_effort is not None
-                and parameterized_effort is not encoded_effort
-            ):
-                raise PlanSessionUnsupportedError(
-                    f"Cursor model {effective_model!r} contains conflicting effort encodings.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
-            declared_effort = parameterized_effort or encoded_effort
-            if declared_effort is not None and declared_effort is not request.effort:
-                raise PlanSessionUnsupportedError(
-                    f"Cursor model {effective_model!r} encodes effort={declared_effort.value!r}, "
-                    f"which conflicts with requested effort={request.effort.value!r} for a "
-                    "collected plan session.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
-            if effective_model.split("[", 1)[0] == "auto":
-                raise PlanSessionUnsupportedError(
-                    f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
-                    "because the selected model is not known before launch.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
         model_base = _cursor_model_base(effective_model)
         thinking_value = "true" if "-thinking" in effective_model.split("[", 1)[0] else "false"
         fast_value = "true" if effective_model.split("[", 1)[0].endswith("-fast") else "false"
@@ -1128,7 +1145,7 @@ def _answer_cursor_permission(
     capability: PlanModeCapability,
     deny_automatically: bool,
 ) -> None:
-    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError
+    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError, PlanTransportError
 
     params = _cursor_bound_params(
         message,
@@ -1146,13 +1163,113 @@ def _answer_cursor_permission(
     tool_call = params.get("toolCall")
     tool_call_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
     title = tool_call.get("title") if isinstance(tool_call, dict) else None
+    native_kind = tool_call.get("kind") if isinstance(tool_call, dict) else None
+    if not isinstance(native_kind, str):
+        native_kind = ""
+    operation_kind = {
+        "execute": PlanOperationKind.COMMAND,
+        "edit": PlanOperationKind.FILE_CHANGE,
+        "delete": PlanOperationKind.FILE_CHANGE,
+        "move": PlanOperationKind.FILE_CHANGE,
+        "fetch": PlanOperationKind.NETWORK,
+    }.get(native_kind, PlanOperationKind.OTHER)
+    raw_input = tool_call.get("rawInput") if isinstance(tool_call, dict) else None
+    argv: tuple[str, ...] | None = None
+    shell_expression: str | None = None
+    execution_dir: Path | None = None
+    if isinstance(raw_input, dict):
+        has_argv_field = "argv" in raw_input
+        has_command_field = "command" in raw_input
+        raw_argv = raw_input.get("argv")
+        raw_command = raw_input.get("command")
+        parsed_argv: tuple[str, ...] | None = None
+        if (
+            isinstance(raw_argv, list)
+            and raw_argv
+            and all(isinstance(value, str) for value in raw_argv)
+        ):
+            parsed_argv = tuple(raw_argv)
+        has_command = isinstance(raw_command, str) and bool(raw_command.strip())
+        if has_argv_field and has_command_field:
+            raise PlanTransportError(
+                "Cursor ACP permission request contained conflicting command representations.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        if parsed_argv is not None:
+            argv = parsed_argv
+        elif has_command:
+            shell_expression = raw_command
+        raw_cwd = raw_input.get("cwd")
+        raw_working_directory = raw_input.get("workingDirectory")
+        cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else None
+        working_directory = (
+            raw_working_directory
+            if isinstance(raw_working_directory, str) and raw_working_directory.strip()
+            else None
+        )
+        if cwd is not None and working_directory is not None and cwd != working_directory:
+            raise PlanTransportError(
+                "Cursor ACP permission request contained conflicting working directories.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        selected_directory = cwd if cwd is not None else working_directory
+        if selected_directory is not None:
+            execution_dir = Path(selected_directory)
+    locations = tool_call.get("locations") if isinstance(tool_call, dict) else None
+    permission_targets: list[PlanPermissionTarget] = []
+    if locations is not None:
+        if not isinstance(locations, list):
+            raise PlanTransportError(
+                "Cursor ACP permission request contained malformed locations.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=session_id,
+            )
+        for location in locations:
+            path = location.get("path") if isinstance(location, dict) else None
+            if not isinstance(path, str) or not path.strip():
+                raise PlanTransportError(
+                    "Cursor ACP permission request contained malformed locations.",
+                    tool_id=tool_id,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            permission_targets.append(
+                PlanPermissionTarget(
+                    kind=(
+                        PlanPermissionTargetKind.FILESYSTEM_WRITE
+                        if operation_kind is PlanOperationKind.FILE_CHANGE
+                        else PlanPermissionTargetKind.RESOURCE
+                    ),
+                    value=path,
+                )
+            )
+    request_id = str(message.get("id"))
+    binding_value = (
+        tool_call_id if isinstance(tool_call_id, str) and tool_call_id.strip() else request_id
+    )
+    native_binding_ids = [PlanNativeBindingID(name="request_id", value=request_id)]
+    if isinstance(tool_call_id, str) and tool_call_id.strip():
+        native_binding_ids.append(PlanNativeBindingID(name="tool_call_id", value=tool_call_id))
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
-        question_id=str(message.get("id")),
+        question_id=request_id,
         prompt=str(title or params.get("reason") or "Cursor requests permission during planning."),
         options=options,
         session_id=session_id,
-        artifact_id=str(tool_call_id or message.get("id")),
+        artifact_id=binding_value,
+        operation=PlanOperation(
+            kind=operation_kind,
+            argv=argv,
+            shell_expression=shell_expression,
+            execution_dir=execution_dir,
+            permission_targets=tuple(permission_targets),
+            native_binding_ids=tuple(native_binding_ids),
+        ),
     )
     if deny_automatically:
         selected = next(

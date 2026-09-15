@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from crossby.ai_tools import AbstractAITool, PlanSessionRequest, plan_process
+from crossby.ai_tools import AbstractAITool, PlanCommandPolicy, PlanSessionRequest, plan_process
 from crossby.models.ai import AIToolID
 
 pytestmark = pytest.mark.skipif(
@@ -70,6 +70,7 @@ def test_real_codex_replaces_ambient_writable_roots(
                 working_dir=workspace,
                 timeout_seconds=15,
                 trusted_dirs=(requested_root,) if extra_root else (),
+                command_policy=PlanCommandPolicy(allowed_commands=("git status",)),
             )
         )
 

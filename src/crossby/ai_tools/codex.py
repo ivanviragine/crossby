@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import (
     PlanInteractionHandler,
+    PlanTransportError,
     parse_plan_question_options,
     validate_plan_option_selection,
 )
+from crossby.ai_tools.plan_policy import operation_matches_command_policy
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import codex as codex_reader
 from crossby.models.ai import (
@@ -26,12 +28,19 @@ from crossby.models.ai import (
     PlanApprovalPolicy,
     PlanArtifactLocation,
     PlanArtifactSource,
+    PlanCommandPolicy,
+    PlanCommandPolicySupport,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionSupport,
     PlanModeActivation,
     PlanModeCapability,
+    PlanNativeBindingID,
+    PlanOperation,
+    PlanOperationKind,
+    PlanPermissionTarget,
+    PlanPermissionTargetKind,
     PlanQuestionOption,
     PlanRequestBehavior,
     PlanSessionBinding,
@@ -108,6 +117,11 @@ class CodexAdapter(AbstractAITool):
                 supported_approval_policies=(
                     PlanApprovalPolicy.ON_REQUEST,
                     PlanApprovalPolicy.NEVER,
+                ),
+                command_policy_support=PlanCommandPolicySupport.CALLBACK,
+                command_policy_detail=(
+                    "Matches only authoritative simple-command app-server approval payloads and "
+                    "approves each matched operation once."
                 ),
             ),
             supports_accept_edits=True,
@@ -450,6 +464,11 @@ class CodexAdapter(AbstractAITool):
                         tool_id=self.TOOL_ID,
                         capability=capability,
                         deny_automatically=request.approval_policy.value == "never",
+                        command_policy=request.command_policy,
+                        allowed_execution_roots=(
+                            request.working_dir,
+                            *request.trusted_dirs,
+                        ),
                     )
                     continue
                 if isinstance(method, str) and "id" in message:
@@ -938,6 +957,220 @@ def _answer_codex_questions(
     rpc.respond(message["id"], {"answers": answers})
 
 
+def _codex_permission_targets(params: dict[str, Any]) -> tuple[PlanPermissionTarget, ...]:
+    """Extract only documented additional resources from an approval payload."""
+    targets: list[PlanPermissionTarget] = []
+
+    def unknown(value: str) -> None:
+        targets.append(PlanPermissionTarget(kind=PlanPermissionTargetKind.RESOURCE, value=value))
+
+    network_context = params.get("networkApprovalContext")
+    if isinstance(network_context, dict):
+        host = network_context.get("host")
+        if isinstance(host, str) and host.strip():
+            targets.append(
+                PlanPermissionTarget(kind=PlanPermissionTargetKind.NETWORK_HOST, value=host)
+            )
+        else:
+            unknown("unrecognized native network approval target")
+    elif network_context is not None:
+        unknown("unrecognized native network approval context")
+
+    additional = params.get("additionalPermissions")
+    if additional is not None and not isinstance(additional, dict):
+        unknown("unrecognized native additional permissions")
+        return tuple(targets)
+    if isinstance(additional, dict) and (
+        set(additional) - {"fileSystem", "network"}
+        or not {
+            "fileSystem",
+            "network",
+        }.issubset(additional)
+    ):
+        unknown("unrecognized native additional permission fields")
+    filesystem = additional.get("fileSystem") if isinstance(additional, dict) else None
+    if isinstance(filesystem, dict):
+        if set(filesystem) - {"read", "write", "entries", "globScanMaxDepth"}:
+            unknown("unrecognized native filesystem permission fields")
+        for field, kind in (
+            ("read", PlanPermissionTargetKind.FILESYSTEM_READ),
+            ("write", PlanPermissionTargetKind.FILESYSTEM_WRITE),
+        ):
+            values = filesystem.get(field)
+            if isinstance(values, list):
+                for path_value in values:
+                    if isinstance(path_value, str) and path_value.strip():
+                        targets.append(PlanPermissionTarget(kind=kind, value=path_value))
+                    else:
+                        unknown("unrecognized native filesystem permission target")
+            elif values is not None:
+                unknown("unrecognized native filesystem permission list")
+        entries = filesystem.get("entries")
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    unknown("unrecognized native filesystem permission entry")
+                    continue
+                access = entry.get("access")
+                resource = entry.get("path")
+                target_value: str | None = None
+                if isinstance(resource, dict):
+                    target_value = next(
+                        (
+                            resource[field]
+                            for field in ("path", "pattern")
+                            if isinstance(resource.get(field), str) and resource[field].strip()
+                        ),
+                        None,
+                    )
+                    special = resource.get("value")
+                    if target_value is None and isinstance(special, dict):
+                        special_kind = special.get("kind")
+                        target_value = (
+                            f"special:{special_kind}"
+                            if isinstance(special_kind, str) and special_kind.strip()
+                            else "unrecognized native special filesystem target"
+                        )
+                if target_value is None:
+                    target_value = "unrecognized native filesystem target"
+                target_kind = {
+                    "read": PlanPermissionTargetKind.FILESYSTEM_READ,
+                    "write": PlanPermissionTargetKind.FILESYSTEM_WRITE,
+                    "deny": PlanPermissionTargetKind.FILESYSTEM_DENY,
+                }.get(
+                    access if isinstance(access, str) else "",
+                    PlanPermissionTargetKind.RESOURCE,
+                )
+                targets.append(PlanPermissionTarget(kind=target_kind, value=target_value))
+        elif entries is not None:
+            unknown("unrecognized native filesystem permission entries")
+    elif filesystem is not None:
+        unknown("unrecognized native filesystem permissions")
+    network = additional.get("network") if isinstance(additional, dict) else None
+    if isinstance(network, dict) and network.get("enabled") is True:
+        targets.append(
+            PlanPermissionTarget(
+                kind=PlanPermissionTargetKind.NETWORK_HOST,
+                value="network access",
+            )
+        )
+    elif network is not None:
+        if not isinstance(network, dict):
+            unknown("unrecognized native additional network permissions")
+        else:
+            enabled = network.get("enabled")
+            if enabled is not True and enabled is not False and enabled is not None:
+                unknown("unrecognized native additional network permissions")
+            if set(network) - {"enabled"}:
+                unknown("unrecognized native additional network permission fields")
+    return tuple(targets)
+
+
+def _codex_permission_operation(message: dict[str, Any], params: dict[str, Any]) -> PlanOperation:
+    """Build operation evidence from documented app-server approval fields."""
+    method = message.get("method")
+    bindings: list[PlanNativeBindingID] = []
+    for field, name in (
+        ("itemId", "item_id"),
+        ("approvalId", "approval_id"),
+        ("environmentId", "environment_id"),
+    ):
+        value = params.get(field)
+        if isinstance(value, str) and value.strip():
+            bindings.append(PlanNativeBindingID(name=name, value=value))
+
+    targets = list(_codex_permission_targets(params))
+    if method == "item/fileChange/requestApproval":
+        grant_root = params.get("grantRoot")
+        if isinstance(grant_root, str) and grant_root.strip():
+            targets.append(
+                PlanPermissionTarget(
+                    kind=PlanPermissionTargetKind.FILESYSTEM_WRITE,
+                    value=grant_root,
+                )
+            )
+        return PlanOperation(
+            kind=PlanOperationKind.FILE_CHANGE,
+            permission_targets=tuple(targets),
+            native_binding_ids=tuple(bindings),
+        )
+
+    native_kind = params.get("kind", "command")
+    operation_kind = {
+        "command": PlanOperationKind.COMMAND,
+        "writeStdin": PlanOperationKind.WRITE_STDIN,
+    }.get(native_kind, PlanOperationKind.OTHER)
+    command = params.get("command")
+    cwd = params.get("cwd")
+    return PlanOperation(
+        kind=operation_kind,
+        shell_expression=(command if isinstance(command, str) and command.strip() else None),
+        execution_dir=Path(cwd) if isinstance(cwd, str) and cwd.strip() else None,
+        permission_targets=tuple(targets),
+        native_binding_ids=tuple(bindings),
+    )
+
+
+def _codex_approval_options(
+    params: dict[str, Any],
+    *,
+    tool_id: AIToolID,
+    capability: PlanModeCapability,
+    thread_id: str,
+    turn_id: str,
+) -> tuple[PlanQuestionOption, ...]:
+    """Preserve native decision IDs when app-server advertises them."""
+    available = params.get("availableDecisions")
+    decision_ids: tuple[str, ...]
+    if available is None:
+        decision_ids = ("accept", "decline", "cancel")
+    elif not isinstance(available, list) or not available:
+        raise PlanTransportError(
+            "Codex returned malformed native approval decisions.",
+            tool_id=tool_id,
+            capability=capability,
+            session_id=thread_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+    else:
+        decision_ids = tuple(value for value in available if isinstance(value, str))
+        structured = tuple(value for value in available if isinstance(value, dict))
+        if (
+            any(not value.strip() for value in decision_ids)
+            or len(set(decision_ids)) != len(decision_ids)
+            or structured
+            or len(decision_ids) + len(structured) != len(available)
+            or not decision_ids
+        ):
+            raise PlanTransportError(
+                "Codex returned malformed or unrepresentable native approval decisions.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+    labels = {
+        "accept": "Approve once",
+        "acceptForSession": "Approve for session",
+        "decline": "Deny",
+        "cancel": "Cancel turn",
+    }
+    if any(decision not in labels for decision in decision_ids):
+        raise PlanTransportError(
+            "Codex returned an unknown native approval decision.",
+            tool_id=tool_id,
+            capability=capability,
+            session_id=thread_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+    return tuple(
+        PlanQuestionOption(option_id=decision, label=labels[decision]) for decision in decision_ids
+    )
+
+
 def _answer_codex_approval(
     rpc: Any,
     message: dict[str, Any],
@@ -948,8 +1181,13 @@ def _answer_codex_approval(
     tool_id: AIToolID,
     capability: PlanModeCapability,
     deny_automatically: bool,
+    command_policy: PlanCommandPolicy | None = None,
+    allowed_execution_roots: tuple[Path, ...] = (),
 ) -> None:
-    from crossby.ai_tools.plan_mode import PlanInteractionRequiredError, PlanTransportError
+    from crossby.ai_tools.plan_mode import (
+        PlanCommandPolicyUnsupportedError,
+        PlanInteractionRequiredError,
+    )
 
     params = message.get("params")
     if not isinstance(params, dict):
@@ -966,21 +1204,53 @@ def _answer_codex_approval(
         capability=capability,
     )
     question_id = str(params.get("approvalId") or params.get("itemId") or "approval")
+    operation = _codex_permission_operation(message, params)
+    options = _codex_approval_options(
+        params,
+        tool_id=tool_id,
+        capability=capability,
+        thread_id=thread_id,
+        turn_id=turn_id,
+    )
+    option_ids = {option.option_id for option in options}
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
         question_id=question_id,
         prompt=str(params.get("reason") or "Codex requests permission during planning."),
-        options=(
-            PlanQuestionOption(option_id="accept", label="Approve once"),
-            PlanQuestionOption(option_id="decline", label="Deny"),
-            PlanQuestionOption(option_id="cancel", label="Cancel turn"),
-        ),
+        options=options,
         session_id=thread_id,
         thread_id=thread_id,
         turn_id=turn_id,
         artifact_id=str(params.get("itemId") or "") or None,
+        operation=operation,
     )
-    if deny_automatically:
+    policy_match = command_policy is not None and operation_matches_command_policy(
+        command_policy,
+        operation,
+        allowed_execution_roots=allowed_execution_roots,
+    )
+    if policy_match:
+        if "accept" not in option_ids:
+            raise PlanCommandPolicyUnsupportedError(
+                "Codex cannot preserve command_policy for a matched operation because the "
+                "native approval request does not offer one-operation acceptance.",
+                tool_id=tool_id,
+                capability=capability,
+                session_id=thread_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                artifact_id=interaction.artifact_id,
+            )
+        decision = "accept"
+    elif deny_automatically:
+        if "decline" not in option_ids:
+            raise PlanInteractionRequiredError(
+                "Codex cannot preserve approval_policy='never' because the native request "
+                "does not offer denial.",
+                interaction=interaction,
+                tool_id=tool_id,
+                capability=capability,
+            )
         decision = "decline"
     elif handler is None:
         raise PlanInteractionRequiredError(
@@ -992,11 +1262,26 @@ def _answer_codex_approval(
     else:
         response = handler(interaction)
         if response.outcome is PlanInteractionOutcome.CANCELLED:
+            if "cancel" not in option_ids:
+                raise PlanInteractionRequiredError(
+                    "Codex cannot preserve cancellation because the native request does not "
+                    "offer it.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
             decision = "cancel"
         elif response.outcome in {
             PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.SKIPPED,
         }:
+            if "decline" not in option_ids:
+                raise PlanInteractionRequiredError(
+                    "Codex cannot preserve denial because the native request does not offer it.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
             decision = "decline"
         elif response.answer is not None:
             raise PlanInteractionRequiredError(
@@ -1006,6 +1291,14 @@ def _answer_codex_approval(
                 capability=capability,
             )
         elif response.outcome is PlanInteractionOutcome.APPROVED:
+            if "accept" not in option_ids:
+                raise PlanInteractionRequiredError(
+                    "Codex cannot preserve one-operation approval because the native request "
+                    "does not offer it.",
+                    interaction=interaction,
+                    tool_id=tool_id,
+                    capability=capability,
+                )
             decision = "accept"
         else:
             try:
