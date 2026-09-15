@@ -1178,6 +1178,8 @@ def _answer_cursor_permission(
     shell_expression: str | None = None
     execution_dir: Path | None = None
     if isinstance(raw_input, dict):
+        has_argv_field = "argv" in raw_input
+        has_command_field = "command" in raw_input
         raw_argv = raw_input.get("argv")
         raw_command = raw_input.get("command")
         parsed_argv: tuple[str, ...] | None = None
@@ -1188,7 +1190,7 @@ def _answer_cursor_permission(
         ):
             parsed_argv = tuple(raw_argv)
         has_command = isinstance(raw_command, str) and bool(raw_command.strip())
-        if parsed_argv is not None and has_command:
+        if has_argv_field and has_command_field:
             raise PlanTransportError(
                 "Cursor ACP permission request contained conflicting command representations.",
                 tool_id=tool_id,

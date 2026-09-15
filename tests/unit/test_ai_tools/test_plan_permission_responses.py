@@ -455,6 +455,42 @@ def test_cursor_rejects_conflicting_native_command_representations(tmp_path: Pat
     assert not native.mock_calls
 
 
+def test_cursor_rejects_malformed_argv_alongside_native_command(tmp_path: Path) -> None:
+    native = Mock()
+    handler = Mock()
+
+    with pytest.raises(PlanTransportError, match="conflicting command representations"):
+        _answer_cursor_permission(
+            native,
+            {
+                "id": 42,
+                "params": {
+                    "sessionId": "session",
+                    "toolCall": {
+                        "kind": "execute",
+                        "rawInput": {
+                            "argv": ["git", 1],
+                            "command": "git status",
+                            "cwd": str(tmp_path),
+                        },
+                    },
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+            session_id="session",
+            handler=handler,
+            tool_id=AIToolID.CURSOR,
+            capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().plan_mode,
+            deny_automatically=False,
+        )
+
+    handler.assert_not_called()
+    assert not native.mock_calls
+
+
 def test_cursor_rejects_conflicting_native_working_directories(tmp_path: Path) -> None:
     native = Mock()
     handler = Mock()
