@@ -28,8 +28,9 @@ Any of the five direct-sync tools can be the source — `crossby sync --from cur
 | Give my other tools the same rules/agents/skills/MCP/hooks I already wrote | **Sync** | `crossby sync --plan --from claude` |
 | Run a tool with only the capabilities one task needs | **Scenes** | `crossby scene list` / `crossby launch --scene <name>` |
 | Continue my current session in a different tool | **Handoff** | `crossby handoff --from claude --to codex` |
+| Launch a tool and drive it from a browser instead of a shell | **Browser terminal** | `crossby ui` |
 
-Everything else in this README expands one of these three. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
+Everything else in this README expands one of these. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
 
 ## Install
 
@@ -653,6 +654,51 @@ Codex can confine writes with an OS sandbox (`--sandbox workspace-write` — Sea
 - **Linked worktrees & submodules just work when sandboxed.** In a linked worktree the working tree's `.git` is a *file* pointing at metadata that lives **outside** the working directory, which the sandbox would otherwise block. crossby detects this and grants only the real git-metadata dirs outside the root to the sandbox with `--add-dir` — which *adds* to the writable roots, preserving any `sandbox_workspace_write.writable_roots` you configured — so sandboxed git operations succeed while the sandbox stays on. A normal checkout grants nothing. This applies to launch, `--resume` (approval-neutral: no `-a` injected), and the headless handoff summarizer.
 - **`--network` (Codex only).** `crossby launch --network` allows network access inside the sandbox (package installs, remote fetch/push). It is **security-sensitive** and off by default. On tools without a sandbox network opt-in it is **warned and ignored** on every path (launch, resume, GUI).
 - **Explicit network pin.** Whenever crossby forces `workspace-write` (a worktree, `--network`, `--accept-edits`, or `--trusted-dir`), it also emits an explicit `-c sandbox_workspace_write.network_access=<true|false>` (`true` only with `--network`) so an ambient `network_access = true` in your Codex config can never silently enable networking in a crossby-managed sandbox. A plain, unmanaged launch emits no sandbox flag and stays byte-identical.
+
+## Browser terminal — `crossby ui`
+
+Run an AI tool from a web page instead of a shell:
+
+```sh
+crossby ui                 # serve the current directory, open a browser
+crossby ui --path ~/work/api --port 7420 --no-open
+```
+
+Pick a tool, model, effort and initial message in the form, hit **Launch**, and
+the tool appears in an embedded terminal. It is a **real terminal**, not a log
+view: the tool runs on a server-side pseudo-terminal, so its full-screen
+interface, colours, keybindings, `Ctrl-C` and resize behaviour all work exactly
+as they do in your shell.
+
+The form is generated from each adapter's declared capabilities, so a tool only
+ever offers what it actually supports — no effort selector on Copilot, no YOLO
+toggle on OpenCode.
+
+**Scope in this release.** The UI launches a session and lets you interact with
+it. Scene selection, profiles, resume and transcript capture are not wired into
+it yet; use the CLI for those.
+
+### Security
+
+The server spawns AI tools with access to your filesystem, so it is locked down
+by default:
+
+| Control | Behaviour |
+| --- | --- |
+| Binding | Loopback only. A non-loopback `--host` is refused outright. |
+| Token | The printed URL carries a random access token; every request needs it. **Treat the URL as a secret.** |
+| DNS rebinding | Requests whose `Host` header is not loopback are rejected. |
+| Cross-origin | Any request carrying a foreign `Origin` is rejected. |
+| Static assets | Authenticated by a `SameSite=Strict` cookie, which API routes never accept — so a cookie alone can never start a process. |
+| Working directory | Every session runs in `--path`. The page cannot choose another directory. |
+| Concurrency | Capped at 16 live sessions per server. |
+
+There is no multi-user mode, no remote access, and no authentication beyond the
+token. Do not expose it through a tunnel or reverse proxy.
+
+**Platform.** Requires POSIX pseudo-terminal support (macOS, Linux, WSL).
+Windows would need a ConPTY backend, which crossby does not ship yet — the
+command fails with a clear message rather than degrading silently.
 
 ## Update installed tools
 

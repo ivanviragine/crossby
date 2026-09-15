@@ -2,3 +2,8 @@
 KNOWLEDGE.md merge=union
 KNOWLEDGE.ratings.jsonl merge=union
 # wade:knowledge:end
+
+# Vendored frontend assets (see src/crossby/data/ui/vendor/README.md).
+# linguist-vendored keeps a 289 KB minified bundle out of the repo's language
+# stats; -diff collapses it in diffs and reviews.
+src/crossby/data/ui/vendor/** linguist-vendored -diff

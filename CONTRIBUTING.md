@@ -41,6 +41,7 @@ src/crossby/
 ├── models/       # Shared data models (AIToolID, capabilities, …)
 ├── data/         # Static model catalog and bundled prompt presets
 ├── ui/           # Rich/questionary UI components
+├── web/          # Local browser UI (crossby ui) — HTTP + PTY broker
 └── logging/      # structlog configuration
 ```
 
@@ -96,6 +97,55 @@ CLI command
 - `initial_message` — used for interactive sessions, placed as the first positional arg before any flags.
 
 Keep these separate when adding launch logic.
+
+### Browser terminal (`crossby ui`)
+
+`crossby/web/` serves a loopback page that runs one AI tool per pseudo-terminal.
+Three pieces:
+
+- **`utils/pty_runner.py`** — `PtySession`. The counterpart to
+  `utils/process.py`: that module runs a child on *this* process's stdio, this
+  one allocates a PTY so a caller with no terminal can host one. Three details
+  carry the whole feature and are easy to regress:
+  - `start_new_session=True` makes the child a session leader, but a session
+    leader does **not** acquire a controlling terminal just by inheriting the
+    slave as fd 0/1/2. `preexec_fn` issues `TIOCSCTTY` to close that gap.
+    Without it `Ctrl-C` generates no `SIGINT` and `SIGWINCH` reaches nobody —
+    and nothing else looks wrong, so a test asserts `/dev/tty` is openable in
+    the child.
+  - `TIOCSWINSZ` on the master both records the size and makes the kernel
+    deliver `SIGWINCH`. A session that never sets it inherits 0x0.
+  - Output is **bytes end to end**. A read boundary routinely splits a UTF-8
+    sequence or an escape, so nothing decodes per chunk; the browser decodes.
+- **`web/sessions.py`** — validates a request against the adapter's own
+  `AIToolCapabilities` *before* spawning, then builds argv through
+  `build_launch_command()`. Sessions are pinned to the server's project root;
+  the browser never supplies a working directory.
+- **`web/server.py`** — stdlib `ThreadingHTTPServer`. Output streams as
+  base64 inside SSE frames, input and resize come back as POSTs. No new
+  dependency, and no asyncio next to an otherwise synchronous codebase.
+
+**Why this does not call `cli/launch.py`.** That function resolves
+interactively, prints Rich markup and raises `typer.Exit` — none of which
+survives a browser. Adapters, by contrast, import nothing from `crossby.ui`, so
+the web layer talks to them directly. Richer launch behaviour (scenes,
+profiles, transcripts) should arrive by **extracting that orchestration into
+`services/`** returning result objects, the way `activate_scene()` already
+returns a `SceneActivationOutcome` — not by calling the command function.
+
+**Security invariants.** These are load-bearing; the server spawns AI tools with
+filesystem access. Loopback binding only (`serve()` refuses anything else); a
+`secrets` token on every request compared with `compare_digest`; `Host`
+validation (DNS rebinding); `Origin` rejection (CSRF); and a `SameSite=Strict`
+cookie that authenticates **static assets only** — API routes never accept it,
+so cookie-driven CSRF cannot reach a route that starts a process. Static files
+resolve through `config/json_utils.assert_within`. `tests/integration/test_web_server.py`
+drives a real socket for each of these; keep it that way.
+
+**Vendored frontend.** `data/ui/vendor/` holds xterm.js, committed rather than
+fetched so `pip install crossby` yields a working offline UI with no npm and no
+CDN dependency. `data/ui/vendor/README.md` records versions and the refresh
+command.
 
 ### Collected native plan sessions
 

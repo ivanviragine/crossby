@@ -55,6 +55,9 @@ def _patch_subcommands(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         "convert": MagicMock(return_value=None),
         "stats": MagicMock(return_value=None),
         "update": MagicMock(return_value=None),
+        # Mocked so a menu test can never start a real server (ui() blocks
+        # in serve_forever until interrupted).
+        "ui": MagicMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"crossby.cli.main.{name}", mock)
@@ -131,6 +134,7 @@ class TestInitMenuVisibility:
             "Stats",
             "Scene",
             "Update tools",
+            "UI",
         ]
 
     def test_init_shown_when_no_config(
@@ -226,6 +230,16 @@ class TestMenuDispatch:
         assert kwargs["tool"] is None
         assert kwargs["yes"] is False
         assert kwargs["dry_run"] is False
+
+    def test_ui(self) -> None:
+        """UI is appended last so every pre-existing index keeps its meaning."""
+        self._run(7)
+        self.mocks["ui"].assert_called_once()
+        kwargs = self.mocks["ui"].call_args.kwargs
+        assert kwargs["path"] == Path(".")
+        assert kwargs["port"] == 0
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["open_browser"] is True
 
 
 class TestPromptHelpers:
