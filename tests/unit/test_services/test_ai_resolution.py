@@ -122,17 +122,20 @@ class TestResolveYoloStrict:
     def test_strict_unsupported_tool_raises(self) -> None:
         config = CrossbyConfig()
         with pytest.raises(ValueError, match="does not support YOLO"):
-            resolve_yolo(True, config, tool="opencode", strict=True)
+            resolve_yolo(True, config, tool="vscode", strict=True)
 
     def test_nonstrict_unsupported_returns_false(self) -> None:
         config = CrossbyConfig()
-        result = resolve_yolo(True, config, tool="opencode", strict=False)
+        result = resolve_yolo(True, config, tool="vscode", strict=False)
         assert result is False
 
     def test_strict_supported_tool_returns_true(self) -> None:
         config = CrossbyConfig()
         result = resolve_yolo(True, config, tool="claude", strict=True)
         assert result is True
+
+    def test_opencode_native_auto_supports_yolo(self) -> None:
+        assert resolve_yolo(True, CrossbyConfig(), tool="opencode", strict=True) is True
 
 
 class TestResolveAcceptEdits:

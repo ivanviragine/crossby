@@ -588,8 +588,9 @@ boundary.
 
 For activation-only CLI use, continue calling `adapter.launch(...,
 plan_mode=True)` or `adapter.build_launch_command(..., plan_mode=True)` and
-handle `PlanModeLaunchError`. `--plan` remains mutually exclusive with
-`--yolo`, `--auto`, and `--accept-edits`. `--plan-output-dir <dir>` remains a
+handle `PlanModeLaunchError`. Interactive planning composes with native approval
+options listed below. Unsupported combinations fail before launch instead of
+replacing Plan mode or silently downgrading. `--plan-output-dir <dir>` remains a
 launch option only for Claude. The collected Claude API also accepts a
 project-contained `plan_output_dir`, but creates a unique run-owned child
 directory within it so a concurrent or newer artifact cannot be selected.
@@ -605,28 +606,82 @@ the scene's `skillOverrides` into one `--settings` JSON source. Claude treats
 repeated `--settings` occurrences as replacement, so emitting two would discard
 the requested plan destination.
 
+### Interactive planning and approvals
+
+`crossby launch --tool <tool> --plan --yolo` opens the real terminal UI in
+native Plan mode on all five CLIs below. Planning and tool approvals are
+separate dimensions; Crossby uses the tool's own flags and settings.
+
+| CLI | Native Plan selector | With Crossby `--yolo` | With Crossby `--auto` |
+| --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | `--allow-dangerously-skip-permissions` | `--settings '{"useAutoModeDuringPlan":true}'` |
+| Cursor | `--mode plan` | `--force` | `--auto-review` |
+| GitHub Copilot | `--plan` | `--yolo` | Unsupported |
+| OpenCode | `--agent plan` | `--auto` | Unsupported |
+| Antigravity CLI | `--mode plan` | `--dangerously-skip-permissions` | Unsupported |
+
+Verified startup versions: Claude 2.1.263, Cursor 2026.09.02-c22c1a3,
+Copilot 1.0.83, OpenCode 1.18.29, and Antigravity CLI 1.2.3.
+Codex and GUI activation are unchanged and remain outside this contract.
+`capabilities().plan_mode.supported_launch_approval_modes` declares the supported
+combinations; collected-session approval policies are independent and unchanged.
+These combinations are interactive-only (`initial_message`, not the builder's
+headless `prompt`).
+
+Claude's ordinary `--dangerously-skip-permissions` replaces Plan mode, so its
+Plan launch uses `--allow-dangerously-skip-permissions`: the native interactive
+CLI keeps Plan selected and makes bypass available during planning. Native
+Plan instructions still guide the model; bypass is not filesystem confinement.
+Claude's classifier requires an eligible account/model; native policy and any
+`useAutoModeDuringPlan: false` setting can prevent classifier approval. Cursor's
+classifier is likewise controlled by its native account and organization policy.
+OpenCode calls its skip-approval flag `--auto`; Crossby maps it to `--yolo`,
+not to Crossby's classifier-based `--auto`. Explicit native denials still apply.
+Folder trust and plan/implementation decisions remain native user interactions.
+
+Copilot additionally supports `--plan --accept-edits` through `--allow-tool write`,
+subject to its Plan restrictions. Other CLIs reject that combination. In
+particular, Claude and Antigravity use one selector for Plan and accept-edits;
+Crossby never emits competing selectors. Multiple approval flags retain the
+usual `yolo > auto > accept-edits` precedence while keeping Plan selected.
+
+To exercise a real interactive session through the public API, using your
+normal native authentication:
+
+```bash
+uv run python scripts/probe_native_plan.py --tool claude --approval yolo
+uv run python scripts/probe_native_plan.py --tool cursor --model auto --approval yolo
+```
+
+The probe uses a temporary workspace and a read-only shell command, saves the
+launch argv and terminal transcript, and reports whether the command's unique
+output appeared. Inspect the native Plan/approval indicators and actual shell
+call; token presence alone is not proof of execution. Exit normally without
+approving implementation. See [verification notes](docs/native-plan-launch-verification.md)
+for the tested scope and remaining limits.
+
 ### Autonomy modes
 
 The remaining flags form the autonomy ladder (how much the agent may do without
 asking). They are permission modes, not model selection:
 
 - `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of the 6 CLIs support it at launch; OpenCode falls back to default prompting). *(Codex is the exception — its accept-edits is sandbox-confined rather than per-command-prompted; see the note below the table.)*
-- `--auto` — Claude Code's classifier-mediated guarded autonomy (a separate model reviews each non-read action). **Claude-only** among the CLIs crossby drives; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
+- `--auto` — Classifier-mediated guarded autonomy, supported by **Claude Code and Cursor CLI**; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
 - `--yolo` — skip all permission prompts.
 
 **Precedence (most permissive wins):** `yolo > auto > accept-edits`. If you pass
 several of these three, the highest applies. A requested tier a tool doesn't
 support downgrades to the next lower autonomy tier it does support (emitting a
-`UserWarning`), stopping at default prompting — it never escalates. None can be
-combined with `--plan`.
+`UserWarning`), stopping at default prompting — it never escalates. With `--plan`, only the explicitly supported native combinations above are accepted.
 
-Per-tool mapping (verified against official docs, July 2026; CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
+Per-tool mapping (Cursor updated September 2026; other entries verified July 2026;
+CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
 
 | Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
 | --------------- | ------------------------------------- | ----------------------------------------- |
 | Claude          | `--permission-mode acceptEdits`       | `--permission-mode auto`                  |
 | Codex           | `-a on-request --sandbox workspace-write` | ↓ downgrades to accept-edits              |
-| Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | ↓ downgrades to accept-edits |
+| Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | `--auto-review` |
 | Copilot         | `--allow-tool write`                  | ↓ downgrades to accept-edits              |
 | Antigravity CLI | `--mode accept-edits`                 | ↓ downgrades to accept-edits              |
 | OpenCode        | ↓ default prompting (config-only)     | ↓ default prompting                       |

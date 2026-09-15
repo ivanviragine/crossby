@@ -21,6 +21,7 @@ from crossby.models.ai import (
     PlanArtifactSource,
     PlanCommandPolicySupport,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     PlanRequestBehavior,
@@ -61,7 +62,9 @@ class OpenCodeAdapter(AbstractAITool):
             supports_effort=True,
             supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
             supports_resume=True,
+            supports_yolo=True,
             plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(PlanLaunchApprovalMode.YOLO,),
                 activation=PlanModeActivation.CLI_ARGUMENT,
                 activation_detail="Selects OpenCode's built-in plan agent with --agent plan.",
                 version_requirement="OpenCode exposing the built-in plan agent and --agent.",
@@ -133,6 +136,13 @@ class OpenCodeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Select OpenCode's built-in, read-only ``plan`` agent."""
         return ["--agent", "plan"]
+
+    def yolo_args(self) -> list[str]:
+        """OpenCode's --auto skips approvals, retaining explicit native denials.
+
+        This is not Crossby's classifier-mediated --auto tier.
+        """
+        return ["--auto"]
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate a caller-supplied public model identifier without server I/O."""
