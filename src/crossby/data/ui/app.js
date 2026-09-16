@@ -58,6 +58,15 @@ async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    // Every `crossby ui` run mints a new token, so a stale URL — a bookmark, a
+    // reopened tab, a reload after a restart — is the usual cause. Say so,
+    // rather than leaving someone to decode "invalid token".
+    throw new Error(
+      "This page's access token is no longer valid. The server was most likely " +
+        "restarted — open the URL it printed most recently.",
+    );
+  }
   if (!response.ok) throw new Error(payload.error || `${method} ${path} failed (${response.status})`);
   return payload;
 }

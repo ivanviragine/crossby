@@ -29,12 +29,20 @@ server is hostile-browser-aware by default:
 - pins every session's working directory to the project root the server was
   started with — the browser never supplies a path.
 
-The page's own ``<link>`` and ``<script>`` subresources cannot attach a header,
-so loading ``/?token=…`` issues a ``SameSite=Strict`` cookie that authenticates
-**static assets only**. API routes keep refusing it and demand the token
-explicitly, so cookie-driven CSRF cannot reach anything that spawns a process —
-the ``Origin`` check above is then a second, independent barrier rather than the
-only one.
+**The static shell is served without a token; the API is not.** The page's
+``<link>`` and ``<script>`` subresources cannot attach a header, and the cookie
+that once covered them proved fragile in exactly the way that matters: cookies
+ignore the port, so they outlive a restart and leak between concurrent servers,
+and every ``crossby ui`` run mints a fresh token. A reload from a bookmark, or a
+cached shell after a restart, then 401s the stylesheet and script while the HTML
+loads — a broken page with no explanation.
+
+The shell holds nothing worth protecting: vendored xterm.js, this project's own
+CSS and JS, and an HTML page that does nothing at all without a token. What
+needs guarding is the API, which spawns processes, and that still demands the
+token on every request. An unauthenticated fetch of the shell tells an attacker
+only that crossby is listening, which a 401 would equally reveal. ``Host`` and
+``Origin`` are still enforced on it, so no foreign page can embed it.
 """
 
 from __future__ import annotations
@@ -43,10 +51,9 @@ import base64
 import json
 import mimetypes
 import secrets
+import sys
 import threading
-from contextlib import suppress
 from http import HTTPStatus
-from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -80,10 +87,16 @@ MAX_BODY_BYTES = 1024 * 1024
 # connection open. SSE comments are ignored by EventSource.
 SSE_KEEPALIVE_SECONDS = 15.0
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# A browser resets connections as a matter of course — closing a tab, reloading,
+# reaping an idle pooled connection. None of these are server faults.
+_CLIENT_DISCONNECT_ERRORS = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+)
 
-# Authenticates static assets only — never an API route.
-SESSION_COOKIE = "crossby_ui_token"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class CrossbyUIServer(ThreadingHTTPServer):
@@ -115,6 +128,28 @@ class CrossbyUIServer(ThreadingHTTPServer):
             }
         )
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Keep routine client disconnects out of the operator's terminal.
+
+        ``socketserver`` prints a full traceback for any exception escaping a
+        handler, and a browser produces these constantly through no fault of
+        its own: closing a tab, reloading, or reaping an idle pooled connection
+        resets the socket while the server is parked in ``readline()`` waiting
+        for the next keep-alive request. The result is a wall of
+        ``ConnectionResetError`` tracebacks that look like a crash and bury any
+        real error. These are expected, so they are logged at debug; everything
+        else still goes to the default handler.
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, _CLIENT_DISCONNECT_ERRORS):
+            logger.debug(
+                "web.client_disconnected",
+                client=client_address[0] if client_address else None,
+                error=type(error).__name__,
+            )
+            return
+        super().handle_error(request, client_address)
+
     def server_close(self) -> None:
         self.sessions.shutdown()
         super().server_close()
@@ -140,17 +175,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         route = parsed.path.rstrip("/") or "/"
-        is_static = route == "/" or route.startswith("/assets/")
 
-        if not self._authorize(query, allow_cookie=is_static):
+        # The static shell carries no secrets and is deliberately unauthenticated;
+        # see the module docstring. Host/Origin still apply.
+        if route == "/":
+            if self._same_origin():
+                self._serve_static("index.html")
+            return
+        if route.startswith("/assets/"):
+            if self._same_origin():
+                self._serve_static(route[len("/assets/") :])
             return
 
-        if route == "/":
-            # Hand the page a cookie so its subresources authenticate themselves.
-            self._serve_static("index.html", set_cookie=True)
-        elif route.startswith("/assets/"):
-            self._serve_static(route[len("/assets/") :])
-        elif route == "/api/tools":
+        if not self._authorize(query):
+            return
+
+        if route == "/api/tools":
             self._send_json(
                 HTTPStatus.OK,
                 {"tools": describe_tools(), "project_root": str(self.ui.project_root)},
@@ -279,7 +319,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             heartbeat.stop()
 
     # -- static -----------------------------------------------------------
-    def _serve_static(self, relative: str, *, set_cookie: bool = False) -> None:
+    def _serve_static(self, relative: str) -> None:
         candidate = STATIC_ROOT / relative
         try:
             assert_within(STATIC_ROOT, candidate)
@@ -294,15 +334,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             candidate.read_bytes(),
             content_type or "application/octet-stream",
-            cookie=self.ui.token if set_cookie else None,
+            # Never cache the shell: a stale copy after a restart would hide a
+            # token change and leave the page silently unable to reach the API.
+            cache=False,
         )
 
     # -- plumbing ---------------------------------------------------------
-    def _authorize(self, query: dict[str, list[str]], *, allow_cookie: bool = False) -> bool:
-        """Reject anything that is not a same-origin, correctly-tokened request.
+    def _same_origin(self) -> bool:
+        """Reject requests that are not loopback and same-origin.
 
-        ``allow_cookie`` is set only for static assets, whose ``<link>``/
-        ``<script>`` requests cannot carry a header. API routes never enable it.
+        Splitting this out lets the unauthenticated static shell keep the
+        rebinding and cross-origin barriers that the API also relies on.
         """
         host = self.headers.get("Host", "")
         hostname = host.rsplit(":", 1)[0].strip("[]") if host else ""
@@ -314,10 +356,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if origin is not None and origin not in self.ui.allowed_origins():
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "cross-origin request refused"})
             return False
+        return True
 
+    def _authorize(self, query: dict[str, list[str]]) -> bool:
+        """Reject anything that is not a same-origin, correctly-tokened request."""
+        if not self._same_origin():
+            return False
         supplied = self.headers.get("X-Crossby-Token") or next(iter(query.get("token", [])), "")
-        if not supplied and allow_cookie:
-            supplied = self._cookie_token()
         if not secrets.compare_digest(supplied, self.ui.token):
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "invalid or missing token"})
             return False
@@ -328,14 +373,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
             handler(session_id)
         except SessionNotFoundError:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "no such session"})
-
-    def _cookie_token(self) -> str:
-        """Read the access token from the request's cookie header, if present."""
-        jar = SimpleCookie()
-        with suppress(CookieError):
-            jar.load(self.headers.get("Cookie", ""))
-        morsel = jar.get(SESSION_COOKIE)
-        return morsel.value if morsel else ""
 
     def _read_json(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
@@ -362,18 +399,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
         body: bytes,
         content_type: str,
         *,
-        cookie: str | None = None,
+        cache: bool = True,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        if cookie is not None:
-            # No Secure flag: loopback HTTP would drop it. HttpOnly because the
-            # page reads its token from the URL and never needs script access.
-            self.send_header(
-                "Set-Cookie",
-                f"{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict",
-            )
+        if not cache:
+            self.send_header("Cache-Control", "no-store, must-revalidate")
         # The page is same-origin and token-gated; deny framing and sniffing so a
         # hostile tab cannot wrap or reinterpret it.
         self.send_header("X-Content-Type-Options", "nosniff")

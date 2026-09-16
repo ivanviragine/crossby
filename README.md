@@ -793,7 +793,7 @@ by default:
 | Token | The printed URL carries a random access token; every request needs it. **Treat the URL as a secret.** |
 | DNS rebinding | Requests whose `Host` header is not loopback are rejected. |
 | Cross-origin | Any request carrying a foreign `Origin` is rejected. |
-| Static assets | Authenticated by a `SameSite=Strict` cookie, which API routes never accept — so a cookie alone can never start a process. |
+| Static assets | The page shell (HTML/CSS/JS) is served unauthenticated — it holds no secrets and does nothing without a token — but still only same-origin. |
 | Working directory | Every session runs in `--path`. The page cannot choose another directory. |
 | Concurrency | Capped at 16 live sessions per server. |
 

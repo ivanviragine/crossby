@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
+import struct
 import threading
 import time
 from collections.abc import Iterator
@@ -20,7 +22,7 @@ import pytest
 from crossby.models.ai import AIToolID
 from crossby.utils.pty_runner import WindowSize
 from crossby.web import serve
-from crossby.web.server import SESSION_COOKIE, CrossbyUIServer
+from crossby.web.server import CrossbyUIServer
 from crossby.web.sessions import LaunchRequest, MultiplexedStream
 
 TOKEN = "test-token-not-a-secret"
@@ -110,34 +112,47 @@ class TestRebindingAndCsrfDefences:
 
 
 class TestStaticAssets:
-    def test_index_is_served_and_issues_a_cookie(self, server: CrossbyUIServer) -> None:
-        status, body, headers = request(server, "GET", "/")
+    """The shell is deliberately unauthenticated.
+
+    `<link>` and `<script>` cannot attach a header, and the cookie that once
+    covered them was fragile in the way that mattered: cookies ignore the port,
+    so they outlive a restart and leak between concurrent servers, while every
+    run mints a fresh token. A reload from a bookmark then 401'd the stylesheet
+    and script while the HTML loaded from cache — a broken page, no explanation.
+    The shell holds nothing worth guarding; the API still demands the token.
+    """
+
+    def test_index_is_served_without_a_token(self, server: CrossbyUIServer) -> None:
+        status, body, _ = request(server, "GET", "/", token=None)
         assert status == 200
         assert b"<title>crossby</title>" in body
-        assert SESSION_COOKIE in headers.get("Set-Cookie", "")
-        assert "HttpOnly" in headers["Set-Cookie"]
-        assert "SameSite=Strict" in headers["Set-Cookie"]
 
-    def test_assets_authenticate_by_cookie(self, server: CrossbyUIServer) -> None:
-        """A <script> tag cannot send a header, so the cookie must carry it."""
-        status, body, _ = request(
-            server, "GET", "/assets/app.js", token=None, cookie=f"{SESSION_COOKIE}={TOKEN}"
-        )
+    def test_index_is_never_cached(self, server: CrossbyUIServer) -> None:
+        """A stale shell would hide a token change after a restart."""
+        _, _, headers = request(server, "GET", "/", token=None)
+        assert "no-store" in headers.get("Cache-Control", "")
+
+    def test_assets_are_served_without_a_token(self, server: CrossbyUIServer) -> None:
+        status, body, _ = request(server, "GET", "/assets/app.js", token=None)
         assert status == 200
         assert b"crossby" in body
 
-    def test_assets_reject_a_forged_cookie(self, server: CrossbyUIServer) -> None:
-        status, _, _ = request(
-            server, "GET", "/assets/app.js", token=None, cookie=f"{SESSION_COOKIE}=forged"
-        )
-        assert status == 401
+    def test_shell_still_refuses_cross_origin(self, server: CrossbyUIServer) -> None:
+        """Unauthenticated does not mean unprotected: no foreign page may embed it."""
+        for path in ("/", "/assets/app.js"):
+            status, _, _ = request(server, "GET", path, token=None, origin="https://evil.example")
+            assert status == 403, path
 
-    def test_api_never_accepts_the_cookie(self, server: CrossbyUIServer) -> None:
-        """Cookie auth is scoped to static files; the API demands the token."""
-        status, _, _ = request(
-            server, "GET", "/api/tools", token=None, cookie=f"{SESSION_COOKIE}={TOKEN}"
-        )
-        assert status == 401
+    def test_shell_still_refuses_a_foreign_host(self, server: CrossbyUIServer) -> None:
+        for path in ("/", "/assets/app.js"):
+            status, _, _ = request(server, "GET", path, token=None, host="attacker.example")
+            assert status == 403, path
+
+    def test_api_still_requires_the_token(self, server: CrossbyUIServer) -> None:
+        """The shell opening up must not have opened up anything that spawns."""
+        for path in ("/api/tools", "/api/sessions", "/api/stream"):
+            status, _, _ = request(server, "GET", path, token=None)
+            assert status == 401, path
 
     @pytest.mark.parametrize(
         "path",
@@ -290,3 +305,49 @@ class TestExitProvenance:
         described = server.sessions.describe(session.id)
         assert described["stopped"] is True
         assert described["exit_signal"] == "SIGHUP"
+
+
+class TestClientDisconnectNoise:
+    """A browser resets connections constantly and it is never a server fault.
+
+    `socketserver` prints a full traceback for anything escaping a handler, so
+    closing a tab, reloading, or reaping an idle pooled connection produced a
+    wall of `ConnectionResetError` tracebacks that looked like a crash and
+    buried real errors.
+    """
+
+    def test_abrupt_client_reset_is_not_reported(
+        self, server: CrossbyUIServer, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """Reset a keep-alive connection while the server awaits the next request."""
+        conn = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+        request = (
+            f"GET /api/tools HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"X-Crossby-Token: {TOKEN}\r\n\r\n"
+        ).encode()
+        conn.sendall(request)
+        conn.recv(65536)
+
+        # SO_LINGER with a zero timeout sends RST rather than FIN — exactly what
+        # a browser tearing down a pooled connection looks like.
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()
+        time.sleep(0.6)
+
+        captured = capfd.readouterr()
+        assert "Traceback" not in captured.err, captured.err
+        assert "ConnectionResetError" not in captured.err
+
+    def test_unexpected_errors_are_still_reported(
+        self, server: CrossbyUIServer, capfd: pytest.CaptureFixture[str]
+    ) -> None:
+        """Only disconnects are quiet — a genuine fault must still be visible."""
+        try:
+            raise ValueError("a real failure")
+        except ValueError:
+            server.handle_error(None, ("127.0.0.1", 12345))
+
+        captured = capfd.readouterr()
+        assert "ValueError" in captured.err
+        assert "a real failure" in captured.err

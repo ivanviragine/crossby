@@ -198,12 +198,21 @@ returns a `SceneActivationOutcome` — not by calling the command function.
 
 **Security invariants.** These are load-bearing; the server spawns AI tools with
 filesystem access. Loopback binding only (`serve()` refuses anything else); a
-`secrets` token on every request compared with `compare_digest`; `Host`
-validation (DNS rebinding); `Origin` rejection (CSRF); and a `SameSite=Strict`
-cookie that authenticates **static assets only** — API routes never accept it,
-so cookie-driven CSRF cannot reach a route that starts a process. Static files
-resolve through `config/json_utils.assert_within`. `tests/integration/test_web_server.py`
-drives a real socket for each of these; keep it that way.
+`secrets` token on every **API** request compared with `compare_digest`; `Host`
+validation (DNS rebinding); and `Origin` rejection (CSRF), enforced on the static
+shell too. Static files resolve through `config/json_utils.assert_within`.
+`tests/integration/test_web_server.py` drives a real socket for each of these;
+keep it that way.
+
+**The static shell is intentionally unauthenticated.** It was once covered by a
+`SameSite=Strict` cookie, which failed in practice: cookies ignore the port, so
+they outlive a restart and leak between concurrent servers, while every run mints
+a fresh token. A reload from a bookmark, or a cached shell after a restart, then
+401'd the stylesheet and script while the HTML still loaded — a blank broken page
+with no explanation. The shell is vendored xterm.js, this project's own CSS/JS,
+and a page that does nothing without a token; the thing worth guarding is the
+API, and it still demands one. Do not reintroduce cookie auth. The index is
+served `no-store` so a stale copy cannot mask a token change.
 
 **Vendored frontend.** `data/ui/vendor/` holds xterm.js, committed rather than
 fetched so `pip install crossby` yields a working offline UI with no npm and no
