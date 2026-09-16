@@ -493,6 +493,12 @@ function dropExit(id) {
   pendingExit.delete(id);
 }
 
+/** Write a session's held frames into its tab, in arrival order, and clear them. */
+function flushAdoption(entry) {
+  for (const chunk of pendingAdoption.get(entry.id) || []) writeChunk(entry, chunk);
+  pendingAdoption.delete(entry.id);
+}
+
 function adopt(id, chunk) {
   const held = pendingAdoption.get(id);
   if (held) {
@@ -507,8 +513,7 @@ function adopt(id, chunk) {
       const existing = sessions.get(id);
       const entry = existing || createSession(info);
       if (!existing) entry.restored = true;   // a reattachment: needs a redraw nudge
-      for (const pending of pendingAdoption.get(id) || []) writeChunk(entry, pending);
-      pendingAdoption.delete(id);
+      flushAdoption(entry);
       settleExit(id);             // after the backlog, so the closing line lands last
       if (activeId === null) activate(id);
     })
@@ -539,7 +544,11 @@ function openStream() {
   stream.addEventListener("output", (event) => {
     const { session: id, chunk } = JSON.parse(event.data);
     const entry = sessions.get(id);
-    if (!entry) {
+    // `pendingAdoption` is checked even when a tab exists: the launch POST can
+    // create it while adoption still holds earlier frames, and writing this one
+    // straight through would put it *before* them. Terminal output is a stateful
+    // escape stream, so reordering corrupts the screen, not just the scrollback.
+    if (!entry || pendingAdoption.has(id)) {
       // A session this page has not seen. Its geometry is unknown and guessing
       // would corrupt the replay, so hold the frames until the server tells us
       // the real size.
@@ -604,11 +613,14 @@ async function startSession(event) {
     });
     // Adoption may already have built the tab from a first output frame.
     const entry = sessions.get(info.id) || createSession(info);
+    // Output can beat this response. Draining the held frames here — rather
+    // than waiting for adoption's metadata GET to resolve — is what keeps them
+    // ahead of everything that arrives next, and it costs no round trip since
+    // the POST already told us the geometry.
+    flushAdoption(entry);
     // A tool that exited before this response landed has its frame held; apply
-    // it now, or the tab reads as running for the rest of the page's life. An
-    // adoption still in flight owns the ordering instead — it writes its
-    // backlog first so the closing line lands last.
-    if (!pendingAdoption.has(info.id)) settleExit(info.id);
+    // it now, or the tab reads as running for the rest of the page's life.
+    settleExit(info.id);
     activate(info.id);
     refit(entry);
     // Tell the server the size this pane actually resolved to.

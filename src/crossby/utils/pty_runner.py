@@ -289,21 +289,32 @@ class PtySession:
                 return
             self._closed = True
 
+        # Signalling only while the leader is still unreaped is what makes this
+        # safe. A pid is released the moment it is waited on, and the kernel is
+        # free to hand that number to anyone; a session that ended on its own
+        # was reaped by the reader thread, possibly hours before its tab is
+        # closed. Polling that stale number and SIGKILLing whatever answers
+        # could hit an unrelated process group of the same user. A session that
+        # exits by itself needs none of this anyway: the child is the session
+        # leader of its controlling terminal, so the kernel hangs up its
+        # foreground group as it goes.
+        #
         # One grace period covers the leader *and* its descendants. Timing them
         # separately spent TERMINATE_GRACE_SECONDS twice per session, and
         # shutdown closes sessions serially — sixteen tabs meant a minute of
         # waiting before the process exited.
-        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         if self._proc.poll() is None:
+            deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
             _signal_group(self._proc.pid, signal.SIGHUP)
             with suppress(subprocess.TimeoutExpired):
                 self._proc.wait(timeout=_remaining(deadline))
 
-        # A tool's descendants are the point of this: an agent runs shell
-        # commands, and one that ignores SIGHUP outlives the leader. Keying the
-        # SIGKILL off the leader's exit alone left it running — still editing
-        # files or making requests — while the UI reported the session closed.
-        self._reap_process_group(deadline)
+            # A tool's descendants are the point of this: an agent runs shell
+            # commands, and one that ignores SIGHUP outlives the leader. Keying
+            # the SIGKILL off the leader's exit alone left it running — still
+            # editing files or making requests — while the UI reported the
+            # session closed.
+            self._reap_process_group(deadline)
 
         # Not part of that budget: the reader unblocks as soon as the last
         # slave closes, so this timeout only ever elapses if the thread is
@@ -346,6 +357,12 @@ class PtySession:
         descendants share its pgid and can be signalled together. *deadline* is
         a :func:`time.monotonic` instant shared with the leader's own wait, so a
         slow leader spends the budget rather than extending it.
+
+        Only :meth:`close` may call this, and only for a leader it just reaped
+        itself. While the group has any member left the kernel holds its id
+        reserved, so a live group is provably still this session's; the
+        vulnerable moment is the tick after the last member goes, and the very
+        next poll reads that as empty and returns.
         """
         if os.name != "posix":  # pragma: no cover - POSIX-only sessions
             return

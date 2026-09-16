@@ -433,6 +433,36 @@ class TestProcessGroupTeardown:
 
         assert self._state(pid) in {"Z", "gone"}, "descendant outlived the session"
 
+    def test_a_reaped_leader_is_never_signalled_by_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closing a tab whose tool already exited must not signal its old pid.
+
+        The reader thread reaps the leader as soon as it exits, which releases
+        the pid — and a tab can sit open for hours afterwards. Signalling that
+        stale number then, and SIGKILLing whatever answers at the end of the
+        grace period, could kill an unrelated process group of the same user
+        that had since become a group leader with the recycled id.
+        """
+        session = PtySession([sys.executable, "-c", "pass"], cwd=tmp_path)
+        assert session.wait(timeout=5) is not None, "child never exited"
+
+        # Every pid-based group operation is recorded, the liveness probe
+        # included: reading the stale number is already the mistake, because a
+        # recycled group answering "alive" is what leads to the SIGKILL.
+        queried: list[int] = []
+        signalled: list[tuple[int, int]] = []
+        monkeypatch.setattr(pty_runner, "_group_alive", lambda pgid: queried.append(pgid) or True)
+        monkeypatch.setattr(
+            pty_runner,
+            "_signal_group",
+            lambda pid, sig: signalled.append((pid, sig)),
+        )
+        session.close()
+
+        assert queried == [], f"close() probed the reaped pid: {queried}"
+        assert signalled == [], f"close() signalled the reaped pid: {signalled}"
+
     def test_close_spends_one_grace_period_not_two(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
