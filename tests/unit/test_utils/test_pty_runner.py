@@ -651,6 +651,67 @@ class TestSaturatedSubscriberAtExit:
         assert drained == [b"hello", _Signal.END]
 
 
+class TestOutputAndExitAreSerialized:
+    """Data delivery and marker choice must not interleave."""
+
+    def test_channels_are_only_written_under_the_session_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Offering outside the lock reopened the truncated-exit hole.
+
+        A broadcast that interleaves with `_finish` can put a chunk *behind*
+        END, or let END be chosen for a queue it is about to fill. Either way
+        `drain()` stops at END, so a DESYNC appended afterwards is never seen
+        and the viewer terminates cleanly over lost bytes. Both sides run under
+        one lock now, so there is no interleaving left to reason about.
+        """
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        locked_during: list[bool] = []
+        try:
+            _, subscription = session.attach()
+            assert subscription is not None
+
+            real_offer = pty_runner._offer
+            real_force = pty_runner._force
+
+            def spy_offer(channel: Any, item: Any) -> bool:
+                locked_during.append(session._lock.locked())
+                return real_offer(channel, item)
+
+            def spy_force(channel: Any, marker: Any) -> None:
+                locked_during.append(session._lock.locked())
+                real_force(channel, marker)
+
+            monkeypatch.setattr(pty_runner, "_offer", spy_offer)
+            monkeypatch.setattr(pty_runner, "_force", spy_force)
+
+            session._broadcast(b"hello")
+            session._finish(0)
+        finally:
+            session.close()
+
+        assert locked_during, "neither path touched a subscriber channel"
+        assert all(locked_during), "a subscriber channel was written outside the lock"
+
+    def test_nothing_follows_the_terminal_marker(self, tmp_path: Path) -> None:
+        """Whatever the marker turns out to be, it is the last thing a viewer sees."""
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        try:
+            _, subscription = session.attach()
+            assert subscription is not None
+            session._broadcast(b"one")
+            session._broadcast(b"two")
+            session._finish(0)
+
+            channel = subscription.channel
+            drained = [channel.get_nowait() for _ in range(channel.qsize())]
+        finally:
+            session.close()
+
+        markers = [i for i, item in enumerate(drained) if isinstance(item, _Signal)]
+        assert markers == [len(drained) - 1], f"output landed behind the marker: {drained}"
+
+
 class TestExitIsPublishedAtomically:
     def test_attach_during_finish_cannot_miss_the_end_marker(self, tmp_path: Path) -> None:
         """`_exited` is set under the same lock `attach()` takes.

@@ -443,7 +443,7 @@ class PtySession:
         with self._lock:
             if subscription.channel in self._subscribers:
                 self._subscribers.remove(subscription.channel)
-        _force(subscription.channel, _Signal.DETACH)
+            _force(subscription.channel, _Signal.DETACH)
 
     def subscribe(self) -> Iterator[bytes]:
         """Yield output chunks, starting with the current scrollback.
@@ -491,21 +491,29 @@ class PtySession:
             self._finish(status if status is not None else self._proc.returncode)
 
     def _broadcast(self, chunk: bytes) -> None:
+        """Fan one chunk out to every viewer, cutting any that cannot keep up.
+
+        Delivery happens under the same lock :meth:`_finish` takes, which is
+        what keeps a viewer's exit marker honest. Offering outside it let a
+        chunk land *behind* END, and let END be chosen for a queue a broadcast
+        was about to fill — and since ``drain()`` stops at END, the DESYNC that
+        would have rescued the viewer was never seen. Every queue operation here
+        is non-blocking, so holding the lock across them costs nothing.
+        """
         with self._lock:
             self._scrollback.extend(chunk)
             self._trim_scrollback()
-            targets = list(self._subscribers)
-        for channel in targets:
-            if not _offer(channel, chunk):
-                self._cut(channel)
-
-    def _cut(self, channel: queue.Queue[bytes | _Signal]) -> None:
-        """Drop a subscriber that fell behind, telling it to resync."""
-        with self._lock:
-            if channel in self._subscribers:
+            # Dropping the oldest chunk would be the usual answer and is the
+            # wrong one: terminal output is a stateful escape stream, so losing
+            # bytes mid-sequence desynchronizes the screen permanently and
+            # silently. A viewer that cannot keep up is cut instead, and
+            # repaints from scrollback when it resubscribes.
+            behind = [channel for channel in self._subscribers if not _offer(channel, chunk)]
+            for channel in behind:
                 self._subscribers.remove(channel)
-        _force(channel, _Signal.DESYNC)
-        logger.warning("pty.subscriber.desync", session=self.id)
+                _force(channel, _Signal.DESYNC)
+        for _ in behind:
+            logger.warning("pty.subscriber.desync", session=self.id)
 
     def _trim_scrollback(self) -> None:
         """Bound the scrollback, cutting at an escape-sequence boundary.
@@ -534,15 +542,15 @@ class PtySession:
             # a channel absent from `targets` — it would never receive END and
             # its pump would block forever.
             self._exited.set()
-        for channel in targets:
-            # A full queue means the marker can only be delivered by evicting
-            # output. END would then paint an exit frame over a gap the viewer
-            # has no way to see — and being an orderly end, it gives the browser
-            # no reason to reconnect and repaint from scrollback. DESYNC cuts the
-            # stream instead, which is the recovery a viewer that fell behind
-            # already gets. (A broadcast racing this check finds the queue full
-            # too, and `_cut` desyncs the channel for the same reason.)
-            _force(channel, _Signal.DESYNC if channel.full() else _Signal.END)
+            for channel in targets:
+                # Chosen under the lock, alongside the broadcasts it has to stay
+                # consistent with. A full queue means the marker can only be
+                # delivered by evicting output; END would then paint an exit
+                # frame over a gap the viewer has no way to see, and being an
+                # orderly end it gives the browser no reason to reconnect and
+                # repaint from scrollback. DESYNC cuts the stream instead, which
+                # is the recovery a viewer that fell behind already gets.
+                _force(channel, _Signal.DESYNC if channel.full() else _Signal.END)
 
 
 def _force(channel: queue.Queue[bytes | _Signal], marker: _Signal) -> None:
