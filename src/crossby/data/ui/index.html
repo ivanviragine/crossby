@@ -47,7 +47,8 @@
       </label>
 
       <button type="submit" id="launch" class="primary">Launch session</button>
-      <button type="button" id="stop" class="danger" hidden>Stop session</button>
+      <button type="button" id="stop" class="danger" hidden>Stop this session</button>
+      <p class="hint-line" id="stop-hint" hidden>Stopping keeps the tab so you can read the output; × closes it.</p>
       <p class="error" id="error" role="alert" hidden></p>
     </form>
 
@@ -62,13 +63,11 @@
   </aside>
 
   <main class="stage">
-    <div class="stage-bar">
-      <span class="dot" id="status-dot" data-state="idle"></span>
-      <span id="status-text">No session</span>
-    </div>
-    <div id="terminal" class="terminal"></div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Terminal sessions"></div>
+    <div class="panes" id="panes"></div>
     <div class="placeholder" id="placeholder">
       <p>Pick a tool and launch — it runs on a real PTY, so the tool's full interface works here exactly as it does in your shell.</p>
+      <p class="placeholder-hint">Launch again to open another session; each gets its own tab.</p>
     </div>
   </main>
 </div>

@@ -1,4 +1,8 @@
 :root {
+  /* xterm renders a native scrollbar; without this it is white on the dark
+     terminal. Also themes native form controls to match. */
+  color-scheme: dark;
+
   --bg: #0f1115;
   --panel: #161920;
   --panel-2: #1d212b;
@@ -28,6 +32,10 @@ html, body {
 .app {
   display: grid;
   grid-template-columns: 300px 1fr;
+  /* minmax(0, 1fr), not 1fr: a default grid row is floored at its content's
+     min-content height, so the terminal could grow but never shrink — shortening
+     the window just made the page taller instead of reducing rows. */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
 }
 
@@ -94,6 +102,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .danger { background: transparent; color: var(--danger); border-color: var(--danger); }
 .danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); }
 
+.hint-line { margin: -4px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.hint-line[hidden] { display: none; }
+
 .error {
   margin: 0;
   padding: 8px 10px;
@@ -122,39 +133,102 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 
 /* ---------- terminal stage ---------- */
-.stage { display: flex; flex-direction: column; min-width: 0; position: relative; }
+.stage {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
 
-.stage-bar {
+/* ---------- tab strip ---------- */
+.tabs {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
-  font-size: 12px;
-  color: var(--muted);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  min-height: 39px;
 }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.tabs:empty { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 11px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tab:hover { background: var(--panel-2); color: var(--text); }
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot[data-state="running"] { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
 .dot[data-state="exited"] { background: var(--danger); }
+.dot[data-state="stopped"] { background: var(--muted); }
 
-.terminal { flex: 1; min-height: 0; padding: 8px 4px 8px 10px; }
-.terminal .xterm { height: 100%; }
+.tab-close {
+  padding: 1px 5px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tab-close:hover { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
+
+/* ---------- panes ---------- */
+.panes { position: relative; min-height: 0; }
+.pane {
+  position: absolute;
+  inset: 0;
+  padding: 8px 4px 8px 10px;
+  visibility: hidden;
+}
+/* Hidden panes stay laid out (not display:none) so xterm keeps correct
+   dimensions and does not need a re-fit on every tab switch. */
+.pane[data-active="true"] { visibility: visible; }
+.pane .xterm { height: 100%; }
 
 .placeholder {
   position: absolute;
-  inset: 39px 0 0 0;
+  inset: 0;
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 10px;
   padding: 32px;
   background: var(--bg);
   pointer-events: none;
 }
-.placeholder p { max-width: 42ch; text-align: center; color: var(--muted); line-height: 1.6; }
+.placeholder p { max-width: 42ch; text-align: center; color: var(--muted); line-height: 1.6; margin: 0; }
+.placeholder-hint { font-size: 12.5px; opacity: .7; }
 .placeholder[hidden] { display: none; }
 
 @media (max-width: 800px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; min-height: 100vh; }
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: auto;
+    min-height: 100vh;
+  }
   .panel { border-right: none; border-bottom: 1px solid var(--line); }
   .stage { min-height: 70vh; }
 

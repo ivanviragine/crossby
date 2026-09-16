@@ -5,6 +5,12 @@ streams terminal output over Server-Sent Events and takes keystrokes back as
 small POSTs. On loopback the round trip is sub-millisecond, and the project
 keeps its current dependency set.
 
+**One stream carries every session.** A browser allows roughly six HTTP/1.1
+connections per origin, and a stream per session spends one apiece; measured,
+the sixth open terminal exhausts the pool and stalls every other request —
+including the POSTs carrying keystrokes, so typing stops working. Multiplexing
+removes tab count as a transport concern entirely.
+
 Terminal output is **base64-encoded** inside each SSE frame. Raw output is
 bytes, and a read boundary regularly lands mid-UTF-8-sequence or mid-escape;
 base64 sidesteps both that and the newline-framing rules of the SSE wire format
@@ -50,12 +56,14 @@ import structlog
 
 from crossby import data as _data
 from crossby.config.json_utils import PathContainmentError, assert_within
-from crossby.utils.pty_runner import PtyUnsupportedError, SubscriberDesyncError
+from crossby.utils.pty_runner import PtyUnsupportedError
 from crossby.web.sessions import (
     LaunchRequest,
     LaunchValidationError,
+    MultiplexedStream,
     SessionManager,
     SessionNotFoundError,
+    StreamEvent,
     describe_tools,
     window_size_from_payload,
 )
@@ -149,8 +157,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
         elif route == "/api/sessions":
             self._send_json(HTTPStatus.OK, {"sessions": self.ui.sessions.list_sessions()})
-        elif route.startswith("/api/sessions/") and route.endswith("/stream"):
-            self._stream(route[len("/api/sessions/") : -len("/stream")])
+        elif route == "/api/stream":
+            self._stream()
         elif route.startswith("/api/sessions/"):
             self._with_session(route[len("/api/sessions/") :], self._describe)
         else:
@@ -240,14 +248,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
         session.resize(size)
         self._send_json(HTTPStatus.OK, {"cols": size.cols, "rows": size.rows})
 
-    def _stream(self, session_id: str) -> None:
-        """Stream a session's output to the browser as Server-Sent Events."""
-        try:
-            session = self.ui.sessions.get(session_id)
-        except SessionNotFoundError:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "no such session"})
-            return
+    def _stream(self) -> None:
+        """Stream every session's output to the browser as Server-Sent Events.
 
+        One connection carries all sessions. Per-session streams would each hold
+        an HTTP/1.1 connection, and a browser allows only ~6 per origin — the
+        sixth terminal would stall every other request, keystrokes included.
+        """
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -259,18 +266,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         heartbeat = _Heartbeat(self.wfile, SSE_KEEPALIVE_SECONDS)
         heartbeat.start()
         try:
-            for chunk in session.subscribe():
-                payload = base64.b64encode(chunk).decode("ascii")
-                heartbeat.write(f"event: output\ndata: {payload}\n\n".encode())
-            heartbeat.write(
-                f"event: exit\ndata: {json.dumps({'exit_code': session.exit_code})}\n\n".encode()
-            )
-        except SubscriberDesyncError:
-            # Close without an exit frame: EventSource reconnects on its own and
-            # repaints from scrollback, which beats rendering corrupted output.
-            logger.warning("web.stream.desync", session=session_id)
+            with MultiplexedStream(self.ui.sessions) as stream:
+                for event in stream:
+                    heartbeat.write(_sse_frame(event))
+                if stream.desynced:
+                    # Close without a terminal marker: EventSource reconnects on
+                    # its own and repaints every session from fresh scrollback.
+                    logger.warning("web.stream.desync")
         except (BrokenPipeError, ConnectionResetError):
-            logger.debug("web.stream.disconnected", session=session_id)
+            logger.debug("web.stream.disconnected")
         finally:
             heartbeat.stop()
 
@@ -379,6 +383,28 @@ class _RequestHandler(BaseHTTPRequestHandler):
         with_body = self.command != "HEAD"
         if with_body:
             self.wfile.write(body)
+
+
+def _sse_frame(event: StreamEvent) -> bytes:
+    """Encode one multiplexed event as an SSE frame.
+
+    Output travels base64-encoded: terminal bytes split UTF-8 sequences and
+    escapes at arbitrary boundaries, and SSE is a newline-framed text protocol.
+    """
+    payload: dict[str, Any]
+    if event.kind == "output":
+        payload = {
+            "session": event.session_id,
+            "chunk": base64.b64encode(event.chunk).decode("ascii"),
+        }
+        return f"event: output\ndata: {json.dumps(payload)}\n\n".encode()
+    payload = {
+        "session": event.session_id,
+        "exit_code": event.exit_code,
+        "stopped": event.stopped,
+        "exit_signal": event.exit_signal,
+    }
+    return f"event: exit\ndata: {json.dumps(payload)}\n\n".encode()
 
 
 class _Heartbeat:

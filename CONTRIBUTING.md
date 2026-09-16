@@ -125,6 +125,29 @@ Three pieces:
   base64 inside SSE frames, input and resize come back as POSTs. No new
   dependency, and no asyncio next to an otherwise synchronous codebase.
 
+**One stream carries every session** (`MultiplexedStream`). This is not
+premature generality: a browser allows roughly six HTTP/1.1 connections per
+origin, and a stream per session spends one apiece. Measured, the sixth open
+terminal exhausts the pool and stalls *every* other request — including the
+POSTs carrying keystrokes, so typing silently stops working. One pump thread per
+session feeds a shared queue; sessions opened while the stream is live arrive
+through `SessionManager.add_listener`, and closing the stream detaches every
+subscription, which also releases pumps parked on a quiet session. Do not
+reintroduce per-session streams.
+
+**Replay geometry is load-bearing** (frontend). Scrollback is a raw byte stream
+containing absolute cursor-positioning escapes computed for the size the tool
+was drawing at. A restored tab therefore constructs its `Terminal` with the
+session's *server-reported* `cols`/`rows` and only refits once it is activated.
+Replaying into xterm's 80x24 default silently puts the content off-screen — the
+buffer ends up genuinely empty, which looks exactly like a lost session. For the
+same reason, a session the page has not seen buffers its frames until
+`GET /api/sessions/{id}` returns the real geometry.
+
+**xterm does not paint into a hidden container** and does not repaint merely on
+becoming visible, so `activate()` forces `term.refresh()`. Panes are hidden with
+`visibility`, not `display: none`, so they keep their dimensions.
+
 **Why this does not call `cli/launch.py`.** That function resolves
 interactively, prints Rich markup and raises `typer.Exit` — none of which
 survives a browser. Adapters, by contrast, import nothing from `crossby.ui`, so

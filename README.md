@@ -670,12 +670,25 @@ view: the tool runs on a server-side pseudo-terminal, so its full-screen
 interface, colours, keybindings, `Ctrl-C` and resize behaviour all work exactly
 as they do in your shell.
 
+**Multiple sessions, in tabs.** Launch again for another session — each gets its
+own tab, its own terminal and its own PTY, and they run side by side. Every
+session streams over a single connection, so the tab count is not limited by the
+browser's per-origin connection cap.
+
+**Reloading the page does not lose your work.** Sessions live on the server, so
+a refresh reattaches to everything still running and repaints each tab from its
+scrollback.
+
+**Stop vs close.** *Stop this session* ends the tool but keeps the tab so you can
+read the final output; the tab's **×** closes it (stopping it first if it is
+still running).
+
 The form is generated from each adapter's declared capabilities, so a tool only
 ever offers what it actually supports — no effort selector on Copilot, no YOLO
 toggle on OpenCode.
 
-**Scope in this release.** The UI launches a session and lets you interact with
-it. Scene selection, profiles, resume and transcript capture are not wired into
+**Scope in this release.** The UI launches sessions and lets you interact with
+them. Scene selection, profiles, resume and transcript capture are not wired into
 it yet; use the CLI for those.
 
 ### Security
@@ -702,16 +715,25 @@ command fails with a clear message rather than degrading silently.
 
 ### What has been verified
 
-The terminal stack is exercised against real full-screen TUIs — `vim`, `top`
-and `less` — covering alternate-screen rendering, modal input, self-driven
-repaint, mouse reporting, and resize (a resized window is reflected in the
-running program's own idea of `columns`/`lines`).
+Verified against the real CLIs — **Claude Code** and **Codex**, signed in as
+usual — covering startup, trust prompts driven by arrow keys, streamed answers
+with syntax highlighting, `Ctrl-C` interrupting a reply, resize with the tool
+re-wrapping its output, and clean exit.
 
-**Not yet exercised against a real AI CLI's first-run flow.** Interactive login,
-OAuth browser redirects and device-code prompts have not been tested through the
-browser terminal. Authenticate the tool once in a normal shell before launching
-it here. If a tool tries to open a browser during login, it opens on the machine
-running the server.
+Also exercised against real full-screen TUIs (`vim`, `top`, `less`) for
+alternate-screen rendering, self-driven repaint, mouse reporting, and resize
+confirmed against the running program's own `columns`/`lines`.
+
+**Not yet exercised: first-run sign-in.** Interactive login, OAuth browser
+redirects and device-code prompts have not been tested through the browser
+terminal. Authenticate the tool once in a normal shell first. If a tool opens a
+browser during login, it opens on the machine running the server.
+
+**Known cosmetic issue.** A tool may echo a stray `^[[I` or `^[[?1;2c` in its
+first frame — the terminal's own focus and device-attribute replies arriving
+before the tool switches the tty to raw mode, made likelier by the extra round
+trip through the server. crossby holds outgoing bytes until the tool has drawn
+something, which narrows the window; the tool clears it on its next redraw.
 
 ## Update installed tools
 

@@ -63,9 +63,10 @@ READ_CHUNK_SIZE = 64 * 1024
 # needs to cover the gap, not the whole session.
 SCROLLBACK_LIMIT = 256 * 1024
 
-# Pending chunks per subscriber before the slowest viewer starts losing the
-# oldest ones. Dropping is deliberate: one stalled browser tab must never block
-# the reader thread and thereby the child's stdout.
+# Pending chunks a subscriber may fall behind before it is cut loose (see
+# _offer: bytes are never dropped, because a gap mid-escape-sequence corrupts
+# the viewer's screen silently). The bound exists so one stalled browser tab
+# cannot block the reader thread and thereby the child's stdout.
 SUBSCRIBER_QUEUE_LIMIT = 2048
 
 # Grace period between SIGHUP and SIGKILL when closing a session.
@@ -91,6 +92,7 @@ class _Signal(Enum):
 
     END = "end"
     DESYNC = "desync"
+    DETACH = "detach"
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,27 @@ def pty_supported() -> bool:
 def _acquire_controlling_tty() -> None:  # pragma: no cover - runs post-fork
     """Make the inherited slave this session's controlling terminal."""
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+@dataclass(frozen=True)
+class Subscription:
+    """A registered viewer's private channel into one session's output."""
+
+    channel: queue.Queue[bytes | _Signal]
+
+
+def drain(subscription: Subscription) -> Iterator[bytes]:
+    """Yield a subscription's live chunks until it ends, detaches, or desyncs."""
+    while True:
+        chunk = subscription.channel.get()
+        if chunk is _Signal.END or chunk is _Signal.DETACH:
+            return
+        if chunk is _Signal.DESYNC:
+            raise SubscriberDesyncError(
+                "terminal output outpaced this viewer; resubscribe to resync"
+            )
+        assert isinstance(chunk, bytes)
+        yield chunk
 
 
 class PtySession:
@@ -214,6 +237,26 @@ class PtySession:
         return not self._exited.is_set()
 
     @property
+    def stopped(self) -> bool:
+        """Whether this session ended because :meth:`close` was called."""
+        return self._closed
+
+    @property
+    def exit_signal(self) -> str | None:
+        """Name of the signal that killed the child, if one did.
+
+        ``Popen.returncode`` encodes this as ``-N``, which surfaces as a
+        baffling "exit -1" unless it is translated.
+        """
+        code = self._exit_code
+        if code is None or code >= 0:
+            return None
+        try:
+            return signal.Signals(-code).name
+        except ValueError:  # pragma: no cover - unknown signal number
+            return f"signal {-code}"
+
+    @property
     def size(self) -> WindowSize:
         with self._lock:
             return self._size
@@ -275,6 +318,34 @@ class PtySession:
                 raise
 
     # -- output -----------------------------------------------------------
+    def attach(self) -> tuple[bytes, Subscription | None]:
+        """Register a viewer, returning ``(scrollback, subscription)``.
+
+        The snapshot and the registration happen under one lock, so no chunk can
+        slip between them. ``subscription`` is ``None`` when the child has
+        already exited — the scrollback is then the whole story.
+
+        Callers must pass the subscription to :meth:`detach` when done.
+        :meth:`subscribe` wraps this pair for the simple single-session case;
+        the multiplexer uses them directly so it can release a viewer that is
+        parked in ``Queue.get()`` on a quiet session.
+        """
+        channel: queue.Queue[bytes | _Signal] = queue.Queue(maxsize=SUBSCRIBER_QUEUE_LIMIT)
+        with self._lock:
+            backlog = bytes(self._scrollback)
+            if self._exited.is_set():
+                return backlog, None
+            self._subscribers.append(channel)
+        return backlog, Subscription(channel)
+
+    def detach(self, subscription: Subscription) -> None:
+        """Release a viewer and wake it if it is parked waiting for output."""
+        with self._lock:
+            if subscription.channel in self._subscribers:
+                self._subscribers.remove(subscription.channel)
+        with suppress(queue.Full):
+            subscription.channel.put_nowait(_Signal.DETACH)
+
     def subscribe(self) -> Iterator[bytes]:
         """Yield output chunks, starting with the current scrollback.
 
@@ -282,32 +353,16 @@ class PtySession:
         subscriber that cannot keep up raises :class:`SubscriberDesyncError`
         rather than stalling the reader thread or silently losing bytes.
         """
-        channel: queue.Queue[bytes | _Signal] = queue.Queue(maxsize=SUBSCRIBER_QUEUE_LIMIT)
-        with self._lock:
-            backlog = bytes(self._scrollback)
-            already_done = self._exited.is_set()
-            if not already_done:
-                self._subscribers.append(channel)
-
+        backlog, subscription = self.attach()
         try:
             if backlog:
                 yield backlog
-            if already_done:
+            if subscription is None:
                 return
-            while True:
-                chunk = channel.get()
-                if chunk is _Signal.END:
-                    return
-                if chunk is _Signal.DESYNC:
-                    raise SubscriberDesyncError(
-                        "terminal output outpaced this viewer; resubscribe to resync"
-                    )
-                assert isinstance(chunk, bytes)
-                yield chunk
+            yield from drain(subscription)
         finally:
-            with self._lock:
-                if channel in self._subscribers:
-                    self._subscribers.remove(channel)
+            if subscription is not None:
+                self.detach(subscription)
 
     def _pump_output(self) -> None:
         """Drain the master descriptor until the child closes it."""

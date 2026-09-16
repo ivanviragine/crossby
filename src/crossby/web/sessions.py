@@ -11,7 +11,9 @@ an unsupported flag is a clean 400 rather than a confusing tool-side error.
 
 from __future__ import annotations
 
+import queue
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +23,13 @@ import structlog
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.models.ai import AIToolID, AIToolType, EffortLevel
-from crossby.utils.pty_runner import PtySession, WindowSize
+from crossby.utils.pty_runner import (
+    PtySession,
+    SubscriberDesyncError,
+    Subscription,
+    WindowSize,
+    drain,
+)
 
 logger = structlog.get_logger()
 
@@ -150,6 +158,7 @@ class SessionManager:
         self.project_root = project_root.resolve()
         self._sessions: dict[str, PtySession] = {}
         self._requests: dict[str, LaunchRequest] = {}
+        self._listeners: list[Callable[[PtySession], None]] = []
         self._lock = threading.Lock()
 
     def create(self, request: LaunchRequest) -> PtySession:
@@ -198,13 +207,30 @@ class SessionManager:
         with self._lock:
             self._sessions[session.id] = session
             self._requests[session.id] = request
+            listeners = list(self._listeners)
         logger.info(
             "web.session.created",
             session=session.id,
             tool=str(request.tool),
             model=request.model,
         )
+        for listener in listeners:
+            listener(session)
         return session
+
+    def add_listener(self, callback: Callable[[PtySession], None]) -> None:
+        """Notify *callback* of each session created from now on."""
+        with self._lock:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[PtySession], None]) -> None:
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
+    def live_sessions(self) -> list[PtySession]:
+        with self._lock:
+            return list(self._sessions.values())
 
     def get(self, session_id: str) -> PtySession:
         with self._lock:
@@ -233,6 +259,8 @@ class SessionManager:
             "pid": session.pid,
             "running": session.running,
             "exit_code": session.exit_code,
+            "stopped": session.stopped,
+            "exit_signal": session.exit_signal,
             "cols": session.size.cols,
             "rows": session.size.rows,
         }
@@ -255,3 +283,138 @@ class SessionManager:
             self._requests.clear()
         for session in sessions:
             session.close()
+
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """One tagged event on the multiplexed stream."""
+
+    kind: str  # "output" | "exit"
+    session_id: str
+    chunk: bytes = b""
+    exit_code: int | None = None
+    stopped: bool = False
+    exit_signal: str | None = None
+
+
+class MultiplexedStream:
+    """Every session's output on one iterator, tagged by session id.
+
+    A browser holds at most ~6 HTTP/1.1 connections per origin, and a
+    per-session stream would spend one apiece — the sixth open terminal
+    exhausts the pool and stalls *every* other request, keystrokes included.
+    Folding all sessions into a single stream removes that ceiling: tab count
+    stops being a transport concern.
+
+    One pump thread per session feeds a shared queue. Sessions created while the
+    stream is open are picked up through :meth:`SessionManager.add_listener`.
+    Closing the stream detaches every subscription, which also wakes pumps
+    parked on a quiet session.
+    """
+
+    def __init__(self, manager: SessionManager, *, capacity: int = 4096) -> None:
+        self._manager = manager
+        self._queue: queue.Queue[StreamEvent | None] = queue.Queue(maxsize=capacity)
+        self._subscriptions: dict[str, tuple[PtySession, Subscription]] = {}
+        self._pumps: list[threading.Thread] = []
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+        self._desynced = threading.Event()
+
+    def __enter__(self) -> MultiplexedStream:
+        self._manager.add_listener(self._on_session_created)
+        for session in self._manager.live_sessions():
+            self._start_pump(session)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._manager.remove_listener(self._on_session_created)
+        self._closed.set()
+        with self._lock:
+            pending = list(self._subscriptions.values())
+            self._subscriptions.clear()
+        for session, subscription in pending:
+            session.detach(subscription)
+        with suppress(queue.Full):
+            self._queue.put_nowait(None)
+
+    def __iter__(self) -> Iterator[StreamEvent]:
+        while True:
+            event = self._queue.get()
+            if event is None:
+                return
+            yield event
+
+    @property
+    def desynced(self) -> bool:
+        """Whether the consumer fell behind and the stream was cut."""
+        return self._desynced.is_set()
+
+    def _on_session_created(self, session: PtySession) -> None:
+        if not self._closed.is_set():
+            self._start_pump(session)
+
+    def _start_pump(self, session: PtySession) -> None:
+        with self._lock:
+            if session.id in self._subscriptions or self._closed.is_set():
+                return
+        thread = threading.Thread(
+            target=self._pump, args=(session,), name=f"mux-{session.id[:8]}", daemon=True
+        )
+        self._pumps.append(thread)
+        thread.start()
+
+    def _pump(self, session: PtySession) -> None:
+        """Forward one session's output into the shared queue, tagged."""
+        backlog, subscription = session.attach()
+        if subscription is not None:
+            with self._lock:
+                if self._closed.is_set():
+                    session.detach(subscription)
+                    return
+                self._subscriptions[session.id] = (session, subscription)
+        if backlog:
+            self._emit(StreamEvent("output", session.id, chunk=backlog))
+        try:
+            if subscription is not None:
+                for chunk in drain(subscription):
+                    self._emit(StreamEvent("output", session.id, chunk=chunk))
+        except SubscriberDesyncError:
+            self._cut()
+            return
+        finally:
+            if subscription is not None:
+                with self._lock:
+                    self._subscriptions.pop(session.id, None)
+                session.detach(subscription)
+        # drain() also returns on detach, which is not an exit — only report one
+        # when the child has actually finished.
+        if not session.running:
+            self._emit(
+                StreamEvent(
+                    "exit",
+                    session.id,
+                    exit_code=session.exit_code,
+                    stopped=session.stopped,
+                    exit_signal=session.exit_signal,
+                )
+            )
+
+    def _emit(self, event: StreamEvent) -> None:
+        if self._closed.is_set():
+            return
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            # Same reasoning as a single session: never drop terminal bytes.
+            self._cut()
+
+    def _cut(self) -> None:
+        if self._desynced.is_set():
+            return
+        self._desynced.set()
+        logger.warning("web.stream.multiplexed_desync")
+        self.close()

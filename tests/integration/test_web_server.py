@@ -10,14 +10,18 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from crossby.models.ai import AIToolID
+from crossby.utils.pty_runner import WindowSize
 from crossby.web import serve
 from crossby.web.server import SESSION_COOKIE, CrossbyUIServer
+from crossby.web.sessions import LaunchRequest, MultiplexedStream
 
 TOKEN = "test-token-not-a-secret"
 
@@ -163,8 +167,9 @@ class TestApiContract:
     def test_unknown_route_is_not_found(self, server: CrossbyUIServer) -> None:
         assert request(server, "GET", "/api/nope")[0] == 404
 
-    def test_unknown_session_stream_is_not_found(self, server: CrossbyUIServer) -> None:
-        assert request(server, "GET", "/api/sessions/missing/stream")[0] == 404
+    def test_per_session_stream_route_is_gone(self, server: CrossbyUIServer) -> None:
+        """Superseded by the multiplexed stream; see TestMultiplexedStream."""
+        assert request(server, "GET", "/api/sessions/any/stream")[0] == 404
 
     def test_unknown_session_input_is_not_found(self, server: CrossbyUIServer) -> None:
         status, _, _ = request(server, "POST", "/api/sessions/missing/input", body={"data": "x"})
@@ -199,3 +204,89 @@ class TestBindingPolicy:
         """This server spawns AI tools; it must never face a network."""
         with pytest.raises(ValueError, match="loopback"):
             serve(tmp_path, host=host)
+
+
+class TestMultiplexedStream:
+    """One SSE connection carries every session.
+
+    A browser allows roughly six HTTP/1.1 connections per origin. With a stream
+    per session the sixth terminal exhausts the pool and stalls every other
+    request — including the POSTs carrying keystrokes — so tab count would
+    silently become a transport limit.
+    """
+
+    def test_stream_requires_a_token(self, server: CrossbyUIServer) -> None:
+        assert request(server, "GET", "/api/stream", token=None)[0] == 401
+
+    def test_stream_rejects_cross_origin(self, server: CrossbyUIServer) -> None:
+        status, _, _ = request(server, "GET", "/api/stream", origin="https://evil.example")
+        assert status == 403
+
+    def test_stream_carries_every_session_tagged(self, server: CrossbyUIServer) -> None:
+        """Two sessions, one connection, frames tagged by session id."""
+        first = server.sessions.create(
+            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+        )
+        second = server.sessions.create(
+            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+        )
+        try:
+            seen: set[str] = set()
+            with MultiplexedStream(server.sessions) as stream:
+                first.write(b"echo first\n")
+                second.write(b"echo second\n")
+                deadline = time.monotonic() + 10
+                for event in stream:
+                    seen.add(event.session_id)
+                    if {first.id, second.id} <= seen or time.monotonic() > deadline:
+                        break
+            assert {first.id, second.id} <= seen
+        finally:
+            first.close()
+            second.close()
+
+    def test_stream_picks_up_sessions_created_later(self, server: CrossbyUIServer) -> None:
+        """A tab opened after the stream is live must still receive output."""
+        with MultiplexedStream(server.sessions) as stream:
+            later = server.sessions.create(
+                LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+            )
+            try:
+                later.write(b"echo later\n")
+                deadline = time.monotonic() + 10
+                for event in stream:
+                    if event.session_id == later.id:
+                        break
+                    assert time.monotonic() < deadline, "no frame for the later session"
+            finally:
+                later.close()
+
+    def test_closing_the_stream_releases_idle_pumps(self, server: CrossbyUIServer) -> None:
+        """A pump parked on a silent session must not outlive its stream."""
+        session = server.sessions.create(
+            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+        )
+        try:
+            before = threading.active_count()
+            stream = MultiplexedStream(server.sessions)
+            stream.__enter__()
+            time.sleep(0.4)
+            stream.close()
+            time.sleep(0.6)
+            assert threading.active_count() <= before + 1, "pump thread leaked"
+        finally:
+            session.close()
+
+
+class TestExitProvenance:
+    def test_stopped_session_is_labelled_stopped_not_exit_minus_one(
+        self, server: CrossbyUIServer
+    ) -> None:
+        """`close()` kills with SIGHUP; a raw returncode of -1 reads as nonsense."""
+        session = server.sessions.create(
+            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+        )
+        session.close()
+        described = server.sessions.describe(session.id)
+        assert described["stopped"] is True
+        assert described["exit_signal"] == "SIGHUP"

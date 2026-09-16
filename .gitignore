@@ -26,3 +26,9 @@ steps.md
 .cursor/skills
 .gemini/
 .github/skills
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+.*.sw[a-p]
