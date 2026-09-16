@@ -16,12 +16,14 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import PlanModeLaunchError
 from crossby.models.ai import AIToolID, AIToolType, EffortLevel
 from crossby.utils.pty_runner import (
     PtySession,
@@ -36,6 +38,23 @@ logger = structlog.get_logger()
 # Sessions a single UI process will hold open at once. The cap exists so a
 # runaway page cannot fork unbounded AI tool processes.
 MAX_CONCURRENT_SESSIONS = 16
+
+
+class Autonomy(StrEnum):
+    """How much the tool may do without asking.
+
+    Mutually exclusive by construction, mirroring ``crossby launch``: native
+    plan mode is exclusive, and the remaining rungs have a fixed precedence
+    (yolo > auto > accept-edits > default prompting). Modelling them as one
+    choice makes the contradictory combinations unrepresentable rather than
+    something to validate after the fact.
+    """
+
+    DEFAULT = "default"
+    PLAN = "plan"
+    ACCEPT_EDITS = "accept-edits"
+    AUTO = "auto"
+    YOLO = "yolo"
 
 
 class SessionNotFoundError(KeyError):
@@ -53,9 +72,27 @@ class LaunchRequest:
     tool: AIToolID
     model: str | None = None
     effort: EffortLevel | None = None
-    yolo: bool = False
+    autonomy: Autonomy = Autonomy.DEFAULT
     initial_message: str | None = None
+    network_access: bool = False
+    sandbox: bool = True
     size: WindowSize = field(default=WindowSize(cols=80, rows=24))
+
+    @property
+    def yolo(self) -> bool:
+        return self.autonomy is Autonomy.YOLO
+
+    @property
+    def plan_mode(self) -> bool:
+        return self.autonomy is Autonomy.PLAN
+
+    @property
+    def accept_edits(self) -> bool:
+        return self.autonomy is Autonomy.ACCEPT_EDITS
+
+    @property
+    def auto(self) -> bool:
+        return self.autonomy is Autonomy.AUTO
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> LaunchRequest:
@@ -84,12 +121,20 @@ class LaunchRequest:
         if message is not None and not isinstance(message, str):
             raise LaunchValidationError("'initial_message' must be a string")
 
+        raw_autonomy = payload.get("autonomy") or Autonomy.DEFAULT.value
+        try:
+            autonomy = Autonomy(raw_autonomy)
+        except ValueError as exc:
+            raise LaunchValidationError(f"unknown autonomy mode: {raw_autonomy!r}") from exc
+
         return cls(
             tool=tool,
             model=model,
             effort=effort,
-            yolo=bool(payload.get("yolo", False)),
+            autonomy=autonomy,
             initial_message=message,
+            network_access=bool(payload.get("network_access", False)),
+            sandbox=bool(payload.get("sandbox", True)),
             size=_window_size(payload),
         )
 
@@ -139,11 +184,27 @@ def describe_tools() -> list[dict[str, Any]]:
                 "models": [model.id for model in adapter.get_models()],
                 "supports_effort": caps.supports_effort,
                 "supported_efforts": [e.value for e in caps.supported_efforts],
-                "supports_yolo": caps.supports_yolo,
                 "supports_initial_message": caps.supports_initial_message,
+                "autonomy": [mode.value for mode in _supported_autonomy(caps)],
+                "supports_network_access": caps.supports_network_access,
+                "supports_sandbox_toggle": caps.supports_sandbox_toggle,
             }
         )
     return described
+
+
+def _supported_autonomy(caps: Any) -> list[Autonomy]:
+    """The autonomy rungs one adapter actually implements."""
+    modes = [Autonomy.DEFAULT]
+    if caps.plan_mode.supported:
+        modes.append(Autonomy.PLAN)
+    if caps.supports_accept_edits:
+        modes.append(Autonomy.ACCEPT_EDITS)
+    if caps.supports_auto:
+        modes.append(Autonomy.AUTO)
+    if caps.supports_yolo:
+        modes.append(Autonomy.YOLO)
+    return modes
 
 
 class SessionManager:
@@ -177,8 +238,18 @@ class SessionManager:
             raise LaunchValidationError(
                 f"{caps.display_name} supports these effort levels: {supported}"
             )
-        if request.yolo and not caps.supports_yolo:
-            raise LaunchValidationError(f"{caps.display_name} does not support YOLO mode")
+        if request.autonomy not in _supported_autonomy(caps):
+            supported = ", ".join(m.value for m in _supported_autonomy(caps))
+            raise LaunchValidationError(
+                f"{caps.display_name} does not support {request.autonomy.value!r} "
+                f"autonomy; supported: {supported}"
+            )
+        if request.network_access and not caps.supports_network_access:
+            raise LaunchValidationError(f"{caps.display_name} has no sandbox network opt-in")
+        if not request.sandbox and not caps.supports_sandbox_toggle:
+            raise LaunchValidationError(
+                f"{caps.display_name} does not support disabling its sandbox"
+            )
         if request.initial_message and not caps.supports_initial_message:
             raise LaunchValidationError(f"{caps.display_name} does not accept an initial message")
 
@@ -195,13 +266,27 @@ class SessionManager:
                     "close one before starting another"
                 )
 
-        command = adapter.build_launch_command(
-            model=request.model,
-            initial_message=request.initial_message,
-            effort=request.effort,
-            yolo=request.yolo,
-            working_dir=self.project_root,
-        )
+        command_kwargs: dict[str, Any] = {
+            "model": request.model,
+            "initial_message": request.initial_message,
+            "effort": request.effort,
+            "yolo": request.yolo,
+            "plan_mode": request.plan_mode,
+            "accept_edits": request.accept_edits,
+            "auto": request.auto,
+            "network_access": request.network_access,
+            "working_dir": self.project_root,
+        }
+        # Only adapters declaring the toggle accept the keyword; passing it
+        # unconditionally would break the others' builders.
+        if caps.supports_sandbox_toggle:
+            command_kwargs["sandbox"] = request.sandbox
+        try:
+            command = adapter.build_launch_command(**command_kwargs)
+        except PlanModeLaunchError as exc:
+            # The adapter's own pre-launch gate; surface it as a bad request
+            # rather than a server error.
+            raise LaunchValidationError(str(exc)) from exc
         session = PtySession(command, cwd=self.project_root, size=request.size)
 
         with self._lock:
@@ -254,6 +339,7 @@ class SessionManager:
             "id": session.id,
             "tool": str(request.tool) if request else None,
             "model": request.model if request else None,
+            "autonomy": request.autonomy.value if request else None,
             "command": session.command,
             "cwd": str(session.cwd),
             "pid": session.pid,

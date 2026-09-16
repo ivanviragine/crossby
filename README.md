@@ -664,8 +664,8 @@ crossby ui                 # serve the current directory, open a browser
 crossby ui --path ~/work/api --port 7420 --no-open
 ```
 
-Pick a tool, model, effort and initial message in the form, hit **Launch**, and
-the tool appears in an embedded terminal. It is a **real terminal**, not a log
+Pick a tool, model, effort, autonomy and initial message in the form, hit
+**Launch**, and the tool appears in an embedded terminal. It is a **real terminal**, not a log
 view: the tool runs on a server-side pseudo-terminal, so its full-screen
 interface, colours, keybindings, `Ctrl-C` and resize behaviour all work exactly
 as they do in your shell.
@@ -685,7 +685,23 @@ still running).
 
 The form is generated from each adapter's declared capabilities, so a tool only
 ever offers what it actually supports — no effort selector on Copilot, no YOLO
-toggle on OpenCode.
+rung on OpenCode, no plan mode on Codex, and the sandbox and network controls
+only where a tool honours them.
+
+**Autonomy** is one choice rather than a row of checkboxes, matching
+`crossby launch`: plan mode is exclusive, and the rest form a ladder.
+
+| Rung | What the tool may do |
+| --- | --- |
+| Ask before acting | Prompts for edits and commands (default). |
+| Plan only | Native plan mode — proposes, changes nothing. |
+| Auto-accept edits | Edits apply without asking; commands still prompt. |
+| Auto | The tool's own classifier decides what needs asking (Claude only). |
+| YOLO | No permission prompts at all. |
+
+**Closing a tab asks first** when the session is still running — the **×** sits
+next to the label, and ending a live tool by a stray click is not a good trade.
+Tabs of the same tool are numbered so two Claude sessions are distinguishable.
 
 **Scope in this release.** The UI launches sessions and lets you interact with
 them. Scene selection, profiles, resume and transcript capture are not wired into
@@ -729,11 +745,10 @@ redirects and device-code prompts have not been tested through the browser
 terminal. Authenticate the tool once in a normal shell first. If a tool opens a
 browser during login, it opens on the machine running the server.
 
-**Known cosmetic issue.** A tool may echo a stray `^[[I` or `^[[?1;2c` in its
-first frame — the terminal's own focus and device-attribute replies arriving
-before the tool switches the tty to raw mode, made likelier by the extra round
-trip through the server. crossby holds outgoing bytes until the tool has drawn
-something, which narrows the window; the tool clears it on its next redraw.
+**Reattaching forces a redraw.** Replayed scrollback is a cushion, not a
+transcript: a tool with an idle animation (Codex emits ~10.8 KB/s doing nothing)
+pushes real output out of the buffer within seconds. On reattach the page nudges
+the terminal size, which makes the tool repaint from its own state.
 
 ## Update installed tools
 

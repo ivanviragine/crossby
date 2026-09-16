@@ -39,6 +39,7 @@ import fcntl
 import os
 import pty
 import queue
+import re
 import signal
 import struct
 import subprocess
@@ -58,10 +59,16 @@ logger = structlog.get_logger()
 # One read syscall's worth of terminal output.
 READ_CHUNK_SIZE = 64 * 1024
 
-# Bytes of recent output retained so a reconnecting viewer can repaint. A
-# full-screen TUI redraws itself on the next keystroke or resize, so this only
-# needs to cover the gap, not the whole session.
-SCROLLBACK_LIMIT = 256 * 1024
+# Bytes of recent output retained so a reconnecting viewer can repaint.
+# Deliberately generous: a tool with an idle animation (Codex emits ~10.8 KB/s
+# doing nothing) otherwise pushes every real frame out within seconds, and a
+# reattaching viewer replays pure animation. This is a cushion, not the
+# mechanism — a reattaching viewer should also force a redraw, which makes the
+# tool repaint from its own state.
+SCROLLBACK_LIMIT = 1024 * 1024
+
+# How far past the trim point to look for an escape-sequence boundary.
+SCROLLBACK_RESYNC_WINDOW = 8 * 1024
 
 # Pending chunks a subscriber may fall behind before it is cut loose (see
 # _offer: bytes are never dropped, because a gap mid-escape-sequence corrupts
@@ -73,6 +80,11 @@ SUBSCRIBER_QUEUE_LIMIT = 2048
 TERMINATE_GRACE_SECONDS = 3.0
 
 DEFAULT_TERM = "xterm-256color"
+
+# Reports a terminal emulator generates by itself, never a keystroke: focus
+# in/out (CSI I / CSI O), primary and secondary device attributes (CSI ? … c,
+# CSI > … c), and the cursor position report (CSI … R).
+_TERMINAL_REPORT = re.compile(rb"^(?:\x1b\[[IO]|\x1b\[\?[0-9;]*c|\x1b\[>[0-9;]*c|\x1b\[[0-9;]*R)+$")
 
 
 class PtyUnsupportedError(RuntimeError):
@@ -290,8 +302,21 @@ class PtySession:
 
     # -- input ------------------------------------------------------------
     def write(self, data: bytes) -> None:
-        """Send keystrokes to the child. A no-op once the child has exited."""
+        """Send keystrokes to the child. A no-op once the child has exited.
+
+        Emulator-generated reports are dropped while the tty still echoes. A
+        tool enables focus reporting, the browser answers, and a millisecond
+        later the tool turns the mode off again — which re-enables echo. The
+        reply then arrives over the network *after* that switch and the kernel
+        prints it as literal ``^[[I`` / ``^[[?1;2c``. A local terminal answers in
+        microseconds and wins that race; a browser cannot. The tool is not
+        reading raw replies in that window anyway, and re-queries once it is back
+        in raw mode.
+        """
         if self._exited.is_set():
+            return
+        if _TERMINAL_REPORT.match(data) and self._echo_enabled() is True:
+            logger.debug("pty.write.dropped_report", session=self.id, data=data[:32])
             return
         try:
             os.write(self._master_fd, data)
@@ -299,6 +324,21 @@ class PtySession:
             if exc.errno not in (errno.EIO, errno.EBADF, errno.EPIPE):
                 raise
             logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
+
+    def _echo_enabled(self) -> bool | None:
+        """Whether the line discipline is echoing, or ``None`` if unknowable.
+
+        A raw-mode tool has ECHO off, so ECHO on means the tool is not consuming
+        input raw. Reading termios through the master works on Linux; anywhere it
+        does not, this returns ``None`` and no filtering happens — degrading to
+        the previous behaviour rather than dropping input blindly.
+        """
+        try:
+            attributes = termios.tcgetattr(self._master_fd)
+        except (termios.error, OSError, ValueError):
+            return None
+        local_flags = attributes[3]
+        return bool(local_flags & termios.ECHO)
 
     def resize(self, size: WindowSize) -> None:
         """Apply a new window size.
@@ -389,8 +429,7 @@ class PtySession:
     def _broadcast(self, chunk: bytes) -> None:
         with self._lock:
             self._scrollback.extend(chunk)
-            if len(self._scrollback) > SCROLLBACK_LIMIT:
-                del self._scrollback[: len(self._scrollback) - SCROLLBACK_LIMIT]
+            self._trim_scrollback()
             targets = list(self._subscribers)
         for channel in targets:
             if not _offer(channel, chunk):
@@ -409,6 +448,20 @@ class PtySession:
         with suppress(queue.Full):
             channel.put_nowait(_Signal.DESYNC)
         logger.warning("pty.subscriber.desync", session=self.id)
+
+    def _trim_scrollback(self) -> None:
+        """Bound the scrollback, cutting at an escape-sequence boundary.
+
+        Cutting at an arbitrary byte can land mid-escape-sequence, so the replay
+        opens with a fragment the emulator renders as garbage (a viewer saw a
+        stray ``;72;48;2;43;45;49m``). Resuming at the next ESC guarantees the
+        replay starts where a sequence starts.
+        """
+        excess = len(self._scrollback) - SCROLLBACK_LIMIT
+        if excess <= 0:
+            return
+        boundary = self._scrollback.find(b"\x1b", excess, excess + SCROLLBACK_RESYNC_WINDOW)
+        del self._scrollback[: boundary if boundary != -1 else excess]
 
     def _finish(self, code: int | None) -> None:
         """Record the exit status once and release every waiting subscriber."""

@@ -17,6 +17,7 @@ import pytest
 
 from crossby.utils.pty_runner import (
     SCROLLBACK_LIMIT,
+    SCROLLBACK_RESYNC_WINDOW,
     SUBSCRIBER_QUEUE_LIMIT,
     PtySession,
     SubscriberDesyncError,
@@ -220,3 +221,96 @@ class TestWindowSize:
     def test_rejects_implausible_dimensions(self, cols: int, rows: int) -> None:
         with pytest.raises(ValueError, match="between 1 and 10000"):
             WindowSize(cols=cols, rows=rows)
+
+
+# Enters raw mode, then drops back to cooked — the window in which a late
+# terminal reply is echoed as visible junk.
+_MODE_FLIP = r"""
+import sys, termios, time, tty
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+sys.stdout.write("RAW\r\n"); sys.stdout.flush()
+time.sleep(0.05)
+termios.tcsetattr(fd, termios.TCSANOW, saved)
+sys.stdout.write("COOKED\n"); sys.stdout.flush()
+for line in sys.stdin:
+    sys.stdout.write("got %s" % line); sys.stdout.flush()
+"""
+
+
+class TestTerminalReportFiltering:
+    """A tool enables focus reporting, then turns it off ~1ms later, which
+    re-enables echo. The browser's reply arrives after that flip and the kernel
+    prints it as literal ``^[[I`` / ``^[[?1;2c``. A local terminal answers in
+    microseconds and wins the race; a browser cannot.
+    """
+
+    @pytest.fixture
+    def cooked(self, tmp_path: Path) -> PtySession:
+        session = PtySession([sys.executable, "-u", "-c", _MODE_FLIP], cwd=tmp_path)
+        yield session
+        session.close()
+
+    def _settled(self, session: PtySession) -> list[bytes]:
+        chunks = _collect(session)
+        assert _await(chunks, "COOKED"), "child never left raw mode"
+        return chunks
+
+    @pytest.mark.parametrize(
+        "report",
+        [b"\x1b[I", b"\x1b[O", b"\x1b[?1;2c", b"\x1b[>0;276;0c", b"\x1b[24;80R"],
+    )
+    def test_reports_are_dropped_while_echo_is_on(self, cooked: PtySession, report: bytes) -> None:
+        chunks = self._settled(cooked)
+        cooked.write(report)
+        time.sleep(0.4)
+        rendered = b"".join(chunks)
+        assert report.lstrip(b"\x1b") not in rendered
+
+    def test_real_keystrokes_are_never_dropped(self, cooked: PtySession) -> None:
+        """The filter must not swallow input that merely contains an escape."""
+        chunks = self._settled(cooked)
+        cooked.write(b"hello\n")
+        assert _await(chunks, "got hello")
+
+    def test_report_with_trailing_input_is_delivered(self, cooked: PtySession) -> None:
+        """Only a pure report is dropped; a report glued to real input is not."""
+        chunks = self._settled(cooked)
+        cooked.write(b"\x1b[Ityped\n")
+        assert _await(chunks, "got")
+
+    def test_echo_state_is_readable_through_the_master(self, cooked: PtySession) -> None:
+        assert cooked._echo_enabled() is not None, "termios unreadable; filter would no-op"
+
+
+class TestScrollbackTrimming:
+    def test_trim_resumes_at_an_escape_boundary(self, tmp_path: Path) -> None:
+        """Cutting at an arbitrary byte can land mid-sequence, and the replay
+        then opens with a fragment the emulator renders as garbage."""
+        session = PtySession([sys.executable, "-c", "pass"], cwd=tmp_path)
+        try:
+            session.wait(timeout=5)
+            # Fill past the limit with well-formed sequences.
+            unit = b"\x1b[38;2;43;45;49mX"
+            session._scrollback = bytearray(unit * (SCROLLBACK_LIMIT // len(unit) + 64))
+            session._trim_scrollback()
+            assert len(session._scrollback) <= SCROLLBACK_LIMIT
+            assert session._scrollback.startswith(b"\x1b"), (
+                "replay must begin where a sequence begins"
+            )
+        finally:
+            session.close()
+
+    def test_trim_falls_back_when_no_boundary_is_near(self, tmp_path: Path) -> None:
+        """Plain output with no escapes still gets bounded."""
+        session = PtySession([sys.executable, "-c", "pass"], cwd=tmp_path)
+        try:
+            session.wait(timeout=5)
+            session._scrollback = bytearray(
+                b"x" * (SCROLLBACK_LIMIT + SCROLLBACK_RESYNC_WINDOW * 2)
+            )
+            session._trim_scrollback()
+            assert len(session._scrollback) == SCROLLBACK_LIMIT
+        finally:
+            session.close()

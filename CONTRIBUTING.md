@@ -146,7 +146,36 @@ same reason, a session the page has not seen buffers its frames until
 
 **xterm does not paint into a hidden container** and does not repaint merely on
 becoming visible, so `activate()` forces `term.refresh()`. Panes are hidden with
-`visibility`, not `display: none`, so they keep their dimensions.
+`visibility`, not `display: none`, so they keep their dimensions — which also
+means a background pane still occupies layout, so `.panes` clips with
+`overflow: hidden` (without it a background tab left at a larger geometry
+stretched the page and produced a horizontal scrollbar).
+
+**Terminal reports are filtered while the tty echoes** (`pty_runner.write`).
+A tool enables focus reporting, the browser answers, and roughly a millisecond
+later the tool turns the mode off again — which re-enables echo. The reply lands
+after that flip and the kernel prints it as a literal `^[[I` / `^[[?1;2c`. A
+local terminal answers in microseconds and wins the race; a browser never can,
+so the fix belongs on the server: if the payload is *only* an emulator-generated
+report (focus, device attributes, cursor position) and `termios.tcgetattr` on the
+master says ECHO is on, drop it. The tool is not reading raw replies in that
+window and re-queries once it is back in raw mode. Where termios cannot be read
+through the master, `_echo_enabled()` returns `None` and nothing is filtered —
+never guess, since the cost of a wrong guess is swallowed keystrokes.
+
+**Scrollback is a cushion, not a transcript.** It is bounded, and a tool with an
+idle animation (Codex: ~10.8 KB/s doing nothing) fills it with animation in
+seconds, so a reattaching viewer must *force a redraw* — the page nudges the
+terminal size, and the tool repaints from its own state. The trim also resumes
+at the next ESC rather than an arbitrary byte, because cutting mid-sequence made
+the replay open with a fragment rendered as garbage.
+
+**Autonomy is one exclusive choice** (`Autonomy` in `web/sessions.py`), not
+independent booleans: plan mode is exclusive and the rest have a fixed
+precedence, exactly as `crossby launch` treats them. Modelling it as a ladder
+makes the contradictory combinations unrepresentable. `build_launch_command`
+runs the adapter's own plan-mode gate, whose `PlanModeLaunchError` is translated
+into a 400 rather than escaping as a server error.
 
 **Why this does not call `cli/launch.py`.** That function resolves
 interactively, prints Rich markup and raises `typer.Exit` — none of which

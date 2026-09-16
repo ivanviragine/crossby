@@ -18,9 +18,12 @@ const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const el = (id) => document.getElementById(id);
 const ui = {
   form: el("launch-form"), tool: el("tool"), model: el("model"), effort: el("effort"),
-  message: el("initial-message"), yolo: el("yolo"), launch: el("launch"), stop: el("stop"),
+  message: el("initial-message"), launch: el("launch"), stop: el("stop"),
+  autonomy: el("autonomy"), autonomyField: el("autonomy-field"), autonomyNote: el("autonomy-note"),
+  sandbox: el("sandbox"), sandboxField: el("sandbox-field"),
+  network: el("network"), networkField: el("network-field"),
   error: el("error"), modelField: el("model-field"), effortField: el("effort-field"),
-  messageField: el("message-field"), yoloField: el("yolo-field"), placeholder: el("placeholder"),
+  messageField: el("message-field"), placeholder: el("placeholder"),
   stopHint: el("stop-hint"),
   tabs: el("tabs"), panes: el("panes"), meta: el("session-meta"), metaStatus: el("meta-status"),
   metaPid: el("meta-pid"), metaSize: el("meta-size"), metaCommand: el("meta-command"),
@@ -32,6 +35,16 @@ let stream = null;
 let activeId = null;
 /** @type {Map<string, object>} session id → terminal, addon, pane, tab, state */
 const sessions = new Map();
+
+
+/** How each autonomy rung reads in the form, and what it means. */
+const AUTONOMY = {
+  "default": ["Ask before acting", "The tool prompts for edits and commands."],
+  "plan": ["Plan only (read-only)", "Native plan mode: the tool proposes, changes nothing."],
+  "accept-edits": ["Auto-accept edits", "File edits apply without asking; commands still prompt."],
+  "auto": ["Auto", "The tool's own classifier decides what needs asking."],
+  "yolo": ["YOLO — skip all prompts", "No permission prompts at all. Use deliberately."],
+};
 
 /* ---------------- transport ---------------- */
 
@@ -94,7 +107,6 @@ function createSession(info) {
     // the tool switches the tty to raw mode, those replies get echoed as
     // literal `^[[I` / `^[[?1;2c` junk in the first frame.
     started: false,
-    outbox: "",
     pending: "",
     inFlight: false,
   };
@@ -111,8 +123,9 @@ function createSession(info) {
     );
   });
 
-  entry.tab = createTab(entry);
   sessions.set(info.id, entry);
+  entry.tab = createTab(entry);
+  relabelTabs();
   ui.placeholder.hidden = true;
   document.body.dataset.session = "live";
   return entry;
@@ -134,6 +147,27 @@ async function flushInput(entry) {
   }
 }
 
+/**
+ * Distinguish same-tool tabs. Two sessions both reading "Claude Code" gave no
+ * way to tell which was which; an ordinal per tool does.
+ */
+function tabLabel(entry) {
+  const name = labelFor(entry.info.tool) || "session";
+  const sameTool = [...sessions.values()].filter(
+    (other) => labelFor(other.info.tool) === name,
+  );
+  if (sameTool.length <= 1) return name;
+  const ordinal = sameTool.findIndex((other) => other.id === entry.id) + 1;
+  return `${name} ${ordinal || sameTool.length}`;
+}
+
+function relabelTabs() {
+  for (const entry of sessions.values()) {
+    const label = entry.tab && entry.tab.querySelector(".tab-label");
+    if (label) label.textContent = tabLabel(entry);
+  }
+}
+
 function createTab(entry) {
   const tab = document.createElement("button");
   tab.type = "button";
@@ -146,7 +180,8 @@ function createTab(entry) {
   dot.dataset.state = entry.running ? "running" : "exited";
 
   const label = document.createElement("span");
-  label.textContent = labelFor(entry.info.tool) || "session";
+  label.className = "tab-label";
+  label.textContent = tabLabel(entry);
 
   const close = document.createElement("span");
   close.className = "tab-close";
@@ -154,7 +189,7 @@ function createTab(entry) {
   close.title = "Close session";
   close.addEventListener("click", (event) => {
     event.stopPropagation();
-    void closeSession(entry.id);
+    void requestClose(entry.id);
   });
 
   tab.append(dot, label, close);
@@ -180,6 +215,7 @@ function activate(id) {
   // forces a redraw — most visibly after a reload, when every restored tab but
   // the active one looked empty.
   entry.term.refresh(0, entry.term.rows - 1);
+  if (entry.restored) nudgeRedraw(entry);
   if (entry.running) entry.term.focus();
   renderMeta(entry);
   ui.stop.hidden = !entry.running;
@@ -192,6 +228,25 @@ function refit(entry) {
   } catch {
     /* pane not measurable yet */
   }
+}
+
+/**
+ * Make a reattached tool repaint from its own state.
+ *
+ * Replayed scrollback is a cushion, not a transcript: a tool with an idle
+ * animation (Codex emits ~10.8 KB/s doing nothing) pushes real output out of the
+ * buffer within seconds, so a reattaching viewer can replay nothing but
+ * animation. A one-column resize makes the tool redraw what it is actually
+ * showing, which no replay can reconstruct.
+ */
+function nudgeRedraw(entry) {
+  if (!entry.running || entry.nudged) return;
+  entry.nudged = true;
+  const { cols, rows } = entry.term;
+  if (cols <= 1) return;
+  const resize = (c, r) =>
+    api("POST", `/api/sessions/${entry.id}/resize`, { cols: c, rows: r }).catch(() => {});
+  void resize(cols - 1, rows).then(() => setTimeout(() => void resize(cols, rows), 120));
 }
 
 function renderMeta(entry) {
@@ -244,6 +299,22 @@ async function stopSession(id) {
   }
 }
 
+/**
+ * Closing a *running* session kills the tool, and the x sits a few pixels from
+ * the tab label — easy to hit while aiming to switch tabs. Ask first. An
+ * already-ended tab holds nothing but text, so it just closes.
+ */
+async function requestClose(id) {
+  const entry = sessions.get(id);
+  if (!entry) return;
+  if (entry.running) {
+    const label = entry.tab.querySelector(".tab-label");
+    const name = (label && label.textContent) || "this session";
+    if (!window.confirm(`End ${name}? The tool is still running.`)) return;
+  }
+  await closeSession(id);
+}
+
 async function closeSession(id) {
   const entry = sessions.get(id);
   if (!entry) return;
@@ -256,6 +327,7 @@ async function closeSession(id) {
   entry.pane.remove();
   entry.tab.remove();
   sessions.delete(id);
+  relabelTabs();
   if (activeId === id) {
     activeId = null;
     const next = sessions.keys().next();
@@ -287,6 +359,7 @@ function adopt(id, chunk) {
   api("GET", `/api/sessions/${id}`)
     .then((info) => {
       const entry = createSession(info);
+      entry.restored = true;      // a reattachment, so it needs a redraw nudge
       for (const pending of pendingAdoption.get(id) || []) writeChunk(entry, pending);
       pendingAdoption.delete(id);
       if (activeId === null) activate(id);
@@ -358,8 +431,10 @@ async function startSession(event) {
       tool: ui.tool.value,
       model: ui.model.value || null,
       effort: ui.effort.value || null,
-      yolo: ui.yolo.checked,
+      autonomy: ui.autonomy.value || "default",
       initial_message: ui.message.value.trim() || null,
+      sandbox: ui.sandboxField.hidden ? true : ui.sandbox.checked,
+      network_access: ui.networkField.hidden ? false : ui.network.checked,
       cols,
       rows,
     });
@@ -391,15 +466,42 @@ function labelFor(id) {
 function syncFormToTool() {
   const selected = tools.find((tool) => tool.id === ui.tool.value);
   if (!selected) return;
+
   ui.modelField.hidden = !selected.supports_model_flag || selected.models.length === 0;
   ui.model.replaceChildren(new Option("Tool default", ""));
   selected.models.forEach((model) => ui.model.add(new Option(model, model)));
+
   ui.effortField.hidden = !selected.supports_effort;
   ui.effort.replaceChildren(new Option("Tool default", ""));
   selected.supported_efforts.forEach((level) => ui.effort.add(new Option(level, level)));
-  ui.yoloField.hidden = !selected.supports_yolo;
-  if (!selected.supports_yolo) ui.yolo.checked = false;
+
+  // Only the rungs this adapter implements — the tools genuinely differ
+  // (OpenCode has no YOLO, Codex no plan mode, only Claude has auto).
+  ui.autonomy.replaceChildren();
+  selected.autonomy.forEach((mode) => {
+    const [label] = AUTONOMY[mode] || [mode];
+    ui.autonomy.add(new Option(label, mode));
+  });
+  ui.autonomyField.hidden = selected.autonomy.length <= 1;
+  syncAutonomyNote();
+
+  ui.sandboxField.hidden = !selected.supports_sandbox_toggle;
+  if (!selected.supports_sandbox_toggle) ui.sandbox.checked = true;
+  ui.networkField.hidden = !selected.supports_network_access;
+  if (!selected.supports_network_access) ui.network.checked = false;
+
   ui.messageField.hidden = !selected.supports_initial_message;
+}
+
+function syncAutonomyNote() {
+  const entry = AUTONOMY[ui.autonomy.value];
+  ui.autonomyNote.textContent = entry ? entry[1] : "";
+  // Plan mode is exclusive: the tool changes nothing, so an initial message
+  // would be a planning brief rather than a task.
+  const planning = ui.autonomy.value === "plan";
+  ui.message.placeholder = planning
+    ? "What should it plan?"
+    : "Ask for something to start with…";
 }
 
 function showError(message) {
@@ -447,6 +549,7 @@ async function boot() {
     tools.forEach((tool) => ui.tool.add(new Option(tool.display_name, tool.id)));
     syncFormToTool();
     ui.tool.addEventListener("change", syncFormToTool);
+    ui.autonomy.addEventListener("change", syncAutonomyNote);
     ui.form.addEventListener("submit", startSession);
   }
   ui.stop.addEventListener("click", () => stopSession(activeId));
@@ -457,6 +560,7 @@ async function boot() {
     const { sessions: existing } = await api("GET", "/api/sessions");
     for (const info of existing) {
       const entry = createSession(info);
+      entry.restored = true;      // needs a redraw nudge, not just a replay
       if (!info.running) markExited(info.id, info);
       if (activeId === null) activate(info.id);
     }

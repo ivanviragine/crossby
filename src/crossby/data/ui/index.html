@@ -41,9 +41,20 @@
         <textarea id="initial-message" rows="3" placeholder="Ask for something to start with…"></textarea>
       </label>
 
-      <label class="toggle" id="yolo-field">
-        <input type="checkbox" id="yolo">
-        <span>Skip permission prompts <em>(YOLO)</em></span>
+      <label class="field" id="autonomy-field">
+        <span>Autonomy</span>
+        <select id="autonomy"></select>
+        <em class="field-note" id="autonomy-note"></em>
+      </label>
+
+      <label class="toggle" id="sandbox-field">
+        <input type="checkbox" id="sandbox" checked>
+        <span>Sandbox file writes</span>
+      </label>
+
+      <label class="toggle" id="network-field">
+        <input type="checkbox" id="network">
+        <span>Allow network in sandbox <em>(security-sensitive)</em></span>
       </label>
 
       <button type="submit" id="launch" class="primary">Launch session</button>

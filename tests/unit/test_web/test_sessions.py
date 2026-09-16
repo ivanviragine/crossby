@@ -12,6 +12,7 @@ from crossby.models.ai import AIToolID, EffortLevel
 from crossby.utils.pty_runner import WindowSize
 from crossby.web.sessions import (
     MAX_CONCURRENT_SESSIONS,
+    Autonomy,
     LaunchRequest,
     LaunchValidationError,
     SessionManager,
@@ -28,6 +29,7 @@ class TestLaunchRequestParsing:
         assert request.tool is AIToolID.CLAUDE
         assert request.model is None
         assert request.effort is None
+        assert request.autonomy is Autonomy.DEFAULT
         assert request.yolo is False
 
     def test_full_payload(self) -> None:
@@ -36,7 +38,7 @@ class TestLaunchRequestParsing:
                 "tool": "claude",
                 "model": "claude-opus-5",
                 "effort": "high",
-                "yolo": True,
+                "autonomy": "yolo",
                 "initial_message": "hi",
                 "cols": 120,
                 "rows": 40,
@@ -44,7 +46,9 @@ class TestLaunchRequestParsing:
         )
         assert request.model == "claude-opus-5"
         assert request.effort is EffortLevel.HIGH
+        assert request.autonomy is Autonomy.YOLO
         assert request.yolo is True
+        assert request.plan_mode is False
         assert request.initial_message == "hi"
         assert request.size == WindowSize(cols=120, rows=40)
 
@@ -105,9 +109,12 @@ class TestToolDiscovery:
             "models",
             "supports_effort",
             "supported_efforts",
-            "supports_yolo",
             "supports_initial_message",
+            "autonomy",
+            "supports_network_access",
+            "supports_sandbox_toggle",
         }
+        assert "default" in entry["autonomy"]
 
 
 class TestSessionManagerValidation:
@@ -129,14 +136,51 @@ class TestSessionManagerValidation:
             manager.create(LaunchRequest(tool=AIToolID.COPILOT, effort=EffortLevel.HIGH))
         spawn.assert_not_called()
 
-    def test_unsupported_yolo_is_refused_before_spawn(self, manager: SessionManager) -> None:
+    def test_unsupported_autonomy_is_refused_before_spawn(self, manager: SessionManager) -> None:
         """OpenCode is a terminal tool that declares no YOLO mode."""
         with (
             patch("crossby.web.sessions.PtySession") as spawn,
-            pytest.raises(LaunchValidationError, match="YOLO"),
+            pytest.raises(LaunchValidationError, match="autonomy"),
         ):
-            manager.create(LaunchRequest(tool=AIToolID.OPENCODE, yolo=True))
+            manager.create(LaunchRequest(tool=AIToolID.OPENCODE, autonomy=Autonomy.YOLO))
         spawn.assert_not_called()
+
+    def test_plan_mode_refused_where_unsupported(self, manager: SessionManager) -> None:
+        """Codex declares no native plan mode."""
+        with (
+            patch("crossby.web.sessions.PtySession") as spawn,
+            pytest.raises(LaunchValidationError, match="autonomy"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CODEX, autonomy=Autonomy.PLAN))
+        spawn.assert_not_called()
+
+    def test_network_access_refused_where_unsupported(self, manager: SessionManager) -> None:
+        """Only Codex has a sandbox network opt-in."""
+        with (
+            patch("crossby.web.sessions.PtySession") as spawn,
+            pytest.raises(LaunchValidationError, match="network"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, network_access=True))
+        spawn.assert_not_called()
+
+    def test_disabling_sandbox_refused_where_unsupported(self, manager: SessionManager) -> None:
+        with (
+            patch("crossby.web.sessions.PtySession") as spawn,
+            pytest.raises(LaunchValidationError, match="sandbox"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, sandbox=False))
+        spawn.assert_not_called()
+
+    def test_autonomy_reaches_the_command(self, manager: SessionManager) -> None:
+        """A selected rung must actually appear in the tool's argv."""
+        with patch("crossby.web.sessions.PtySession") as spawn:
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, autonomy=Autonomy.PLAN))
+        argv = spawn.call_args.args[0]
+        assert any("plan" in part for part in argv), argv
+
+    def test_unknown_autonomy_is_rejected(self) -> None:
+        with pytest.raises(LaunchValidationError, match="unknown autonomy"):
+            LaunchRequest.from_payload({"tool": "claude", "autonomy": "chaos"})
 
     def test_out_of_range_effort_is_refused(self, manager: SessionManager) -> None:
         """Copilot supports no effort levels at all."""
