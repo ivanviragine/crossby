@@ -15,6 +15,9 @@
 
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 
+/** How long outgoing bytes wait for the tool's first output before being sent anyway. */
+const INPUT_HOLD_MS = 1500;
+
 const el = (id) => document.getElementById(id);
 const ui = {
   form: el("launch-form"), tool: el("tool"), model: el("model"), effort: el("effort"),
@@ -126,6 +129,16 @@ function createSession(info) {
     pending: "",
     inFlight: false,
   };
+
+  // Releasing on first output alone deadlocks a tool that prints nothing until
+  // it is written to — the input is then held forever. The hold is only a
+  // mitigation for the echo race at startup, so it expires on its own.
+  entry.releaseTimer = setTimeout(() => {
+    if (!entry.started) {
+      entry.started = true;
+      if (entry.pending) void flushInput(entry);
+    }
+  }, INPUT_HOLD_MS);
 
   // Returning false keeps xterm from handling the key *and* from forwarding it
   // to the tool, so a tab switch never leaks a stray keystroke into the session.
@@ -378,6 +391,7 @@ async function closeSession(id) {
   } catch (err) {
     showError(err.message);
   }
+  clearTimeout(entry.releaseTimer);
   entry.term.dispose();
   entry.pane.remove();
   entry.tab.remove();
@@ -432,6 +446,7 @@ function writeChunk(entry, chunk) {
   entry.term.write(bytes);
   if (!entry.started) {
     entry.started = true;                 // tool is drawing; safe to send now
+    clearTimeout(entry.releaseTimer);
     if (entry.pending) void flushInput(entry);
     if (entry.id === activeId) entry.term.focus();
   }
