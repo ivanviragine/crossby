@@ -525,6 +525,15 @@ function adopt(id, chunk) {
 }
 
 function writeChunk(entry, chunk) {
+  // A reconnect arms this instead of clearing the terminal outright, because
+  // only the replay can say whether clearing is safe: an exited session the
+  // server has already reaped gets none, and its final output then exists
+  // nowhere but here. Consuming the flag on the first chunk means the screen is
+  // cleared exactly when there is something to rebuild it from.
+  if (entry.pendingReset) {
+    entry.pendingReset = false;
+    entry.term.reset();
+  }
   const binary = atob(chunk);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
@@ -571,27 +580,31 @@ function openStream() {
     markExited(detail.session, detail);
   });
 
-  // A reconnect replays every session's scrollback, so each terminal is cleared
-  // first to stop the screen doubling up. This belongs on `open`, not `error`:
-  // error fires on every failed attempt too, which wiped the terminals with no
-  // replay coming. Exited sessions are reset as well — their scrollback is
-  // replayed just the same.
+  // A reconnect replays every session's scrollback, so each terminal has to be
+  // cleared to stop the screen doubling up — but only those the server will
+  // actually replay. `create()` reaps exited sessions from the registry, so a
+  // tab whose tool finished before the last launch gets no replay at all, and
+  // clearing it would wipe a final transcript that survives only in this
+  // browser. Arming the reset and letting the first replayed chunk spend it
+  // covers both without asking the server which sessions it still holds.
+  //
+  // This belongs on `open`, not `error`: error fires on every failed attempt
+  // too, which wiped the terminals with no replay coming.
   let opened = false;
   stream.onopen = () => {
     if (opened) {
       for (const entry of sessions.values()) {
-        entry.term.reset();
+        entry.pendingReset = true;
         // The replay is a cushion, not a transcript. A tool with an idle
         // animation pushes its real screen out of that buffer within seconds,
-        // so resetting and replaying can leave a live session blank or stale.
-        // Every running tool is asked to redraw from its own state — which
-        // previously happened only for tabs restored on load, so a session
-        // launched here and then briefly disconnected had no way back. Clearing
-        // the one-shot flag also lets a second reconnect nudge again.
+        // so replaying alone can leave a live session blank or stale. Every
+        // running tool is asked to redraw from its own state — which previously
+        // happened only for tabs restored on load, so a session launched here
+        // and then briefly disconnected had no way back. Clearing the one-shot
+        // flag also lets a second reconnect nudge again.
         //
-        // Ordering: the nudge's first resize is a fresh HTTP round trip and its
-        // redraw only follows 120ms later, by which time the replay burst that
-        // began at `open` has long since been written.
+        // An exited session needs none of this: it has nothing left to redraw,
+        // and nudgeRedraw ignores it.
         entry.nudged = false;
         nudgeRedraw(entry);
       }
