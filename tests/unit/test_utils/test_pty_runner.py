@@ -597,6 +597,60 @@ class TestProcessGroupTeardown:
         assert elapsed < 2 * grace, f"close() took {elapsed:.2f}s of a {grace:.2f}s budget"
 
 
+class TestSaturatedSubscriberAtExit:
+    """A viewer that is behind when the tool exits must resync, not lose bytes."""
+
+    def test_a_full_queue_gets_desync_rather_than_a_truncated_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """END is only correct when it can be delivered without evicting output.
+
+        `_force` drops queued chunks to guarantee the marker lands, which is
+        right for DETACH but wrong for END: the multiplexer renders an orderly
+        exit frame over the gap, the shared EventSource stays open, and nothing
+        ever prompts the reconnect that would repaint from scrollback. The
+        viewer is left with a hole in the middle of an escape stream.
+        """
+        monkeypatch.setattr(pty_runner, "SUBSCRIBER_QUEUE_LIMIT", 2)
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        try:
+            _, subscription = session.attach()
+            assert subscription is not None
+
+            # Exactly fills the queue: one more would trip `_offer` into the
+            # existing desync path before the exit is even reached.
+            session._broadcast(b"first")
+            session._broadcast(b"second")
+            assert subscription.channel.full()
+
+            session._finish(0)
+
+            channel = subscription.channel
+            drained = [channel.get_nowait() for _ in range(channel.qsize())]
+        finally:
+            session.close()
+
+        # Delivering any marker into a full queue costs a chunk. That is fine
+        # for DESYNC — the viewer is about to repaint from scrollback — and not
+        # fine for END, which claims the stream ended cleanly.
+        assert drained, "the marker was never delivered"
+        assert drained[-1] is _Signal.DESYNC, f"saturated viewer got {drained[-1]!r}"
+
+    def test_a_subscriber_with_room_still_gets_a_clean_end(self, tmp_path: Path) -> None:
+        """The ordinary case must not start reconnecting for no reason."""
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        try:
+            _, subscription = session.attach()
+            assert subscription is not None
+            session._broadcast(b"hello")
+            session._finish(0)
+            drained = [subscription.channel.get_nowait() for _ in range(2)]
+        finally:
+            session.close()
+
+        assert drained == [b"hello", _Signal.END]
+
+
 class TestExitIsPublishedAtomically:
     def test_attach_during_finish_cannot_miss_the_end_marker(self, tmp_path: Path) -> None:
         """`_exited` is set under the same lock `attach()` takes.

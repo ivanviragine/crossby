@@ -535,7 +535,14 @@ class PtySession:
             # its pump would block forever.
             self._exited.set()
         for channel in targets:
-            _force(channel, _Signal.END)
+            # A full queue means the marker can only be delivered by evicting
+            # output. END would then paint an exit frame over a gap the viewer
+            # has no way to see — and being an orderly end, it gives the browser
+            # no reason to reconnect and repaint from scrollback. DESYNC cuts the
+            # stream instead, which is the recovery a viewer that fell behind
+            # already gets. (A broadcast racing this check finds the queue full
+            # too, and `_cut` desyncs the channel for the same reason.)
+            _force(channel, _Signal.DESYNC if channel.full() else _Signal.END)
 
 
 def _force(channel: queue.Queue[bytes | _Signal], marker: _Signal) -> None:
