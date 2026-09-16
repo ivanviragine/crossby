@@ -185,6 +185,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .dot[data-state="exited"] { background: var(--danger); }
 .dot[data-state="stopped"] { background: var(--muted); }
 
+.tab-index {
+  min-width: 13px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  opacity: .75;
+  text-align: center;
+}
+.tab-index:empty { display: none; }
+.tab[aria-selected="true"] .tab-index { color: var(--accent); opacity: 1; }
+
 .tab-close {
   margin-left: 3px;
   padding: 1px 6px;
@@ -231,6 +242,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 .placeholder p { max-width: 42ch; text-align: center; color: var(--muted); line-height: 1.6; margin: 0; }
 .placeholder-hint { font-size: 12.5px; opacity: .7; }
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
 .placeholder[hidden] { display: none; }
 
 @media (max-width: 800px) {

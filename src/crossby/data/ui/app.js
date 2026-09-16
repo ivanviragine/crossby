@@ -111,6 +111,13 @@ function createSession(info) {
     inFlight: false,
   };
 
+  // Returning false keeps xterm from handling the key *and* from forwarding it
+  // to the tool, so a tab switch never leaks a stray keystroke into the session.
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== "keydown") return true;
+    return !isShortcut(event);
+  });
+
   term.onData((data) => {
     entry.pending += data;
     void flushInput(entry);
@@ -162,9 +169,14 @@ function tabLabel(entry) {
 }
 
 function relabelTabs() {
+  let position = 0;
   for (const entry of sessions.values()) {
+    position += 1;
     const label = entry.tab && entry.tab.querySelector(".tab-label");
     if (label) label.textContent = tabLabel(entry);
+    const index = entry.tab && entry.tab.querySelector(".tab-index");
+    // Only the first nine are reachable by number, so only those advertise one.
+    if (index) index.textContent = position <= 9 ? String(position) : "";
   }
 }
 
@@ -179,6 +191,9 @@ function createTab(entry) {
   dot.className = "dot";
   dot.dataset.state = entry.running ? "running" : "exited";
 
+  const index = document.createElement("span");
+  index.className = "tab-index";
+
   const label = document.createElement("span");
   label.className = "tab-label";
   label.textContent = tabLabel(entry);
@@ -192,7 +207,7 @@ function createTab(entry) {
     void requestClose(entry.id);
   });
 
-  tab.append(dot, label, close);
+  tab.append(dot, index, label, close);
   tab.addEventListener("click", () => activate(entry.id));
   ui.tabs.appendChild(tab);
   entry.dot = dot;
@@ -522,6 +537,53 @@ window.addEventListener("resize", () => {
   }, 80);
 });
 
+/* ---------------- keyboard shortcuts ---------------- */
+
+/**
+ * Switch tabs with Cmd/Ctrl + 1-9 (9 = last tab, as browsers and editors do).
+ *
+ * Cmd is the right modifier here: macOS never delivers it to a terminal
+ * application, so nothing collides with the tool's own bindings, whereas Ctrl-
+ * and Option- combinations are the tool's to use.
+ *
+ * The catch is that Chrome reserves Cmd+1-9 for its *own* tab strip and handles
+ * it in the browser process, where a page cannot intercept it —
+ * `preventDefault()` does not help. It is free when there is no browser tab
+ * strip: an installed PWA / "Open as window", or another browser that does not
+ * reserve it. So a second binding, Cmd/Ctrl+Alt+1-9, is registered alongside and
+ * is not reserved anywhere, giving a combination that always works in a normal
+ * tab while the plain one works wherever the browser allows it.
+ */
+function isShortcut(event) {
+  return (
+    (event.metaKey || event.ctrlKey) && !event.shiftKey && /^Digit[1-9]$/.test(event.code)
+  );
+}
+
+function handleShortcut(event) {
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return false;
+  // `code`, not `key`: with Option held, macOS reports Option+1 as "¡".
+  const match = /^Digit([1-9])$/.exec(event.code);
+  if (!match) return false;
+
+  const ids = [...sessions.keys()];
+  if (ids.length === 0) return false;
+  const requested = Number(match[1]);
+  // 9 means "last tab" however many there are; otherwise the nth, if it exists.
+  const id = requested === 9 ? ids[ids.length - 1] : ids[requested - 1];
+  if (!id) return false;
+
+  activate(id);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function setupShortcuts() {
+  // Capture phase so the handler runs before xterm sees the key.
+  window.addEventListener("keydown", handleShortcut, { capture: true });
+}
+
 /* ---------------- boot ---------------- */
 
 async function boot() {
@@ -568,6 +630,7 @@ async function boot() {
     showError(err.message);
   }
 
+  setupShortcuts();
   openStream();
 }
 

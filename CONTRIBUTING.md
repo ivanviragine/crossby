@@ -170,6 +170,17 @@ terminal size, and the tool repaints from its own state. The trim also resumes
 at the next ESC rather than an arbitrary byte, because cutting mid-sequence made
 the replay open with a fragment rendered as garbage.
 
+**Tab shortcuts are bound twice on purpose.** `Cmd`/`Ctrl` + `1`-`9` is what
+people expect, and `Cmd` is the only modifier macOS never delivers to a terminal
+application — so it cannot collide with the tool's own keys. But Chrome reserves
+it for its own tab strip and handles it in the browser process, where the page
+cannot intercept it (`preventDefault()` does nothing). It *is* free with no tab
+strip present (installed PWA / "Open as window"), so the plain binding stays and
+`Cmd`/`Ctrl`+`Alt`+`1`-`9` is registered alongside as the always-available one.
+Match on `event.code`, never `event.key`: with Option held, macOS reports
+Option+1 as `¡`. Each terminal's `attachCustomKeyEventHandler` returns false for
+these combinations so a tab switch cannot leak a digit into the running tool.
+
 **Autonomy is one exclusive choice** (`Autonomy` in `web/sessions.py`), not
 independent booleans: plan mode is exclusive and the rest have a fixed
 precedence, exactly as `crossby launch` treats them. Modelling it as a ladder

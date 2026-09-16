@@ -758,6 +758,26 @@ only where a tool honours them.
 next to the label, and ending a live tool by a stray click is not a good trade.
 Tabs of the same tool are numbered so two Claude sessions are distinguishable.
 
+**Switching tabs:** `Cmd`/`Ctrl` + `1`–`9` (9 is the last tab). Each tab shows
+its number.
+
+`Cmd` is the right modifier for a terminal UI: macOS never delivers it to the
+tool, so it cannot collide with the tool's own bindings the way `Ctrl-` and
+`Option-` would. The snag is that **Chrome reserves `Cmd`/`Ctrl` + `1`–`9` for
+its own tab strip**, handling it in the browser process where a page cannot
+intercept it — `preventDefault()` has no effect.
+
+So there are two bindings, and you use whichever your setup leaves free:
+
+| | |
+| --- | --- |
+| `Cmd`/`Ctrl` + `1`–`9` | Works where the browser has no tab strip to switch — an installed PWA or "Open as window", and browsers that do not reserve it. |
+| `Cmd`/`Ctrl` + `Alt` + `1`–`9` | Not reserved anywhere, so this works in an ordinary browser tab. |
+
+Installing the page as an app window (Chrome ▸ **Cast, save and share** ▸
+**Install page as app**) frees the plain shortcut and drops the browser chrome,
+which is worth doing if you use the UI regularly.
+
 **Scope in this release.** The UI launches sessions and lets you interact with
 them. Scene selection, profiles, resume and transcript capture are not wired into
 it yet; use the CLI for those.
