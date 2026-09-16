@@ -147,7 +147,7 @@ toml = [
 
 [[package]]
 name = "crossby"
-version = "0.33.0"
+version = "0.34.0"
 source = { editable = "." }
 dependencies = [
     { name = "pexpect", marker = "sys_platform != 'win32'" },
