@@ -579,7 +579,22 @@ function openStream() {
   let opened = false;
   stream.onopen = () => {
     if (opened) {
-      for (const entry of sessions.values()) entry.term.reset();
+      for (const entry of sessions.values()) {
+        entry.term.reset();
+        // The replay is a cushion, not a transcript. A tool with an idle
+        // animation pushes its real screen out of that buffer within seconds,
+        // so resetting and replaying can leave a live session blank or stale.
+        // Every running tool is asked to redraw from its own state — which
+        // previously happened only for tabs restored on load, so a session
+        // launched here and then briefly disconnected had no way back. Clearing
+        // the one-shot flag also lets a second reconnect nudge again.
+        //
+        // Ordering: the nudge's first resize is a fresh HTTP round trip and its
+        // redraw only follows 120ms later, by which time the replay burst that
+        // began at `open` has long since been written.
+        entry.nudged = false;
+        nudgeRedraw(entry);
+      }
     }
     opened = true;
   };
