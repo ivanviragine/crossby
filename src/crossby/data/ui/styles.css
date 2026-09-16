@@ -1,0 +1,350 @@
+:root {
+  /* xterm renders a native scrollbar; without this it is white on the dark
+     terminal. Also themes native form controls to match. */
+  color-scheme: dark;
+
+  --bg: #0f1115;
+  --panel: #161920;
+  --panel-2: #1d212b;
+  --line: #272c38;
+  --text: #e4e7ee;
+  --muted: #929aad;
+  --accent: #5b9dff;
+  --accent-ink: #06203f;
+  --danger: #ff6b6b;
+  --ok: #4ade80;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  /* minmax(0, 1fr), not 1fr: a default grid row is floored at its content's
+     min-content height, so the terminal could grow but never shrink — shortening
+     the window just made the page taller instead of reducing rows. */
+  grid-template-rows: minmax(0, 1fr);
+  height: 100vh;
+}
+
+/* ---------- sidebar ---------- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.brand { display: flex; align-items: center; gap: 11px; }
+.brand h1 { margin: 0; font-size: 15px; letter-spacing: .02em; font-weight: 600; }
+.brand .mark { font-size: 21px; color: var(--accent); line-height: 1; }
+.root {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.form { display: flex; flex-direction: column; gap: 13px; }
+
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > span { font-size: 12px; font-weight: 500; color: var(--muted); }
+.field em, .toggle em { font-style: normal; opacity: .65; }
+.field[hidden], .toggle[hidden] { display: none; }
+
+select, textarea {
+  width: 100%;
+  padding: 8px 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 13px;
+}
+textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+select:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.folder-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  text-align: left;
+}
+.folder-button:hover { border-color: var(--accent); }
+.folder-path { overflow: hidden; white-space: nowrap; }
+.folder-caret { flex: none; color: var(--muted); }
+
+.browser {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.browser[hidden] { display: none; }
+.browser-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.browser-up {
+  flex: none;
+  padding: 1px 7px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+}
+.browser-up:hover:not(:disabled) { border-color: var(--accent); }
+.browser-here {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.browser-list { margin: 0; padding: 0; list-style: none; max-height: 190px; overflow-y: auto; }
+.browser-list li { border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+.browser-list li:last-child { border-bottom: none; }
+.browser-list button {
+  width: 100%;
+  padding: 6px 9px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  text-align: left;
+}
+.browser-list button:hover { background: var(--panel); color: var(--accent); }
+.browser-empty { padding: 9px; font-size: 11.5px; color: var(--muted); text-align: center; }
+.browser-foot { padding: 7px 8px; border-top: 1px solid var(--line); }
+button.small { padding: 5px 10px; font-size: 12px; width: 100%; }
+
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+button {
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: .5; cursor: not-allowed; }
+.primary { background: var(--accent); color: var(--accent-ink); }
+.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+.danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+
+.field-note { display: block; font-size: 11px; color: var(--muted); font-style: normal; line-height: 1.4; }
+.field-note:empty { display: none; }
+
+.hint-line { margin: -4px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.hint-line[hidden] { display: none; }
+
+.error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.meta { margin-top: auto; display: flex; flex-direction: column; gap: 9px; }
+.meta dl { margin: 0; display: flex; flex-direction: column; gap: 5px; }
+.meta dl > div { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+.meta dt { color: var(--muted); }
+.meta dd { margin: 0; font-family: var(--mono); font-size: 11.5px; }
+.command {
+  margin: 0;
+  padding: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* ---------- terminal stage ---------- */
+.stage {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+/* ---------- tab strip ---------- */
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  min-height: 39px;
+}
+.tabs:empty { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 11px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tab:hover { background: var(--panel-2); color: var(--text); }
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot[data-state="running"] { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.dot[data-state="exited"] { background: var(--danger); }
+.dot[data-state="stopped"] { background: var(--muted); }
+
+.tab-index {
+  min-width: 13px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  opacity: .75;
+  text-align: center;
+}
+.tab-index:empty { display: none; }
+.tab[aria-selected="true"] .tab-index { color: var(--accent); opacity: 1; }
+
+.tab-close {
+  margin-left: 3px;
+  padding: 1px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tab-close:hover { background: color-mix(in srgb, var(--danger) 22%, transparent); color: var(--danger); }
+
+/* ---------- panes ---------- */
+.panes {
+  position: relative;
+  min-height: 0;
+  /* `visibility: hidden` still occupies layout, so a background tab left at its
+     old, larger geometry stretched the page and produced a horizontal
+     scrollbar. Clipping here keeps the stage to its grid cell. */
+  overflow: hidden;
+}
+.pane {
+  position: absolute;
+  inset: 0;
+  padding: 8px 4px 8px 10px;
+  visibility: hidden;
+}
+/* Hidden panes stay laid out (not display:none) so xterm keeps correct
+   dimensions and does not need a re-fit on every tab switch. */
+.pane[data-active="true"] { visibility: visible; }
+.pane .xterm { height: 100%; }
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 32px;
+  background: var(--bg);
+  pointer-events: none;
+}
+.placeholder p { max-width: 42ch; text-align: center; color: var(--muted); line-height: 1.6; margin: 0; }
+.placeholder-hint { font-size: 12.5px; opacity: .7; }
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+.placeholder[hidden] { display: none; }
+
+@media (max-width: 800px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: auto;
+    min-height: 100vh;
+  }
+  .panel { border-right: none; border-bottom: 1px solid var(--line); }
+  .stage { min-height: 70vh; }
+
+  /* The single-column layout stacks the form above the terminal, which is right
+     while choosing what to launch and wrong the moment something is running —
+     a tall form would push the terminal off-screen. Once a session is live the
+     terminal leads and the form becomes a scrollable strip beneath it. */
+  body[data-session="live"] .stage { order: -1; }
+  body[data-session="live"] .panel {
+    max-height: 40vh;
+    overflow-y: auto;
+    border-bottom: none;
+    border-top: 1px solid var(--line);
+  }
+}

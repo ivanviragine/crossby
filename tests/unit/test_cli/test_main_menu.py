@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from typer.models import ParameterInfo
 from typer.testing import CliRunner
 
 from crossby.cli.main import app
@@ -55,6 +56,9 @@ def _patch_subcommands(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         "convert": MagicMock(return_value=None),
         "stats": MagicMock(return_value=None),
         "update": MagicMock(return_value=None),
+        # Mocked so a menu test can never start a real server (ui() blocks
+        # in serve_forever until interrupted).
+        "ui": MagicMock(return_value=None),
     }
     for name, mock in mocks.items():
         monkeypatch.setattr(f"crossby.cli.main.{name}", mock)
@@ -131,6 +135,7 @@ class TestInitMenuVisibility:
             "Stats",
             "Scene",
             "Update tools",
+            "UI",
         ]
 
     def test_init_shown_when_no_config(
@@ -226,6 +231,38 @@ class TestMenuDispatch:
         assert kwargs["tool"] is None
         assert kwargs["yes"] is False
         assert kwargs["dry_run"] is False
+
+    def test_ui(self) -> None:
+        """UI is appended last so every pre-existing index keeps its meaning."""
+        self._run(7)
+        self.mocks["ui"].assert_called_once()
+        kwargs = self.mocks["ui"].call_args.kwargs
+        assert kwargs["path"] == Path(".")
+        assert kwargs["port"] == 0
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["allow_dir"] == []
+        assert kwargs["open_browser"] is True
+
+    def test_ui_supplies_every_parameter(self) -> None:
+        """No parameter may fall back to its Typer default.
+
+        ``ui`` is a Typer command, so an argument the menu omits arrives as an
+        ``OptionInfo`` sentinel rather than the declared default — ``allow_dir``
+        was omitted and ``for candidate in allow_dir`` raised ``TypeError`` the
+        moment a real project directory got that far. Mocking ``ui`` hides that,
+        so compare the call against the real signature instead.
+        """
+        import inspect
+
+        from crossby.cli.ui import ui as real_ui
+
+        self._run(7)
+        kwargs = self.mocks["ui"].call_args.kwargs
+        assert not self.mocks["ui"].call_args.args, "menu dispatches by keyword only"
+        assert set(kwargs) == set(inspect.signature(real_ui).parameters)
+        assert not any(isinstance(value, ParameterInfo) for value in kwargs.values()), (
+            "a Typer sentinel leaked into the menu's dispatch"
+        )
 
 
 class TestPromptHelpers:

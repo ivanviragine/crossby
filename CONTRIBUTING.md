@@ -53,6 +53,7 @@ src/crossby/
 ├── models/       # Shared data models (AIToolID, capabilities, …)
 ├── data/         # Static model catalog and bundled prompt presets
 ├── ui/           # Rich/questionary UI components
+├── web/          # Local browser UI (crossby ui) — HTTP + PTY broker
 └── logging/      # structlog configuration
 ```
 
@@ -109,6 +110,166 @@ CLI command
 
 Keep these separate when adding launch logic.
 
+### Browser terminal (`crossby ui`)
+
+`crossby/web/` serves a loopback page that runs one AI tool per pseudo-terminal.
+Three pieces:
+
+- **`utils/pty_runner.py`** — `PtySession`. The counterpart to
+  `utils/process.py`: that module runs a child on *this* process's stdio, this
+  one allocates a PTY so a caller with no terminal can host one. Three details
+  carry the whole feature and are easy to regress:
+  - `start_new_session=True` makes the child a session leader, but a session
+    leader does **not** acquire a controlling terminal just by inheriting the
+    slave as fd 0/1/2. `preexec_fn` issues `TIOCSCTTY` to close that gap.
+    Without it `Ctrl-C` generates no `SIGINT` and `SIGWINCH` reaches nobody —
+    and nothing else looks wrong, so a test asserts `/dev/tty` is openable in
+    the child.
+  - `TIOCSWINSZ` on the master both records the size and makes the kernel
+    deliver `SIGWINCH`. A session that never sets it inherits 0x0.
+  - Output is **bytes end to end**. A read boundary routinely splits a UTF-8
+    sequence or an escape, so nothing decodes per chunk; the browser decodes.
+- **`web/sessions.py`** — validates a request against the adapter's own
+  `AIToolCapabilities` *before* spawning, then builds argv through
+  `build_launch_command()`. A session runs in any directory at or below an
+  allowed root (`--path` plus any `--allow-dir`), resolved and containment-checked
+  before anything is spawned — the browser chooses within that boundary, never
+  outside it.
+- **`web/server.py`** — stdlib `ThreadingHTTPServer`. Output streams as
+  base64 inside SSE frames, input and resize come back as POSTs. No new
+  dependency, and no asyncio next to an otherwise synchronous codebase.
+
+**One stream carries every session** (`MultiplexedStream`). This is not
+premature generality: a browser allows roughly six HTTP/1.1 connections per
+origin, and a stream per session spends one apiece. Measured, the sixth open
+terminal exhausts the pool and stalls *every* other request — including the
+POSTs carrying keystrokes, so typing silently stops working. One pump thread per
+session feeds a shared queue; sessions opened while the stream is live arrive
+through `SessionManager.add_listener`, and closing the stream detaches every
+subscription, which also releases pumps parked on a quiet session. Do not
+reintroduce per-session streams.
+
+**Replay geometry is load-bearing** (frontend). Scrollback is a raw byte stream
+containing absolute cursor-positioning escapes computed for the size the tool
+was drawing at. A restored tab therefore constructs its `Terminal` with the
+session's *server-reported* `cols`/`rows` and only refits once it is activated.
+Replaying into xterm's 80x24 default silently puts the content off-screen — the
+buffer ends up genuinely empty, which looks exactly like a lost session. For the
+same reason, a session the page has not seen buffers its frames until
+`GET /api/sessions/{id}` returns the real geometry.
+
+**xterm does not paint into a hidden container** and does not repaint merely on
+becoming visible, so `activate()` forces `term.refresh()`. Panes are hidden with
+`visibility`, not `display: none`, so they keep their dimensions — which also
+means a background pane still occupies layout, so `.panes` clips with
+`overflow: hidden` (without it a background tab left at a larger geometry
+stretched the page and produced a horizontal scrollbar).
+
+**Terminal reports are filtered while the tty echoes** (`pty_runner.write`).
+A tool enables focus reporting, the browser answers, and roughly a millisecond
+later the tool turns the mode off again — which re-enables echo. The reply lands
+after that flip and the kernel prints it as a literal `^[[I` / `^[[?1;2c`. A
+local terminal answers in microseconds and wins the race; a browser never can,
+so the fix belongs on the server: if the payload is *only* an emulator-generated
+report (focus, device attributes, cursor position) and `termios.tcgetattr` on the
+master says ECHO is on, drop it. The tool is not reading raw replies in that
+window and re-queries once it is back in raw mode. Where termios cannot be read
+through the master, `_echo_enabled()` returns `None` and nothing is filtered —
+never guess, since the cost of a wrong guess is swallowed keystrokes.
+
+**Scrollback is a cushion, not a transcript.** It is bounded, and a tool with an
+idle animation (Codex: ~10.8 KB/s doing nothing) fills it with animation in
+seconds, so a reattaching viewer must *force a redraw* — the page nudges the
+terminal size, and the tool repaints from its own state. The trim also resumes
+at the next ESC rather than an arbitrary byte, because cutting mid-sequence made
+the replay open with a fragment rendered as garbage.
+
+**Working directories are operator-bounded, not page-chosen.** A session may run
+anywhere at or below `--path` or an `--allow-dir` root, and nowhere else.
+`SessionManager.resolve_workdir` resolves the request first and only then checks
+containment via `assert_within`, so a symlink pointing out of a root is refused
+rather than followed; `browse()` applies the same check and withholds the parent
+at a root, so the picker cannot be used to enumerate the filesystem. Relaxing
+this to arbitrary paths would mean a leaked token buys the whole filesystem
+rather than a known tree — keep the boundary.
+
+**Tab shortcuts are bound twice on purpose.** `Cmd`/`Ctrl` + `1`-`9` is what
+people expect, and `Cmd` is the only modifier macOS never delivers to a terminal
+application — so it cannot collide with the tool's own keys. It is confirmed working in ordinary Chrome on macOS, but
+some browsers claim it for their own tab strip and handle it in the browser
+process where a page cannot intercept it (`preventDefault()` does nothing), so
+`Cmd`/`Ctrl`+`Alt`+`1`-`9` is registered alongside as the always-available one.
+Match on `event.code`, never `event.key`: with Option held, macOS reports
+Option+1 as `¡`. Each terminal's `attachCustomKeyEventHandler` returns false for
+these combinations so a tab switch cannot leak a digit into the running tool.
+
+**Autonomy is one exclusive choice** (`Autonomy` in `web/sessions.py`), not
+independent booleans: plan mode is exclusive and the rest have a fixed
+precedence, exactly as `crossby launch` treats them. Modelling it as a ladder
+makes the contradictory combinations unrepresentable. `build_launch_command`
+runs the adapter's own plan-mode gate, whose `PlanModeLaunchError` is translated
+into a 400 rather than escaping as a server error.
+
+**Why this does not call `cli/launch.py`.** That function resolves
+interactively, prints Rich markup and raises `typer.Exit` — none of which
+survives a browser. Adapters, by contrast, import nothing from `crossby.ui`, so
+the web layer talks to them directly. Richer launch behaviour (scenes,
+profiles, transcripts) should arrive by **extracting that orchestration into
+`services/`** returning result objects, the way `activate_scene()` already
+returns a `SceneActivationOutcome` — not by calling the command function.
+
+**Security invariants.** These are load-bearing; the server spawns AI tools with
+filesystem access. Loopback binding only (`serve()` refuses anything else); a
+`secrets` token on every **API** request compared with `compare_digest`; `Host`
+validation (DNS rebinding); and `Origin` rejection (CSRF), enforced on the static
+shell too. Static files resolve through `config/json_utils.assert_within`.
+`tests/integration/test_web_server.py` drives a real socket for each of these;
+keep it that way.
+
+**The static shell is intentionally unauthenticated.** It was once covered by a
+`SameSite=Strict` cookie, which failed in practice: cookies ignore the port, so
+they outlive a restart and leak between concurrent servers, while every run mints
+a fresh token. A reload from a bookmark, or a cached shell after a restart, then
+401'd the stylesheet and script while the HTML still loaded — a blank broken page
+with no explanation. The shell is vendored xterm.js, this project's own CSS/JS,
+and a page that does nothing without a token; the thing worth guarding is the
+API, and it still demands one. Do not reintroduce cookie auth. The index is
+served `no-store` so a stale copy cannot mask a token change.
+
+**Vendored frontend.** `data/ui/vendor/` holds xterm.js, committed rather than
+fetched so `pip install crossby` yields a working offline UI with no npm and no
+CDN dependency. `data/ui/vendor/README.md` records versions and the refresh
+command.
+
+**Backpressure is not drop-oldest.** The obvious policy for a slow subscriber —
+discard its oldest pending chunk — is wrong here. Terminal output is a stateful
+escape-sequence stream, so dropping bytes mid-sequence desynchronizes that
+viewer's emulator permanently *and invisibly*. An overrun subscriber is cut with
+`SubscriberDesyncError` instead; the server ends the SSE response without an
+exit frame, `EventSource` reconnects on its own, and the fresh scrollback plus
+the next repaint restores a correct screen. Preserve that property if you touch
+`_offer`/`_broadcast`.
+
+**No web test may need an AI tool installed.** CI runners have none, and a
+developer machine usually does — so a test that spawns `claude`, or that asserts
+on real argv or a detected tool version, passes locally and fails on CI. Six did
+exactly that. Use the `stub_tool` fixture (patches `build_launch_command` to a
+harmless local process) for anything that needs a live session, stub
+`capabilities()` when asserting on what a tool supports, and assert on the flags
+handed to the adapter rather than the argv it produces — turning flags into argv
+is the adapter's contract, tested in its own suite. To check before pushing, run
+the suite with the tools off `PATH`; `AbstractAITool.detect_installed()` should
+return `[]`.
+
+**Testing the terminal.** Unit tests drive a real child on a real PTY, because
+the behaviours that matter (controlling terminal, SIGWINCH, signal-generated
+exits) are invisible to mocks. Beyond that, the stack has been driven in a real
+browser against real full-screen TUIs — `vim`, `top`, `less` — which is what
+validates the parts a line-oriented stub cannot: alternate screen, modal input,
+self-driven repaint, mouse reporting, and resize confirmed against the running
+program's own `columns`/`lines`. A line-oriented fake binary proves the PTY and
+the transport and nothing about TUI rendering; do not treat it as sufficient.
+Interactive login flows for the real AI CLIs remain unverified.
 ### Native interactive Plan launch
 
 `launch()` and `build_launch_command(initial_message=...)` retain the native

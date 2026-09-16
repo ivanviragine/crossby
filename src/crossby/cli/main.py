@@ -57,6 +57,7 @@ from crossby.cli.scene import scene_app  # noqa: E402
 from crossby.cli.stats import stats  # noqa: E402
 from crossby.cli.sync import sync  # noqa: E402
 from crossby.cli.tools import tools_app, update  # noqa: E402
+from crossby.cli.ui import ui  # noqa: E402
 
 app.command()(launch)
 app.command()(sync)
@@ -64,6 +65,7 @@ app.command()(convert)
 app.command()(stats)
 app.command()(handoff)
 app.command()(init)
+app.command()(ui)
 app.add_typer(agents_app, name="agents")
 app.add_typer(scene_app, name="scene")
 app.add_typer(tools_app, name="tools")
@@ -94,6 +96,7 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
         ("Stats", "Parse session transcripts", "crossby stats"),
         ("Scene", "Activate a scene", "crossby scene"),
         ("Update tools", "Update installed AI tools", "crossby tools update"),
+        ("UI", "Launch a tool in a browser terminal", "crossby ui"),
     ]
     if not has_config:
         entries.append(("Init", "Initialize .crossby.yml", "crossby init"))
@@ -160,6 +163,10 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
         stats(transcript_path=transcript_path, tool=tool)
     elif label == "Scene":
         _run_scene_menu()
+    elif label == "UI":
+        # Every parameter is spelled out: these are Typer commands, so an
+        # omitted one arrives as an OptionInfo sentinel rather than its default.
+        ui(path=Path("."), port=0, host="127.0.0.1", allow_dir=[], open_browser=True)
     elif label == "Update tools":
         update(tool=None, yes=False, dry_run=False)
     elif label == "Init":
