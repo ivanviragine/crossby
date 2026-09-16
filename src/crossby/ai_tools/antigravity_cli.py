@@ -29,6 +29,7 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     PlanRequestBehavior,
@@ -127,6 +128,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(PlanLaunchApprovalMode.YOLO,),
                 activation=PlanModeActivation.CLI_ARGUMENT,
                 activation_detail="Passes --mode plan before the first user turn.",
                 version_requirement="Antigravity CLI exposing --mode plan.",

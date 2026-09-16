@@ -237,7 +237,16 @@ class PlanModeConflictError(PlanModeLaunchError):
         flags = ", ".join(f"--{name.replace('_', '-')}" for name in conflicts)
         return cls(
             f"{display_name} plan mode cannot be combined with {flags}. "
-            "Remove the autonomy flag(s); native plan mode must remain the effective mode.",
+            "This approval combination is not supported for this launch. "
+            "Interactive Plan-mode approval options: "
+            + (
+                ", ".join(
+                    f"--{mode.value.replace('_', '-')}"
+                    for mode in capability.supported_launch_approval_modes
+                )
+                or "default prompting only"
+            )
+            + ". Native Plan mode must remain the effective mode.",
             tool_id=tool_id,
             capability=capability,
         )

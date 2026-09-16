@@ -49,6 +49,14 @@ class PlanModeActivation(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class PlanLaunchApprovalMode(StrEnum):
+    """Approval options that can coexist with native interactive planning."""
+
+    YOLO = "yolo"
+    AUTO = "auto"
+    ACCEPT_EDITS = "accept_edits"
+
+
 class PlanArtifactLocation(StrEnum):
     """Where a harness can persist artifacts created by native plan mode."""
 
@@ -548,6 +556,7 @@ class PlanModeCapability(BaseModel, frozen=True):
     export_command: tuple[str, ...] | None = None
     import_command: tuple[str, ...] | None = None
     remediation: str | None = None
+    supported_launch_approval_modes: tuple[PlanLaunchApprovalMode, ...] = ()
     collector_activation: PlanModeActivation | None = None
     transport: PlanSessionTransport = PlanSessionTransport.UNAVAILABLE
     artifact_source: PlanArtifactSource | None = None
@@ -639,8 +648,8 @@ class AIToolCapabilities(BaseModel):
     shell/commands (the accept-edits autonomy tier)."""
     supports_auto: bool = False
     """Tool exposes a classifier-mediated ``auto`` mode at launch (a separate
-    model reviews each non-read action). Claude-only among the CLIs crossby
-    drives; ``auto`` downgrades to accept-edits elsewhere."""
+    model reviews tool calls). Supported by Claude and Cursor; ordinary
+    launches downgrade elsewhere, while Plan launches require explicit support."""
 
     @property
     def supports_plan_mode(self) -> bool:

@@ -904,7 +904,9 @@ class TestExactPathRestoration:
         )
         descriptor = load_ledger(tmp_path).scene_restore(".cursor/skills")
         assert descriptor is not None and descriptor.backup_path is not None
-        shutil.rmtree(tmp_path / descriptor.backup_path)
+        # Remove the recorded path without freeing its inode for immediate
+        # reuse by the unrelated directory created below.
+        (tmp_path / descriptor.backup_path).rename(tmp_path / "displaced-cursor-backup")
 
         target = tmp_path / ".cursor/skills"
         target.unlink()

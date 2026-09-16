@@ -15,6 +15,7 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     TokenUsage,
@@ -44,6 +45,10 @@ class CopilotAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.ACCEPT_EDITS,
+                ),
                 activation=PlanModeActivation.CLI_ARGUMENT,
                 activation_detail="Passes --plan before the first interactive prompt.",
                 version_requirement="GitHub Copilot CLI exposing --plan.",
