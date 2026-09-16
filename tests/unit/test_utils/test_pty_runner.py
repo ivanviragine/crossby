@@ -8,6 +8,7 @@ observed through mocks.
 from __future__ import annotations
 
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -649,6 +650,43 @@ class TestSaturatedSubscriberAtExit:
             session.close()
 
         assert drained == [b"hello", _Signal.END]
+
+
+class TestConstructorFailure:
+    """A constructor that raises must not leave the tool running."""
+
+    def test_a_reader_that_cannot_start_takes_the_child_with_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`Thread.start()` can fail after `Popen` has already launched the tool.
+
+        The constructor then escaped with the process running and nobody
+        holding a reference to it — and the caller released its capacity slot
+        having never received a session to close, so repeated failures walked
+        straight past the concurrency limit.
+        """
+        spawned: list[Any] = []
+        real_popen = subprocess.Popen
+        real_start = threading.Thread.start
+
+        def track_popen(*args: Any, **kwargs: Any) -> Any:
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        def refuse_reader(self: threading.Thread) -> None:
+            if self.name.startswith("pty-reader-"):
+                raise RuntimeError("can't start new thread")
+            real_start(self)
+
+        monkeypatch.setattr(subprocess, "Popen", track_popen)
+        monkeypatch.setattr(threading.Thread, "start", refuse_reader)
+
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            PtySession([sys.executable, "-c", "import time; time.sleep(300)"], cwd=tmp_path)
+
+        assert spawned, "the child was never launched, so this proves nothing"
+        assert spawned[0].returncode is not None, "the tool outlived the failed constructor"
 
 
 class TestOutputAndExitAreSerialized:

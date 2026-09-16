@@ -239,7 +239,23 @@ class PtySession:
             name=f"pty-reader-{self.id}",
             daemon=True,
         )
-        self._reader.start()
+        try:
+            self._reader.start()
+        except BaseException:
+            # The tool is already running at this point. Letting the constructor
+            # escape without it would leave a process nobody holds a reference
+            # to — and the caller releases its capacity slot having never
+            # received a session to close, so repeated failures walk straight
+            # past the concurrency limit.
+            #
+            # Signal before reaping, as everywhere else: waiting releases the
+            # pid and the kernel may hand that number to anyone.
+            _signal_group(self._proc.pid, signal.SIGKILL)
+            with suppress(Exception):
+                self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
+            with suppress(OSError):
+                os.close(self._master_fd)
+            raise
 
     # -- lifecycle --------------------------------------------------------
     @property

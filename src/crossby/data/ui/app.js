@@ -431,6 +431,10 @@ async function closeSession(id) {
   entry.pane.remove();
   entry.tab.remove();
   sessions.delete(id);
+  // Anything still in flight for this session is now unwanted.
+  rememberClosed(id);
+  pendingAdoption.delete(id);
+  dropExit(id);
   relabelTabs();
   if (activeId === id) {
     activeId = null;
@@ -503,7 +507,27 @@ function flushAdoption(entry) {
   pendingAdoption.delete(entry.id);
 }
 
+/**
+ * Sessions closed from this page.
+ *
+ * Closing is not instantaneous from the stream's point of view: the DELETE and
+ * the SSE connection are different sockets, so output frames and an in-flight
+ * metadata GET can both outlive the tab. Either would rebuild a tab the user
+ * explicitly dismissed, from a snapshot that predates the DELETE. Bounded,
+ * because a page left open for days would otherwise remember every id it ever
+ * closed.
+ */
+const closedIds = new Set();
+const CLOSED_ID_MEMORY = 256;
+
+function rememberClosed(id) {
+  closedIds.add(id);
+  // Sets iterate in insertion order, so this drops the oldest.
+  if (closedIds.size > CLOSED_ID_MEMORY) closedIds.delete(closedIds.values().next().value);
+}
+
 function adopt(id, chunk) {
+  if (closedIds.has(id)) return;
   const held = pendingAdoption.get(id);
   if (held) {
     held.push(chunk);
@@ -512,6 +536,13 @@ function adopt(id, chunk) {
   pendingAdoption.set(id, [chunk]);
   api("GET", `/api/sessions/${id}`)
     .then((info) => {
+      // The tab can be closed while this is in flight, and `info` predates that
+      // DELETE — rebuilding from it would resurrect what the user dismissed.
+      if (closedIds.has(id)) {
+        pendingAdoption.delete(id);
+        dropExit(id);
+        return;
+      }
       // The launch POST may have created the tab while this fetch was in
       // flight; a second createSession() would leave a duplicate pane behind.
       const existing = sessions.get(id);
