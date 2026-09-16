@@ -89,7 +89,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `preflight_plan_session()` shares the static request/capability/version boundary without requiring the prospective working directory to exist; runtime always repeats it. `AIToolCapabilities.plan_mode` declares these dimensions, including `command_policy_support`, independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Ordinary automation uses the separate `AIToolCapabilities.headless` declaration and `run_headless_session()` managed boundary; its conservative default is unavailable and does not follow from the legacy `supports_headless` flag. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `preflight_plan_session()` shares the static request/capability/version boundary without requiring the prospective working directory to exist; runtime always repeats it. `AIToolCapabilities.plan_mode` declares these dimensions, including `command_policy_support`, independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -282,6 +282,44 @@ not assume interactive approval semantics for headless or collected sessions.
 Native permissions, account eligibility, folder trust, and explicit deny rules
 remain authoritative. Do not emulate unavailable modes with prompt text or
 terminal input. The reusable real-CLI probe is `scripts/probe_native_plan.py`.
+
+### Managed ordinary headless sessions
+
+`run_headless_session(request, interaction_handler, event_handler,
+cancel_event=...)` is the ordinary automation boundary. It is independent from
+interactive `launch()`, legacy prompt-to-command construction, and collected
+Plan mode. An adapter integration must declare `AIToolCapabilities.headless`
+truthfully and implement `_run_headless_session(request, version, context)`.
+Do not advertise support merely because a CLI has a `--print`, `exec`, or
+similar legacy headless flag.
+
+The base class starts the absolute deadline before request validation, repeats
+all preflight checks, performs one bounded version probe, and executes the
+protected hook in an isolated worker so startup or collection cannot outlive
+the request. Adapter code obtains every blocking budget from
+`HeadlessRuntimeContext.remaining_seconds()`, emits only bounded normalized
+events, resolves interactions through `context.interact()`, registers one
+ordered cleanup sequence, and constructs the result through
+`context.complete()`. Never put native frames, prompt/answer text, argv, or
+command rendering in an event, warning, denial, or exception.
+
+`UNATTENDED` questions fail and permissions deny without consulting parent
+stdin. `BROKERED` callbacks and event callbacks run in daemon workers and are
+bounded by the idle, interaction, and overall deadlines. A late answer is never
+returned to the adapter. Handler exceptions are `HeadlessTransportError`s with
+a safe partial snapshot. Cancellation and timeout call native abort once when
+declared, then close input, terminate/kill the owned process group, reap the
+direct child, and bound worker joins. Terminal-event evidence, native status,
+exit status, and caller schema validation are reconciled before exactly one
+terminal event is delivered.
+
+Use `ai_tools/session_process.py` for shared captured/JSON-RPC primitives. It is
+the same live module as the historical `ai_tools/plan_process.py` path, keeping
+existing Plan imports and safety-limit patches compatible. Carry the runtime's
+absolute deadline and cancellation event into version probes, prompt writes,
+protocol reads/writes, parsing, and final collection. New integrations belong
+to the dedicated adapter follow-up issues; this foundation intentionally leaves
+all concrete adapters unavailable.
 
 ### Collected native plan sessions
 

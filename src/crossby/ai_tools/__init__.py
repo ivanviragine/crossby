@@ -3,6 +3,8 @@
 Import all adapters here to trigger __init_subclass__ registration.
 """
 
+import threading
+
 # Import adapters to trigger registration
 import crossby.ai_tools.antigravity
 import crossby.ai_tools.antigravity_cli
@@ -13,6 +15,20 @@ import crossby.ai_tools.cursor
 import crossby.ai_tools.opencode
 import crossby.ai_tools.vscode  # noqa: F401
 from crossby.ai_tools.base import AbstractAITool, pick_best_model
+from crossby.ai_tools.headless import (
+    HeadlessAdapterContractError,
+    HeadlessCleanupHooks,
+    HeadlessEventHandler,
+    HeadlessInteractionHandler,
+    HeadlessPreflightError,
+    HeadlessRequestError,
+    HeadlessRuntimeContext,
+    HeadlessSchemaError,
+    HeadlessSessionError,
+    HeadlessTransportError,
+    HeadlessUnsupportedError,
+    SessionInteractionHandler,
+)
 from crossby.ai_tools.interactive import InteractiveLaunchHandler, InteractiveSession
 from crossby.ai_tools.plan_mode import (
     PlanArtifactAmbiguousError,
@@ -34,6 +50,27 @@ from crossby.ai_tools.plan_mode import (
 )
 from crossby.models.ai import (
     AIToolID,
+    HeadlessCapability,
+    HeadlessEvent,
+    HeadlessEventKind,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeOutputMode,
+    HeadlessNativeTransport,
+    HeadlessOutput,
+    HeadlessOutputFormat,
+    HeadlessOutputMode,
+    HeadlessPreflightCheck,
+    HeadlessPreflightDeferredCheck,
+    HeadlessPromptTransport,
+    HeadlessSessionPreflight,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessSessionStatus,
+    HeadlessSessionTransport,
+    HeadlessTerminalState,
+    HeadlessTerminalStatus,
+    HeadlessTransport,
     InteractiveLaunchEvent,
     InteractiveLaunchEventKind,
     PlanApprovalPolicy,
@@ -56,7 +93,40 @@ from crossby.models.ai import (
     PlanSessionPreflight,
     PlanSessionRequest,
     PlanSessionResult,
+    SessionApprovalPolicy,
+    SessionBinding,
+    SessionCommandPolicy,
+    SessionCommandPolicySupport,
+    SessionInteraction,
+    SessionInteractionKind,
+    SessionInteractionOutcome,
+    SessionInteractionResponse,
+    SessionNativeBindingID,
+    SessionOperation,
+    SessionOperationKind,
+    SessionOption,
+    SessionPermissionTarget,
+    SessionPermissionTargetKind,
+    SessionQuestionOption,
+    SessionTarget,
 )
+
+
+def preflight_headless_session(
+    tool: AIToolID | str,
+    request: HeadlessSessionRequest,
+    interaction_handler: SessionInteractionHandler | None = None,
+    *,
+    timeout_seconds: float = 5.0,
+    cancel_event: threading.Event | None = None,
+) -> HeadlessSessionPreflight:
+    """Preflight a managed ordinary session without starting its transport."""
+    return AbstractAITool.get(tool).preflight_headless_session(
+        request,
+        interaction_handler,
+        timeout_seconds=timeout_seconds,
+        cancel_event=cancel_event,
+    )
 
 
 def preflight_plan_session(
@@ -74,6 +144,38 @@ def preflight_plan_session(
 
 __all__ = [
     "AbstractAITool",
+    "HeadlessAdapterContractError",
+    "HeadlessCapability",
+    "HeadlessCleanupHooks",
+    "HeadlessEvent",
+    "HeadlessEventHandler",
+    "HeadlessEventKind",
+    "HeadlessInteractionHandler",
+    "HeadlessInteractionMode",
+    "HeadlessNativeOutput",
+    "HeadlessNativeOutputMode",
+    "HeadlessNativeTransport",
+    "HeadlessOutput",
+    "HeadlessOutputFormat",
+    "HeadlessOutputMode",
+    "HeadlessPreflightCheck",
+    "HeadlessPreflightDeferredCheck",
+    "HeadlessPreflightError",
+    "HeadlessPromptTransport",
+    "HeadlessRequestError",
+    "HeadlessRuntimeContext",
+    "HeadlessSchemaError",
+    "HeadlessSessionError",
+    "HeadlessSessionPreflight",
+    "HeadlessSessionRequest",
+    "HeadlessSessionResult",
+    "HeadlessSessionStatus",
+    "HeadlessSessionTransport",
+    "HeadlessTerminalState",
+    "HeadlessTerminalStatus",
+    "HeadlessTransport",
+    "HeadlessTransportError",
+    "HeadlessUnsupportedError",
     "InteractiveLaunchEvent",
     "InteractiveLaunchEventKind",
     "InteractiveLaunchHandler",
@@ -113,7 +215,25 @@ __all__ = [
     "PlanSessionResult",
     "PlanSessionUnsupportedError",
     "PlanTransportError",
+    "SessionApprovalPolicy",
+    "SessionBinding",
+    "SessionCommandPolicy",
+    "SessionCommandPolicySupport",
+    "SessionInteraction",
+    "SessionInteractionHandler",
+    "SessionInteractionKind",
+    "SessionInteractionOutcome",
+    "SessionInteractionResponse",
+    "SessionNativeBindingID",
+    "SessionOperation",
+    "SessionOperationKind",
+    "SessionOption",
+    "SessionPermissionTarget",
+    "SessionPermissionTargetKind",
+    "SessionQuestionOption",
+    "SessionTarget",
     "pick_best_model",
+    "preflight_headless_session",
     "preflight_plan_session",
     "terminal_interaction_handler",
 ]

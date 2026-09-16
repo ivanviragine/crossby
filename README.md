@@ -360,6 +360,53 @@ Library consumers can choose sandbox confinement independently from autonomy by 
 
 The setting never changes approval behavior: Codex `danger-full-access` does not imply `-a never`, and yolo does not imply an unrestricted sandbox. Cursor now explicitly enables its sandbox on the default adapter path instead of inheriting a potentially disabled user setting. The static `sandboxes_writes` capability still describes an adapter's normal confinement; it is not a guarantee for a particular invocation made with `sandbox=False`.
 
+### Managed headless sessions (library foundation)
+
+Library consumers now have a typed boundary for an ordinary, non-Plan agent
+session:
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessSessionRequest,
+    preflight_headless_session,
+)
+
+request = HeadlessSessionRequest(
+    prompt="Implement the approved change",
+    working_dir=Path.cwd(),
+    native_output=HeadlessNativeOutput.TEXT,
+    interaction_mode=HeadlessInteractionMode.UNATTENDED,
+    timeout_seconds=600,
+    idle_timeout_seconds=120,
+)
+adapter = AbstractAITool.get("codex")
+if adapter.capabilities().supports_managed_headless_session:
+    preflight = preflight_headless_session("codex", request)
+    result = adapter.run_headless_session(request)
+```
+
+`HeadlessSessionRequest`, `HeadlessSessionPreflight`, `HeadlessEvent`, and
+`HeadlessSessionResult` are frozen models that reject unknown fields. Native
+text/JSON/JSONL selection is independent from an optional caller-provided JSON
+Schema. One absolute monotonic deadline covers validation, version probing,
+startup, callbacks, output parsing, and collection; idle and interaction
+timeouts can only shorten it. `UNATTENDED` fails an unexpected question and
+denies unresolved permissions. `BROKERED` requires an explicit interaction
+handler. Expected cancellation, timeout, native failure, and invalid output are
+terminal result statuses; unrecoverable spawn, protocol, or handler failures
+raise `HeadlessTransportError` with a bounded, prompt-free partial result.
+
+This release provides the shared contract and managed runtime only. Every
+concrete adapter conservatively reports managed headless support as unavailable
+until its verified transport lands in the follow-up adapter work. Existing
+`supports_headless` / `headless_flag` command construction, interactive
+`launch()`, collected Plan sessions, and handoff summarization are unchanged.
+
 ### Native plan mode
 
 Native planning has two deliberately separate surfaces:
