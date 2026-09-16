@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +36,7 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     PlanNativeBindingID,
@@ -51,6 +54,7 @@ from crossby.models.ai import (
 from crossby.utils.git_worktree import outside_root_git_metadata_dirs
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 # Codex uses "xhigh" for both our XHIGH and MAX levels
@@ -86,26 +90,33 @@ class CodexAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             plan_mode=PlanModeCapability(
-                activation=PlanModeActivation.UNSUPPORTED,
+                activation=PlanModeActivation.TERMINAL_INPUT,
                 activation_detail=(
-                    "Codex has a native Plan collaboration mode, but its interactive CLI has no "
-                    "public launch-time selector that applies before a positional prompt. A "
-                    "positional /plan prefix is ordinary prompt text, not mode activation."
+                    "Crossby launches the native TUI, submits /plan through its composer, "
+                    "waits for the Plan indicator, then emits PLAN_READY before any task input. "
+                    "This temporary terminal adapter uses observed UI state, not a native flag."
                 ),
                 version_requirement=(
-                    "A Codex CLI release with a public interactive launch-time collaboration-mode "
-                    "selector, or a supported app-server-to-TUI activation path."
+                    "Codex CLI 0.154.x on a POSIX interactive terminal. Other versions fail "
+                    "closed until their startup UI or a native selector is verified."
                 ),
-                verified_version="0.153.4",
-                initial_prompt_after_activation=False,
+                verified_version="0.154.0",
+                collector_verified_version="0.153.4",
+                initial_prompt_after_activation=True,
+                supports_ready_event=True,
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.ACCEPT_EDITS,
+                    PlanLaunchApprovalMode.AUTO,
+                ),
                 artifact_location=PlanArtifactLocation.SESSION,
                 artifact_location_detail=(
-                    "Collected sessions use the completed plan item from one exact app-server "
-                    "thread and turn; ordinary interactive launches remain activation-unsupported."
+                    "Interactive plans remain in the native session; no custom file destination "
+                    "is promised. Collected sessions retain exact app-server thread/turn binding."
                 ),
                 remediation=(
-                    "Use run_plan_session() for deterministic collection. Interactive launch "
-                    "still requires selecting Plan mode in Codex itself."
+                    "Use an interactive terminal with Codex 0.154.x, or use run_plan_session() "
+                    "for structured collection without the terminal startup adapter."
                 ),
                 collector_activation=PlanModeActivation.CODEX_APP_SERVER,
                 transport=PlanSessionTransport.CODEX_APP_SERVER,
@@ -142,6 +153,95 @@ class CodexAdapter(AbstractAITool):
             supports_scene_launch=True,
             scene_profile_flag="--profile",
         )
+
+    def _validate_terminal_plan_request(
+        self, initial_message: str | None, *, interactive: bool
+    ) -> None:
+        from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
+
+        if os.name != "posix" or not interactive:
+            raise PlanModeUnsupportedError(
+                "Codex terminal Plan startup requires an interactive POSIX terminal; "
+                "use run_plan_session() for collected/headless planning.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            )
+        if initial_message is not None:
+            from crossby.ai_tools.codex_terminal import validate_message
+
+            validate_message(initial_message)
+
+    def _validate_terminal_plan_version(self, version: tuple[int, int, int]) -> None:
+        from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
+
+        if version[:2] != (0, 154):
+            raise PlanModeUnsupportedError.for_installed_version(
+                tool_id=self.TOOL_ID,
+                display_name=self.capabilities().display_name,
+                capability=self.capabilities().plan_mode,
+                installed_version=version,
+            )
+
+    def plan_mode_args(self) -> list[str]:
+        """The selector is terminal input; keep its observed screen in inline mode."""
+        return ["--no-alt-screen"]
+
+    def plan_approval_args(self, mode: PlanLaunchApprovalMode) -> list[str]:
+        if mode is PlanLaunchApprovalMode.AUTO:
+            # The native --approve-for-me preset also selects workspace-write.
+            # Set its approval component explicitly so sandbox remains independent.
+            return ["-a", "on-request", "-c", 'approvals_reviewer="auto_review"']
+        return super().plan_approval_args(mode)
+
+    def _wrap_terminal_plan_command(self, cmd: list[str], initial_message: str | None) -> list[str]:
+        # A bare command from build_launch_command() must activate Plan too.
+        wrapper = [sys.executable, "-m", "crossby.ai_tools.codex_terminal"]
+        if initial_message is not None:
+            wrapper.append("--initial-message=" + initial_message)
+        # Native Plan effort has a separate setting from Default-mode effort.
+        for argument in tuple(cmd):
+            if argument.startswith("model_reasoning_effort="):
+                cmd.extend(
+                    [
+                        "-c",
+                        argument.replace(
+                            "model_reasoning_effort=", "plan_mode_reasoning_effort=", 1
+                        ),
+                    ]
+                )
+        return [*wrapper, "--", *cmd]
+
+    def _run_terminal_plan_command(
+        self,
+        cmd: list[str],
+        working_dir: Path,
+        transcript_path: Path | None,
+        env: dict[str, str] | None,
+        on_event: InteractiveLaunchHandler | None,
+    ) -> int:
+        from crossby.ai_tools.codex_terminal import (
+            TerminalStartupError,
+            parse_wrapper_args,
+            run_terminal_plan,
+        )
+        from crossby.ai_tools.plan_mode import PlanModeLaunchError
+
+        prompt, native = parse_wrapper_args(cmd[3:])
+        try:
+            return run_terminal_plan(
+                native,
+                working_dir,
+                prompt=prompt,
+                transcript_path=transcript_path,
+                env=env,
+                on_event=on_event,
+            )
+        except TerminalStartupError as exc:
+            raise PlanModeLaunchError(
+                str(exc),
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            ) from exc
 
     def build_resume_command(
         self,

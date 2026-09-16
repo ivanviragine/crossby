@@ -35,6 +35,7 @@ from crossby.models.ai import (
 from crossby.utils.process import run_with_transcript
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.scenes.launch import SceneLaunchContext
 
 logger = structlog.get_logger()
@@ -95,6 +96,7 @@ class AntigravityAdapter(AbstractAITool):
         allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
+        on_event: InteractiveLaunchHandler | None = None,
     ) -> int:
         # The Antigravity IDE is a GUI launcher: it has no sandbox, so
         # `network_access` and `sandbox` are inert (the CLI warns + ignores
@@ -103,6 +105,9 @@ class AntigravityAdapter(AbstractAITool):
         # `antigravity <path>` opens the workspace, mirroring the VS Code-family
         # launcher convention (`code <path>` / `cursor <path>`). Pass the working
         # dir explicitly rather than "." so the target is unambiguous.
+        if on_event is not None:
+            raise ValueError("This adapter does not support interactive startup events")
+
         self.validate_plan_mode_request(
             plan_mode=plan_mode,
             yolo=yolo,

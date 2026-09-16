@@ -752,7 +752,7 @@ class TestPlanFlag:
 
 
 class TestNativePlanContractCLI:
-    @pytest.mark.parametrize("tool", ["codex", "vscode", "antigravity"])
+    @pytest.mark.parametrize("tool", ["vscode", "antigravity"])
     def test_unsupported_tools_fail_before_launch(self, tmp_path: Path, tool: str) -> None:
         (tmp_path / ".crossby.yml").write_text(f"version: 1\nai:\n  default_tool: {tool}\n")
         with (

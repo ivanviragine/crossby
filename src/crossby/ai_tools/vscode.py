@@ -21,6 +21,7 @@ from crossby.models.ai import (
 from crossby.utils.process import run_with_transcript
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.scenes.launch import SceneLaunchContext
 
 logger = structlog.get_logger()
@@ -79,10 +80,14 @@ class VSCodeAdapter(AbstractAITool):
         allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
+        on_event: InteractiveLaunchHandler | None = None,
     ) -> int:
         # VS Code is a GUI launcher: `network_access` and `sandbox` are inert
         # (the CLI already warns + ignores unsupported options for GUI tools),
         # and no session-scoped scene lever exists, so `scene` is inert too.
+        if on_event is not None:
+            raise ValueError("This adapter does not support interactive startup events")
+
         self.validate_plan_mode_request(
             plan_mode=plan_mode,
             yolo=yolo,

@@ -2,6 +2,18 @@
 
 Thanks for your interest in contributing. This document is the maintainer/developer guide — architecture, conventions, and how to extend crossby safely. If you're looking for usage docs, see [README.md](README.md).
 
+## Codex terminal startup
+
+`ai_tools/codex_terminal.py` owns the temporary POSIX PTY startup adapter.
+It observes Codex 0.154.x screen state, submits `/plan`, and exposes typed
+`PLAN_READY` / `MESSAGE_SUBMITTED` events through `ai_tools.interactive`.
+Consumers own the initial task via the one-shot input port; native questions
+and subsequent keyboard input remain in Codex. Keep version bounds explicit
+and replace this adapter when a native pre-prompt Plan selector is verified.
+Deterministic tests use nested PTYs and a fake CLI; live evidence is documented
+in `docs/codex-terminal-plan-verification.md`. The separate app-server collector
+retains its own `collector_verified_version` floor.
+
 ## Development Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
