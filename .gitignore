@@ -26,3 +26,16 @@ steps.md
 .cursor/skills
 .gemini/
 .github/skills
+
+# Editor swap/backup files.
+# vim rotates swap names when several instances share a file (.swp -> .swo ->
+# ... -> .swa -> .svz -> ...), and writes them WITHOUT a filename prefix when it
+# has no named buffer — so bare `.swa` / `.svs` must be covered too, not just
+# the `.README.md.swp` form.
+*~
+*.sw[a-p]
+*.sv[a-z]
+.*.sw[a-p]
+.*.sv[a-z]
+.sw[a-p]
+.sv[a-z]

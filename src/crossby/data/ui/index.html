@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>crossby</title>
+<link rel="stylesheet" href="/assets/vendor/xterm.css">
+<link rel="stylesheet" href="/assets/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>▚</text></svg>">
+</head>
+<body>
+<div class="app">
+  <aside class="panel">
+    <header class="brand">
+      <span class="mark" aria-hidden="true">▚</span>
+      <div>
+        <h1>crossby</h1>
+        <p class="root" id="project-root">&nbsp;</p>
+      </div>
+    </header>
+
+    <form id="launch-form" class="form">
+      <label class="field">
+        <span>AI tool</span>
+        <select id="tool" required></select>
+      </label>
+
+      <label class="field" id="model-field">
+        <span>Model</span>
+        <select id="model"><option value="">Tool default</option></select>
+      </label>
+
+      <label class="field" id="effort-field">
+        <span>Effort</span>
+        <select id="effort"><option value="">Tool default</option></select>
+      </label>
+
+      <label class="field" id="message-field">
+        <span>Initial message <em>optional</em></span>
+        <textarea id="initial-message" rows="3" placeholder="Ask for something to start with…"></textarea>
+      </label>
+
+      <label class="field" id="autonomy-field">
+        <span>Autonomy</span>
+        <select id="autonomy"></select>
+        <em class="field-note" id="autonomy-note"></em>
+      </label>
+
+      <label class="toggle" id="sandbox-field">
+        <input type="checkbox" id="sandbox" checked>
+        <span>Sandbox file writes</span>
+      </label>
+
+      <label class="toggle" id="network-field">
+        <input type="checkbox" id="network">
+        <span>Allow network in sandbox <em>(security-sensitive)</em></span>
+      </label>
+
+      <button type="submit" id="launch" class="primary">Launch session</button>
+      <button type="button" id="stop" class="danger" hidden>Stop this session</button>
+      <p class="hint-line" id="stop-hint" hidden>Stopping keeps the tab so you can read the output; × closes it.</p>
+      <p class="error" id="error" role="alert" hidden></p>
+    </form>
+
+    <footer class="meta">
+      <dl id="session-meta" hidden>
+        <div><dt>Status</dt><dd id="meta-status">—</dd></div>
+        <div><dt>PID</dt><dd id="meta-pid">—</dd></div>
+        <div><dt>Size</dt><dd id="meta-size">—</dd></div>
+      </dl>
+      <p class="command" id="meta-command" hidden></p>
+    </footer>
+  </aside>
+
+  <main class="stage">
+    <div class="tabs" id="tabs" role="tablist" aria-label="Terminal sessions"></div>
+    <div class="panes" id="panes"></div>
+    <div class="placeholder" id="placeholder">
+      <p>Pick a tool and launch — it runs on a real PTY, so the tool's full interface works here exactly as it does in your shell.</p>
+      <p class="placeholder-hint">Launch again to open another session; each gets its own tab.</p>
+      <p class="placeholder-hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>1</kbd>–<kbd>9</kbd> switches tabs. If your browser claims those, add <kbd>⌥</kbd>/<kbd>Alt</kbd>.</p>
+    </div>
+  </main>
+</div>
+
+<script src="/assets/vendor/xterm.js"></script>
+<script src="/assets/vendor/addon-fit.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>
