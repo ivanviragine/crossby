@@ -42,6 +42,7 @@ from crossby.models.ai import (
     PlanInteraction,
     PlanInteractionResponse,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanPreflightCheck,
     PlanPreflightDeferredCheck,
@@ -195,8 +196,9 @@ class AbstractAITool(ABC):
             accept_edits: If True, auto-approve file edits while still prompting
                 for shell/commands (the accept-edits tier).
             auto: If True, request the tool's classifier-mediated auto mode
-                (Claude-only); downgrades to accept-edits, then default
-                prompting, on tools that lack it.
+                (Claude and Cursor); downgrades to accept-edits, then default
+                prompting, on tools that lack it outside Plan mode. Plan mode
+                requires a declared native approval combination.
             scene: Optional session-scoped scene context. When set, this
                 adapter's ``scene_launch_args`` renders the scene's artefacts and
                 contributes extra argv (appended to the launch command) and env
@@ -652,6 +654,7 @@ class AbstractAITool(ABC):
         plan_output_dir: Path | None = None,
         working_dir: Path | None = None,
         verify_version: bool = True,
+        interactive: bool = True,
     ) -> None:
         """Reject any plan request the adapter cannot honor truthfully.
 
@@ -680,21 +683,15 @@ class AbstractAITool(ABC):
         if not plan_mode:
             return
 
-        conflicts = tuple(
-            name
-            for name, requested in (
-                ("yolo", yolo),
-                ("auto", auto),
-                ("accept_edits", accept_edits),
-            )
-            if requested
-        )
-        if conflicts:
+        requested = self._requested_plan_approval(yolo=yolo, auto=auto, accept_edits=accept_edits)
+        if requested is not None and (
+            not interactive or requested not in capability.supported_launch_approval_modes
+        ):
             raise PlanModeConflictError.for_tool(
                 tool_id=self.TOOL_ID,
                 display_name=caps.display_name,
                 capability=capability,
-                conflicts=conflicts,
+                conflicts=(requested.value,),
             )
 
         if not capability.supported:
@@ -1036,6 +1033,31 @@ class AbstractAITool(ABC):
         """
         return set()
 
+    @staticmethod
+    def _requested_plan_approval(
+        *, yolo: bool, auto: bool, accept_edits: bool
+    ) -> PlanLaunchApprovalMode | None:
+        """Use the same precedence as ordinary launches without changing Plan mode."""
+        if yolo:
+            return PlanLaunchApprovalMode.YOLO
+        if auto:
+            return PlanLaunchApprovalMode.AUTO
+        if accept_edits:
+            return PlanLaunchApprovalMode.ACCEPT_EDITS
+        return None
+
+    def plan_approval_args(self, mode: PlanLaunchApprovalMode) -> list[str]:
+        """Compose only combinations declared by the native launch capability.
+
+        Override when ordinary approval flags would replace the Plan selector.
+        Collector approval policies remain an independent contract.
+        """
+        return {
+            PlanLaunchApprovalMode.YOLO: self.yolo_args,
+            PlanLaunchApprovalMode.AUTO: self.auto_args,
+            PlanLaunchApprovalMode.ACCEPT_EDITS: self.accept_edits_args,
+        }[mode]()
+
     def _autonomy_launch_args(
         self,
         caps: AIToolCapabilities,
@@ -1048,8 +1070,8 @@ class AbstractAITool(ABC):
         """Resolve the autonomy/permission-mode CLI args via one precedence chain.
 
         Ladder, most permissive first: ``yolo`` > ``auto`` > ``accept_edits`` >
-        default prompting. Native plan mode is a separate, exclusive contract;
-        :meth:`validate_plan_mode_request` rejects combinations with this ladder.
+        default prompting. Native Plan launches use their separately declared
+        approval combinations, retaining the Plan selector and never downgrading.
         The highest requested autonomy tier that the tool supports wins. When
         the tool lacks a requested tier the request downgrades to the next lower
         autonomy tier it supports (never escalating), emitting a one-line
@@ -1062,11 +1084,19 @@ class AbstractAITool(ABC):
         request land on a tier the user never asked for. ``TestCapabilityInvariants``
         in ``test_autonomy_modes.py`` guards it.
         """
+        if plan_mode:
+            requested_plan = self._requested_plan_approval(
+                yolo=yolo, auto=auto, accept_edits=accept_edits
+            )
+            return self.plan_mode_args() + (
+                self.plan_approval_args(requested_plan) if requested_plan is not None else []
+            )
+
         _tier_labels = {"yolo": "YOLO", "auto": "classifier auto", "accept_edits": "accept-edits"}
 
         requested = "yolo" if yolo else "auto" if auto else "accept_edits" if accept_edits else None
         if requested is None:
-            return self.plan_mode_args() if plan_mode else []
+            return []
 
         tiers = ("yolo", "auto", "accept_edits")
         supports = {
@@ -1091,8 +1121,8 @@ class AbstractAITool(ABC):
                     )
                 return args_fns[tier]()
 
-        # No autonomy tier is supported. Degrade to default prompting; plan mode
-        # cannot be a fallback because it is mutually exclusive with this ladder.
+        # No autonomy tier is supported. Degrade to default prompting.
+        # Explicit Plan launches are handled above.
         warnings.warn(
             f"{caps.display_name} does not support {_tier_labels[requested]} mode; "
             "using default prompting.",
@@ -1144,6 +1174,7 @@ class AbstractAITool(ABC):
             plan_output_dir=plan_output_dir,
             working_dir=working_dir,
             verify_version=not _skip_plan_version_check,
+            interactive=prompt is None,
         )
 
         caps = self.capabilities()

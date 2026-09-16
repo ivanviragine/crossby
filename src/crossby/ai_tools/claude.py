@@ -36,6 +36,7 @@ from crossby.models.ai import (
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     PlanRequestBehavior,
@@ -117,6 +118,10 @@ class ClaudeAdapter(AbstractAITool):
             supports_resume=True,
             supports_trusted_dirs=True,
             plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.AUTO,
+                ),
                 activation=PlanModeActivation.CLI_ARGUMENT,
                 activation_detail="Passes --permission-mode plan before the first user turn.",
                 version_requirement="Claude Code exposing --permission-mode plan.",
@@ -199,6 +204,16 @@ class ClaudeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Claude supports --permission-mode plan."""
         return ["--permission-mode", "plan"]
+
+    def plan_approval_args(self, mode: PlanLaunchApprovalMode) -> list[str]:
+        if mode is PlanLaunchApprovalMode.YOLO:
+            # --dangerously-skip-permissions replaces Plan with bypassPermissions.
+            # In an interactive terminal, making bypass available preserves Plan
+            # while natively bypassing its tool permission checks.
+            return ["--allow-dangerously-skip-permissions"]
+        if mode is PlanLaunchApprovalMode.AUTO:
+            return ["--settings", '{"useAutoModeDuringPlan":true}']
+        return super().plan_approval_args(mode)
 
     def plan_output_args(self, plan_output_dir: Path, *, working_dir: Path) -> list[str]:
         """Select Claude's documented project-relative ``plansDirectory``."""

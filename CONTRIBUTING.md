@@ -217,6 +217,18 @@ self-driven repaint, mouse reporting, and resize confirmed against the running
 program's own `columns`/`lines`. A line-oriented fake binary proves the PTY and
 the transport and nothing about TUI rendering; do not treat it as sufficient.
 Interactive login flows for the real AI CLIs remain unverified.
+### Native interactive Plan launch
+
+`launch()` and `build_launch_command(initial_message=...)` retain the native
+terminal UI. `PlanModeCapability.supported_launch_approval_modes` declares which
+approval tiers coexist with Plan. `plan_approval_args()` handles native
+combinations that differ from ordinary launch, such as Claude's bypass-available
+flag and Plan-specific classifier setting. Keep the Plan selector independent
+of approval precedence, reject unsupported combinations before launch, and do
+not assume interactive approval semantics for headless or collected sessions.
+Native permissions, account eligibility, folder trust, and explicit deny rules
+remain authoritative. Do not emulate unavailable modes with prompt text or
+terminal input. The reusable real-CLI probe is `scripts/probe_native_plan.py`.
 
 ### Collected native plan sessions
 

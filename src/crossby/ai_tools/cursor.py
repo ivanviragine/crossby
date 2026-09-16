@@ -33,6 +33,7 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionSupport,
+    PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
     PlanNativeBindingID,
@@ -219,6 +220,10 @@ class CursorAdapter(AbstractAITool):
             supports_effort=True,
             supports_yolo=True,
             plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.AUTO,
+                ),
                 activation=PlanModeActivation.CLI_ARGUMENT,
                 activation_detail="Passes --mode plan before the first user turn.",
                 version_requirement="Cursor Agent exposing --mode plan.",
@@ -251,6 +256,7 @@ class CursorAdapter(AbstractAITool):
                 ),
             ),
             supports_accept_edits=True,
+            supports_auto=True,
             supports_sandbox_toggle=True,
             supports_stop_hook=True,
             supports_user_prompt_submit_hook=True,
@@ -855,6 +861,10 @@ class CursorAdapter(AbstractAITool):
     def yolo_args(self) -> list[str]:
         """Cursor uses ``--force`` (``--yolo`` is an alias)."""
         return ["--force"]
+
+    def auto_args(self) -> list[str]:
+        """Use Cursor CLI's native classifier-mediated Smart Auto run mode."""
+        return ["--auto-review"]
 
     def accept_edits_args(self) -> list[str]:
         """No flag needed — the Cursor CLI's default Agent mode *is* accept-edits

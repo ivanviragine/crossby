@@ -39,8 +39,11 @@ def test_sandbox_is_orthogonal_to_autonomy(sandbox: bool) -> None:
         "--force",
         *suffix,
     ]
-    with pytest.warns(UserWarning, match="downgrading to accept-edits"):
-        assert adapter.build_launch_command(auto=True, sandbox=sandbox) == ["agent", *suffix]
+    assert adapter.build_launch_command(auto=True, sandbox=sandbox) == [
+        "agent",
+        "--auto-review",
+        *suffix,
+    ]
 
 
 def test_capability_gate_blocks_accidental_translation() -> None:

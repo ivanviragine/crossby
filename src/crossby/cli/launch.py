@@ -40,8 +40,8 @@ def launch(
         "--auto",
         help=(
             "Permission mode (not model selection): request the classifier-"
-            "mediated auto mode where available (Claude); downgrades to accept-"
-            "edits, then default prompting, elsewhere. Never escalates to yolo."
+            "mediated auto mode where available (Claude, Cursor); ordinary launches "
+            "downgrade elsewhere. With --plan, requires native support."
         ),
     ),
     command: str | None = typer.Option(
@@ -348,35 +348,32 @@ def launch(
     # build_launch_command(). But GUI adapters (VS Code, Antigravity IDE) override
     # launch() and never reach the builder, so an unsupported flag would be
     # dropped silently; normalizing here keeps the summary honest for every tool.
-    if resolved_auto and not caps.supports_auto:
+    if not plan and resolved_auto and not caps.supports_auto:
         if caps.supports_accept_edits:
             console.warn(f"{caps.display_name} does not support --auto; using accept-edits.")
             resolved_accept_edits = True
         else:
             console.warn(f"{caps.display_name} does not support --auto; using default prompting.")
         resolved_auto = False
-    if resolved_accept_edits and not caps.supports_accept_edits:
+    if not plan and resolved_accept_edits and not caps.supports_accept_edits:
         console.warn(
             f"{caps.display_name} does not support --accept-edits; using default prompting."
         )
         resolved_accept_edits = False
 
-    # Display the effective selection. Native plan mode is exclusive, so a plan
-    # summary is always truthful; the remaining autonomy ladder retains its
-    # existing yolo > auto > accept-edits precedence when plan was not requested.
+    # Planning and approval are independent native dimensions. Show both;
+    # approval flags retain yolo > auto > accept-edits precedence.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
         console.kv("Model", resolved_model)
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
+    if plan:
+        console.kv("Plan mode", "on")
     autonomy_tiers = (
-        (("Plan mode", plan),)
-        if plan
-        else (
-            ("YOLO mode", resolved_yolo),
-            ("Auto mode", resolved_auto),
-            ("Accept-edits mode", resolved_accept_edits),
-        )
+        ("YOLO mode", resolved_yolo),
+        ("Auto mode", resolved_auto),
+        ("Accept-edits mode", resolved_accept_edits),
     )
     effective_shown = False
     for label, requested in autonomy_tiers:

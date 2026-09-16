@@ -785,7 +785,7 @@ class TestNativePlanContractCLI:
         assert "oldest release verified by this adapter is 1.18.29" in result.output
         run.assert_not_called()
 
-    @pytest.mark.parametrize("flag", ["--yolo", "--auto", "--accept-edits"])
+    @pytest.mark.parametrize("flag", ["--accept-edits"])
     def test_plan_conflicts_are_rejected_before_launch(self, tmp_path: Path, flag: str) -> None:
         (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
         with patch("crossby.utils.process.run_with_transcript") as run:
@@ -794,6 +794,32 @@ class TestNativePlanContractCLI:
                 ["launch", str(tmp_path), "--tool", "claude", "--plan", flag],
             )
         assert result.exit_code == 1, result.output
+        assert "cannot be combined" in result.output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["claude", "cursor", "copilot", "opencode", "antigravity-cli"])
+    def test_plan_and_yolo_are_both_displayed_and_launched(self, tmp_path: Path, tool: str) -> None:
+        (tmp_path / ".crossby.yml").write_text(f"version: 1\nai:\n  default_tool: {tool}\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(9999, 0, 0)),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", tool, "--plan", "--yolo"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "Plan mode" in result.output
+        assert "YOLO mode" in result.output
+        argv = run.call_args.args[0]
+        assert "plan" in argv or "--plan" in argv
+
+    def test_unsupported_plan_auto_is_not_silently_downgraded(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "opencode", "--plan", "--auto"]
+            )
+        assert result.exit_code == 1
         assert "cannot be combined" in result.output
         run.assert_not_called()
 

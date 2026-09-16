@@ -283,7 +283,7 @@ class TestPlanModeFailures:
         vscode_run.assert_not_called()
         antigravity_run.assert_not_called()
 
-    @pytest.mark.parametrize("flag", ["yolo", "auto", "accept_edits"])
+    @pytest.mark.parametrize("flag", ["accept_edits"])
     def test_every_superseding_autonomy_flag_is_a_typed_conflict(self, flag: str) -> None:
         with pytest.raises(PlanModeConflictError, match=flag.replace("_", "-")):
             AbstractAITool.get("claude").build_launch_command(plan_mode=True, **{flag: True})
