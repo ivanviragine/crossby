@@ -80,6 +80,11 @@ SUBSCRIBER_QUEUE_LIMIT = 2048
 # Grace period between SIGHUP and SIGKILL when closing a session.
 TERMINATE_GRACE_SECONDS = 3.0
 
+# How long a second close() waits for the first to finish. The teardown spends
+# at most one grace period on the child and another joining the reader, so this
+# covers it with room to spare without letting a wedged close hang shutdown.
+CLOSE_SETTLE_SECONDS = TERMINATE_GRACE_SECONDS * 3
+
 # How often to re-check whether the child has exited, while waiting it out.
 EXIT_POLL_SECONDS = 0.05
 
@@ -199,6 +204,9 @@ class PtySession:
         self._exit_code: int | None = None
         self._size = size
         self._closed = False
+        # Set once teardown has finished, so a second close() waits for the
+        # first rather than racing ahead of it.
+        self._close_done = threading.Event()
         # The child's pid may be recycled once this is True, so teardown must
         # have finished signalling its process group before it flips.
         self._reaped = False
@@ -286,11 +294,32 @@ class PtySession:
         return self._exit_code
 
     def close(self) -> None:
-        """Terminate the child's process group and release the master descriptor."""
+        """Terminate the child's process group and release the master descriptor.
+
+        Safe to call from several threads: the first caller does the work and
+        the rest block until it is done. Returning early instead was not enough
+        — a DELETE handler can be mid-teardown when Ctrl-C arrives, and those
+        handlers are daemon threads. ``shutdown()`` saw ``_closed`` already set,
+        returned, and the interpreter exited while the original thread still had
+        signals to send, leaving the tool or its descendants running.
+        """
         with self._lock:
-            if self._closed:
-                return
+            mine = not self._closed
             self._closed = True
+        if not mine:
+            # Bounded by roughly what the teardown below can cost, so a wedged
+            # close slows shutdown rather than hanging it.
+            if not self._close_done.wait(timeout=CLOSE_SETTLE_SECONDS):
+                logger.warning("pty.close.settle_timeout", session=self.id)
+            return
+
+        try:
+            self._teardown()
+        finally:
+            self._close_done.set()
+
+    def _teardown(self) -> None:
+        """The close path proper. Exactly one thread ever runs this."""
 
         # Teardown signals the child's *group* by number, and a pid is released
         # the instant it is waited on — after which the kernel may hand it to

@@ -488,6 +488,49 @@ class TestProcessGroupTeardown:
         session.close()
         assert session._reaped
 
+    def test_a_second_close_waits_for_the_first_to_finish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returning early on an already-closing session was not enough.
+
+        A DELETE handler can be mid-teardown when Ctrl-C arrives, and those
+        handlers are daemon threads. shutdown()'s close() saw the flag already
+        set and returned, so the interpreter could exit while the original
+        thread still had signals to send — leaving the tool, or a descendant
+        that ignored SIGHUP, running with nothing left to stop it.
+        """
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(300)"], cwd=tmp_path)
+
+        inside = threading.Event()
+        release = threading.Event()
+        real_reap = session._reap_leader
+
+        def slow_reap() -> None:
+            inside.set()
+            assert release.wait(timeout=5), "test never released the teardown"
+            real_reap()
+
+        monkeypatch.setattr(session, "_reap_leader", slow_reap)
+
+        first = threading.Thread(target=session.close, daemon=True)
+        first.start()
+        assert inside.wait(timeout=5), "first close never reached the teardown"
+
+        returned = threading.Event()
+
+        def second_close() -> None:
+            session.close()
+            returned.set()
+
+        waiter = threading.Thread(target=second_close, daemon=True)
+        waiter.start()
+        assert not returned.wait(timeout=0.5), "second close returned mid-teardown"
+
+        release.set()
+        assert returned.wait(timeout=10), "second close never returned"
+        first.join(timeout=5)
+        assert session._reaped
+
     def test_the_exit_status_is_published_before_the_child_is_collected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
