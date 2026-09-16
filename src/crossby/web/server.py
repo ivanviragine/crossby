@@ -53,7 +53,8 @@ import mimetypes
 import secrets
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -342,20 +343,22 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-        heartbeat = _Heartbeat(self.wfile, SSE_KEEPALIVE_SECONDS)
-        heartbeat.start()
-        try:
-            with MultiplexedStream(self.ui.sessions) as stream:
+        with MultiplexedStream(self.ui.sessions) as stream:
+            heartbeat = _Heartbeat(
+                self.wfile, SSE_KEEPALIVE_SECONDS, on_disconnect=stream.interrupt
+            )
+            heartbeat.start()
+            try:
                 for event in stream:
                     heartbeat.write(_sse_frame(event))
                 if stream.desynced:
                     # Close without a terminal marker: EventSource reconnects on
                     # its own and repaints every session from fresh scrollback.
                     logger.warning("web.stream.desync")
-        except (BrokenPipeError, ConnectionResetError):
-            logger.debug("web.stream.disconnected")
-        finally:
-            heartbeat.stop()
+            except (BrokenPipeError, ConnectionResetError):
+                logger.debug("web.stream.disconnected")
+            finally:
+                heartbeat.stop()
 
     # -- static -----------------------------------------------------------
     def _serve_static(self, relative: str) -> None:
@@ -481,9 +484,15 @@ def _sse_frame(event: StreamEvent) -> bytes:
 class _Heartbeat:
     """Serializes SSE writes and emits a comment frame while the stream is idle."""
 
-    def __init__(self, stream: Any, interval: float) -> None:
+    def __init__(
+        self,
+        stream: Any,
+        interval: float,
+        on_disconnect: Callable[[], None] | None = None,
+    ) -> None:
         self._stream = stream
         self._interval = interval
+        self._on_disconnect = on_disconnect
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -504,6 +513,14 @@ class _Heartbeat:
             try:
                 self.write(b": keepalive\n\n")
             except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
+                # On an idle connection this thread is the only one that ever
+                # notices. Ending it alone left the handler parked on the
+                # multiplexed queue with its listener and per-session pumps
+                # still attached, so every reload against quiet sessions leaked
+                # another set until some session happened to produce output.
+                if self._on_disconnect is not None:
+                    with suppress(Exception):
+                        self._on_disconnect()
                 return
 
 

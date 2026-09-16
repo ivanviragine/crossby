@@ -607,6 +607,16 @@ class MultiplexedStream:
             self._subscriptions.clear()
         for session, subscription in pending:
             session.detach(subscription)
+        self.interrupt()
+
+    def interrupt(self) -> None:
+        """Release a consumer parked in :meth:`__iter__`, tearing nothing down.
+
+        The SSE keepalive thread is the only thing that notices an idle client
+        disconnecting — the handler is blocked on the queue, and with every
+        session quiet nothing else will ever wake it. Waking it lets the handler
+        run its own ``close()``, so cleanup stays on one thread.
+        """
         # Evict if necessary: losing this sentinel parks __iter__ in get()
         # forever and the SSE handler thread never returns.
         for _ in range(self._queue.maxsize + 8):

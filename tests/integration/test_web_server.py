@@ -422,3 +422,47 @@ class TestConstructionFailures:
         """Binding and header validation are different questions."""
         status, _, _ = request(server, "GET", "/api/tools", host=f"[::1]:{server.port}")
         assert status == 200
+
+
+class TestIdleStreamDisconnect:
+    """An idle SSE client going away must release the handler that serves it."""
+
+    def test_a_quiet_stream_is_released_when_the_client_disconnects(
+        self, server: CrossbyUIServer
+    ) -> None:
+        """Only the keepalive thread notices an idle disconnect.
+
+        The handler blocks in `MultiplexedStream.__iter__` on the queue, so with
+        every session quiet nothing woke it: the keepalive thread died alone and
+        the handler stayed parked with its listener and per-session pumps
+        attached. Each reload leaked another set until some session happened to
+        produce output.
+        """
+        assert server.sessions._listeners == [], "a listener was left over"
+
+        with patch("crossby.web.server.SSE_KEEPALIVE_SECONDS", 0.1):
+            client = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+            try:
+                client.sendall(
+                    b"GET /api/stream HTTP/1.1\r\n"
+                    + f"Host: 127.0.0.1:{server.port}\r\n".encode()
+                    + f"X-Crossby-Token: {TOKEN}\r\n".encode()
+                    + b"\r\n"
+                )
+                assert b"200" in client.recv(256), "stream did not open"
+                # Registered while the connection is up.
+                deadline = time.monotonic() + 5
+                while not server.sessions._listeners and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert server.sessions._listeners, "stream never registered its listener"
+            finally:
+                # Hard reset, so the server's next write fails rather than
+                # seeing a clean EOF.
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                client.close()
+
+            deadline = time.monotonic() + 10
+            while server.sessions._listeners and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+        assert server.sessions._listeners == [], "handler stayed parked after disconnect"
