@@ -16,6 +16,11 @@ def ui(
     path: Path = typer.Option(Path("."), "--path", "-p", help="Project directory sessions run in."),
     port: int = typer.Option(0, "--port", help="Port to bind (0 picks a free one)."),
     host: str = typer.Option("127.0.0.1", "--host", help="Loopback address to bind."),
+    allow_dir: list[Path] = typer.Option(
+        [],
+        "--allow-dir",
+        help="Additional directory tree sessions may run in. Repeatable.",
+    ),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open the UI in your default browser."
     ),
@@ -28,7 +33,9 @@ def ui(
     every request must present, so treat the URL as a secret. The token lasts as
     long as the server; stopping it invalidates the URL.
 
-    Sessions always run in ``--path``; the page cannot choose another directory.
+    Sessions run in ``--path`` by default, and the page can pick any directory
+    at or below it. Pass ``--allow-dir`` to offer trees outside that one. Only
+    these roots are reachable — the page cannot walk elsewhere.
     """
     from crossby.web import serve
 
@@ -42,8 +49,16 @@ def ui(
         console.error(f"Not a directory: {project_root}")
         raise typer.Exit(1)
 
+    extra_roots: list[Path] = []
+    for candidate in allow_dir:
+        resolved = candidate.expanduser().resolve()
+        if not resolved.is_dir():
+            console.error(f"--allow-dir is not a directory: {resolved}")
+            raise typer.Exit(1)
+        extra_roots.append(resolved)
+
     try:
-        server = serve(project_root, host=host, port=port)
+        server = serve(project_root, host=host, port=port, allowed_roots=extra_roots)
     except ValueError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from exc
@@ -54,6 +69,8 @@ def ui(
     url = server.url()
     console.header("crossby ui")
     console.kv("Project", str(project_root))
+    for extra in extra_roots:
+        console.kv("Also allowed", str(extra))
     console.kv("URL", url)
     console.empty()
     console.hint("The URL contains an access token — anyone with it can run AI tools here.")

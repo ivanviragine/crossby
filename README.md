@@ -730,6 +730,22 @@ own tab, its own terminal and its own PTY, and they run side by side. Every
 session streams over a single connection, so the tab count is not limited by the
 browser's per-origin connection cap.
 
+**Each session picks its own folder.** The **Folder** control browses the
+directories the server allows and launches the tool there, so one UI can drive
+several projects at once. When sessions span more than one folder, the tabs say
+which is which. Your last choice is remembered between visits.
+
+By default that is `--path` and everything beneath it. `--allow-dir` adds more
+trees:
+
+```sh
+crossby ui --path ~/work --allow-dir ~/oss --allow-dir ~/scratch
+```
+
+Only the operator sets those roots. The page browses and launches **within** them
+and cannot reach outside — a request for anything else is refused, symlinks
+included, because containment is checked against the resolved path.
+
 **Reloading the page does not lose your work.** Sessions live on the server, so
 a refresh reattaches to everything still running and repaints each tab from its
 scrollback.
@@ -763,20 +779,15 @@ its number.
 
 `Cmd` is the right modifier for a terminal UI: macOS never delivers it to the
 tool, so it cannot collide with the tool's own bindings the way `Ctrl-` and
-`Option-` would. The snag is that **Chrome reserves `Cmd`/`Ctrl` + `1`–`9` for
-its own tab strip**, handling it in the browser process where a page cannot
-intercept it — `preventDefault()` has no effect.
+`Option-` would. This is confirmed working in ordinary Chrome on macOS.
 
-So there are two bindings, and you use whichever your setup leaves free:
-
-| | |
-| --- | --- |
-| `Cmd`/`Ctrl` + `1`–`9` | Works where the browser has no tab strip to switch — an installed PWA or "Open as window", and browsers that do not reserve it. |
-| `Cmd`/`Ctrl` + `Alt` + `1`–`9` | Not reserved anywhere, so this works in an ordinary browser tab. |
+Some browsers do claim `Cmd`/`Ctrl` + a digit for their own tab strip, so a
+second binding is registered for those: `Cmd`/`Ctrl` + `Alt` + `1`–`9`, which
+nothing reserves. Use whichever your browser leaves free.
 
 Installing the page as an app window (Chrome ▸ **Cast, save and share** ▸
-**Install page as app**) frees the plain shortcut and drops the browser chrome,
-which is worth doing if you use the UI regularly.
+**Install page as app**) drops the browser chrome and removes any doubt, which
+is worth doing if you use the UI regularly.
 
 **Scope in this release.** The UI launches sessions and lets you interact with
 them. Scene selection, profiles, resume and transcript capture are not wired into

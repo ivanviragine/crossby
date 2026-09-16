@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,6 +24,7 @@ import structlog
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import PlanModeLaunchError
+from crossby.config.json_utils import PathContainmentError, assert_within
 from crossby.models.ai import AIToolID, AIToolType, EffortLevel
 from crossby.utils.pty_runner import (
     PtySession,
@@ -38,6 +39,10 @@ logger = structlog.get_logger()
 # Sessions a single UI process will hold open at once. The cap exists so a
 # runaway page cannot fork unbounded AI tool processes.
 MAX_CONCURRENT_SESSIONS = 16
+
+# Directories returned by one browse call; a listing is a convenience, not a
+# file manager, and an enormous folder should not become an enormous payload.
+MAX_BROWSE_ENTRIES = 500
 
 
 class Autonomy(StrEnum):
@@ -74,6 +79,7 @@ class LaunchRequest:
     effort: EffortLevel | None = None
     autonomy: Autonomy = Autonomy.DEFAULT
     initial_message: str | None = None
+    cwd: str | None = None
     network_access: bool = False
     sandbox: bool = True
     size: WindowSize = field(default=WindowSize(cols=80, rows=24))
@@ -121,6 +127,10 @@ class LaunchRequest:
         if message is not None and not isinstance(message, str):
             raise LaunchValidationError("'initial_message' must be a string")
 
+        cwd = payload.get("cwd") or None
+        if cwd is not None and not isinstance(cwd, str):
+            raise LaunchValidationError("'cwd' must be a string")
+
         raw_autonomy = payload.get("autonomy") or Autonomy.DEFAULT.value
         try:
             autonomy = Autonomy(raw_autonomy)
@@ -133,6 +143,7 @@ class LaunchRequest:
             effort=effort,
             autonomy=autonomy,
             initial_message=message,
+            cwd=cwd,
             network_access=bool(payload.get("network_access", False)),
             sandbox=bool(payload.get("sandbox", True)),
             size=_window_size(payload),
@@ -210,13 +221,18 @@ def _supported_autonomy(caps: Any) -> list[Autonomy]:
 class SessionManager:
     """Owns every live terminal session for one UI server.
 
-    All sessions run in ``project_root``. The browser never supplies a working
-    directory: the server is started against one project and stays there, so a
-    page cannot walk the filesystem by asking for a different cwd.
+    A session runs in any directory at or below one of ``allowed_roots``, which
+    only the operator sets (``--path`` plus any ``--allow-dir``). The browser
+    chooses *within* that boundary and never outside it: a requested directory is
+    resolved and checked against the roots before a process is created, so a page
+    cannot walk the filesystem by asking for an arbitrary cwd.
     """
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(self, project_root: Path, allowed_roots: Sequence[Path] | None = None) -> None:
         self.project_root = project_root.resolve()
+        roots = [self.project_root, *(r.resolve() for r in allowed_roots or ())]
+        # De-duplicate while keeping the operator's order; the first is the default.
+        self.allowed_roots: tuple[Path, ...] = tuple(dict.fromkeys(roots))
         self._sessions: dict[str, PtySession] = {}
         self._requests: dict[str, LaunchRequest] = {}
         self._listeners: list[Callable[[PtySession], None]] = []
@@ -266,6 +282,7 @@ class SessionManager:
                     "close one before starting another"
                 )
 
+        workdir = self.resolve_workdir(request.cwd)
         command_kwargs: dict[str, Any] = {
             "model": request.model,
             "initial_message": request.initial_message,
@@ -275,7 +292,7 @@ class SessionManager:
             "accept_edits": request.accept_edits,
             "auto": request.auto,
             "network_access": request.network_access,
-            "working_dir": self.project_root,
+            "working_dir": workdir,
         }
         # Only adapters declaring the toggle accept the keyword; passing it
         # unconditionally would break the others' builders.
@@ -287,7 +304,7 @@ class SessionManager:
             # The adapter's own pre-launch gate; surface it as a bad request
             # rather than a server error.
             raise LaunchValidationError(str(exc)) from exc
-        session = PtySession(command, cwd=self.project_root, size=request.size)
+        session = PtySession(command, cwd=workdir, size=request.size)
 
         with self._lock:
             self._sessions[session.id] = session
@@ -298,10 +315,80 @@ class SessionManager:
             session=session.id,
             tool=str(request.tool),
             model=request.model,
+            cwd=str(workdir),
         )
         for listener in listeners:
             listener(session)
         return session
+
+    def resolve_workdir(self, requested: str | None) -> Path:
+        """Resolve a requested working directory, or the default when absent.
+
+        Containment is checked against the resolved path, so a symlink pointing
+        out of an allowed root is refused rather than followed.
+        """
+        if requested is None:
+            return self.project_root
+
+        candidate = Path(requested).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise LaunchValidationError(f"no such directory: {requested}") from exc
+        if not resolved.is_dir():
+            raise LaunchValidationError(f"not a directory: {requested}")
+
+        for root in self.allowed_roots:
+            try:
+                assert_within(root, resolved)
+            except PathContainmentError:
+                continue
+            return resolved
+
+        allowed = ", ".join(str(root) for root in self.allowed_roots)
+        raise LaunchValidationError(
+            f"{resolved} is outside the directories this server may use ({allowed}). "
+            "Restart crossby ui with --path or --allow-dir to widen it."
+        )
+
+    def browse(self, requested: str | None) -> dict[str, Any]:
+        """List the sub-directories of *requested* for the folder picker.
+
+        Only directories inside an allowed root are listed, and a parent is
+        offered only while it also stays inside one — so the picker cannot be
+        used to enumerate the filesystem.
+        """
+        path = self.resolve_workdir(requested)
+
+        parent: str | None = None
+        if path.parent != path:
+            try:
+                parent = str(self.resolve_workdir(str(path.parent)))
+            except LaunchValidationError:
+                parent = None
+
+        children: list[str] = []
+        try:
+            for child in sorted(path.iterdir(), key=lambda c: c.name.lower()):
+                if len(children) >= MAX_BROWSE_ENTRIES:
+                    break
+                # Hidden directories are overwhelmingly tooling (.git, .venv),
+                # not somewhere anyone launches an agent.
+                if child.name.startswith(".") or not child.is_dir():
+                    continue
+                children.append(child.name)
+        except (PermissionError, OSError) as exc:
+            raise LaunchValidationError(f"cannot read {path}: {exc}") from exc
+
+        return {
+            "path": str(path),
+            "parent": parent,
+            "children": children,
+            "roots": [str(root) for root in self.allowed_roots],
+            "default": str(self.project_root),
+        }
 
     def add_listener(self, callback: Callable[[PtySession], None]) -> None:
         """Notify *callback* of each session created from now on."""

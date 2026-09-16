@@ -28,11 +28,18 @@ const ui = {
   tabs: el("tabs"), panes: el("panes"), meta: el("session-meta"), metaStatus: el("meta-status"),
   metaPid: el("meta-pid"), metaSize: el("meta-size"), metaCommand: el("meta-command"),
   projectRoot: el("project-root"),
+  folder: el("folder"), folderPath: el("folder-path"), browser: el("browser"),
+  browserUp: el("browser-up"), browserHere: el("browser-here"),
+  browserList: el("browser-list"), browserPick: el("browser-pick"),
 };
 
 let tools = [];
 let stream = null;
 let activeId = null;
+/** Directory new sessions launch in; null means the server's default. */
+let workdir = null;
+/** Directory the picker is currently showing, which may differ from `workdir`. */
+let browsing = null;
 /** @type {Map<string, object>} session id → terminal, addon, pane, tab, state */
 const sessions = new Map();
 
@@ -169,6 +176,13 @@ async function flushInput(entry) {
  */
 function tabLabel(entry) {
   const name = labelFor(entry.info.tool) || "session";
+  // With sessions across several folders the tool name alone is ambiguous, so
+  // the folder becomes the distinguishing part.
+  const folders = new Set([...sessions.values()].map((other) => other.info.cwd));
+  if (folders.size > 1 && entry.info.cwd) {
+    const leaf = entry.info.cwd.replace(/\/+$/, "").split("/").pop();
+    if (leaf) return `${name} · ${leaf}`;
+  }
   const sameTool = [...sessions.values()].filter(
     (other) => labelFor(other.info.tool) === name,
   );
@@ -455,6 +469,7 @@ async function startSession(event) {
       tool: ui.tool.value,
       model: ui.model.value || null,
       effort: ui.effort.value || null,
+      cwd: workdir,
       autonomy: ui.autonomy.value || "default",
       initial_message: ui.message.value.trim() || null,
       sandbox: ui.sandboxField.hidden ? true : ui.sandbox.checked,
@@ -546,6 +561,108 @@ window.addEventListener("resize", () => {
   }, 80);
 });
 
+/* ---------------- folder picker ---------------- */
+
+const LAST_FOLDER_KEY = "crossby.lastFolder";
+
+/**
+ * Shorten a path for display, keeping the tail — the informative part.
+ *
+ * Truncation happens here rather than via CSS: `direction: rtl` does ellipsize
+ * at the start, but it also reorders the path's leading "/" to the end, which
+ * reads as a stray trailing slash.
+ */
+function shortenPath(path, limit = 38) {
+  const home = path.replace(/^\/(Users|home)\/[^/]+/, "~");
+  return home.length <= limit ? home : `…${home.slice(-(limit - 1))}`;
+}
+
+function setWorkdir(path) {
+  workdir = path;
+  ui.folderPath.textContent = shortenPath(path);
+  ui.folder.title = path;
+  try {
+    localStorage.setItem(LAST_FOLDER_KEY, path);
+  } catch {
+    /* private window, or storage disabled — the choice just will not persist */
+  }
+}
+
+async function showBrowser(path) {
+  let listing;
+  try {
+    listing = await api("GET", `/api/directories?path=${encodeURIComponent(path)}`);
+  } catch (err) {
+    showError(err.message);
+    return;
+  }
+  browsing = listing.path;
+  ui.browserHere.textContent = shortenPath(listing.path);
+  ui.browserHere.title = listing.path;
+  ui.browserUp.disabled = !listing.parent;
+  ui.browserUp.dataset.parent = listing.parent || "";
+
+  ui.browserList.replaceChildren();
+  if (listing.children.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "browser-empty";
+    empty.textContent = "No sub-folders here";
+    ui.browserList.appendChild(empty);
+  }
+  for (const name of listing.children) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = name;
+    button.addEventListener("click", () => showBrowser(`${listing.path}/${name}`));
+    item.appendChild(button);
+    ui.browserList.appendChild(item);
+  }
+  ui.browser.hidden = false;
+  ui.folder.setAttribute("aria-expanded", "true");
+}
+
+function hideBrowser() {
+  ui.browser.hidden = true;
+  ui.folder.setAttribute("aria-expanded", "false");
+}
+
+function setupFolderPicker(defaultPath) {
+  // Reuse the last folder when it is still permitted; the server is the judge,
+  // since the operator may have restarted with different roots.
+  let remembered = null;
+  try {
+    remembered = localStorage.getItem(LAST_FOLDER_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  setWorkdir(defaultPath);
+  if (remembered && remembered !== defaultPath) {
+    api("GET", `/api/directories?path=${encodeURIComponent(remembered)}`)
+      .then(() => setWorkdir(remembered))
+      .catch(() => {
+        try {
+          localStorage.removeItem(LAST_FOLDER_KEY);
+        } catch {
+          /* nothing to clean up */
+        }
+      });
+  }
+
+  ui.folder.addEventListener("click", () => {
+    if (ui.browser.hidden) void showBrowser(browsing || workdir);
+    else hideBrowser();
+  });
+  ui.browserUp.addEventListener("click", () => {
+    const parent = ui.browserUp.dataset.parent;
+    if (parent) void showBrowser(parent);
+  });
+  ui.browserPick.addEventListener("click", () => {
+    if (browsing) setWorkdir(browsing);
+    hideBrowser();
+  });
+}
+
 /* ---------------- keyboard shortcuts ---------------- */
 
 /**
@@ -604,8 +721,9 @@ async function boot() {
   try {
     const payload = await api("GET", "/api/tools");
     tools = payload.tools;
-    ui.projectRoot.textContent = payload.project_root;
+    ui.projectRoot.textContent = shortenPath(payload.project_root);
     ui.projectRoot.title = payload.project_root;
+    setupFolderPicker(payload.project_root);
   } catch (err) {
     showError(err.message);
     ui.launch.disabled = true;

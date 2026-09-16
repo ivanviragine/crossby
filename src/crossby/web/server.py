@@ -53,6 +53,7 @@ import mimetypes
 import secrets
 import sys
 import threading
+from collections.abc import Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -105,9 +106,15 @@ class CrossbyUIServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], project_root: Path, token: str) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        project_root: Path,
+        token: str,
+        allowed_roots: Sequence[Path] | None = None,
+    ) -> None:
         super().__init__(address, _RequestHandler)
-        self.sessions = SessionManager(project_root)
+        self.sessions = SessionManager(project_root, allowed_roots)
         self.token = token
         self.project_root = project_root.resolve()
 
@@ -193,10 +200,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if route == "/api/tools":
             self._send_json(
                 HTTPStatus.OK,
-                {"tools": describe_tools(), "project_root": str(self.ui.project_root)},
+                {
+                    "tools": describe_tools(),
+                    "project_root": str(self.ui.project_root),
+                    "roots": [str(root) for root in self.ui.sessions.allowed_roots],
+                },
             )
         elif route == "/api/sessions":
             self._send_json(HTTPStatus.OK, {"sessions": self.ui.sessions.list_sessions()})
+        elif route == "/api/directories":
+            self._browse(next(iter(query.get("path", [])), None))
         elif route == "/api/stream":
             self._stream()
         elif route.startswith("/api/sessions/"):
@@ -258,6 +271,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(HTTPStatus.CREATED, self.ui.sessions.describe(session.id))
+
+    def _browse(self, requested: str | None) -> None:
+        try:
+            listing = self.ui.sessions.browse(requested)
+        except LaunchValidationError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, listing)
 
     def _describe(self, session_id: str) -> None:
         self._send_json(HTTPStatus.OK, self.ui.sessions.describe(session_id))
@@ -474,6 +495,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 0,
     token: str | None = None,
+    allowed_roots: Sequence[Path] | None = None,
 ) -> CrossbyUIServer:
     """Create (but do not run) a UI server bound to a loopback address.
 
@@ -486,4 +508,6 @@ def serve(
         raise ValueError(
             f"refusing to bind {host!r}: the crossby UI serves loopback addresses only"
         )
-    return CrossbyUIServer((host, port), project_root, token or secrets.token_urlsafe(32))
+    return CrossbyUIServer(
+        (host, port), project_root, token or secrets.token_urlsafe(32), allowed_roots
+    )

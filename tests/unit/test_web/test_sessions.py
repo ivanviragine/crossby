@@ -231,3 +231,107 @@ class _FakeSession:
     def __init__(self, session_id: str) -> None:
         self.id = session_id
         self.running = True
+
+
+class TestWorkingDirectoryResolution:
+    """Sessions may run anywhere at or below an allowed root — and nowhere else.
+
+    Only the operator sets the roots (``--path`` plus ``--allow-dir``); the
+    browser picks within them. Containment is checked against the *resolved*
+    path so a symlink cannot be used to step outside.
+    """
+
+    @pytest.fixture
+    def tree(self, tmp_path: Path) -> Path:
+        (tmp_path / "root" / "project" / "nested").mkdir(parents=True)
+        (tmp_path / "root" / ".hidden").mkdir()
+        (tmp_path / "root" / "file.txt").write_text("x", encoding="utf-8")
+        (tmp_path / "outside" / "secret").mkdir(parents=True)
+        return tmp_path
+
+    @pytest.fixture
+    def manager(self, tree: Path) -> SessionManager:
+        return SessionManager(tree / "root")
+
+    def test_default_is_the_project_root(self, manager: SessionManager, tree: Path) -> None:
+        assert manager.resolve_workdir(None) == (tree / "root").resolve()
+
+    def test_subdirectory_is_allowed(self, manager: SessionManager, tree: Path) -> None:
+        target = tree / "root" / "project" / "nested"
+        assert manager.resolve_workdir(str(target)) == target.resolve()
+
+    def test_directory_outside_the_root_is_refused(
+        self, manager: SessionManager, tree: Path
+    ) -> None:
+        with pytest.raises(LaunchValidationError, match="outside the directories"):
+            manager.resolve_workdir(str(tree / "outside" / "secret"))
+
+    def test_parent_traversal_is_refused(self, manager: SessionManager, tree: Path) -> None:
+        with pytest.raises(LaunchValidationError, match="outside the directories"):
+            manager.resolve_workdir(str(tree / "root" / ".." / "outside"))
+
+    def test_symlink_escape_is_refused(self, manager: SessionManager, tree: Path) -> None:
+        """Resolving first is what makes this a refusal rather than a hole."""
+        link = tree / "root" / "escape"
+        link.symlink_to(tree / "outside")
+        with pytest.raises(LaunchValidationError, match="outside the directories"):
+            manager.resolve_workdir(str(link))
+
+    def test_missing_directory_is_refused(self, manager: SessionManager, tree: Path) -> None:
+        with pytest.raises(LaunchValidationError, match="no such directory"):
+            manager.resolve_workdir(str(tree / "root" / "nope"))
+
+    def test_file_is_refused(self, manager: SessionManager, tree: Path) -> None:
+        with pytest.raises(LaunchValidationError, match="not a directory"):
+            manager.resolve_workdir(str(tree / "root" / "file.txt"))
+
+    def test_extra_allowed_root_is_reachable(self, tree: Path) -> None:
+        """``--allow-dir`` widens the boundary; nothing else does."""
+        manager = SessionManager(tree / "root", [tree / "outside"])
+        target = tree / "outside" / "secret"
+        assert manager.resolve_workdir(str(target)) == target.resolve()
+
+    def test_session_runs_in_the_requested_directory(
+        self, manager: SessionManager, tree: Path
+    ) -> None:
+        target = tree / "root" / "project"
+        with patch("crossby.web.sessions.PtySession") as spawn:
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, cwd=str(target)))
+        assert spawn.call_args.kwargs["cwd"] == target.resolve()
+
+
+class TestDirectoryBrowsing:
+    @pytest.fixture
+    def tree(self, tmp_path: Path) -> Path:
+        (tmp_path / "root" / "alpha").mkdir(parents=True)
+        (tmp_path / "root" / "beta").mkdir()
+        (tmp_path / "root" / ".git").mkdir()
+        (tmp_path / "root" / "readme.md").write_text("x", encoding="utf-8")
+        (tmp_path / "outside").mkdir()
+        return tmp_path
+
+    def test_lists_only_directories(self, tree: Path) -> None:
+        listing = SessionManager(tree / "root").browse(None)
+        assert listing["children"] == ["alpha", "beta"], "files and dotdirs are noise here"
+
+    def test_parent_is_withheld_at_a_root(self, tree: Path) -> None:
+        """Offering the parent would let the picker walk out of the boundary."""
+        listing = SessionManager(tree / "root").browse(None)
+        assert listing["parent"] is None
+
+    def test_parent_is_offered_below_a_root(self, tree: Path) -> None:
+        manager = SessionManager(tree / "root")
+        listing = manager.browse(str(tree / "root" / "alpha"))
+        assert listing["parent"] == str((tree / "root").resolve())
+
+    def test_browsing_outside_a_root_is_refused(self, tree: Path) -> None:
+        with pytest.raises(LaunchValidationError, match="outside the directories"):
+            SessionManager(tree / "root").browse(str(tree / "outside"))
+
+    def test_roots_are_reported(self, tree: Path) -> None:
+        manager = SessionManager(tree / "root", [tree / "outside"])
+        listing = manager.browse(None)
+        assert listing["roots"] == [
+            str((tree / "root").resolve()),
+            str((tree / "outside").resolve()),
+        ]

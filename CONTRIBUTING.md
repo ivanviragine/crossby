@@ -170,12 +170,20 @@ terminal size, and the tool repaints from its own state. The trim also resumes
 at the next ESC rather than an arbitrary byte, because cutting mid-sequence made
 the replay open with a fragment rendered as garbage.
 
+**Working directories are operator-bounded, not page-chosen.** A session may run
+anywhere at or below `--path` or an `--allow-dir` root, and nowhere else.
+`SessionManager.resolve_workdir` resolves the request first and only then checks
+containment via `assert_within`, so a symlink pointing out of a root is refused
+rather than followed; `browse()` applies the same check and withholds the parent
+at a root, so the picker cannot be used to enumerate the filesystem. Relaxing
+this to arbitrary paths would mean a leaked token buys the whole filesystem
+rather than a known tree — keep the boundary.
+
 **Tab shortcuts are bound twice on purpose.** `Cmd`/`Ctrl` + `1`-`9` is what
 people expect, and `Cmd` is the only modifier macOS never delivers to a terminal
-application — so it cannot collide with the tool's own keys. But Chrome reserves
-it for its own tab strip and handles it in the browser process, where the page
-cannot intercept it (`preventDefault()` does nothing). It *is* free with no tab
-strip present (installed PWA / "Open as window"), so the plain binding stays and
+application — so it cannot collide with the tool's own keys. It is confirmed working in ordinary Chrome on macOS, but
+some browsers claim it for their own tab strip and handle it in the browser
+process where a page cannot intercept it (`preventDefault()` does nothing), so
 `Cmd`/`Ctrl`+`Alt`+`1`-`9` is registered alongside as the always-available one.
 Match on `event.code`, never `event.key`: with Option held, macOS reports
 Option+1 as `¡`. Each terminal's `attachCustomKeyEventHandler` returns false for

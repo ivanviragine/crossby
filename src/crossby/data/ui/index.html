@@ -21,6 +21,24 @@
     </header>
 
     <form id="launch-form" class="form">
+      <div class="field">
+        <span>Folder</span>
+        <button type="button" id="folder" class="folder-button" aria-expanded="false">
+          <span class="folder-path" id="folder-path">…</span>
+          <span class="folder-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="browser" id="browser" hidden>
+          <div class="browser-head">
+            <button type="button" id="browser-up" class="browser-up" title="Parent folder">↑</button>
+            <span class="browser-here" id="browser-here"></span>
+          </div>
+          <ul class="browser-list" id="browser-list"></ul>
+          <div class="browser-foot">
+            <button type="button" id="browser-pick" class="primary small">Use this folder</button>
+          </div>
+        </div>
+      </div>
+
       <label class="field">
         <span>AI tool</span>
         <select id="tool" required></select>
