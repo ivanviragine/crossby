@@ -913,25 +913,40 @@ async function boot() {
     ui.form.addEventListener("submit", startSession);
   }
   ui.stop.addEventListener("click", () => stopSession(activeId));
+  setupShortcuts();
+
+  // The stream is attached *before* the snapshot is taken, not after. Launching
+  // a session reaps exited ones from the server registry as it goes — from this
+  // page, whose submit handler is already live, or from another one — so a
+  // session that ended inside the gap between the two lost both its backlog and
+  // its exit frame. A snapshot that caught it still running then left the tab
+  // marked running forever; one taken after it exited produced a blank tab with
+  // the transcript already gone. Attaching first puts the scrollback and the
+  // exit on their way before anything can reap them.
+  openStream();
 
   // Reattach to sessions that outlived the page: a reload must not orphan a
-  // running tool that only the server can still see.
+  // running tool that only the server can still see. The stream may have
+  // adopted some of them from their replay already, so tabs are reused rather
+  // than rebuilt.
   try {
     const { sessions: existing } = await api("GET", "/api/sessions");
     for (const info of existing) {
-      const entry = createSession(info);
-      entry.restored = true;      // needs a redraw nudge, not just a replay
-      // State only: the closing line waits for the stream's exit frame, which
-      // arrives after this session's scrollback.
-      if (!info.running) markExited(info.id, info, { announce: false });
+      const known = sessions.get(info.id);
+      if (!known) {
+        const entry = createSession(info);
+        entry.restored = true;    // needs a redraw nudge, not just a replay
+        // State only: the closing line waits for the stream's exit frame, which
+        // arrives after this session's scrollback.
+        if (!info.running) markExited(info.id, info, { announce: false });
+        // …unless that frame beat this request, in which case it is held.
+        settleExit(info.id);
+      }
       if (activeId === null) activate(info.id);
     }
   } catch (err) {
     showError(err.message);
   }
-
-  setupShortcuts();
-  openStream();
 }
 
 window.addEventListener("beforeunload", () => stream && stream.close());

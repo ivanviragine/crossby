@@ -55,6 +55,8 @@ from pathlib import Path
 
 import structlog
 
+from crossby.utils.pty_support import pty_supported
+
 logger = structlog.get_logger()
 
 # One read syscall's worth of terminal output.
@@ -126,16 +128,6 @@ class WindowSize:
     def __post_init__(self) -> None:
         if not (1 <= self.cols <= 10_000) or not (1 <= self.rows <= 10_000):
             raise ValueError("terminal dimensions must be between 1 and 10000 cells")
-
-
-def pty_supported() -> bool:
-    """Whether this platform can allocate a pseudo-terminal.
-
-    ``pty`` is POSIX-only. Windows would need ConPTY (``pywinpty``), which this
-    module does not implement — the same gap ``script`` already leaves in
-    :func:`crossby.utils.process.run_with_transcript`.
-    """
-    return os.name == "posix"
 
 
 def _acquire_controlling_tty() -> None:  # pragma: no cover - runs post-fork

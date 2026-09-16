@@ -9,7 +9,7 @@ from pathlib import Path
 import typer
 
 from crossby.ui.console import console
-from crossby.utils.pty_runner import pty_supported
+from crossby.utils.pty_support import pty_supported
 
 
 def ui(
