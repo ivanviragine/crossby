@@ -13,6 +13,7 @@ import crossby.ai_tools.cursor
 import crossby.ai_tools.opencode
 import crossby.ai_tools.vscode  # noqa: F401
 from crossby.ai_tools.base import AbstractAITool, pick_best_model
+from crossby.ai_tools.interactive import InteractiveLaunchHandler, InteractiveSession
 from crossby.ai_tools.plan_mode import (
     PlanArtifactAmbiguousError,
     PlanArtifactLocationError,
@@ -33,6 +34,8 @@ from crossby.ai_tools.plan_mode import (
 )
 from crossby.models.ai import (
     AIToolID,
+    InteractiveLaunchEvent,
+    InteractiveLaunchEventKind,
     PlanApprovalPolicy,
     PlanArtifactSource,
     PlanCommandPolicy,
@@ -71,6 +74,10 @@ def preflight_plan_session(
 
 __all__ = [
     "AbstractAITool",
+    "InteractiveLaunchEvent",
+    "InteractiveLaunchEventKind",
+    "InteractiveLaunchHandler",
+    "InteractiveSession",
     "PlanApprovalPolicy",
     "PlanArtifactAmbiguousError",
     "PlanArtifactLocationError",

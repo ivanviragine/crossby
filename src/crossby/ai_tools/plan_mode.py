@@ -320,10 +320,19 @@ class PlanSessionUnsupportedError(PlanSessionError):
         installed_version: str | None,
     ) -> PlanSessionUnsupportedError:
         detected = installed_version or "unknown"
-        verified = capability.verified_version or "an adapter-verified release"
+        verified = (
+            capability.collector_verified_version
+            or capability.verified_version
+            or "an adapter-verified release"
+        )
+        requirement = (
+            "a collector-compatible release."
+            if capability.collector_verified_version
+            else capability.version_requirement
+        )
         return cls(
             f"{display_name} cannot collect a native plan for installed version {detected}. "
-            f"Crossby requires {capability.version_requirement} The oldest release verified by "
+            f"Crossby requires {requirement} The oldest release verified by "
             f"this collector is {verified}. Remediation: upgrade {display_name} to {verified} "
             "or newer, then retry.",
             tool_id=tool_id,

@@ -32,7 +32,7 @@ SUPPORTED = {
     AIToolID.OPENCODE: ("--agent", "plan"),
     AIToolID.ANTIGRAVITY_CLI: ("--mode", "plan"),
 }
-UNSUPPORTED = {AIToolID.CODEX, AIToolID.VSCODE, AIToolID.ANTIGRAVITY}
+UNSUPPORTED = {AIToolID.VSCODE, AIToolID.ANTIGRAVITY}
 COLLECTED = {
     AIToolID.CLAUDE,
     AIToolID.CODEX,
@@ -60,6 +60,10 @@ class TestPlanModeCapabilityMatrix:
                 assert capability.supported is True
                 assert capability.initial_prompt_after_activation is True
                 assert capability.verified_version
+            elif tool_id is AIToolID.CODEX:
+                assert capability.activation is PlanModeActivation.TERMINAL_INPUT
+                assert capability.supports_ready_event
+                assert capability.initial_prompt_after_activation
             else:
                 assert tool_id in UNSUPPORTED
                 assert capability.activation is PlanModeActivation.UNSUPPORTED
@@ -95,7 +99,7 @@ class TestPlanModeCapabilityMatrix:
             caps = AbstractAITool.get(tool_id).capabilities()
             assert caps.supports_plan_session is (tool_id in COLLECTED)
         codex = AbstractAITool.get(AIToolID.CODEX).capabilities()
-        assert codex.supports_plan_mode is False
+        assert codex.supports_plan_mode is True
         assert codex.supports_plan_session is True
         assert codex.plan_mode.session_activation is PlanModeActivation.CODEX_APP_SERVER
 
@@ -294,7 +298,7 @@ class TestPlanModeFailures:
             "codex",
             "/plan inspect this",
         ]
-        with pytest.raises(PlanModeUnsupportedError):
+        with pytest.raises(ValueError, match="slash or shell"):
             adapter.build_launch_command(initial_message="/plan inspect this", plan_mode=True)
 
 

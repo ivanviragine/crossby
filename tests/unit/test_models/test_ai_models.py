@@ -417,9 +417,9 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("copilot")
         assert adapter.plan_mode_args() == ["--plan"]
 
-    def test_codex_no_plan_mode(self) -> None:
+    def test_codex_terminal_plan_mode(self) -> None:
         adapter = AbstractAITool.get("codex")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--no-alt-screen"]
 
     def test_opencode_plan_mode(self) -> None:
         adapter = AbstractAITool.get("opencode")

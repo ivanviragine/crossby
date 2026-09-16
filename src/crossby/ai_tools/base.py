@@ -19,6 +19,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.handoff.models import ConversationTranscript, SessionRef
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
     from crossby.utils.versioning import BinaryVersion
@@ -171,6 +172,7 @@ class AbstractAITool(ABC):
         allow_tools: list[str] | None = None,
         *,
         sandbox: bool = True,
+        on_event: InteractiveLaunchHandler | None = None,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -219,11 +221,24 @@ class AbstractAITool(ABC):
             sandbox: Whether to launch with the tool's sandbox enabled. Only
                 adapters declaring ``supports_sandbox_toggle`` translate this
                 programmatic input into a sandbox-selection flag.
+            on_event: Optional startup handler for adapters whose plan capability
+                declares supports_ready_event. On PLAN_READY, call the supplied
+                session.send_message() once. Cannot be combined with prompt.
 
         Returns:
             Exit code from the tool process (0 for detached).
         """
         from crossby.utils.process import run_with_transcript
+
+        if on_event is not None and (
+            not plan_mode
+            or not self.capabilities().plan_mode.supports_ready_event
+            or prompt is not None
+        ):
+            raise ValueError("Startup events require a supported Plan launch without prompt")
+
+        if detach and plan_mode and self.capabilities().plan_mode.supports_ready_event:
+            raise ValueError("Terminal Plan startup cannot run detached")
 
         self.validate_plan_mode_request(
             plan_mode=plan_mode,
@@ -268,7 +283,29 @@ class AbstractAITool(ABC):
         extra_env = self.build_launch_environment(scene=scene_args)
         child_env = {**os.environ, **extra_env} if extra_env else None
         logger.info("ai_tool.launch", tool=str(self.TOOL_ID), model=model, cwd=str(working_dir))
+        if (
+            plan_mode
+            and self.capabilities().plan_mode.activation is PlanModeActivation.TERMINAL_INPUT
+        ):
+            return self._run_terminal_plan_command(
+                cmd, working_dir, transcript_path, child_env, on_event
+            )
         return run_with_transcript(cmd, transcript_path, cwd=working_dir, env=child_env)
+
+    def _run_terminal_plan_command(
+        self,
+        cmd: list[str],
+        working_dir: Path,
+        transcript_path: Path | None,
+        env: dict[str, str] | None,
+        on_event: InteractiveLaunchHandler | None,
+    ) -> int:
+        """Adapters advertising TERMINAL_INPUT must implement the actual launcher."""
+        raise NotImplementedError("Terminal Plan activation requires a launcher")
+
+    def _wrap_terminal_plan_command(self, cmd: list[str], initial_message: str | None) -> list[str]:
+        """Return an executable command that performs terminal activation, too."""
+        raise NotImplementedError("Terminal Plan activation requires a command wrapper")
 
     def run_plan_session(
         self,
@@ -547,7 +584,9 @@ class AbstractAITool(ABC):
 
         caps = self.capabilities()
         capability = caps.plan_mode
-        floor = parse_semver(capability.verified_version or "")
+        floor = parse_semver(
+            capability.collector_verified_version or capability.verified_version or ""
+        )
         if floor is None:
             raise PlanModeAdapterContractError(
                 f"{caps.display_name} declares collected plan support without a parseable "
@@ -701,6 +740,9 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
 
+        if capability.activation is PlanModeActivation.TERMINAL_INPUT:
+            self._validate_terminal_plan_request(initial_message, interactive=interactive)
+
         if initial_message and not capability.initial_prompt_after_activation:
             raise PlanModeUnsupportedError(
                 f"{caps.display_name} cannot deliver an initial prompt after native plan-mode "
@@ -755,6 +797,16 @@ class AbstractAITool(ABC):
                 capability=capability,
                 installed_version=installed_version,
             )
+        if capability.activation is PlanModeActivation.TERMINAL_INPUT:
+            self._validate_terminal_plan_version(installed_version)
+
+    def _validate_terminal_plan_request(
+        self, initial_message: str | None, *, interactive: bool
+    ) -> None:
+        raise NotImplementedError("Terminal Plan activation requires request validation")
+
+    def _validate_terminal_plan_version(self, version: tuple[int, int, int]) -> None:
+        raise NotImplementedError("Terminal Plan activation requires version validation")
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Get extra CLI args to grant write access to a plan output directory."""
@@ -1182,7 +1234,8 @@ class AbstractAITool(ABC):
 
         # Initial message comes first so it is the first positional arg seen by
         # the tool's parser (before any flags that could interfere).
-        if initial_message:
+        terminal_plan = plan_mode and caps.plan_mode.activation is PlanModeActivation.TERMINAL_INPUT
+        if initial_message and not terminal_plan:
             cmd.extend(self.initial_message_args(initial_message))
 
         # Resolve effort-based model variant before applying model flag. Called
@@ -1291,7 +1344,10 @@ class AbstractAITool(ABC):
         if scene is not None:
             cmd.extend(scene.args)
 
-        return self._finalize_launch_command(cmd)
+        cmd = self._finalize_launch_command(cmd)
+        if terminal_plan:
+            return self._wrap_terminal_plan_command(cmd, initial_message)
+        return cmd
 
     def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
         """Let an adapter reconcile arguments that must form one logical source."""

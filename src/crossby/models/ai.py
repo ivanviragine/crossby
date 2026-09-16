@@ -43,6 +43,7 @@ class PlanModeActivation(StrEnum):
     """How an adapter activates a harness's native planning mode."""
 
     CLI_ARGUMENT = "cli_argument"
+    TERMINAL_INPUT = "terminal_input"
     CODEX_APP_SERVER = "codex_app_server"
     OPENCODE_SERVER = "opencode_server"
     ACP = "acp"
@@ -55,6 +56,21 @@ class PlanLaunchApprovalMode(StrEnum):
     YOLO = "yolo"
     AUTO = "auto"
     ACCEPT_EDITS = "accept_edits"
+
+
+class InteractiveLaunchEventKind(StrEnum):
+    """Startup milestones, independent of a tool's terminal rendering."""
+
+    PLAN_READY = "plan_ready"
+    MESSAGE_SUBMITTED = "message_submitted"
+
+
+class InteractiveLaunchEvent(BaseModel):
+    """An observed startup milestone; not a model turn or plan artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: InteractiveLaunchEventKind
+    tool_id: AIToolID
 
 
 class PlanArtifactLocation(StrEnum):
@@ -540,6 +556,8 @@ class PlanModeCapability(BaseModel, frozen=True):
     requirement instead of pretending every upstream publishes a reliable
     numeric introduction version. ``verified_version`` records the oldest
     concrete CLI build Crossby verified and is the conservative runtime floor.
+    ``collector_verified_version`` overrides that floor for a separate collector
+    transport when its verified version differs from interactive startup.
     Activation-only launches remain available through :attr:`supported`; a
     complete collected session additionally requires ``artifact_source`` and an
     exact ``binding``.
@@ -549,6 +567,7 @@ class PlanModeCapability(BaseModel, frozen=True):
     activation_detail: str
     version_requirement: str
     verified_version: str | None = None
+    collector_verified_version: str | None = None
     initial_prompt_after_activation: bool
     artifact_location: PlanArtifactLocation
     artifact_location_detail: str
@@ -557,6 +576,7 @@ class PlanModeCapability(BaseModel, frozen=True):
     import_command: tuple[str, ...] | None = None
     remediation: str | None = None
     supported_launch_approval_modes: tuple[PlanLaunchApprovalMode, ...] = ()
+    supports_ready_event: bool = False
     collector_activation: PlanModeActivation | None = None
     transport: PlanSessionTransport = PlanSessionTransport.UNAVAILABLE
     artifact_source: PlanArtifactSource | None = None

@@ -31,6 +31,8 @@ dependencies = [
     "structlog>=24.0",
     "questionary>=2.0,<3.0",
     "tomli-w>=1.0",
+    "pexpect>=4.9,<5; sys_platform != 'win32'",
+    "pyte>=0.8.2,<0.9; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -81,7 +83,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["questionary.*", "prompt_toolkit.*"]
+module = ["questionary.*", "prompt_toolkit.*", "pexpect.*", "pyte.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

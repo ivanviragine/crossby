@@ -371,7 +371,8 @@ Native planning has two deliberately separate surfaces:
   Markdown plus provenance. `supports_plan_session` is true only when that full
   lifecycle is deterministic.
 
-Neither surface treats prompt text such as `/plan` as activation. Plan mode,
+A positional prompt containing `/plan` is still ordinary text. Codex interactive
+startup instead submits the native slash command separately through its terminal. Plan mode,
 sandbox confinement, and approval policy are independent request dimensions; a
 collector either preserves a supported choice or rejects it. Static unsupported
 requests fail before spawning; native model-availability checks finish before
@@ -420,7 +421,7 @@ Support matrix (contracts verified against the listed builds through 2026-09-14)
 | Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Command preauthorization | Verified floor | Remediation |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | Native per-invocation `--allowedTools`; user/project/local settings sources excluded | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
-| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | Callback matching of authoritative simple commands; approve once only | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; ordinary interactive launch has no pre-prompt selector and remains activation-only unsupported |
+| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | Callback matching of authoritative simple commands; approve once only | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; interactive launch uses the separate terminal startup adapter described below |
 | Cursor CLI | ACP `session/set_mode` → `plan` | ACP; configured model + thought level + thinking/fast state, exact session + blocking `cursor/create_plan` request ID + successful `end_turn` + zero process exit | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | Unsupported; verified permission requests omit authoritative command input | 2026.09.02-c22c1a3 | Supply an ACP-advertised model and effort plus a handler for questions and the non-executing final outcome; remove explicit command policy or choose another collector |
 | GitHub Copilot CLI | Interactive `--plan` | Collected sessions unsupported | Native terminal for interactive launch only | No collected-session policy | Unsupported | 1.0.83 (interactive activation) | Use interactive `launch(..., plan_mode=True)` or another collector; the verified headless transport omits `ask_user`, so native question callbacks and continuation are unavailable |
 | OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | Native session rules: catch-all ask, then scoped shell allows | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
@@ -609,8 +610,9 @@ the requested plan destination.
 ### Interactive planning and approvals
 
 `crossby launch --tool <tool> --plan --yolo` opens the real terminal UI in
-native Plan mode on all five CLIs below. Planning and tool approvals are
-separate dimensions; Crossby uses the tool's own flags and settings.
+native Plan mode on all six CLIs below. Planning and tool approvals are
+separate dimensions; Crossby uses native flags/settings, with a temporary
+terminal startup adapter for Codex.
 
 | CLI | Native Plan selector | With Crossby `--yolo` | With Crossby `--auto` |
 | --- | --- | --- | --- |
@@ -619,10 +621,12 @@ separate dimensions; Crossby uses the tool's own flags and settings.
 | GitHub Copilot | `--plan` | `--yolo` | Unsupported |
 | OpenCode | `--agent plan` | `--auto` | Unsupported |
 | Antigravity CLI | `--mode plan` | `--dangerously-skip-permissions` | Unsupported |
+| Codex CLI (POSIX) | Terminal `/plan`, then the task | `-a never` | `-a on-request -c approvals_reviewer='"auto_review"'` |
 
 Verified startup versions: Claude 2.1.263, Cursor 2026.09.02-c22c1a3,
 Copilot 1.0.83, OpenCode 1.18.29, and Antigravity CLI 1.2.3.
-Codex and GUI activation are unchanged and remain outside this contract.
+Codex terminal startup is verified on 0.154.0 and restricted to 0.154.x. GUI
+activation remains unsupported.
 `capabilities().plan_mode.supported_launch_approval_modes` declares the supported
 combinations; collected-session approval policies are independent and unchanged.
 These combinations are interactive-only (`initial_message`, not the builder's
@@ -640,7 +644,8 @@ not to Crossby's classifier-based `--auto`. Explicit native denials still apply.
 Folder trust and plan/implementation decisions remain native user interactions.
 
 Copilot additionally supports `--plan --accept-edits` through `--allow-tool write`,
-subject to its Plan restrictions. Other CLIs reject that combination. In
+subject to its Plan restrictions. Codex supports it through `-a on-request` with
+its existing sandbox composition. Other CLIs reject that combination. In
 particular, Claude and Antigravity use one selector for Plan and accept-edits;
 Crossby never emits competing selectors. Multiple approval flags retain the
 usual `yolo > auto > accept-edits` precedence while keeping Plan selected.
@@ -700,6 +705,60 @@ crossby launch --tool codex --model claude-sonnet-4.6 --effort high
 ```
 
 Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-5.4` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
+
+### Codex interactive Plan startup and events
+
+Codex 0.154 has no native `--plan` launch flag. Crossby opens the real Codex UI
+in an inline terminal, submits `/plan` by itself, waits for its rendered Plan
+indicator, and then submits the initial message. Long prompts use bracketed
+paste after activation. The user then interacts with Codex normally, including
+native questions and approvals. No conversation text is turned into a plan file
+by this adapter.
+
+This temporary adapter requires a POSIX terminal (macOS/Linux), Codex 0.154.x,
+and the main Python thread. It rejects headless/detached launches and unverified
+versions. Startup has a 120-second deadline; unexpected input, an unrecognized
+screen, or early exit fails without resubmitting the task. Trust/login screens
+remain interactive. Startup messages must be ordinary nonblank text, at most
+100,000 UTF-8 bytes, without terminal control characters (newline/tab allowed).
+
+Callers can pass `prompt=` as usual or own deferred delivery through the public
+startup callback:
+
+```python
+from pathlib import Path
+from crossby.ai_tools import (
+    AbstractAITool, InteractiveLaunchEvent, InteractiveLaunchEventKind,
+    InteractiveSession,
+)
+
+prompt = "Inspect this project and propose a plan."
+
+def on_event(event: InteractiveLaunchEvent, session: InteractiveSession) -> None:
+    if event.kind is InteractiveLaunchEventKind.PLAN_READY:
+        session.send_message(prompt)
+
+exit_code = AbstractAITool.get("codex").launch(
+    Path.cwd(), plan_mode=True, on_event=on_event,
+)
+```
+
+`capabilities().plan_mode.supports_ready_event` declares this optional API.
+`PLAN_READY` allows exactly one synchronous `send_message()` call; omitting it
+opens an empty Plan session. `MESSAGE_SUBMITTED` reports the observed start of
+the first native Plan turn. These are Crossby startup events derived from the
+terminal display, not Codex app-server events. Callbacks must return promptly
+and must not read/write the terminal. They cannot be combined with `prompt=`;
+subsequent conversation belongs to the native UI. `build_launch_command()`
+returns a Python module wrapper for this mode, so executing the built command
+performs the same startup handshake.
+
+The app-server collected API remains available independently, with its existing
+0.153.4 version floor and exact artifact binding. Terminal startup does not
+promise a custom plan-file destination. Plan `--auto` uses Codex's native
+`approvals_reviewer="auto_review"` setting; ordinary non-Plan auto behavior stays
+as documented above. Plan effort is applied to Codex's separate
+`plan_mode_reasoning_effort` setting as well as ordinary model effort.
 
 ### Codex sandbox: linked worktrees & `--network`
 
