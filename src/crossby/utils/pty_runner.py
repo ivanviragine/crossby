@@ -383,8 +383,7 @@ class PtySession:
         with self._lock:
             if subscription.channel in self._subscribers:
                 self._subscribers.remove(subscription.channel)
-        with suppress(queue.Full):
-            subscription.channel.put_nowait(_Signal.DETACH)
+        _force(subscription.channel, _Signal.DETACH)
 
     def subscribe(self) -> Iterator[bytes]:
         """Yield output chunks, starting with the current scrollback.
@@ -440,13 +439,7 @@ class PtySession:
         with self._lock:
             if channel in self._subscribers:
                 self._subscribers.remove(channel)
-        # The consumer may drain concurrently, so neither call is guaranteed:
-        # make room if we can, then signal if we can. An unsuppressed Empty here
-        # would propagate into _broadcast and kill the reader thread.
-        with suppress(queue.Empty):
-            channel.get_nowait()
-        with suppress(queue.Full):
-            channel.put_nowait(_Signal.DESYNC)
+        _force(channel, _Signal.DESYNC)
         logger.warning("pty.subscriber.desync", session=self.id)
 
     def _trim_scrollback(self) -> None:
@@ -473,7 +466,26 @@ class PtySession:
             self._subscribers.clear()
         self._exited.set()
         for channel in targets:
-            _offer(channel, _Signal.END)
+            _force(channel, _Signal.END)
+
+
+def _force(channel: queue.Queue[bytes | _Signal], marker: _Signal) -> None:
+    """Enqueue a control marker, evicting queued data to make room if needed.
+
+    Data may be dropped here; a marker may not. END and DETACH are what release a
+    consumer parked in ``Queue.get()``, so losing one to a full queue leaks that
+    thread forever. The session is ending or the viewer is leaving either way, so
+    trailing bytes are the cheaper thing to lose. Bounded so a producer racing to
+    refill cannot spin this forever.
+    """
+    for _ in range(SUBSCRIBER_QUEUE_LIMIT + 8):
+        try:
+            channel.put_nowait(marker)
+            return
+        except queue.Full:
+            with suppress(queue.Empty):
+                channel.get_nowait()
+    logger.error("pty.marker.undeliverable", marker=marker.value)
 
 
 def _offer(channel: queue.Queue[bytes | _Signal], item: bytes | _Signal) -> bool:

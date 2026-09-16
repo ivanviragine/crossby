@@ -805,7 +805,7 @@ by default:
 | DNS rebinding | Requests whose `Host` header is not loopback are rejected. |
 | Cross-origin | Any request carrying a foreign `Origin` is rejected. |
 | Static assets | The page shell (HTML/CSS/JS) is served unauthenticated — it holds no secrets and does nothing without a token — but still only same-origin. |
-| Working directory | Every session runs in `--path`. The page cannot choose another directory. |
+| Working directory | Sessions run only at or below `--path` and any `--allow-dir`, checked against the resolved path so symlinks cannot escape. |
 | Concurrency | Capped at 16 live sessions per server. |
 
 There is no multi-user mode, no remote access, and no authentication beyond the

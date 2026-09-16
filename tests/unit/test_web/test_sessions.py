@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from crossby.web.sessions import (
     Autonomy,
     LaunchRequest,
     LaunchValidationError,
+    MultiplexedStream,
     SessionManager,
     SessionNotFoundError,
     describe_tools,
@@ -332,8 +333,16 @@ class TestWorkingDirectoryResolution:
     def test_session_runs_in_the_requested_directory(
         self, manager: SessionManager, tree: Path
     ) -> None:
+        from crossby.ai_tools.base import AbstractAITool
+
         target = tree / "root" / "project"
-        with patch("crossby.web.sessions.PtySession") as spawn:
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        # Stub the builder so this asserts directory forwarding only, and cannot
+        # be broken by an unrelated change to Claude's command line.
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession") as spawn,
+        ):
             manager.create(LaunchRequest(tool=AIToolID.CLAUDE, cwd=str(target)))
         assert spawn.call_args.kwargs["cwd"] == target.resolve()
 
@@ -373,3 +382,63 @@ class TestDirectoryBrowsing:
             str((tree / "root").resolve()),
             str((tree / "outside").resolve()),
         ]
+
+
+class TestConcurrencyInvariants:
+    """Races that a single-threaded test would never reach."""
+
+    @pytest.fixture
+    def manager(self, tmp_path: Path) -> SessionManager:
+        return SessionManager(tmp_path)
+
+    def test_failed_creation_releases_its_reserved_slot(self, manager: SessionManager) -> None:
+        """A slot is claimed before spawning; a failed spawn must give it back.
+
+        Without this the limit ratchets down on every failure until no session
+        can start at all.
+        """
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession", side_effect=FileNotFoundError("boom")),
+            pytest.raises(FileNotFoundError),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+        assert manager._reserved == 0
+
+    def test_reaped_sessions_are_closed_not_just_forgotten(self, manager: SessionManager) -> None:
+        """Dropping the reference alone leaks the master fd and reader thread."""
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        finished = MagicMock()
+        finished.running = False
+        finished.id = "dead-session"
+        manager._sessions["dead-session"] = finished
+
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+
+        finished.close.assert_called_once()
+        assert "dead-session" not in manager._sessions
+
+    def test_a_session_is_pumped_once_even_if_claimed_twice(self, manager: SessionManager) -> None:
+        """`__enter__`'s snapshot and the creation listener can both claim one
+        session; two pumps would deliver its output twice."""
+        stream = MultiplexedStream(manager)
+        session = MagicMock()
+        session.id = "session-1"
+        session.attach.return_value = (b"", None)
+
+        stream._start_pump(session)
+        stream._start_pump(session)
+        for pump in stream._pumps:
+            pump.join(timeout=2)
+
+        assert len(stream._pumps) == 1
+        assert session.attach.call_count == 1

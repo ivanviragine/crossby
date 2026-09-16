@@ -192,15 +192,21 @@ function tabLabel(entry) {
 }
 
 function relabelTabs() {
-  let position = 0;
-  for (const entry of sessions.values()) {
-    position += 1;
+  const entries = [...sessions.values()];
+  entries.forEach((entry, offset) => {
     const label = entry.tab && entry.tab.querySelector(".tab-label");
     if (label) label.textContent = tabLabel(entry);
     const index = entry.tab && entry.tab.querySelector(".tab-index");
-    // Only the first nine are reachable by number, so only those advertise one.
-    if (index) index.textContent = position <= 9 ? String(position) : "";
-  }
+    if (!index) return;
+    // Mirror handleShortcut exactly: 1-8 are positional and 9 is always the
+    // last tab. Numbering straight through would print a "9" on the ninth tab
+    // while the key took you to the twelfth.
+    const position = offset + 1;
+    const isLast = offset === entries.length - 1;
+    if (position <= 8) index.textContent = String(position);
+    else if (isLast) index.textContent = "9";
+    else index.textContent = "";
+  });
 }
 
 function createTab(entry) {
@@ -209,6 +215,7 @@ function createTab(entry) {
   tab.className = "tab";
   tab.setAttribute("role", "tab");
   tab.dataset.session = entry.id;
+  tab.title = "Click to switch; Delete or Backspace to close";
 
   const dot = document.createElement("span");
   dot.className = "dot";
@@ -225,6 +232,7 @@ function createTab(entry) {
   close.className = "tab-close";
   close.textContent = "×";
   close.title = "Close session";
+  close.setAttribute("aria-hidden", "true");
   close.addEventListener("click", (event) => {
     event.stopPropagation();
     void requestClose(entry.id);
@@ -232,6 +240,15 @@ function createTab(entry) {
 
   tab.append(dot, index, label, close);
   tab.addEventListener("click", () => activate(entry.id));
+  // The "x" is decorative, not a nested button — a button inside a button is
+  // invalid and unreachable by keyboard. Closing is bound to the tab itself so
+  // it works without a mouse.
+  tab.addEventListener("keydown", (event) => {
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      void requestClose(entry.id);
+    }
+  });
   ui.tabs.appendChild(tab);
   entry.dot = dot;
   return tab;
@@ -442,12 +459,17 @@ function openStream() {
     markExited(detail.session, detail);
   });
 
-  // EventSource reconnects on its own. On reconnect the server replays every
-  // session's scrollback, so a reset keeps the screen from doubling up.
-  stream.onerror = () => {
-    for (const entry of sessions.values()) {
-      if (entry.running) entry.term.reset();
+  // A reconnect replays every session's scrollback, so each terminal is cleared
+  // first to stop the screen doubling up. This belongs on `open`, not `error`:
+  // error fires on every failed attempt too, which wiped the terminals with no
+  // replay coming. Exited sessions are reset as well — their scrollback is
+  // replayed just the same.
+  let opened = false;
+  stream.onopen = () => {
+    if (opened) {
+      for (const entry of sessions.values()) entry.term.reset();
     }
+    opened = true;
   };
 }
 

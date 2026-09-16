@@ -97,6 +97,28 @@ def stub_tool() -> Iterator[None]:
         yield
 
 
+def collect_until(stream: Any, wanted: set[str], timeout: float = 10.0) -> set[str]:
+    """Collect tagged session ids until *wanted* is covered, or time out.
+
+    Iterating the stream blocks in `Queue.get()`, so a deadline checked inside
+    the loop only runs once an event arrives — it could never fire on the hang it
+    was meant to guard. Draining on a worker and joining with a timeout bounds
+    the wait for real.
+    """
+    seen: set[str] = set()
+
+    def drain_stream() -> None:
+        for event in stream:
+            seen.add(event.session_id)
+            if wanted <= seen:
+                return
+
+    worker = threading.Thread(target=drain_stream, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return seen
+
+
 def open_session(server: CrossbyUIServer) -> Any:
     return server.sessions.create(
         LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
@@ -271,15 +293,10 @@ class TestMultiplexedStream:
         first = open_session(server)
         second = open_session(server)
         try:
-            seen: set[str] = set()
             with MultiplexedStream(server.sessions) as stream:
                 first.write(b"echo first\n")
                 second.write(b"echo second\n")
-                deadline = time.monotonic() + 10
-                for event in stream:
-                    seen.add(event.session_id)
-                    if {first.id, second.id} <= seen or time.monotonic() > deadline:
-                        break
+                seen = collect_until(stream, {first.id, second.id})
             assert {first.id, second.id} <= seen
         finally:
             first.close()
@@ -293,11 +310,7 @@ class TestMultiplexedStream:
             later = open_session(server)
             try:
                 later.write(b"echo later\n")
-                deadline = time.monotonic() + 10
-                for event in stream:
-                    if event.session_id == later.id:
-                        break
-                    assert time.monotonic() < deadline, "no frame for the later session"
+                assert later.id in collect_until(stream, {later.id})
             finally:
                 later.close()
 
@@ -374,3 +387,38 @@ class TestClientDisconnectNoise:
         captured = capfd.readouterr()
         assert "ValueError" in captured.err
         assert "a real failure" in captured.err
+
+
+class TestConstructionFailures:
+    """A failed bind must report why it failed."""
+
+    def test_port_in_use_raises_oserror(self, tmp_path: Path) -> None:
+        """`TCPServer` calls `server_close()` when binding fails.
+
+        The override assumed construction had finished, so it touched attributes
+        that did not exist yet and the resulting AttributeError masked the real
+        error — and `cli/ui.py` catches OSError, so an in-use port crashed the
+        CLI instead of printing a clear message.
+        """
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        try:
+            with pytest.raises(OSError) as caught:
+                serve(tmp_path, host="127.0.0.1", port=busy.getsockname()[1])
+            assert not isinstance(caught.value, AttributeError)
+        finally:
+            busy.close()
+
+    def test_ipv6_loopback_is_refused_because_it_cannot_be_bound(self, tmp_path: Path) -> None:
+        """`ThreadingHTTPServer` is AF_INET, so offering ::1 promised a listener
+        it could never open."""
+        with pytest.raises(ValueError, match="loopback IPv4"):
+            serve(tmp_path, host="::1")
+
+    def test_ipv6_loopback_is_still_accepted_in_a_host_header(
+        self, server: CrossbyUIServer
+    ) -> None:
+        """Binding and header validation are different questions."""
+        status, _, _ = request(server, "GET", "/api/tools", host=f"[::1]:{server.port}")
+        assert status == 200

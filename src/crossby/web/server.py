@@ -97,7 +97,13 @@ _CLIENT_DISCONNECT_ERRORS = (
     TimeoutError,
 )
 
+# Hosts a request's `Host` header may name. IPv6 loopback is valid for an
+# incoming header even though the server itself binds IPv4.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Hosts `serve()` will bind. `ThreadingHTTPServer` is `AF_INET`, so offering
+# ``::1`` here promised an address it could not actually listen on.
+_BINDABLE_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
 
 class CrossbyUIServer(ThreadingHTTPServer):
@@ -113,10 +119,15 @@ class CrossbyUIServer(ThreadingHTTPServer):
         token: str,
         allowed_roots: Sequence[Path] | None = None,
     ) -> None:
-        super().__init__(address, _RequestHandler)
+        # Populate before super().__init__(), which binds the socket and calls
+        # server_close() if that fails. The override below would then touch
+        # attributes that did not exist yet, and the AttributeError masked the
+        # real bind error — an in-use port crashed the CLI instead of printing
+        # "could not bind".
         self.sessions = SessionManager(project_root, allowed_roots)
         self.token = token
         self.project_root = project_root.resolve()
+        super().__init__(address, _RequestHandler)
 
     @property
     def port(self) -> int:
@@ -158,7 +169,10 @@ class CrossbyUIServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
     def server_close(self) -> None:
-        self.sessions.shutdown()
+        # Tolerate a half-constructed server: this runs during a failed bind too.
+        sessions = getattr(self, "sessions", None)
+        if sessions is not None:
+            sessions.shutdown()
         super().server_close()
 
 
@@ -504,9 +518,10 @@ def serve(
     this server spawns AI tools with filesystem access and is not built to face
     a network.
     """
-    if host not in _LOOPBACK_HOSTS:
+    if host not in _BINDABLE_HOSTS:
         raise ValueError(
-            f"refusing to bind {host!r}: the crossby UI serves loopback addresses only"
+            f"refusing to bind {host!r}: the crossby UI binds loopback IPv4 only "
+            f"({', '.join(sorted(_BINDABLE_HOSTS))})"
         )
     return CrossbyUIServer(
         (host, port), project_root, token or secrets.token_urlsafe(32), allowed_roots

@@ -23,6 +23,7 @@ from crossby.utils.pty_runner import (
     SubscriberDesyncError,
     WindowSize,
     _Signal,
+    drain,
     pty_supported,
 )
 
@@ -314,3 +315,60 @@ class TestScrollbackTrimming:
             assert len(session._scrollback) == SCROLLBACK_LIMIT
         finally:
             session.close()
+
+
+class TestControlMarkersSurviveAFullQueue:
+    """A dropped marker is a leaked thread.
+
+    END and DETACH are what release a consumer parked in `Queue.get()`. Both were
+    enqueued with `put_nowait` under `suppress(queue.Full)`, so a saturated
+    channel silently discarded them and the consumer waited forever.
+    """
+
+    def test_detach_reaches_a_saturated_subscriber(self, probe: PtySession) -> None:
+        _backlog, subscription = probe.attach()
+        assert subscription is not None
+        _fill(subscription.channel)
+
+        probe.detach(subscription)
+
+        assert _Signal.DETACH in list(subscription.channel.queue)
+
+    def test_a_saturated_subscriber_is_released_when_the_child_exits(
+        self, probe: PtySession
+    ) -> None:
+        """Some terminal marker must arrive — which one is the session's choice.
+
+        A saturated subscriber is normally cut with DESYNC by the broadcast that
+        found the queue full, and is deregistered before the exit, so it never
+        sees END. Either marker releases the consumer; asserting END alone would
+        be asserting an implementation detail that does not hold.
+        """
+        _backlog, subscription = probe.attach()
+        assert subscription is not None
+        _fill(subscription.channel)
+
+        probe.write(b"quit\n")
+        assert probe.wait(timeout=5) == 5
+        time.sleep(0.3)
+
+        markers = [item for item in list(subscription.channel.queue) if isinstance(item, _Signal)]
+        assert markers, "no terminal marker reached the saturated subscriber"
+        assert {_Signal.END, _Signal.DESYNC} & set(markers)
+
+    def test_a_saturated_consumer_is_still_released(self, probe: PtySession) -> None:
+        """The property that matters: `drain` returns rather than blocking."""
+        _backlog, subscription = probe.attach()
+        assert subscription is not None
+        _fill(subscription.channel)
+        probe.detach(subscription)
+
+        released = threading.Event()
+
+        def consume() -> None:
+            for _ in drain(subscription):
+                pass
+            released.set()
+
+        threading.Thread(target=consume, daemon=True).start()
+        assert released.wait(timeout=5), "consumer never woke — the marker was lost"

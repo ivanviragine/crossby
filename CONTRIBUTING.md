@@ -119,8 +119,10 @@ Three pieces:
     sequence or an escape, so nothing decodes per chunk; the browser decodes.
 - **`web/sessions.py`** — validates a request against the adapter's own
   `AIToolCapabilities` *before* spawning, then builds argv through
-  `build_launch_command()`. Sessions are pinned to the server's project root;
-  the browser never supplies a working directory.
+  `build_launch_command()`. A session runs in any directory at or below an
+  allowed root (`--path` plus any `--allow-dir`), resolved and containment-checked
+  before anything is spawned — the browser chooses within that boundary, never
+  outside it.
 - **`web/server.py`** — stdlib `ThreadingHTTPServer`. Output streams as
   base64 inside SSE frames, input and resize come back as POSTs. No new
   dependency, and no asyncio next to an otherwise synchronous codebase.

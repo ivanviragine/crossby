@@ -236,6 +236,8 @@ class SessionManager:
         self._sessions: dict[str, PtySession] = {}
         self._requests: dict[str, LaunchRequest] = {}
         self._listeners: list[Callable[[PtySession], None]] = []
+        # Slots claimed by an in-flight create that has not registered yet.
+        self._reserved = 0
         self._lock = threading.Lock()
 
     def create(self, request: LaunchRequest) -> PtySession:
@@ -269,18 +271,28 @@ class SessionManager:
         if request.initial_message and not caps.supports_initial_message:
             raise LaunchValidationError(f"{caps.display_name} does not accept an initial message")
 
+        # Reap exited sessions and reserve a slot in one critical section. The
+        # check and the registration used to be separate, so two concurrent
+        # creates could both pass the limit before either registered.
         with self._lock:
-            # Exited sessions linger until explicitly closed; drop them here so a
-            # long-lived server does not accumulate dead entries.
-            for dead in [sid for sid, s in self._sessions.items() if not s.running]:
-                self._sessions.pop(dead, None)
-                self._requests.pop(dead, None)
+            dead = [
+                self._sessions.pop(sid) for sid, s in list(self._sessions.items()) if not s.running
+            ]
+            for entry in dead:
+                self._requests.pop(entry.id, None)
             live = sum(1 for session in self._sessions.values() if session.running)
-            if live >= MAX_CONCURRENT_SESSIONS:
+            if live + self._reserved >= MAX_CONCURRENT_SESSIONS:
                 raise LaunchValidationError(
                     f"too many live sessions (limit {MAX_CONCURRENT_SESSIONS}); "
                     "close one before starting another"
                 )
+            self._reserved += 1
+
+        # Closing releases a master fd and joins a reader thread, so it must not
+        # happen under the lock — and dropping the reference without closing
+        # leaked both.
+        for entry in dead:
+            entry.close()
 
         workdir = self.resolve_workdir(request.cwd)
         command_kwargs: dict[str, Any] = {
@@ -299,14 +311,20 @@ class SessionManager:
         if caps.supports_sandbox_toggle:
             command_kwargs["sandbox"] = request.sandbox
         try:
-            command = adapter.build_launch_command(**command_kwargs)
-        except PlanModeLaunchError as exc:
-            # The adapter's own pre-launch gate; surface it as a bad request
-            # rather than a server error.
-            raise LaunchValidationError(str(exc)) from exc
-        session = PtySession(command, cwd=workdir, size=request.size)
+            try:
+                command = adapter.build_launch_command(**command_kwargs)
+            except PlanModeLaunchError as exc:
+                # The adapter's own pre-launch gate; surface it as a bad request
+                # rather than a server error.
+                raise LaunchValidationError(str(exc)) from exc
+            session = PtySession(command, cwd=workdir, size=request.size)
+        except BaseException:
+            with self._lock:
+                self._reserved -= 1
+            raise
 
         with self._lock:
+            self._reserved -= 1
             self._sessions[session.id] = session
             self._requests[session.id] = request
             listeners = list(self._listeners)
@@ -489,6 +507,7 @@ class MultiplexedStream:
         self._manager = manager
         self._queue: queue.Queue[StreamEvent | None] = queue.Queue(maxsize=capacity)
         self._subscriptions: dict[str, tuple[PtySession, Subscription]] = {}
+        self._started: set[str] = set()
         self._pumps: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._closed = threading.Event()
@@ -511,8 +530,16 @@ class MultiplexedStream:
             self._subscriptions.clear()
         for session, subscription in pending:
             session.detach(subscription)
-        with suppress(queue.Full):
-            self._queue.put_nowait(None)
+        # Evict if necessary: losing this sentinel parks __iter__ in get()
+        # forever and the SSE handler thread never returns.
+        for _ in range(self._queue.maxsize + 8):
+            try:
+                self._queue.put_nowait(None)
+                return
+            except queue.Full:
+                with suppress(queue.Empty):
+                    self._queue.get_nowait()
+        logger.error("web.stream.sentinel_undeliverable")
 
     def __iter__(self) -> Iterator[StreamEvent]:
         while True:
@@ -531,9 +558,14 @@ class MultiplexedStream:
             self._start_pump(session)
 
     def _start_pump(self, session: PtySession) -> None:
+        # Claim the session before the thread exists. `_pump` only registers its
+        # subscription after `attach()` returns, so checking `_subscriptions`
+        # here let `__enter__`'s snapshot and the creation listener each start a
+        # pump for the same session — and its output arrived twice.
         with self._lock:
-            if session.id in self._subscriptions or self._closed.is_set():
+            if session.id in self._started or self._closed.is_set():
                 return
+            self._started.add(session.id)
         thread = threading.Thread(
             target=self._pump, args=(session,), name=f"mux-{session.id[:8]}", daemon=True
         )
