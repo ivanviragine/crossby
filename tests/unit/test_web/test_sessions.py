@@ -137,13 +137,32 @@ class TestSessionManagerValidation:
         spawn.assert_not_called()
 
     def test_unsupported_autonomy_is_refused_before_spawn(self, manager: SessionManager) -> None:
-        """OpenCode is a terminal tool that declares no YOLO mode."""
+        """OpenCode declares no accept-edits tier."""
         with (
             patch("crossby.web.sessions.PtySession") as spawn,
             pytest.raises(LaunchValidationError, match="autonomy"),
         ):
-            manager.create(LaunchRequest(tool=AIToolID.OPENCODE, autonomy=Autonomy.YOLO))
+            manager.create(LaunchRequest(tool=AIToolID.OPENCODE, autonomy=Autonomy.ACCEPT_EDITS))
         spawn.assert_not_called()
+
+    def test_autonomy_offered_matches_the_adapter(self) -> None:
+        """The form is generated from capabilities, so it must track them.
+
+        Pinning a tool's rungs in a test goes stale the moment an adapter gains
+        one — this replaced a test asserting OpenCode had no YOLO mode, which it
+        has since gained. Assert the derivation instead of the current values.
+        """
+        from crossby.ai_tools.base import AbstractAITool
+        from crossby.web.sessions import _supported_autonomy
+
+        for tool_id in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.OPENCODE):
+            caps = AbstractAITool.get(tool_id).capabilities()
+            offered = _supported_autonomy(caps)
+            assert Autonomy.DEFAULT in offered, tool_id
+            assert (Autonomy.PLAN in offered) is caps.plan_mode.supported, tool_id
+            assert (Autonomy.ACCEPT_EDITS in offered) is caps.supports_accept_edits, tool_id
+            assert (Autonomy.AUTO in offered) is caps.supports_auto, tool_id
+            assert (Autonomy.YOLO in offered) is caps.supports_yolo, tool_id
 
     def test_plan_mode_refused_where_unsupported(self, manager: SessionManager) -> None:
         """Codex declares no native plan mode."""
