@@ -302,8 +302,13 @@ def run_terminal_plan(
                     outgoing.extend(startup.advance("\n".join(screen.display)))
         if startup.phase is not _Phase.ACTIVE:
             raise TerminalStartupError(f"Codex exited {startup.phase.value}; task not retried")
-        if child.isalive():
-            raise TerminalStartupError("Codex closed its terminal before reporting an exit status")
+        # EOF can precede waitpid visibility (notably on macOS). Allow bounded
+        # process reaping without treating an ordinary native exit as failure.
+        exit_deadline = time.monotonic() + 2.0
+        while child.isalive():
+            if time.monotonic() >= exit_deadline:
+                raise TerminalStartupError("Codex closed its terminal but did not exit")
+            time.sleep(0.01)
         if child.exitstatus is not None:
             return int(child.exitstatus)
         return 128 + int(child.signalstatus or 1)

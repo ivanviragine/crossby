@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import sys
+import time
 import tty
 from pathlib import Path
 
@@ -63,4 +64,9 @@ signal.signal(signal.SIGWINCH, resized)
 display("Working (0s • esc to interrupt)\nNATIVE INTERACTION\ntest Plan mode")
 answer = os.read(0, 1)
 (root / "answer").write_bytes(answer)
+if scenario == "exit_race":
+    for fd in (0, 1, 2):
+        os.close(fd)
+    # Explicitly reproduce PTY EOF arriving before process exit.
+    time.sleep(0.1)
 raise SystemExit(7)

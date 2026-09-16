@@ -53,7 +53,7 @@ def spawn(root: Path, scenario: str = "success"):
     )
 
 
-@pytest.mark.parametrize("scenario", ["success", "trust", "reply"])
+@pytest.mark.parametrize("scenario", ["success", "trust", "reply", "exit_race"])
 def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: str) -> None:
     child = spawn(tmp_path, scenario)
     try:
