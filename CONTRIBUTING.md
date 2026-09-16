@@ -236,6 +236,17 @@ exit frame, `EventSource` reconnects on its own, and the fresh scrollback plus
 the next repaint restores a correct screen. Preserve that property if you touch
 `_offer`/`_broadcast`.
 
+**No web test may need an AI tool installed.** CI runners have none, and a
+developer machine usually does — so a test that spawns `claude`, or that asserts
+on real argv or a detected tool version, passes locally and fails on CI. Six did
+exactly that. Use the `stub_tool` fixture (patches `build_launch_command` to a
+harmless local process) for anything that needs a live session, stub
+`capabilities()` when asserting on what a tool supports, and assert on the flags
+handed to the adapter rather than the argv it produces — turning flags into argv
+is the adapter's contract, tested in its own suite. To check before pushing, run
+the suite with the tools off `PATH`; `AbstractAITool.detect_installed()` should
+return `[]`.
+
 **Testing the terminal.** Unit tests drive a real child on a real PTY, because
 the behaviours that matter (controlling terminal, SIGWINCH, signal-generated
 exits) are invisible to mocks. Beyond that, the stack has been driven in a real

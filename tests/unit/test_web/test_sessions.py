@@ -164,13 +164,23 @@ class TestSessionManagerValidation:
             assert (Autonomy.AUTO in offered) is caps.supports_auto, tool_id
             assert (Autonomy.YOLO in offered) is caps.supports_yolo, tool_id
 
-    def test_plan_mode_refused_where_unsupported(self, manager: SessionManager) -> None:
-        """Codex declares no native plan mode."""
+    def test_rung_the_adapter_does_not_declare_is_refused(self, manager: SessionManager) -> None:
+        """Capabilities are stubbed rather than taken from whatever is installed.
+
+        Asserting against a real adapter made this pass locally and fail on CI,
+        where no tool is on PATH and the adapter's own version gate answered
+        first with a different error.
+        """
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        without_yolo = adapter.capabilities().model_copy(update={"supports_yolo": False})
         with (
+            patch.object(type(adapter), "capabilities", lambda _self: without_yolo),
             patch("crossby.web.sessions.PtySession") as spawn,
             pytest.raises(LaunchValidationError, match="autonomy"),
         ):
-            manager.create(LaunchRequest(tool=AIToolID.CODEX, autonomy=Autonomy.PLAN))
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, autonomy=Autonomy.YOLO))
         spawn.assert_not_called()
 
     def test_network_access_refused_where_unsupported(self, manager: SessionManager) -> None:
@@ -190,12 +200,40 @@ class TestSessionManagerValidation:
             manager.create(LaunchRequest(tool=AIToolID.CLAUDE, sandbox=False))
         spawn.assert_not_called()
 
-    def test_autonomy_reaches_the_command(self, manager: SessionManager) -> None:
-        """A selected rung must actually appear in the tool's argv."""
-        with patch("crossby.web.sessions.PtySession") as spawn:
-            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, autonomy=Autonomy.PLAN))
-        argv = spawn.call_args.args[0]
-        assert any("plan" in part for part in argv), argv
+    @pytest.mark.parametrize(
+        "autonomy,expected",
+        [
+            (Autonomy.DEFAULT, {}),
+            (Autonomy.PLAN, {"plan_mode": True}),
+            (Autonomy.ACCEPT_EDITS, {"accept_edits": True}),
+            (Autonomy.AUTO, {"auto": True}),
+            (Autonomy.YOLO, {"yolo": True}),
+        ],
+    )
+    def test_autonomy_reaches_the_adapter(
+        self, manager: SessionManager, autonomy: Autonomy, expected: dict[str, bool]
+    ) -> None:
+        """Exactly one rung is set, and it is the one that was asked for.
+
+        This asserts the flags handed to the adapter rather than the resulting
+        argv: turning flags into argv is the adapter's contract, and asserting on
+        argv made the test depend on a real tool of a sufficient version being
+        installed — green locally, red on CI.
+        """
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        rungs = ("plan_mode", "accept_edits", "auto", "yolo")
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]) as build,
+            patch("crossby.web.sessions.PtySession"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE, autonomy=autonomy))
+
+        kwargs = build.call_args.kwargs
+        assert {rung: kwargs[rung] for rung in rungs} == {
+            rung: expected.get(rung, False) for rung in rungs
+        }
 
     def test_unknown_autonomy_is_rejected(self) -> None:
         with pytest.raises(LaunchValidationError, match="unknown autonomy"):

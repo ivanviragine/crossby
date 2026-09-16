@@ -11,14 +11,17 @@ import http.client
 import json
 import socket
 import struct
+import sys
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from crossby.ai_tools.base import AbstractAITool
 from crossby.models.ai import AIToolID
 from crossby.utils.pty_runner import WindowSize
 from crossby.web import serve
@@ -74,6 +77,30 @@ def request(
         return response.status, response.read(), dict(response.getheaders())
     finally:
         conn.close()
+
+
+# Echoes stdin forever. These tests exercise session and stream machinery, not
+# the adapters, so they must not require a real AI tool on PATH — CI has none,
+# which is precisely how they passed locally and failed there.
+_STAND_IN = [
+    sys.executable,
+    "-u",
+    "-c",
+    "import sys\nfor line in sys.stdin:\n    sys.stdout.write(line)\n    sys.stdout.flush()\n",
+]
+
+
+@pytest.fixture
+def stub_tool() -> Iterator[None]:
+    """Make every launch spawn a harmless local process instead of an AI tool."""
+    with patch.object(AbstractAITool, "build_launch_command", return_value=list(_STAND_IN)):
+        yield
+
+
+def open_session(server: CrossbyUIServer) -> Any:
+    return server.sessions.create(
+        LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
+    )
 
 
 class TestTokenAuth:
@@ -237,14 +264,12 @@ class TestMultiplexedStream:
         status, _, _ = request(server, "GET", "/api/stream", origin="https://evil.example")
         assert status == 403
 
-    def test_stream_carries_every_session_tagged(self, server: CrossbyUIServer) -> None:
+    def test_stream_carries_every_session_tagged(
+        self, server: CrossbyUIServer, stub_tool: None
+    ) -> None:
         """Two sessions, one connection, frames tagged by session id."""
-        first = server.sessions.create(
-            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
-        )
-        second = server.sessions.create(
-            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
-        )
+        first = open_session(server)
+        second = open_session(server)
         try:
             seen: set[str] = set()
             with MultiplexedStream(server.sessions) as stream:
@@ -260,12 +285,12 @@ class TestMultiplexedStream:
             first.close()
             second.close()
 
-    def test_stream_picks_up_sessions_created_later(self, server: CrossbyUIServer) -> None:
+    def test_stream_picks_up_sessions_created_later(
+        self, server: CrossbyUIServer, stub_tool: None
+    ) -> None:
         """A tab opened after the stream is live must still receive output."""
         with MultiplexedStream(server.sessions) as stream:
-            later = server.sessions.create(
-                LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
-            )
+            later = open_session(server)
             try:
                 later.write(b"echo later\n")
                 deadline = time.monotonic() + 10
@@ -276,11 +301,11 @@ class TestMultiplexedStream:
             finally:
                 later.close()
 
-    def test_closing_the_stream_releases_idle_pumps(self, server: CrossbyUIServer) -> None:
+    def test_closing_the_stream_releases_idle_pumps(
+        self, server: CrossbyUIServer, stub_tool: None
+    ) -> None:
         """A pump parked on a silent session must not outlive its stream."""
-        session = server.sessions.create(
-            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
-        )
+        session = open_session(server)
         try:
             before = threading.active_count()
             stream = MultiplexedStream(server.sessions)
@@ -295,12 +320,10 @@ class TestMultiplexedStream:
 
 class TestExitProvenance:
     def test_stopped_session_is_labelled_stopped_not_exit_minus_one(
-        self, server: CrossbyUIServer
+        self, server: CrossbyUIServer, stub_tool: None
     ) -> None:
         """`close()` kills with SIGHUP; a raw returncode of -1 reads as nonsense."""
-        session = server.sessions.create(
-            LaunchRequest(tool=AIToolID.CLAUDE, size=WindowSize(cols=80, rows=24))
-        )
+        session = open_session(server)
         session.close()
         described = server.sessions.describe(session.id)
         assert described["stopped"] is True
