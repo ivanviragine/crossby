@@ -196,6 +196,14 @@ class PtySession:
         self._exit_code: int | None = None
         self._size = size
         self._closed = False
+        # Distinct from _closed, which is cleanup bookkeeping: this records that
+        # a caller asked for the child's life to end, and only that. A session
+        # the registry reaps after a natural exit is closed but not stopped.
+        self._stopped = False
+        # Guards the master descriptor for its whole lifetime. A closed fd
+        # number is handed straight to the next session that opens one, so a
+        # write racing teardown could land keystrokes in an unrelated tool.
+        self._fd_lock = threading.Lock()
         # Set once teardown has finished, so a second close() waits for the
         # first rather than racing ahead of it.
         self._close_done = threading.Event()
@@ -273,8 +281,13 @@ class PtySession:
 
     @property
     def stopped(self) -> bool:
-        """Whether this session ended because :meth:`close` was called."""
-        return self._closed
+        """Whether this session ended because :meth:`close` asked it to.
+
+        Not the same as having been closed: the registry reaps exited sessions
+        on the next launch, and reporting those as user-stopped mislabelled a
+        tool that had finished on its own.
+        """
+        return self._stopped
 
     @property
     def exit_signal(self) -> str | None:
@@ -314,6 +327,10 @@ class PtySession:
         with self._lock:
             mine = not self._closed
             self._closed = True
+            # Only a close that arrives while the child is still alive is a
+            # stop. Cleanup after a natural exit must not rewrite how it ended.
+            if mine and not self._exited.is_set():
+                self._stopped = True
         if not mine:
             # Bounded by roughly what the teardown below can cost, so a wedged
             # close slows shutdown rather than hanging it.
@@ -361,8 +378,14 @@ class PtySession:
         self._reader.join(timeout=TERMINATE_GRACE_SECONDS)
         self._reap_leader()
 
-        with suppress(OSError):
-            os.close(self._master_fd)
+        # Retire the number before closing it, so a writer either completed
+        # before this point or sees that there is nothing left to write to.
+        # Closing outside the lock is safe once nobody can reach the fd again.
+        with self._fd_lock:
+            fd, self._master_fd = self._master_fd, -1
+        if fd >= 0:
+            with suppress(OSError):
+                os.close(fd)
         self._finish(self._proc.returncode)
         logger.info("pty.session.close", session=self.id, exit_code=self._exit_code)
 
@@ -381,15 +404,23 @@ class PtySession:
         """
         if self._exited.is_set():
             return
-        if _TERMINAL_REPORT.match(data) and self._echo_enabled() is True:
-            logger.debug("pty.write.dropped_report", session=self.id, data=data[:32])
-            return
-        try:
-            os.write(self._master_fd, data)
-        except OSError as exc:
-            if exc.errno not in (errno.EIO, errno.EBADF, errno.EPIPE):
-                raise
-            logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
+        # Held across the whole syscall. Passing the check above and then being
+        # descheduled was enough for teardown to close this descriptor and for
+        # the next session's `openpty()` to be handed the same number — the
+        # write then succeeded, against someone else's terminal.
+        with self._fd_lock:
+            if self._master_fd < 0:
+                logger.debug("pty.write.after_close", session=self.id)
+                return
+            if _TERMINAL_REPORT.match(data) and self._echo_enabled() is True:
+                logger.debug("pty.write.dropped_report", session=self.id, data=data[:32])
+                return
+            try:
+                os.write(self._master_fd, data)
+            except OSError as exc:
+                if exc.errno not in (errno.EIO, errno.EBADF, errno.EPIPE):
+                    raise
+                logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
 
     def _reap_leader(self) -> None:
         """Collect the child, releasing its pid. The last step of teardown.
@@ -427,11 +458,16 @@ class PtySession:
             return
         with self._lock:
             self._size = size
-        try:
-            _set_window_size(self._master_fd, size)
-        except OSError as exc:
-            if exc.errno not in (errno.EIO, errno.EBADF):
-                raise
+        # Same descriptor hazard as write(): a recycled fd number would resize
+        # an unrelated session's terminal.
+        with self._fd_lock:
+            if self._master_fd < 0:
+                return
+            try:
+                _set_window_size(self._master_fd, size)
+            except OSError as exc:
+                if exc.errno not in (errno.EIO, errno.EBADF):
+                    raise
 
     # -- output -----------------------------------------------------------
     def attach(self) -> tuple[bytes, Subscription | None]:

@@ -7,6 +7,7 @@ observed through mocks.
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -650,6 +651,68 @@ class TestSaturatedSubscriberAtExit:
             session.close()
 
         assert drained == [b"hello", _Signal.END]
+
+
+class TestDescriptorAndExitProvenance:
+    """Teardown must not let a stale writer, or a stale label, escape."""
+
+    def test_a_late_write_cannot_reach_the_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A closed fd number is handed straight to the next session.
+
+        `write()` checked liveness and then issued the syscall unguarded, so a
+        writer descheduled in between could have teardown close the descriptor
+        underneath it — and `openpty()` hands out the lowest free number, so the
+        next session launched is likely to be holding exactly that one. The
+        write then succeeds, delivering keystrokes to somebody else's tool.
+        """
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        session.close()
+        assert session._master_fd < 0, "the descriptor number is still reachable"
+
+        written: list[int] = []
+
+        def record(fd: int, data: bytes) -> int:
+            written.append(fd)
+            return len(data)
+
+        monkeypatch.setattr(os, "write", record)
+        # Stand in for a writer that passed the liveness check just before
+        # teardown ran; the descriptor guard is what has to stop it now.
+        session._exited.clear()
+        session.write(b"meant for a session that is gone\n")
+
+        assert written == [], "a write escaped teardown and reached a descriptor"
+
+    def test_a_resize_after_teardown_is_a_no_op(self, tmp_path: Path) -> None:
+        """Same hazard: a recycled number would resize an unrelated terminal."""
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        session.close()
+        session._exited.clear()
+        session.resize(WindowSize(cols=120, rows=40))  # must not raise
+
+    def test_a_natural_exit_is_not_relabelled_as_stopped(self, tmp_path: Path) -> None:
+        """`stopped` is provenance, not cleanup bookkeeping.
+
+        The registry closes exited sessions when a later launch reaps them. With
+        `stopped` reading straight off the cleanup flag, that reap rewrote how
+        the tool had ended, and a delayed exit frame reported "stopped" for a
+        session that had finished on its own.
+        """
+        session = PtySession([sys.executable, "-c", "raise SystemExit(4)"], cwd=tmp_path)
+        assert session.wait(timeout=5) == 4
+        assert not session.stopped
+
+        session.close()  # the registry reaping it later
+        assert not session.stopped, "cleanup rewrote how the session ended"
+        assert session.exit_code == 4
+
+    def test_closing_a_running_session_is_a_stop(self, tmp_path: Path) -> None:
+        """The other side of it: an explicit close while alive still reads as stopped."""
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path)
+        session.close()
+        assert session.stopped
 
 
 class TestConstructorFailure:
