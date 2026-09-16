@@ -25,7 +25,7 @@ import structlog
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import PlanModeLaunchError
 from crossby.config.json_utils import PathContainmentError, assert_within
-from crossby.models.ai import AIToolID, AIToolType, EffortLevel
+from crossby.models.ai import AIToolCapabilities, AIToolID, AIToolType, EffortLevel
 from crossby.utils.pty_runner import (
     PtySession,
     SubscriberDesyncError,
@@ -39,6 +39,10 @@ logger = structlog.get_logger()
 # Sessions a single UI process will hold open at once. The cap exists so a
 # runaway page cannot fork unbounded AI tool processes.
 MAX_CONCURRENT_SESSIONS = 16
+
+# How long shutdown waits for a create that is still spawning. Bounded so a
+# wedged child cannot hold Ctrl-C open indefinitely.
+SHUTDOWN_DRAIN_SECONDS = 10.0
 
 # Directories returned by one browse call; a listing is a convenience, not a
 # file manager, and an enormous folder should not become an enormous payload.
@@ -247,10 +251,16 @@ class SessionManager:
         self._listeners: list[Callable[[PtySession], None]] = []
         # Slots claimed by an in-flight create that has not registered yet.
         self._reserved = 0
+        # Creates that have claimed a slot and not yet finished cleaning up.
+        # Separate from _reserved, which stops counting once the session is in
+        # the registry: shutdown has to outlast the whole call, including the
+        # orphan close that happens after registration is refused.
+        self._inflight = 0
         # Set by shutdown(); guards the window between reserving a slot and
         # registering the spawned session.
         self._closed = False
         self._lock = threading.Lock()
+        self._settled = threading.Condition(self._lock)
 
     def create(self, request: LaunchRequest) -> PtySession:
         """Validate *request*, build its argv, and spawn it on a PTY."""
@@ -307,7 +317,24 @@ class SessionManager:
                     "close one before starting another"
                 )
             self._reserved += 1
+            self._inflight += 1
 
+        try:
+            return self._spawn(request, workdir, adapter, caps, dead)
+        finally:
+            with self._settled:
+                self._inflight -= 1
+                self._settled.notify_all()
+
+    def _spawn(
+        self,
+        request: LaunchRequest,
+        workdir: Path,
+        adapter: AbstractAITool,
+        caps: AIToolCapabilities,
+        dead: list[PtySession],
+    ) -> PtySession:
+        """Build the argv and start the child. Runs with a slot already claimed."""
         # Closing releases a master fd and joins a reader thread, so it must not
         # happen under the lock — and dropping the reference without closing
         # leaked both.
@@ -503,12 +530,25 @@ class SessionManager:
         snapshot is what makes this total: a create that has not yet registered
         sees the flag and closes its own session, and one that already
         registered is in the snapshot.
+
+        Then it waits for those creates to finish. Request threads are daemons,
+        so returning early let the interpreter exit while a handler was still
+        inside ``PtySession(...)`` — the thread died before it could close the
+        child it had just spawned, and the tool outlived the server with
+        nothing left that could stop it.
         """
-        with self._lock:
+        with self._settled:
             self._closed = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._requests.clear()
+            if self._inflight:
+                logger.info("web.shutdown.draining", inflight=self._inflight)
+                if not self._settled.wait_for(
+                    lambda: self._inflight == 0, timeout=SHUTDOWN_DRAIN_SECONDS
+                ):
+                    # Bounded so a wedged spawn cannot hold Ctrl-C forever.
+                    logger.warning("web.shutdown.drain_timeout", inflight=self._inflight)
         for session in sessions:
             session.close()
 

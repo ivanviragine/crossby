@@ -507,6 +507,63 @@ class TestConcurrencyInvariants:
         manager.shutdown()
         session.close.assert_called_once()
 
+    def test_shutdown_waits_for_a_create_that_is_still_spawning(
+        self, manager: SessionManager
+    ) -> None:
+        """Returning early let the interpreter kill the create mid-spawn.
+
+        Request threads are daemons, so nothing joins them. If Ctrl-C landed
+        while a handler sat inside ``PtySession(...)``, `shutdown()` returned,
+        `server_close()` finished, the interpreter exited — and the thread died
+        before it could close the child it had just spawned. The tool outlived
+        the server with nothing left that could stop it.
+        """
+        import threading
+
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        spawning = threading.Event()
+        release = threading.Event()
+        spawned = MagicMock()
+        spawned.id = "slow-session"
+
+        def slow_spawn(*_args: Any, **_kwargs: Any) -> MagicMock:
+            spawning.set()
+            assert release.wait(timeout=5), "test never released the spawn"
+            return spawned
+
+        def run_create() -> None:
+            with pytest.raises(ManagerClosedError):
+                manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession", side_effect=slow_spawn),
+        ):
+            creator = threading.Thread(target=run_create, daemon=True)
+            creator.start()
+            assert spawning.wait(timeout=5), "create never reached the spawn"
+
+            returned = threading.Event()
+
+            def run_shutdown() -> None:
+                manager.shutdown()
+                returned.set()
+
+            closer = threading.Thread(target=run_shutdown, daemon=True)
+            closer.start()
+
+            # The spawn is still in flight, so shutdown must not be done yet.
+            assert not returned.wait(timeout=0.5), "shutdown returned mid-spawn"
+
+            release.set()
+            assert returned.wait(timeout=10), "shutdown never finished draining"
+            creator.join(timeout=5)
+
+        spawned.close.assert_called_once()
+        assert manager._inflight == 0
+
     def test_invalid_directory_does_not_consume_a_slot(self, manager: SessionManager) -> None:
         """Validation must not claim capacity it then throws away.
 
