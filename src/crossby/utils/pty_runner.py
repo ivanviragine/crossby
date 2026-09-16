@@ -80,8 +80,8 @@ SUBSCRIBER_QUEUE_LIMIT = 2048
 # Grace period between SIGHUP and SIGKILL when closing a session.
 TERMINATE_GRACE_SECONDS = 3.0
 
-# How often to re-check whether the child's process group has emptied.
-GROUP_POLL_SECONDS = 0.05
+# How often to re-check whether the child has exited, while waiting it out.
+EXIT_POLL_SECONDS = 0.05
 
 DEFAULT_TERM = "xterm-256color"
 
@@ -199,6 +199,9 @@ class PtySession:
         self._exit_code: int | None = None
         self._size = size
         self._closed = False
+        # The child's pid may be recycled once this is True, so teardown must
+        # have finished signalling its process group before it flips.
+        self._reaped = False
 
         self._master_fd, slave_fd = pty.openpty()
         try:
@@ -289,32 +292,26 @@ class PtySession:
                 return
             self._closed = True
 
-        # Signalling only while the leader is still unreaped is what makes this
-        # safe. A pid is released the moment it is waited on, and the kernel is
-        # free to hand that number to anyone; a session that ended on its own
-        # was reaped by the reader thread, possibly hours before its tab is
-        # closed. Polling that stale number and SIGKILLing whatever answers
-        # could hit an unrelated process group of the same user. A session that
-        # exits by itself needs none of this anyway: the child is the session
-        # leader of its controlling terminal, so the kernel hangs up its
-        # foreground group as it goes.
+        # Teardown signals the child's *group* by number, and a pid is released
+        # the instant it is waited on — after which the kernel may hand it to
+        # anyone, including a process that makes itself a group leader. So
+        # nothing here reaps until the last signal has been sent: an unreaped
+        # child, running or zombie, keeps the kernel holding that id, which is
+        # what makes every signal below provably this session's. The reader
+        # thread observes the exit without reaping for the same reason.
         #
-        # One grace period covers the leader *and* its descendants. Timing them
-        # separately spent TERMINATE_GRACE_SECONDS twice per session, and
-        # shutdown closes sessions serially — sixteen tabs meant a minute of
-        # waiting before the process exited.
-        if self._proc.poll() is None:
+        # Descendants are the point of the SIGKILL: an agent runs shell
+        # commands, and one that ignores SIGHUP outlives the leader — still
+        # editing files or making requests while the UI reports the session
+        # closed. They get from the hangup until the leader is gone (the whole
+        # grace period if it ignores SIGHUP too) to wind down; an already-empty
+        # group answers ESRCH and the kill is a no-op.
+        if not self._reaped:
             deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
             _signal_group(self._proc.pid, signal.SIGHUP)
-            with suppress(subprocess.TimeoutExpired):
-                self._proc.wait(timeout=_remaining(deadline))
-
-            # A tool's descendants are the point of this: an agent runs shell
-            # commands, and one that ignores SIGHUP outlives the leader. Keying
-            # the SIGKILL off the leader's exit alone left it running — still
-            # editing files or making requests — while the UI reported the
-            # session closed.
-            self._reap_process_group(deadline)
+            _await_exit(self._proc.pid, deadline)
+            _signal_group(self._proc.pid, signal.SIGKILL)
+            self._reap_leader()
 
         # Not part of that budget: the reader unblocks as soon as the last
         # slave closes, so this timeout only ever elapses if the thread is
@@ -322,7 +319,7 @@ class PtySession:
         self._reader.join(timeout=TERMINATE_GRACE_SECONDS)
         with suppress(OSError):
             os.close(self._master_fd)
-        self._finish(self._proc.poll())
+        self._finish(self._proc.returncode)
         logger.info("pty.session.close", session=self.id, exit_code=self._exit_code)
 
     # -- input ------------------------------------------------------------
@@ -350,28 +347,15 @@ class PtySession:
                 raise
             logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
 
-    def _reap_process_group(self, deadline: float) -> None:
-        """Wait out the rest of *deadline* for the child's group, then kill it.
+    def _reap_leader(self) -> None:
+        """Collect the child, releasing its pid. The last step of teardown.
 
-        ``start_new_session=True`` makes the child a group leader, so its
-        descendants share its pgid and can be signalled together. *deadline* is
-        a :func:`time.monotonic` instant shared with the leader's own wait, so a
-        slow leader spends the budget rather than extending it.
-
-        Only :meth:`close` may call this, and only for a leader it just reaped
-        itself. While the group has any member left the kernel holds its id
-        reserved, so a live group is provably still this session's; the
-        vulnerable moment is the tick after the last member goes, and the very
-        next poll reads that as empty and returns.
+        ``close()`` is the only caller, and only once it has finished
+        signalling the process group: reaping publishes that id for reuse.
         """
-        if os.name != "posix":  # pragma: no cover - POSIX-only sessions
-            return
-        while time.monotonic() < deadline:
-            if not _group_alive(self._proc.pid):
-                return
-            time.sleep(GROUP_POLL_SECONDS)
-        logger.warning("pty.group.survived_hangup", session=self.id)
-        _signal_group(self._proc.pid, signal.SIGKILL)
+        with suppress(Exception):
+            self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
+        self._reaped = True
 
     def _echo_enabled(self) -> bool | None:
         """Whether the line discipline is echoing, or ``None`` if unknowable.
@@ -469,9 +453,10 @@ class PtySession:
         except Exception:  # pragma: no cover - defensive
             logger.exception("pty.reader.failed", session=self.id)
         finally:
-            with suppress(Exception):
-                self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
-            self._finish(self._proc.poll())
+            # Deliberately does not reap: close() signals the child's process
+            # group by number, and only an unreaped child keeps the kernel
+            # from handing that number to someone else in the meantime.
+            self._finish(_await_exit(self._proc.pid, time.monotonic() + TERMINATE_GRACE_SECONDS))
 
     def _broadcast(self, chunk: bytes) -> None:
         with self._lock:
@@ -560,25 +545,32 @@ def _set_window_size(fd: int, size: WindowSize) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
 
 
-def _remaining(deadline: float) -> float:
-    """Seconds left before *deadline*, never negative."""
-    return max(0.0, deadline - time.monotonic())
+def _await_exit(pid: int, deadline: float) -> int | None:
+    """Wait until *pid* exits, **without reaping it**, and return its status.
 
+    ``WNOWAIT`` reports the exit but leaves the child collectable, so the kernel
+    keeps its id — and therefore its process-group id — reserved. That is the
+    whole point: teardown signals the group by number, and a reaped id can be
+    handed to an unrelated process that makes itself a group leader, which would
+    then take the SIGKILL meant for the tool's descendants.
 
-def _group_alive(pgid: int) -> bool:
-    """Whether any process remains in *pgid*.
-
-    Signal 0 performs the permission and existence check without delivering
-    anything, so this asks "is the group still there" without disturbing it.
+    Returns ``None`` if the child is still running at *deadline*, or if it was
+    already collected elsewhere. The status uses ``Popen.returncode``'s
+    convention: negative for a signal.
     """
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # Permission denied means something is still there to deny access to.
-        return True
-    return True
+    if not hasattr(os, "waitid"):  # pragma: no cover - POSIX without waitid
+        return None
+    while True:
+        try:
+            info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+        except (ChildProcessError, OSError):
+            return None
+        if info is not None:
+            killed = info.si_code in (os.CLD_KILLED, os.CLD_DUMPED)
+            return -info.si_status if killed else info.si_status
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(EXIT_POLL_SECONDS)
 
 
 def _signal_group(pid: int, sig: int) -> None:

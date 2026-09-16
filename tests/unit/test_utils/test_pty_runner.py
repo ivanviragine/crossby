@@ -7,6 +7,7 @@ observed through mocks.
 
 from __future__ import annotations
 
+import signal
 import sys
 import threading
 import time
@@ -433,35 +434,59 @@ class TestProcessGroupTeardown:
 
         assert self._state(pid) in {"Z", "gone"}, "descendant outlived the session"
 
-    def test_a_reaped_leader_is_never_signalled_by_pid(
+    def test_the_leader_is_reaped_only_after_the_last_group_signal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Closing a tab whose tool already exited must not signal its old pid.
+        """Teardown must finish signalling before it releases the child's id.
 
-        The reader thread reaps the leader as soon as it exits, which releases
-        the pid — and a tab can sit open for hours afterwards. Signalling that
-        stale number then, and SIGKILLing whatever answers at the end of the
-        grace period, could kill an unrelated process group of the same user
-        that had since become a group leader with the recycled id.
+        ``killpg`` addresses the group by number, and waiting on the leader
+        publishes that number for reuse. Reaping first left a window — hours
+        wide when the reader thread did it at natural exit, microseconds when
+        ``close()`` did it before probing the group — in which an unrelated
+        process could become a group leader with the recycled id and take the
+        SIGKILL meant for the tool's descendants.
         """
-        session = PtySession([sys.executable, "-c", "pass"], cwd=tmp_path)
-        assert session.wait(timeout=5) is not None, "child never exited"
+        session = PtySession([sys.executable, "-u", "-c", self._DEAF_LEADER], cwd=tmp_path)
+        chunks = _collect(session)
+        assert _await(chunks, "READY"), "leader never installed its SIGHUP handler"
 
-        # Every pid-based group operation is recorded, the liveness probe
-        # included: reading the stale number is already the mistake, because a
-        # recycled group answering "alive" is what leads to the SIGKILL.
-        queried: list[int] = []
-        signalled: list[tuple[int, int]] = []
-        monkeypatch.setattr(pty_runner, "_group_alive", lambda pgid: queried.append(pgid) or True)
-        monkeypatch.setattr(
-            pty_runner,
-            "_signal_group",
-            lambda pid, sig: signalled.append((pid, sig)),
-        )
+        events: list[str] = []
+        real_signal = pty_runner._signal_group
+
+        def spy_signal(pid: int, sig: int) -> None:
+            events.append(f"signal:{int(sig)}")
+            real_signal(pid, sig)
+
+        real_reap = session._reap_leader
+
+        def spy_reap() -> None:
+            events.append("reap")
+            real_reap()
+
+        monkeypatch.setattr(pty_runner, "_signal_group", spy_signal)
+        monkeypatch.setattr(session, "_reap_leader", spy_reap)
         session.close()
 
-        assert queried == [], f"close() probed the reaped pid: {queried}"
-        assert signalled == [], f"close() signalled the reaped pid: {signalled}"
+        assert "reap" in events, "close() never collected the child"
+        assert events.index("reap") == len(events) - 1, f"signalled after reaping: {events}"
+        assert f"signal:{int(signal.SIGKILL)}" in events, f"descendants never killed: {events}"
+
+    def test_a_naturally_exited_session_is_not_reaped_before_close(self, tmp_path: Path) -> None:
+        """The reader thread observes the exit; only close() collects it.
+
+        If the reader reaped, the id would be free — and reusable — for as long
+        as the tab stayed open, which is exactly the window close() then
+        signalled into.
+        """
+        session = PtySession([sys.executable, "-c", "raise SystemExit(3)"], cwd=tmp_path)
+        assert session.wait(timeout=5) == 3, "exit status must survive a non-reaping wait"
+        assert not session._reaped
+        # Unreaped means the kernel still holds the id: a zombie, not gone, so
+        # nothing else can have been given that number.
+        assert self._state(session.pid) == "Z"
+
+        session.close()
+        assert session._reaped
 
     def test_close_spends_one_grace_period_not_two(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -479,23 +504,12 @@ class TestProcessGroupTeardown:
         chunks = _collect(session)
         assert _await(chunks, "READY"), "leader never installed its SIGHUP handler"
 
-        budgets: list[float] = []
-        reap = session._reap_process_group
-
-        def record(deadline: float) -> None:
-            budgets.append(deadline - time.monotonic())
-            reap(deadline)
-
-        monkeypatch.setattr(session, "_reap_process_group", record)
-
         started = time.monotonic()
         session.close()
         elapsed = time.monotonic() - started
 
-        # The leader ignores SIGHUP, so its wait consumed the whole budget;
-        # what reaches the reap must be the leftover, not a new allowance.
-        assert budgets, "close() no longer reaps the process group"
-        assert budgets[0] <= 0.0, f"reap was handed a fresh {budgets[0]:.2f}s"
+        # The leader ignores SIGHUP, so it spends the whole budget before the
+        # SIGKILL lands. Anything near twice that means a second one started.
         assert elapsed < 2 * grace, f"close() took {elapsed:.2f}s of a {grace:.2f}s budget"
 
 
