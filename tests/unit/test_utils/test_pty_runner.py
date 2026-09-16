@@ -488,6 +488,47 @@ class TestProcessGroupTeardown:
         session.close()
         assert session._reaped
 
+    def test_the_exit_status_is_published_before_the_child_is_collected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reader must finish observing before close() reaps.
+
+        Only an uncollected child can be reported by ``waitid``, so reaping
+        ahead of the reader made its call raise ``ChildProcessError``; the
+        ``None`` that produced was published permanently, and the later
+        ``_finish`` in close() was ignored because the exit was already set.
+        The tab then read a generic "ended" instead of the real status,
+        depending on how the two threads interleaved.
+        """
+        # Force the losing interleaving rather than hoping for it: hold the
+        # reader inside its observation long enough that an unsynchronised
+        # close() would reach the reap first. Left to chance the reader
+        # normally wins, which is why the bug was intermittent.
+        real_await = pty_runner._await_exit
+
+        def slow_on_the_reader(pid: int, deadline: float) -> int | None:
+            if threading.current_thread().name.startswith("pty-reader-"):
+                time.sleep(0.3)
+            return real_await(pid, deadline)
+
+        monkeypatch.setattr(pty_runner, "_await_exit", slow_on_the_reader)
+
+        session = PtySession([sys.executable, "-c", "import time; time.sleep(300)"], cwd=tmp_path)
+        observed: dict[str, object] = {}
+        real_reap = session._reap_leader
+
+        def spy_reap() -> None:
+            observed["published"] = session._exited.is_set()
+            observed["code"] = session.exit_code
+            real_reap()
+
+        monkeypatch.setattr(session, "_reap_leader", spy_reap)
+        session.close()
+
+        assert observed.get("published") is True, "reaped before the reader published"
+        assert observed.get("code") is not None, "exit status was lost to the reap race"
+        assert session.exit_code == -int(signal.SIGHUP)
+
     def test_close_spends_one_grace_period_not_two(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

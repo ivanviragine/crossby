@@ -306,17 +306,24 @@ class PtySession:
         # closed. They get from the hangup until the leader is gone (the whole
         # grace period if it ignores SIGHUP too) to wind down; an already-empty
         # group answers ESRCH and the kill is a no-op.
-        if not self._reaped:
-            deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
-            _signal_group(self._proc.pid, signal.SIGHUP)
-            _await_exit(self._proc.pid, deadline)
-            _signal_group(self._proc.pid, signal.SIGKILL)
-            self._reap_leader()
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        _signal_group(self._proc.pid, signal.SIGHUP)
+        _await_exit(self._proc.pid, deadline)
+        _signal_group(self._proc.pid, signal.SIGKILL)
 
-        # Not part of that budget: the reader unblocks as soon as the last
-        # slave closes, so this timeout only ever elapses if the thread is
-        # genuinely wedged.
+        # The reader publishes the exit status, and it can only read that
+        # status while the child is still collectable — so it runs to
+        # completion before the reap. Collecting first made its ``waitid()``
+        # raise ``ChildProcessError``, and the ``None`` that produced was
+        # published permanently: the tab lost its "exit 1" for a generic
+        # "ended", nondeterministically.
+        #
+        # Not part of the grace budget: the reader unblocks as soon as the last
+        # slave closes, which the SIGKILL above guarantees. This timeout only
+        # elapses if the thread is genuinely wedged.
         self._reader.join(timeout=TERMINATE_GRACE_SECONDS)
+        self._reap_leader()
+
         with suppress(OSError):
             os.close(self._master_fd)
         self._finish(self._proc.returncode)
@@ -456,7 +463,11 @@ class PtySession:
             # Deliberately does not reap: close() signals the child's process
             # group by number, and only an unreaped child keeps the kernel
             # from handing that number to someone else in the meantime.
-            self._finish(_await_exit(self._proc.pid, time.monotonic() + TERMINATE_GRACE_SECONDS))
+            # If something collected the child anyway — close() giving up on a
+            # wedged reader — waitid() can no longer report, but Popen kept the
+            # status it recorded, so fall back to that rather than publish None.
+            status = _await_exit(self._proc.pid, time.monotonic() + TERMINATE_GRACE_SECONDS)
+            self._finish(status if status is not None else self._proc.returncode)
 
     def _broadcast(self, chunk: bytes) -> None:
         with self._lock:
