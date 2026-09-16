@@ -271,6 +271,12 @@ class SessionManager:
         if request.initial_message and not caps.supports_initial_message:
             raise LaunchValidationError(f"{caps.display_name} does not accept an initial message")
 
+        # Resolve the working directory before anything is claimed. It rejects a
+        # directory that vanished between selection and launch, and doing that
+        # after the reservation leaked a slot on every rejection — sixteen bad
+        # requests and the server refused all launches until restarted.
+        workdir = self.resolve_workdir(request.cwd)
+
         # Reap exited sessions and reserve a slot in one critical section. The
         # check and the registration used to be separate, so two concurrent
         # creates could both pass the limit before either registered.
@@ -294,7 +300,6 @@ class SessionManager:
         for entry in dead:
             entry.close()
 
-        workdir = self.resolve_workdir(request.cwd)
         command_kwargs: dict[str, Any] = {
             "model": request.model,
             "initial_message": request.initial_message,

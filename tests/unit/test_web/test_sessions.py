@@ -442,3 +442,27 @@ class TestConcurrencyInvariants:
 
         assert len(stream._pumps) == 1
         assert session.attach.call_count == 1
+
+    def test_invalid_directory_does_not_consume_a_slot(self, manager: SessionManager) -> None:
+        """Validation must not claim capacity it then throws away.
+
+        `resolve_workdir` rejects a directory that vanished between selection and
+        launch. Running it after the reservation leaked a slot per rejection, so
+        sixteen bad requests left the server refusing every launch until restart.
+        """
+        for _ in range(MAX_CONCURRENT_SESSIONS * 2):
+            with pytest.raises(LaunchValidationError):
+                manager.create(
+                    LaunchRequest(tool=AIToolID.CLAUDE, cwd=str(manager.project_root / "gone"))
+                )
+        assert manager._reserved == 0
+
+        # And a valid launch still gets through afterwards.
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession"),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE))

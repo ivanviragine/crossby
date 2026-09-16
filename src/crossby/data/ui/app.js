@@ -68,6 +68,11 @@ async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 404) {
+    const missing = new Error(payload.error || "not found");
+    missing.status = 404;
+    throw missing;
+  }
   if (response.status === 401) {
     // Every `crossby ui` run mints a new token, so a stale URL — a bookmark, a
     // reopened tab, a reload after a restart — is the usual cause. Say so,
@@ -337,17 +342,37 @@ function endedLabel({ stopped, exit_code: code, exit_signal: signal }) {
   return `exit ${code}`;
 }
 
-function markExited(id, detail) {
+/**
+ * Record how a session ended.
+ *
+ * `announce` controls the closing line in the terminal, and is off while
+ * restoring: the scrollback replay has not run yet at that point, so writing it
+ * there would leave "session ended" sitting above the output it followed. The
+ * stream delivers an exit frame after that session's backlog, which is when the
+ * line belongs.
+ *
+ * Not gated on `entry.running`: a restored session is constructed
+ * already-exited, and that guard discarded its stopped/exit_code/exit_signal
+ * detail so every restored tab read a generic "ended".
+ */
+function markExited(id, detail, { announce = true } = {}) {
   const entry = sessions.get(id);
-  if (!entry || !entry.running) return;
-  entry.running = false;
-  entry.endedLabel = endedLabel(detail);
-  entry.dot.dataset.state = detail.stopped ? "stopped" : "exited";
-  entry.term.write(`\r\n\x1b[2m── session ${entry.endedLabel} ──\x1b[0m\r\n`);
-  if (entry.id === activeId) {
-    ui.stop.hidden = true;
-    ui.stopHint.hidden = true;
-    renderMeta(entry);
+  if (!entry) return;
+
+  if (!entry.endedLabel) {
+    entry.running = false;
+    entry.endedLabel = endedLabel(detail);
+    entry.dot.dataset.state = detail.stopped ? "stopped" : "exited";
+    if (entry.id === activeId) {
+      ui.stop.hidden = true;
+      ui.stopHint.hidden = true;
+      renderMeta(entry);
+    }
+  }
+
+  if (announce && !entry.announced) {
+    entry.announced = true;
+    entry.term.write(`\r\n\x1b[2m── session ${entry.endedLabel} ──\x1b[0m\r\n`);
   }
 }
 
@@ -386,11 +411,21 @@ async function requestClose(id) {
 async function closeSession(id) {
   const entry = sessions.get(id);
   if (!entry) return;
+
+  // Always ask the server to drop it, running or not: an exited session stays
+  // in the registry until a later launch reaps it, so skipping the DELETE meant
+  // a reload re-adopted a tab the user had closed.
   try {
-    if (entry.running) await api("DELETE", `/api/sessions/${id}`);
+    await api("DELETE", `/api/sessions/${id}`);
   } catch (err) {
-    showError(err.message);
+    // Already reaped is the outcome we wanted.
+    if (err.status !== 404) {
+      // Removing the tab now would strand a running tool with no controls.
+      showError(`${err.message} — the session is still running.`);
+      return;
+    }
   }
+
   clearTimeout(entry.releaseTimer);
   entry.term.dispose();
   entry.pane.remove();
@@ -787,7 +822,9 @@ async function boot() {
     for (const info of existing) {
       const entry = createSession(info);
       entry.restored = true;      // needs a redraw nudge, not just a replay
-      if (!info.running) markExited(info.id, info);
+      // State only: the closing line waits for the stream's exit frame, which
+      // arrives after this session's scrollback.
+      if (!info.running) markExited(info.id, info, { announce: false });
       if (activeId === null) activate(info.id);
     }
   } catch (err) {
