@@ -65,3 +65,48 @@ def test_pty_support_is_importable_without_the_backend() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() in {"True", "False"}
+
+
+def test_running_the_ui_command_reports_unsupported_before_importing_the_backend() -> None:
+    """The friendly message must be reachable on the platform it describes.
+
+    `ui()` deferred `from crossby.web import serve` to call time, but placed it
+    *above* the `pty_supported()` guard — and `crossby.web` reaches
+    `pty_runner`. So `crossby ui` on Windows still died with
+    ModuleNotFoundError instead of the message written for exactly that case.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import sys
+
+                for name in ("fcntl", "pty", "termios"):
+                    sys.modules[name] = None
+
+                from typer.testing import CliRunner
+
+                import crossby.cli.ui as ui_module
+                from crossby.cli.main import app
+
+                # Blocking those modules does not move os.name, so the predicate
+                # is forced here instead. `cli/ui.py` binds it by name, so the
+                # rebind has to happen on that module.
+                ui_module.pty_supported = lambda: False
+
+                outcome = CliRunner().invoke(app, ["ui"])
+                assert outcome.exit_code == 1, outcome.output
+                assert "POSIX pseudo-terminal support" in outcome.output, outcome.output
+                assert "crossby.utils.pty_runner" not in sys.modules
+                print("ok")
+                """
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("ok")

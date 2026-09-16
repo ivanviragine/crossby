@@ -466,3 +466,40 @@ class TestIdleStreamDisconnect:
                 time.sleep(0.05)
 
         assert server.sessions._listeners == [], "handler stayed parked after disconnect"
+
+
+class TestStreamReadySignal:
+    """`ready` means attached — not merely that the response headers went out."""
+
+    def test_ready_arrives_only_after_the_listener_is_installed(
+        self, server: CrossbyUIServer
+    ) -> None:
+        """The browser restores its session snapshot on this signal.
+
+        `open` fires on the headers, which the handler writes before entering
+        `MultiplexedStream` — so restoring on `open` still raced a concurrent
+        launch reaping a session out from under the handoff. Nothing is
+        registered when the headers land; everything is by the time `ready` does.
+        """
+        assert server.sessions._listeners == []
+
+        client = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+        try:
+            client.sendall(
+                b"GET /api/stream HTTP/1.1\r\n"
+                + f"Host: 127.0.0.1:{server.port}\r\n".encode()
+                + f"X-Crossby-Token: {TOKEN}\r\n".encode()
+                + b"\r\n"
+            )
+            client.settimeout(10)
+            seen = b""
+            while b"event: ready" not in seen:
+                chunk = client.recv(4096)
+                assert chunk, "stream closed before announcing readiness"
+                seen += chunk
+
+            assert b"200" in seen, "stream did not open"
+            assert server.sessions._listeners, "ready arrived before the stream attached"
+        finally:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()

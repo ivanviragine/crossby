@@ -470,6 +470,10 @@ const pendingAdoption = new Map();
 const pendingExit = new Map();
 const PENDING_EXIT_TTL_MS = 60_000;
 
+// How long boot waits for the server to confirm the stream is attached before
+// restoring anyway.
+const STREAM_READY_TIMEOUT_MS = 5_000;
+
 function holdExit(detail) {
   dropExit(detail.session);
   pendingExit.set(detail.session, {
@@ -546,9 +550,23 @@ function writeChunk(entry, chunk) {
   }
 }
 
+/**
+ * Open the multiplexed stream, resolving once the *server* says it is attached.
+ *
+ * `open` is not that moment: it fires on the response headers, which the
+ * handler writes before it installs its listener and picks up the live
+ * sessions. Restoring on `open` still raced a launch reaping a session out from
+ * under the handoff. The server sends `ready` after that setup instead.
+ */
 function openStream() {
   if (stream) stream.close();
   stream = new EventSource(`/api/stream?token=${encodeURIComponent(TOKEN)}`);
+
+  let markReady;
+  const attached = new Promise((resolve) => {
+    markReady = resolve;
+  });
+  stream.addEventListener("ready", () => markReady());
 
   stream.addEventListener("output", (event) => {
     const { session: id, chunk } = JSON.parse(event.data);
@@ -569,7 +587,11 @@ function openStream() {
 
   stream.addEventListener("exit", (event) => {
     const detail = JSON.parse(event.data);
-    if (!sessions.has(detail.session)) {
+    // Held while the tab is missing *or* while adoption still owes it output:
+    // restoration can build the tab from the snapshot while `adopt()` is
+    // waiting on its metadata GET, and announcing the exit then put the closing
+    // line above the bytes that preceded it.
+    if (!sessions.has(detail.session) || pendingAdoption.has(detail.session)) {
       // No tab yet — a launch or an adoption is still in flight, or the
       // session belongs to another page. Hold the detail so the tab, if one
       // appears, shows how the session ended rather than staying marked
@@ -611,6 +633,14 @@ function openStream() {
     }
     opened = true;
   };
+
+  // Never hang boot on a stream that cannot connect: restoring from the
+  // snapshot alone is worse than a live stream, but far better than a page that
+  // never finishes loading.
+  return Promise.race([
+    attached,
+    new Promise((resolve) => setTimeout(resolve, STREAM_READY_TIMEOUT_MS)),
+  ]);
 }
 
 /* ---------------- launching ---------------- */
@@ -923,7 +953,7 @@ async function boot() {
   // marked running forever; one taken after it exited produced a blank tab with
   // the transcript already gone. Attaching first puts the scrollback and the
   // exit on their way before anything can reap them.
-  openStream();
+  await openStream();
 
   // Reattach to sessions that outlived the page: a reload must not orphan a
   // running tool that only the server can still see. The stream may have

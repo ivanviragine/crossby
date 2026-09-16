@@ -37,12 +37,16 @@ def ui(
     at or below it. Pass ``--allow-dir`` to offer trees outside that one. Only
     these roots are reachable — the page cannot walk elsewhere.
     """
-    from crossby.web import serve
-
     if not pty_supported():
         console.error("The browser terminal needs POSIX pseudo-terminal support.")
         console.hint("Windows would require a ConPTY backend, which crossby does not ship yet.")
         raise typer.Exit(1)
+
+    # Below the guard, not above it: `crossby.web` reaches `pty_runner`, whose
+    # fcntl/pty/termios imports do not exist on Windows. Importing first made
+    # even `crossby ui` die with ModuleNotFoundError instead of the message
+    # directly above.
+    from crossby.web import serve
 
     project_root = path.expanduser().resolve()
     if not project_root.is_dir():

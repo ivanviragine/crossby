@@ -349,6 +349,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
             heartbeat.start()
             try:
+                # Only now is the listener installed and every live session
+                # attached. The browser's `open` fires on the headers above,
+                # which go out before any of that, so a page that took its
+                # session snapshot on `open` could still race a launch reaping a
+                # session out from under the handoff. This frame is the real
+                # "you will see everything from here" signal.
+                heartbeat.write(b"event: ready\ndata: {}\n\n")
                 for event in stream:
                     heartbeat.write(_sse_frame(event))
                 if stream.desynced:
