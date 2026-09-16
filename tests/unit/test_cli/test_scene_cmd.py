@@ -683,7 +683,9 @@ class TestClearAndSchema:
         descriptor = load_ledger(root).scene_restore(".cursor/skills")
         assert descriptor is not None and descriptor.backup_path is not None
         backup = root / descriptor.backup_path
-        shutil.rmtree(backup)
+        # Keep the original inode allocated: Linux may immediately reuse a
+        # deleted directory's inode, defeating this different-identity fixture.
+        backup.rename(root / "displaced-cursor-backup")
         backup.mkdir()
 
         plan = _invoke(["scene", "clear", "--tool", "cursor", "--plan"], root)
