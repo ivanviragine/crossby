@@ -15,6 +15,7 @@ from crossby.web.sessions import (
     Autonomy,
     LaunchRequest,
     LaunchValidationError,
+    ManagerClosedError,
     MultiplexedStream,
     SessionManager,
     SessionNotFoundError,
@@ -442,6 +443,69 @@ class TestConcurrencyInvariants:
 
         assert len(stream._pumps) == 1
         assert session.attach.call_count == 1
+
+    def test_create_after_shutdown_is_refused(self, manager: SessionManager) -> None:
+        """Nothing is spawned once the server has stopped."""
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        manager.shutdown()
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession") as spawn,
+            pytest.raises(ManagerClosedError),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+        spawn.assert_not_called()
+        assert manager._reserved == 0
+
+    def test_shutdown_during_a_spawn_closes_the_orphan(self, manager: SessionManager) -> None:
+        """A create that loses the race to shutdown cleans up its own child.
+
+        Request threads are daemons, so `server_close()` does not wait for one
+        already inside `create()`. Registering after shutdown's snapshot hid a
+        live tool from the only code that closes sessions: "Server stopped"
+        printed while the tool kept running. Shutting down *during* the spawn
+        reproduces that window deterministically.
+        """
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        spawned = MagicMock()
+        spawned.id = "orphan-session"
+
+        def spawn_then_shutdown(*_args: Any, **_kwargs: Any) -> MagicMock:
+            manager.shutdown()
+            return spawned
+
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession", side_effect=spawn_then_shutdown),
+            pytest.raises(ManagerClosedError),
+        ):
+            manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+
+        spawned.close.assert_called_once()
+        assert "orphan-session" not in manager._sessions
+        assert manager._reserved == 0
+
+    def test_shutdown_closes_a_session_that_registered_in_time(
+        self, manager: SessionManager
+    ) -> None:
+        """The other side of the race: registration won, so shutdown owns it."""
+        from crossby.ai_tools.base import AbstractAITool
+
+        adapter = AbstractAITool.get(AIToolID.CLAUDE)
+        with (
+            patch.object(type(adapter), "build_launch_command", return_value=["true"]),
+            patch("crossby.web.sessions.PtySession") as spawn,
+        ):
+            session = manager.create(LaunchRequest(tool=AIToolID.CLAUDE))
+        assert spawn.called
+        session.close.assert_not_called()
+
+        manager.shutdown()
+        session.close.assert_called_once()
 
     def test_invalid_directory_does_not_consume_a_slot(self, manager: SessionManager) -> None:
         """Validation must not claim capacity it then throws away.

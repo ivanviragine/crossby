@@ -454,14 +454,44 @@ async function closeSession(id) {
 const pendingAdoption = new Map();
 
 /**
- * Exit frames that arrived mid-adoption.
+ * Exit frames that arrived before the page had a tab for the session.
  *
- * A short-lived tool can exit before `/api/sessions/{id}` returns, and
- * `markExited` drops a frame for a session it cannot find — leaving the tab
- * that adoption eventually creates marked running forever, since the snapshot
- * it fetched may predate the exit.
+ * A short-lived tool can exit while the launch POST or the adoption fetch is
+ * still in flight, and `markExited` drops a frame for a session it cannot
+ * find. The snapshot those requests return may predate the exit, so the tab
+ * they create would stay marked running forever. Holding the detail here lets
+ * whichever path creates the tab settle it.
+ *
+ * Keying this off a live adoption was not enough: a tool that exits without
+ * writing a byte produces nothing to adopt, so its frame was still lost.
+ * Holding every tab-less id instead means ids that never get a tab — another
+ * browser tab's silent session — would accumulate, so each entry expires.
  */
 const pendingExit = new Map();
+const PENDING_EXIT_TTL_MS = 60_000;
+
+function holdExit(detail) {
+  dropExit(detail.session);
+  pendingExit.set(detail.session, {
+    detail,
+    timer: setTimeout(() => pendingExit.delete(detail.session), PENDING_EXIT_TTL_MS),
+  });
+}
+
+/** Settle a freshly created tab from its held exit frame, if one is waiting. */
+function settleExit(id) {
+  const held = pendingExit.get(id);
+  if (!held) return;
+  dropExit(id);
+  markExited(id, held.detail);
+}
+
+function dropExit(id) {
+  const held = pendingExit.get(id);
+  if (!held) return;
+  clearTimeout(held.timer);
+  pendingExit.delete(id);
+}
 
 function adopt(id, chunk) {
   const held = pendingAdoption.get(id);
@@ -472,20 +502,19 @@ function adopt(id, chunk) {
   pendingAdoption.set(id, [chunk]);
   api("GET", `/api/sessions/${id}`)
     .then((info) => {
-      const entry = createSession(info);
-      entry.restored = true;      // a reattachment, so it needs a redraw nudge
+      // The launch POST may have created the tab while this fetch was in
+      // flight; a second createSession() would leave a duplicate pane behind.
+      const existing = sessions.get(id);
+      const entry = existing || createSession(info);
+      if (!existing) entry.restored = true;   // a reattachment: needs a redraw nudge
       for (const pending of pendingAdoption.get(id) || []) writeChunk(entry, pending);
       pendingAdoption.delete(id);
-      const exited = pendingExit.get(id);
-      if (exited) {
-        pendingExit.delete(id);
-        markExited(id, exited);   // after the backlog, so the line lands last
-      }
+      settleExit(id);             // after the backlog, so the closing line lands last
       if (activeId === null) activate(id);
     })
     .catch((err) => {
       pendingAdoption.delete(id);
-      pendingExit.delete(id);
+      dropExit(id);
       showError(err.message);
     });
 }
@@ -522,10 +551,12 @@ function openStream() {
 
   stream.addEventListener("exit", (event) => {
     const detail = JSON.parse(event.data);
-    if (!sessions.has(detail.session) && pendingAdoption.has(detail.session)) {
-      // Adoption is still in flight; hold the detail so the tab it creates
-      // shows how the session ended rather than staying marked running.
-      pendingExit.set(detail.session, detail);
+    if (!sessions.has(detail.session)) {
+      // No tab yet — a launch or an adoption is still in flight, or the
+      // session belongs to another page. Hold the detail so the tab, if one
+      // appears, shows how the session ended rather than staying marked
+      // running.
+      holdExit(detail);
       return;
     }
     markExited(detail.session, detail);
@@ -571,7 +602,13 @@ async function startSession(event) {
       cols,
       rows,
     });
-    const entry = createSession(info);
+    // Adoption may already have built the tab from a first output frame.
+    const entry = sessions.get(info.id) || createSession(info);
+    // A tool that exited before this response landed has its frame held; apply
+    // it now, or the tab reads as running for the rest of the page's life. An
+    // adoption still in flight owns the ordering instead — it writes its
+    // backlog first so the closing line lands last.
+    if (!pendingAdoption.has(info.id)) settleExit(info.id);
     activate(info.id);
     refit(entry);
     // Tell the server the size this pane actually resolved to.

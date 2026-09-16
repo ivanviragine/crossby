@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from crossby.utils import pty_runner
 from crossby.utils.pty_runner import (
     SCROLLBACK_LIMIT,
     SCROLLBACK_RESYNC_WINDOW,
@@ -387,6 +388,14 @@ class TestProcessGroupTeardown:
     _DEAF_CHILD = (
         "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(300)"
     )
+    # Same, but announces itself so a test can wait until SIG_IGN is really in
+    # place — closing before that and SIGHUP simply kills it.
+    _DEAF_LEADER = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "print('READY', flush=True)\n"
+        "time.sleep(300)\n"
+    )
     _SPAWNS_A_CHILD = (
         "import subprocess, sys, time\n"
         f"kid = subprocess.Popen([sys.executable, '-c', {_DEAF_CHILD!r}])\n"
@@ -423,6 +432,41 @@ class TestProcessGroupTeardown:
         time.sleep(0.6)
 
         assert self._state(pid) in {"Z", "gone"}, "descendant outlived the session"
+
+    def test_close_spends_one_grace_period_not_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The leader's wait and the group reap draw on a single deadline.
+
+        Reaping the group started a *fresh* ``TERMINATE_GRACE_SECONDS`` after
+        the leader had already burned one, so a tool that ignores SIGHUP cost
+        twice the grace period. Shutdown closes sessions serially, so sixteen
+        tabs meant nearly a minute before the process exited.
+        """
+        grace = 0.4
+        monkeypatch.setattr(pty_runner, "TERMINATE_GRACE_SECONDS", grace)
+        session = PtySession([sys.executable, "-u", "-c", self._DEAF_LEADER], cwd=tmp_path)
+        chunks = _collect(session)
+        assert _await(chunks, "READY"), "leader never installed its SIGHUP handler"
+
+        budgets: list[float] = []
+        reap = session._reap_process_group
+
+        def record(deadline: float) -> None:
+            budgets.append(deadline - time.monotonic())
+            reap(deadline)
+
+        monkeypatch.setattr(session, "_reap_process_group", record)
+
+        started = time.monotonic()
+        session.close()
+        elapsed = time.monotonic() - started
+
+        # The leader ignores SIGHUP, so its wait consumed the whole budget;
+        # what reaches the reap must be the leftover, not a new allowance.
+        assert budgets, "close() no longer reaps the process group"
+        assert budgets[0] <= 0.0, f"reap was handed a fresh {budgets[0]:.2f}s"
+        assert elapsed < 2 * grace, f"close() took {elapsed:.2f}s of a {grace:.2f}s budget"
 
 
 class TestExitIsPublishedAtomically:

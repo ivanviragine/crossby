@@ -68,6 +68,7 @@ from crossby.utils.pty_runner import PtyUnsupportedError
 from crossby.web.sessions import (
     LaunchRequest,
     LaunchValidationError,
+    ManagerClosedError,
     MultiplexedStream,
     SessionManager,
     SessionNotFoundError,
@@ -273,6 +274,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             request = LaunchRequest.from_payload(payload)
             session = self.ui.sessions.create(request)
+        except ManagerClosedError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         except LaunchValidationError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return

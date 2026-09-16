@@ -289,17 +289,25 @@ class PtySession:
                 return
             self._closed = True
 
+        # One grace period covers the leader *and* its descendants. Timing them
+        # separately spent TERMINATE_GRACE_SECONDS twice per session, and
+        # shutdown closes sessions serially — sixteen tabs meant a minute of
+        # waiting before the process exited.
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         if self._proc.poll() is None:
             _signal_group(self._proc.pid, signal.SIGHUP)
             with suppress(subprocess.TimeoutExpired):
-                self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
+                self._proc.wait(timeout=_remaining(deadline))
 
         # A tool's descendants are the point of this: an agent runs shell
         # commands, and one that ignores SIGHUP outlives the leader. Keying the
         # SIGKILL off the leader's exit alone left it running — still editing
         # files or making requests — while the UI reported the session closed.
-        self._reap_process_group()
+        self._reap_process_group(deadline)
 
+        # Not part of that budget: the reader unblocks as soon as the last
+        # slave closes, so this timeout only ever elapses if the thread is
+        # genuinely wedged.
         self._reader.join(timeout=TERMINATE_GRACE_SECONDS)
         with suppress(OSError):
             os.close(self._master_fd)
@@ -331,15 +339,16 @@ class PtySession:
                 raise
             logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
 
-    def _reap_process_group(self) -> None:
-        """Give the child's group a moment to follow the leader out, then kill it.
+    def _reap_process_group(self, deadline: float) -> None:
+        """Wait out the rest of *deadline* for the child's group, then kill it.
 
         ``start_new_session=True`` makes the child a group leader, so its
-        descendants share its pgid and can be signalled together.
+        descendants share its pgid and can be signalled together. *deadline* is
+        a :func:`time.monotonic` instant shared with the leader's own wait, so a
+        slow leader spends the budget rather than extending it.
         """
         if os.name != "posix":  # pragma: no cover - POSIX-only sessions
             return
-        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         while time.monotonic() < deadline:
             if not _group_alive(self._proc.pid):
                 return
@@ -532,6 +541,11 @@ def _offer(channel: queue.Queue[bytes | _Signal], item: bytes | _Signal) -> bool
 def _set_window_size(fd: int, size: WindowSize) -> None:
     packed = struct.pack("HHHH", size.rows, size.cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
+
+
+def _remaining(deadline: float) -> float:
+    """Seconds left before *deadline*, never negative."""
+    return max(0.0, deadline - time.monotonic())
 
 
 def _group_alive(pgid: int) -> bool:

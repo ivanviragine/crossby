@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from typer.models import ParameterInfo
 from typer.testing import CliRunner
 
 from crossby.cli.main import app
@@ -239,7 +240,29 @@ class TestMenuDispatch:
         assert kwargs["path"] == Path(".")
         assert kwargs["port"] == 0
         assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["allow_dir"] == []
         assert kwargs["open_browser"] is True
+
+    def test_ui_supplies_every_parameter(self) -> None:
+        """No parameter may fall back to its Typer default.
+
+        ``ui`` is a Typer command, so an argument the menu omits arrives as an
+        ``OptionInfo`` sentinel rather than the declared default — ``allow_dir``
+        was omitted and ``for candidate in allow_dir`` raised ``TypeError`` the
+        moment a real project directory got that far. Mocking ``ui`` hides that,
+        so compare the call against the real signature instead.
+        """
+        import inspect
+
+        from crossby.cli.ui import ui as real_ui
+
+        self._run(7)
+        kwargs = self.mocks["ui"].call_args.kwargs
+        assert not self.mocks["ui"].call_args.args, "menu dispatches by keyword only"
+        assert set(kwargs) == set(inspect.signature(real_ui).parameters)
+        assert not any(isinstance(value, ParameterInfo) for value in kwargs.values()), (
+            "a Typer sentinel leaked into the menu's dispatch"
+        )
 
 
 class TestPromptHelpers:

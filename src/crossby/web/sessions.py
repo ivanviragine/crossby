@@ -70,6 +70,15 @@ class LaunchValidationError(ValueError):
     """Raised when a launch request contradicts the tool's declared capabilities."""
 
 
+class ManagerClosedError(RuntimeError):
+    """Raised when a launch arrives at (or races) :meth:`SessionManager.shutdown`.
+
+    Request threads are daemons, so a shutdown does not wait for one already
+    inside ``create()``. Without this the spawned tool would register after the
+    shutdown snapshot and keep running unsupervised past "Server stopped".
+    """
+
+
 @dataclass(frozen=True)
 class LaunchRequest:
     """A browser's request to start one AI tool session."""
@@ -238,6 +247,9 @@ class SessionManager:
         self._listeners: list[Callable[[PtySession], None]] = []
         # Slots claimed by an in-flight create that has not registered yet.
         self._reserved = 0
+        # Set by shutdown(); guards the window between reserving a slot and
+        # registering the spawned session.
+        self._closed = False
         self._lock = threading.Lock()
 
     def create(self, request: LaunchRequest) -> PtySession:
@@ -281,6 +293,8 @@ class SessionManager:
         # check and the registration used to be separate, so two concurrent
         # creates could both pass the limit before either registered.
         with self._lock:
+            if self._closed:
+                raise ManagerClosedError("server is shutting down")
             dead = [
                 self._sessions.pop(sid) for sid, s in list(self._sessions.items()) if not s.running
             ]
@@ -328,11 +342,22 @@ class SessionManager:
                 self._reserved -= 1
             raise
 
+        # shutdown() may have snapshotted the registry while this session was
+        # being spawned. Registering now would hide a live tool from the only
+        # code that closes sessions, so the loser of that race cleans up its own
+        # child instead of orphaning it.
         with self._lock:
             self._reserved -= 1
-            self._sessions[session.id] = session
-            self._requests[session.id] = request
+            if self._closed:
+                orphan: PtySession | None = session
+            else:
+                orphan = None
+                self._sessions[session.id] = session
+                self._requests[session.id] = request
             listeners = list(self._listeners)
+        if orphan is not None:
+            orphan.close()
+            raise ManagerClosedError("server is shutting down")
         logger.info(
             "web.session.created",
             session=session.id,
@@ -472,8 +497,15 @@ class SessionManager:
         return described
 
     def shutdown(self) -> None:
-        """Close every live session — called when the server stops."""
+        """Close every live session — called when the server stops.
+
+        Marking the manager closed inside the same critical section as the
+        snapshot is what makes this total: a create that has not yet registered
+        sees the flag and closes its own session, and one that already
+        registered is in the snapshot.
+        """
         with self._lock:
+            self._closed = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._requests.clear()

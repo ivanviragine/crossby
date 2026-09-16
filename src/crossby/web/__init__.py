@@ -17,11 +17,17 @@ that orchestration into ``services/``, not by calling the command function.
 from __future__ import annotations
 
 from crossby.web.server import CrossbyUIServer, serve
-from crossby.web.sessions import LaunchRequest, SessionManager, SessionNotFoundError
+from crossby.web.sessions import (
+    LaunchRequest,
+    ManagerClosedError,
+    SessionManager,
+    SessionNotFoundError,
+)
 
 __all__ = [
     "CrossbyUIServer",
     "LaunchRequest",
+    "ManagerClosedError",
     "SessionManager",
     "SessionNotFoundError",
     "serve",

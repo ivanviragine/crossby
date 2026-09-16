@@ -164,7 +164,9 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
     elif label == "Scene":
         _run_scene_menu()
     elif label == "UI":
-        ui(path=Path("."), port=0, host="127.0.0.1", open_browser=True)
+        # Every parameter is spelled out: these are Typer commands, so an
+        # omitted one arrives as an OptionInfo sentinel rather than its default.
+        ui(path=Path("."), port=0, host="127.0.0.1", allow_dir=[], open_browser=True)
     elif label == "Update tools":
         update(tool=None, yes=False, dry_run=False)
     elif label == "Init":
