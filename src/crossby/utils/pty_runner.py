@@ -45,6 +45,7 @@ import struct
 import subprocess
 import termios
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import suppress
@@ -78,6 +79,9 @@ SUBSCRIBER_QUEUE_LIMIT = 2048
 
 # Grace period between SIGHUP and SIGKILL when closing a session.
 TERMINATE_GRACE_SECONDS = 3.0
+
+# How often to re-check whether the child's process group has emptied.
+GROUP_POLL_SECONDS = 0.05
 
 DEFAULT_TERM = "xterm-256color"
 
@@ -287,12 +291,14 @@ class PtySession:
 
         if self._proc.poll() is None:
             _signal_group(self._proc.pid, signal.SIGHUP)
-            try:
+            with suppress(subprocess.TimeoutExpired):
                 self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                _signal_group(self._proc.pid, signal.SIGKILL)
-                with suppress(subprocess.TimeoutExpired):
-                    self._proc.wait(timeout=TERMINATE_GRACE_SECONDS)
+
+        # A tool's descendants are the point of this: an agent runs shell
+        # commands, and one that ignores SIGHUP outlives the leader. Keying the
+        # SIGKILL off the leader's exit alone left it running — still editing
+        # files or making requests — while the UI reported the session closed.
+        self._reap_process_group()
 
         self._reader.join(timeout=TERMINATE_GRACE_SECONDS)
         with suppress(OSError):
@@ -324,6 +330,22 @@ class PtySession:
             if exc.errno not in (errno.EIO, errno.EBADF, errno.EPIPE):
                 raise
             logger.debug("pty.write.after_exit", session=self.id, errno=exc.errno)
+
+    def _reap_process_group(self) -> None:
+        """Give the child's group a moment to follow the leader out, then kill it.
+
+        ``start_new_session=True`` makes the child a group leader, so its
+        descendants share its pgid and can be signalled together.
+        """
+        if os.name != "posix":  # pragma: no cover - POSIX-only sessions
+            return
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if not _group_alive(self._proc.pid):
+                return
+            time.sleep(GROUP_POLL_SECONDS)
+        logger.warning("pty.group.survived_hangup", session=self.id)
+        _signal_group(self._proc.pid, signal.SIGKILL)
 
     def _echo_enabled(self) -> bool | None:
         """Whether the line discipline is echoing, or ``None`` if unknowable.
@@ -464,7 +486,11 @@ class PtySession:
             self._exit_code = code
             targets = list(self._subscribers)
             self._subscribers.clear()
-        self._exited.set()
+            # Set inside the lock. Published after release, a viewer could call
+            # attach() in the gap, still see the session as running, and register
+            # a channel absent from `targets` — it would never receive END and
+            # its pump would block forever.
+            self._exited.set()
         for channel in targets:
             _force(channel, _Signal.END)
 
@@ -506,6 +532,22 @@ def _offer(channel: queue.Queue[bytes | _Signal], item: bytes | _Signal) -> bool
 def _set_window_size(fd: int, size: WindowSize) -> None:
     packed = struct.pack("HHHH", size.rows, size.cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
+
+
+def _group_alive(pgid: int) -> bool:
+    """Whether any process remains in *pgid*.
+
+    Signal 0 performs the permission and existence check without delivering
+    anything, so this asks "is the group still there" without disturbing it.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # Permission denied means something is still there to deny access to.
+        return True
+    return True
 
 
 def _signal_group(pid: int, sig: int) -> None:

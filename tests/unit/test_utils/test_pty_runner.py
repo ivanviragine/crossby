@@ -372,3 +372,75 @@ class TestControlMarkersSurviveAFullQueue:
 
         threading.Thread(target=consume, daemon=True).start()
         assert released.wait(timeout=5), "consumer never woke — the marker was lost"
+
+
+class TestProcessGroupTeardown:
+    """Closing a session must not leave the tool's children running.
+
+    An agent runs shell commands, so descendants are the normal case. SIGKILL
+    was keyed off the *leader* failing to exit, so a descendant that ignores
+    SIGHUP outlived close() — still editing files or making requests — while the
+    UI reported the session closed.
+    """
+
+    # Leader spawns a child that ignores SIGHUP, then waits.
+    _DEAF_CHILD = (
+        "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(300)"
+    )
+    _SPAWNS_A_CHILD = (
+        "import subprocess, sys, time\n"
+        f"kid = subprocess.Popen([sys.executable, '-c', {_DEAF_CHILD!r}])\n"
+        "print('PID', kid.pid, flush=True)\n"
+        "time.sleep(300)\n"
+    )
+
+    @staticmethod
+    def _state(pid: int) -> str:
+        """Process state from /proc, or 'gone'.
+
+        `os.kill(pid, 0)` is not usable here: it succeeds for a zombie, so a
+        killed-but-unreaped child reads as alive.
+        """
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                return handle.read().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            return "gone"
+
+    @pytest.mark.skipif(not Path("/proc").is_dir(), reason="needs procfs")
+    def test_descendant_ignoring_sighup_is_killed(self, tmp_path: Path) -> None:
+        session = PtySession([sys.executable, "-u", "-c", self._SPAWNS_A_CHILD], cwd=tmp_path)
+        chunks = _collect(session)
+        assert _await(chunks, "PID")
+        pid = int(
+            next(
+                word for word in b"".join(chunks).decode(errors="replace").split() if word.isdigit()
+            )
+        )
+        assert self._state(pid) == "S", "descendant should be running before close"
+
+        session.close()
+        time.sleep(0.6)
+
+        assert self._state(pid) in {"Z", "gone"}, "descendant outlived the session"
+
+
+class TestExitIsPublishedAtomically:
+    def test_attach_during_finish_cannot_miss_the_end_marker(self, tmp_path: Path) -> None:
+        """`_exited` is set under the same lock `attach()` takes.
+
+        Published after the lock was released, a viewer could attach in the gap,
+        still see the session as running, and register a channel absent from the
+        snapshot `_finish` signals — it never received END and blocked forever.
+        """
+        session = PtySession([sys.executable, "-c", "pass"], cwd=tmp_path)
+        try:
+            session.wait(timeout=5)
+            time.sleep(0.3)
+
+            # After exit, attach() must refuse rather than hand out a channel
+            # nothing will ever signal.
+            _backlog, subscription = session.attach()
+            assert subscription is None
+        finally:
+            session.close()

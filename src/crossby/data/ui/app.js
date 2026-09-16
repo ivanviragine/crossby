@@ -453,6 +453,16 @@ async function closeSession(id) {
 /** Frames for a session whose geometry has not been fetched yet. */
 const pendingAdoption = new Map();
 
+/**
+ * Exit frames that arrived mid-adoption.
+ *
+ * A short-lived tool can exit before `/api/sessions/{id}` returns, and
+ * `markExited` drops a frame for a session it cannot find — leaving the tab
+ * that adoption eventually creates marked running forever, since the snapshot
+ * it fetched may predate the exit.
+ */
+const pendingExit = new Map();
+
 function adopt(id, chunk) {
   const held = pendingAdoption.get(id);
   if (held) {
@@ -466,10 +476,16 @@ function adopt(id, chunk) {
       entry.restored = true;      // a reattachment, so it needs a redraw nudge
       for (const pending of pendingAdoption.get(id) || []) writeChunk(entry, pending);
       pendingAdoption.delete(id);
+      const exited = pendingExit.get(id);
+      if (exited) {
+        pendingExit.delete(id);
+        markExited(id, exited);   // after the backlog, so the line lands last
+      }
       if (activeId === null) activate(id);
     })
     .catch((err) => {
       pendingAdoption.delete(id);
+      pendingExit.delete(id);
       showError(err.message);
     });
 }
@@ -506,6 +522,12 @@ function openStream() {
 
   stream.addEventListener("exit", (event) => {
     const detail = JSON.parse(event.data);
+    if (!sessions.has(detail.session) && pendingAdoption.has(detail.session)) {
+      // Adoption is still in flight; hold the detail so the tab it creates
+      // shows how the session ended rather than staying marked running.
+      pendingExit.set(detail.session, detail);
+      return;
+    }
     markExited(detail.session, detail);
   });
 
