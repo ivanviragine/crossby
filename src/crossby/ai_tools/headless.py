@@ -349,8 +349,8 @@ class HeadlessRuntimeContext:
                     HeadlessTerminalStatus.INVALID_OUTPUT,
                     str(exc),
                 ) from None
-            if _contains_sensitive_key(payload) or _contains_prompt(
-                encoded_payload.decode("utf-8"), self.request.prompt
+            if _contains_sensitive_key(payload) or _contains_prompt_value(
+                payload, self.request.prompt
             ):
                 raise _HeadlessStopError(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
@@ -573,29 +573,22 @@ class HeadlessRuntimeContext:
         self._cleanup_started = True
         self._closed = True
         hooks = self._cleanup_hooks
-        operations: list[Callable[[], object] | None] = []
+        cooperative_operations: list[Callable[[], object] | None] = []
         if abort and hooks.native_abort is not None and not self._native_abort_called:
             self._native_abort_called = True
-            operations.append(hooks.native_abort)
-        operations.extend(
+            cooperative_operations.append(hooks.native_abort)
+        cooperative_operations.extend(
             (
                 hooks.close_input,
                 hooks.terminate,
-                hooks.force_kill,
-                hooks.reap,
-                hooks.join_workers,
             )
         )
-        cleanup_deadline = time.monotonic() + _CLEANUP_GRACE_SECONDS
-        for operation in operations:
-            if operation is None:
-                continue
-            remaining = cleanup_deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            thread = threading.Thread(target=_ignore_cleanup_error, args=(operation,), daemon=True)
-            thread.start()
-            thread.join(timeout=remaining)
+        _run_cleanup_stage(cooperative_operations)
+        # A stalled cooperative hook must not leave an owned child alive or
+        # unreaped. Each hard stage receives an independent fixed grace.
+        _run_cleanup_stage((hooks.force_kill,))
+        _run_cleanup_stage((hooks.reap,))
+        _run_cleanup_stage((hooks.join_workers,))
 
     def complete(
         self,
@@ -958,8 +951,36 @@ def _contains_prompt(value: str, prompt: str) -> bool:
     return bool(prompt) and prompt in value
 
 
+def _contains_prompt_value(value: Any, prompt: str) -> bool:
+    if isinstance(value, str):
+        return _contains_prompt(value, prompt)
+    if isinstance(value, dict):
+        return any(
+            _contains_prompt_value(key, prompt) or _contains_prompt_value(item, prompt)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_prompt_value(item, prompt) for item in value)
+    return False
+
+
 def _redact_prompt(value: str, prompt: str) -> str:
     return value.replace(prompt, "<redacted>") if _contains_prompt(value, prompt) else value
+
+
+def _run_cleanup_stage(
+    operations: tuple[Callable[[], object] | None, ...] | list[Callable[[], object] | None],
+) -> None:
+    cleanup_deadline = time.monotonic() + _CLEANUP_GRACE_SECONDS
+    for operation in operations:
+        if operation is None:
+            continue
+        remaining = cleanup_deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        thread = threading.Thread(target=_ignore_cleanup_error, args=(operation,), daemon=True)
+        thread.start()
+        thread.join(timeout=remaining)
 
 
 def _ignore_cleanup_error(operation: Callable[[], object]) -> None:

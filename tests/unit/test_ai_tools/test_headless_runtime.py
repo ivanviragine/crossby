@@ -348,6 +348,38 @@ def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: 
     assert cleanup == ["abort", "close", "terminate", "kill", "reap", "join"]
 
 
+@pytest.mark.parametrize("stalled_hook", ["native_abort", "close_input"])
+def test_stalled_cooperative_cleanup_still_kills_and_reaps(
+    tmp_path: Path, stalled_hook: str
+) -> None:
+    cleanup: list[str] = []
+    release_stalled_hook = threading.Event()
+
+    def stall() -> None:
+        cleanup.append(stalled_hook)
+        release_stalled_hook.wait()
+
+    cleanup_hooks: dict[str, Callable[[], object]] = {
+        stalled_hook: stall,
+        "force_kill": lambda: cleanup.append("kill"),
+        "reap": lambda: cleanup.append("reap"),
+    }
+    capability = _capability(supports_native_abort=stalled_hook == "native_abort")
+
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.register_cleanup(HeadlessCleanupHooks(**cleanup_hooks))
+        time.sleep(2)
+
+    try:
+        result = FakeHeadlessAdapter(run, capability=capability).run_headless_session(
+            _request(tmp_path, timeout_seconds=0.05)
+        )
+        assert result.status is HeadlessTerminalStatus.TIMED_OUT
+        assert cleanup == [stalled_hook, "kill", "reap"]
+    finally:
+        release_stalled_hook.set()
+
+
 def test_idle_timeout_can_only_shorten_overall_deadline(tmp_path: Path) -> None:
     result = FakeHeadlessAdapter(lambda _context: time.sleep(2)).run_headless_session(
         _request(tmp_path, timeout_seconds=2, idle_timeout_seconds=0.05)
@@ -534,6 +566,18 @@ def test_short_prompt_is_redacted_from_diagnostics_and_rejected_from_events(tmp_
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.warnings[0] == "failed: <redacted>"
     assert "secret" not in str(result)
+
+
+@pytest.mark.parametrize("prompt", ('secret"value', r"secret\value", "secret\nvalue"))
+def test_json_escaped_prompt_is_rejected_from_event_payloads(tmp_path: Path, prompt: str) -> None:
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.emit(HeadlessEventKind.PROGRESS, payload={"nested": [prompt]})
+        raise AssertionError("unreachable")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path, prompt=prompt))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert prompt not in str(result)
 
 
 def test_event_count_payload_and_final_output_are_bounded(
