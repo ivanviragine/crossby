@@ -374,6 +374,16 @@ class AbstractAITool(ABC):
             cancel_event=cancel_event,
         )
 
+        def finalize_stop(stop: _HeadlessStopError) -> HeadlessSessionResult:
+            """Publish the terminal outcome before closing the adapter context."""
+            result = context.complete(
+                stop.status,
+                warnings=(stop.warning,),
+                _terminal_finalization=True,
+            )
+            context.cleanup(abort=True)
+            return result
+
         responses: queue.Queue[HeadlessSessionResult | None | BaseException] = queue.Queue(1)
 
         def invoke_adapter() -> None:
@@ -404,9 +414,9 @@ class AbstractAITool(ABC):
                 except queue.Empty:
                     continue
                 break
+            context.checkpoint()
         except _HeadlessStopError as stop:
-            context.cleanup(abort=True)
-            return context.complete(stop.status, warnings=(stop.warning,))
+            return finalize_stop(stop)
 
         if isinstance(adapter_value, HeadlessTransportError):
             context.cleanup(abort=True)
@@ -422,8 +432,7 @@ class AbstractAITool(ABC):
             context.cleanup(abort=True)
             raise adapter_value
         if isinstance(adapter_value, _HeadlessStopError):
-            context.cleanup(abort=True)
-            return context.complete(adapter_value.status, warnings=(adapter_value.warning,))
+            return finalize_stop(adapter_value)
         if isinstance(adapter_value, BaseException):
             context.cleanup(abort=True)
             raise context.transport_error(

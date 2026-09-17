@@ -93,6 +93,20 @@ def test_terminal_result_requires_one_final_matching_terminal_event() -> None:
         )
 
 
+def test_json_null_is_distinct_from_missing_final_output() -> None:
+    result = HeadlessSessionResult(
+        tool=AIToolID.CODEX,
+        version="1.0.0",
+        status=HeadlessTerminalStatus.SUCCEEDED,
+        events=(_terminal(HeadlessTerminalStatus.SUCCEEDED),),
+        final_json=None,
+        duration_seconds=0,
+    )
+
+    assert result.final_json is None
+    assert result.final_json_present
+
+
 def test_partial_result_cannot_expose_terminal_or_final_output() -> None:
     partial = HeadlessSessionResult(
         tool=AIToolID.CODEX,

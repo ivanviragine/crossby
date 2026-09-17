@@ -400,6 +400,8 @@ denies unresolved permissions. `BROKERED` requires an explicit interaction
 handler. Expected cancellation, timeout, native failure, and invalid output are
 terminal result statuses; unrecoverable spawn, protocol, or handler failures
 raise `HeadlessTransportError` with a bounded, prompt-free partial result.
+`final_json_present` distinguishes an explicit JSON `null` result from missing
+structured output.
 
 This release provides the shared contract and managed runtime only. Every
 concrete adapter conservatively reports managed headless support as unavailable

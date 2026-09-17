@@ -43,6 +43,8 @@ _MAX_FINAL_PAYLOAD_BYTES = 8 * 1024 * 1024
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
 _CALLBACK_POLL_SECONDS = 0.05
 _CLEANUP_GRACE_SECONDS = 0.25
+_TERMINAL_CALLBACK_GRACE_SECONDS = 0.25
+_MISSING_FINAL_JSON = object()
 _SENSITIVE_EVENT_KEYS = {
     "answer",
     "answers",
@@ -227,6 +229,7 @@ class HeadlessRuntimeContext:
         self._cleanup_started = False
         self._closed = False
         self._native_abort_called = False
+        self._completion_lock = threading.Lock()
         self._result: HeadlessSessionResult | None = None
         self._provenance: dict[str, Any] = {
             "native_status": None,
@@ -599,7 +602,7 @@ class HeadlessRuntimeContext:
         status: HeadlessTerminalStatus = HeadlessTerminalStatus.SUCCEEDED,
         *,
         final_text: str | None = None,
-        final_json: Any | None = None,
+        final_json: Any = _MISSING_FINAL_JSON,
         native_status: str | None = None,
         exit_code: int | None = None,
         session_id: str | None = None,
@@ -609,138 +612,158 @@ class HeadlessRuntimeContext:
         usage: TokenUsage | None = None,
         warnings: tuple[str, ...] = (),
         denials: tuple[str, ...] = (),
+        _terminal_finalization: bool = False,
     ) -> HeadlessSessionResult:
         """Reconcile native evidence and construct the terminal result once."""
-        if self._result is not None:
-            raise self.adapter_contract_error("The adapter completed a headless session twice.")
-        self.set_provenance(
-            native_status=native_status,
-            exit_code=exit_code,
-            session_id=session_id,
-            thread_id=thread_id,
-            turn_id=turn_id,
-            conversation_id=conversation_id,
-            usage=usage,
-        )
-        for warning in warnings:
-            self.add_warning(warning)
-        for denial in denials:
-            self.add_denial(denial)
+        with self._completion_lock:
+            if self._result is not None:
+                if _terminal_finalization:
+                    return self._result
+                raise self.adapter_contract_error("The adapter completed a headless session twice.")
+            if not _terminal_finalization:
+                self._stop_if_needed()
+            self.set_provenance(
+                native_status=native_status,
+                exit_code=exit_code,
+                session_id=session_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                usage=usage,
+            )
+            for warning in warnings:
+                self.add_warning(warning)
+            for denial in denials:
+                self.add_denial(denial)
 
-        terminal_events = [
-            event for event in self._events if event.kind is HeadlessEventKind.TERMINAL
-        ]
-        forced_runtime_status = status in {
-            HeadlessTerminalStatus.CANCELLED,
-            HeadlessTerminalStatus.TIMED_OUT,
-            HeadlessTerminalStatus.INVALID_OUTPUT,
-        }
-        if forced_runtime_status and terminal_events:
-            self._events = [
-                event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
+            terminal_events = [
+                event for event in self._events if event.kind is HeadlessEventKind.TERMINAL
             ]
-            terminal_events = []
-        elif len(terminal_events) > 1:
-            status = HeadlessTerminalStatus.INVALID_OUTPUT
-            self.add_warning("The native transport emitted conflicting terminal events.")
-        elif terminal_events:
-            native_terminal = terminal_events[0]
-            if native_terminal is not self._events[-1]:
+            forced_runtime_status = _terminal_finalization or status in {
+                HeadlessTerminalStatus.CANCELLED,
+                HeadlessTerminalStatus.TIMED_OUT,
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+            }
+            if forced_runtime_status and terminal_events:
+                self._events = [
+                    event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
+                ]
+                terminal_events = []
+            elif len(terminal_events) > 1:
                 status = HeadlessTerminalStatus.INVALID_OUTPUT
-                self.add_warning("The native terminal event was not final.")
-            elif self.capability.terminal_event_authoritative:
-                assert native_terminal.terminal_status is not None
-                status = native_terminal.terminal_status
-            elif native_terminal.terminal_status is not status:
+                self.add_warning("The native transport emitted conflicting terminal events.")
+            elif terminal_events:
+                native_terminal = terminal_events[0]
+                if native_terminal is not self._events[-1]:
+                    status = HeadlessTerminalStatus.INVALID_OUTPUT
+                    self.add_warning("The native terminal event was not final.")
+                elif self.capability.terminal_event_authoritative:
+                    assert native_terminal.terminal_status is not None
+                    status = native_terminal.terminal_status
+                elif native_terminal.terminal_status is not status:
+                    status = HeadlessTerminalStatus.INVALID_OUTPUT
+                    self.add_warning("The native terminal event conflicted with adapter status.")
+            elif self.capability.terminal_event_required:
                 status = HeadlessTerminalStatus.INVALID_OUTPUT
-                self.add_warning("The native terminal event conflicted with adapter status.")
-        elif self.capability.terminal_event_required:
-            status = HeadlessTerminalStatus.INVALID_OUTPUT
-            self.add_warning("The native transport omitted its required terminal event.")
+                self.add_warning("The native transport omitted its required terminal event.")
 
-        if status is HeadlessTerminalStatus.SUCCEEDED and self._provenance["exit_code"] not in (
-            None,
-            0,
-        ):
-            status = HeadlessTerminalStatus.FAILED
-            self.add_warning("The native process exited unsuccessfully.")
-        successful_native_statuses = self.capability.successful_native_statuses
-        if status is HeadlessTerminalStatus.SUCCEEDED and successful_native_statuses:
-            native = self._provenance["native_status"]
-            if native is None:
-                status = HeadlessTerminalStatus.INVALID_OUTPUT
-                self.add_warning("The native transport omitted its authoritative status.")
-            elif native not in successful_native_statuses:
+            if status is HeadlessTerminalStatus.SUCCEEDED and self._provenance["exit_code"] not in (
+                None,
+                0,
+            ):
                 status = HeadlessTerminalStatus.FAILED
-                self.add_warning("The native transport reported failure.")
+                self.add_warning("The native process exited unsuccessfully.")
+            successful_native_statuses = self.capability.successful_native_statuses
+            if status is HeadlessTerminalStatus.SUCCEEDED and successful_native_statuses:
+                native = self._provenance["native_status"]
+                if native is None:
+                    status = HeadlessTerminalStatus.INVALID_OUTPUT
+                    self.add_warning("The native transport omitted its authoritative status.")
+                elif native not in successful_native_statuses:
+                    status = HeadlessTerminalStatus.FAILED
+                    self.add_warning("The native transport reported failure.")
 
-        try:
-            final_text, final_json = self._normalize_output(final_text, final_json)
-        except ValueError as exc:
-            status = HeadlessTerminalStatus.INVALID_OUTPUT
-            final_text = None
-            final_json = None
-            self.add_warning(str(exc))
-        if status is HeadlessTerminalStatus.SUCCEEDED and final_text is None and final_json is None:
-            status = HeadlessTerminalStatus.INVALID_OUTPUT
-            self.add_warning("The native transport produced no final output.")
-        if status is HeadlessTerminalStatus.INVALID_OUTPUT:
-            final_text = None
-            final_json = None
+            final_json_present = final_json is not _MISSING_FINAL_JSON
+            if status is HeadlessTerminalStatus.SUCCEEDED:
+                try:
+                    final_text, final_json, final_json_present = self._normalize_output(
+                        final_text,
+                        final_json,
+                        final_json_present=final_json_present,
+                    )
+                except ValueError as exc:
+                    status = HeadlessTerminalStatus.INVALID_OUTPUT
+                    final_text = None
+                    final_json = _MISSING_FINAL_JSON
+                    final_json_present = False
+                    self.add_warning(str(exc))
+                if final_text is None and not final_json_present:
+                    status = HeadlessTerminalStatus.INVALID_OUTPUT
+                    self.add_warning("The native transport produced no final output.")
+            else:
+                # Non-success terminal states retain their cause rather than
+                # being overwritten by absent or malformed final output.
+                final_text = None
+                final_json = _MISSING_FINAL_JSON
+                final_json_present = False
+            if status is HeadlessTerminalStatus.INVALID_OUTPUT:
+                final_text = None
+                final_json = _MISSING_FINAL_JSON
+                final_json_present = False
 
-        # Replace any malformed/conflicting native terminal evidence with one
-        # normalized terminal event.  Raw frames are never retained.
-        if status is HeadlessTerminalStatus.INVALID_OUTPUT and terminal_events:
-            self._events = [
-                event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
-            ]
-        if not self._events or self._events[-1].kind is not HeadlessEventKind.TERMINAL:
-            if len(self._events) >= _MAX_EVENTS:
-                self._events = self._events[: _MAX_EVENTS - 1]
-            event = HeadlessEvent(
-                sequence=len(self._events) + 1,
-                kind=HeadlessEventKind.TERMINAL,
-                terminal_status=status,
-                elapsed_seconds=max(0.0, time.monotonic() - self.started_at),
-                session_id=self._provenance["session_id"],
-                thread_id=self._provenance["thread_id"],
-                turn_id=self._provenance["turn_id"],
-                conversation_id=self._provenance["conversation_id"],
+            # Replace any malformed/conflicting native terminal evidence with one
+            # normalized terminal event.  Raw frames are never retained.
+            if status is HeadlessTerminalStatus.INVALID_OUTPUT and terminal_events:
+                self._events = [
+                    event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
+                ]
+            if not self._events or self._events[-1].kind is not HeadlessEventKind.TERMINAL:
+                if len(self._events) >= _MAX_EVENTS:
+                    self._events = self._events[: _MAX_EVENTS - 1]
+                event = HeadlessEvent(
+                    sequence=len(self._events) + 1,
+                    kind=HeadlessEventKind.TERMINAL,
+                    terminal_status=status,
+                    elapsed_seconds=max(0.0, time.monotonic() - self.started_at),
+                    session_id=self._provenance["session_id"],
+                    thread_id=self._provenance["thread_id"],
+                    turn_id=self._provenance["turn_id"],
+                    conversation_id=self._provenance["conversation_id"],
+                )
+                self._events.append(event)
+            elif self._events[-1].terminal_status is not status:
+                # Authoritative reconciliation may have changed status (for example
+                # schema-invalid output after a native success terminal).
+                self._events[-1] = self._events[-1].model_copy(update={"terminal_status": status})
+
+            if _terminal_finalization:
+                self._result = self._build_result(
+                    status=status,
+                    final_text=final_text,
+                    final_json=final_json,
+                    final_json_present=final_json_present,
+                )
+                self._notify_finalized_terminal(self._events[-1])
+                return self._result
+
+            if self._event_handler is not None:
+                # Terminal events are withheld until all reconciliation and schema
+                # validation succeeds, so a caller can never observe two terminal
+                # outcomes for one session.
+                self._invoke_callback(
+                    self._event_handler,
+                    self._events[-1],
+                    timeout_seconds=self.remaining_seconds(),
+                    label="event handler",
+                )
+
+            self._result = self._build_result(
+                status=status,
+                final_text=final_text,
+                final_json=final_json,
+                final_json_present=final_json_present,
             )
-            self._events.append(event)
-        elif self._events[-1].terminal_status is not status:
-            # Authoritative reconciliation may have changed status (for example
-            # schema-invalid output after a native success terminal).
-            self._events[-1] = self._events[-1].model_copy(update={"terminal_status": status})
-
-        if (
-            self._event_handler is not None
-            and time.monotonic() < self.deadline
-            and not (self._cancel_event is not None and self._cancel_event.is_set())
-        ):
-            # Terminal events are withheld until all reconciliation and schema
-            # validation succeeds, so a caller can never observe two terminal
-            # outcomes for one session.
-            self._invoke_callback(
-                self._event_handler,
-                self._events[-1],
-                timeout_seconds=self.remaining_seconds(),
-                label="event handler",
-            )
-
-        self._result = HeadlessSessionResult(
-            tool=self.tool_id,
-            version=self.version,
-            status=status,
-            events=tuple(self._events),
-            final_text=final_text,
-            final_json=final_json,
-            duration_seconds=max(0.0, time.monotonic() - self.started_at),
-            denials=tuple(self._denials),
-            warnings=tuple(self._warnings),
-            **self._provenance,
-        )
-        return self._result
+            return self._result
 
     # A natural adapter spelling for successful completion.
     finish = complete
@@ -748,28 +771,30 @@ class HeadlessRuntimeContext:
     def _normalize_output(
         self,
         final_text: str | None,
-        final_json: Any | None,
-    ) -> tuple[str | None, Any | None]:
+        final_json: Any,
+        *,
+        final_json_present: bool,
+    ) -> tuple[str | None, Any, bool]:
         if final_text is not None:
             if not final_text.strip():
                 raise ValueError("The native transport produced blank final output.")
             if len(final_text.encode("utf-8")) > _MAX_FINAL_PAYLOAD_BYTES:
                 raise ValueError("The native final output exceeded the fixed size limit.")
-        if final_json is not None:
+        if final_json_present:
             encoded = _json_bytes(
                 final_json,
                 limit=_MAX_FINAL_PAYLOAD_BYTES,
                 label="final JSON output",
             )
             final_json = json.loads(encoded)
-        if final_text is not None and final_json is not None:
+        if final_text is not None and final_json_present:
             raise ValueError("The adapter returned both text and JSON final output.")
 
         requires_json = (
             self.request.response_schema is not None
             or self.request.native_output is HeadlessNativeOutput.JSON
         )
-        if requires_json and final_json is None:
+        if requires_json and not final_json_present:
             if final_text is None:
                 raise ValueError("The native transport omitted required structured output.")
             try:
@@ -782,7 +807,8 @@ class HeadlessRuntimeContext:
                 label="final JSON output",
             )
             final_text = None
-        elif self.request.native_output is HeadlessNativeOutput.JSONL and final_json is None:
+            final_json_present = True
+        elif self.request.native_output is HeadlessNativeOutput.JSONL and not final_json_present:
             if final_text is None:
                 raise ValueError("The native transport omitted required JSONL output.")
             values: list[Any] = []
@@ -799,9 +825,10 @@ class HeadlessRuntimeContext:
                 raise ValueError("The native transport returned empty JSONL output.")
             final_json = values[-1]
             final_text = None
+            final_json_present = True
 
         if self.request.response_schema is not None:
-            if final_json is None:
+            if not final_json_present:
                 raise ValueError("The native transport omitted schema-constrained output.")
             try:
                 Draft202012Validator(self.request.response_schema).validate(final_json)
@@ -809,7 +836,54 @@ class HeadlessRuntimeContext:
                 raise ValueError(
                     "The native structured output did not satisfy response_schema."
                 ) from exc
-        return final_text, final_json
+        return final_text, final_json, final_json_present
+
+    def _build_result(
+        self,
+        *,
+        status: HeadlessTerminalStatus,
+        final_text: str | None,
+        final_json: Any,
+        final_json_present: bool,
+    ) -> HeadlessSessionResult:
+        """Construct the immutable result after terminal reconciliation."""
+        return HeadlessSessionResult(
+            tool=self.tool_id,
+            version=self.version,
+            status=status,
+            events=tuple(self._events),
+            final_text=final_text,
+            final_json=None if final_json is _MISSING_FINAL_JSON else final_json,
+            final_json_present=final_json_present,
+            duration_seconds=max(0.0, time.monotonic() - self.started_at),
+            denials=tuple(self._denials),
+            warnings=tuple(self._warnings),
+            **self._provenance,
+        )
+
+    def _notify_finalized_terminal(self, event: HeadlessEvent) -> None:
+        """Best-effort terminal notification that cannot re-enter stop control flow."""
+        handler = self._event_handler
+        if handler is None:
+            return
+        responses: queue.Queue[object] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                handler(event)
+            except BaseException:
+                pass
+            finally:
+                with suppress(queue.Full):
+                    responses.put_nowait(object())
+
+        threading.Thread(
+            target=invoke,
+            daemon=True,
+            name="crossby-headless-terminal-event-handler",
+        ).start()
+        with suppress(queue.Empty):
+            responses.get(timeout=_TERMINAL_CALLBACK_GRACE_SECONDS)
 
     def partial_snapshot(self) -> HeadlessSessionResult:
         """Build a safe, non-terminal snapshot without exposing native buffers."""
@@ -881,7 +955,7 @@ def _contains_sensitive_key(value: Any) -> bool:
 
 
 def _contains_prompt(value: str, prompt: str) -> bool:
-    return value == prompt or (len(prompt) >= 8 and prompt in value)
+    return bool(prompt) and prompt in value
 
 
 def _redact_prompt(value: str, prompt: str) -> str:

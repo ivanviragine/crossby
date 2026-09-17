@@ -1013,6 +1013,7 @@ class HeadlessSessionResult(BaseModel):
     events: tuple[HeadlessEvent, ...] = ()
     final_text: str | None = None
     final_json: Any | None = None
+    final_json_present: bool = False
     native_status: str | None = None
     exit_code: int | None = None
     session_id: str | None = None
@@ -1024,6 +1025,16 @@ class HeadlessSessionResult(BaseModel):
     denials: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     is_partial: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _record_json_null_presence(cls, value: Any) -> Any:
+        """Preserve an explicit JSON null separately from omitted output."""
+        if isinstance(value, dict):
+            normalized = dict(value)
+            normalized.setdefault("final_json_present", "final_json" in normalized)
+            return normalized
+        return value
 
     @field_validator(
         "version",
@@ -1065,14 +1076,16 @@ class HeadlessSessionResult(BaseModel):
             and len(self.final_text.encode("utf-8")) > _HEADLESS_FINAL_PAYLOAD_LIMIT
         ):
             raise ValueError("headless result text exceeded the fixed size limit")
-        if self.final_json is not None:
+        if not self.final_json_present and self.final_json is not None:
+            raise ValueError("headless JSON output must be marked present")
+        if self.final_json_present:
             try:
                 encoded = json.dumps(self.final_json, allow_nan=False).encode("utf-8")
             except (TypeError, ValueError) as exc:
                 raise ValueError("headless result JSON must be a finite JSON value") from exc
             if len(encoded) > _HEADLESS_FINAL_PAYLOAD_LIMIT:
                 raise ValueError("headless result JSON exceeded the fixed size limit")
-        if self.final_text is not None and self.final_json is not None:
+        if self.final_text is not None and self.final_json_present:
             raise ValueError("a headless result cannot contain both text and JSON output")
         expected = 1
         terminal: HeadlessTerminalStatus | None = None
@@ -1093,7 +1106,7 @@ class HeadlessSessionResult(BaseModel):
         if terminal is not None and terminal is not self.status:
             raise ValueError("the terminal event and result status must agree")
         if self.is_partial:
-            if terminal is not None or self.final_text is not None or self.final_json is not None:
+            if terminal is not None or self.final_text is not None or self.final_json_present:
                 raise ValueError("safe partial results cannot contain terminal or final output")
             if self.status is not HeadlessTerminalStatus.FAILED:
                 raise ValueError("safe partial results use failed status until reconciled")
@@ -1102,7 +1115,7 @@ class HeadlessSessionResult(BaseModel):
         if self.status is HeadlessTerminalStatus.SUCCEEDED:
             if self.exit_code not in (None, 0):
                 raise ValueError("a successful headless result cannot have a failing exit code")
-            if self.final_text is None and self.final_json is None:
+            if self.final_text is None and not self.final_json_present:
                 raise ValueError("a successful headless result requires final output")
         return self
 

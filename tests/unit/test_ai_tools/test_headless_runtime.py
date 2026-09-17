@@ -203,6 +203,47 @@ def test_malformed_structured_output_returns_invalid_output(
     assert result.events[-1].terminal_status is HeadlessTerminalStatus.INVALID_OUTPUT
 
 
+@pytest.mark.parametrize(
+    "status",
+    (
+        HeadlessTerminalStatus.CANCELLED,
+        HeadlessTerminalStatus.TIMED_OUT,
+        HeadlessTerminalStatus.FAILED,
+    ),
+)
+def test_non_success_status_is_not_replaced_by_missing_structured_output(
+    tmp_path: Path,
+    status: HeadlessTerminalStatus,
+) -> None:
+    result = FakeHeadlessAdapter(lambda context: context.complete(status)).run_headless_session(
+        _request(
+            tmp_path,
+            native_output=HeadlessNativeOutput.JSON,
+            response_schema={"type": "object"},
+        )
+    )
+
+    assert result.status is status
+    assert result.final_json is None
+    assert not result.final_json_present
+
+
+def test_schema_constrained_json_null_is_a_present_final_output(tmp_path: Path) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_json=None)
+    ).run_headless_session(
+        _request(
+            tmp_path,
+            native_output=HeadlessNativeOutput.JSON,
+            response_schema={"type": "null"},
+        )
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_json is None
+    assert result.final_json_present
+
+
 def test_schema_invalid_output_keeps_safe_events_and_provenance(tmp_path: Path) -> None:
     def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
         context.emit(HeadlessEventKind.PROGRESS, message="safe progress")
@@ -326,6 +367,48 @@ def test_external_cancellation_returns_cancelled_result(tmp_path: Path) -> None:
     assert result.status is HeadlessTerminalStatus.CANCELLED
 
 
+def test_adapter_stop_finalizes_terminal_before_cleanup(tmp_path: Path) -> None:
+    lifecycle: list[str] = []
+    question = PlanInteraction(
+        kind=PlanInteractionKind.QUESTION,
+        question_id="question-1",
+        prompt="private native question",
+        session_id="session-1",
+    )
+
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.register_cleanup(
+            HeadlessCleanupHooks(close_input=lambda: lifecycle.append("cleanup"))
+        )
+        context.interact(question)
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path),
+        event_handler=lambda event: lifecycle.append(event.kind.value),
+    )
+
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert lifecycle == ["interaction", "terminal", "cleanup"]
+
+
+def test_runtime_stop_finalizes_terminal_before_cleanup(tmp_path: Path) -> None:
+    lifecycle: list[str] = []
+
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.register_cleanup(
+            HeadlessCleanupHooks(close_input=lambda: lifecycle.append("cleanup"))
+        )
+        time.sleep(1)
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, timeout_seconds=0.05),
+        event_handler=lambda event: lifecycle.append(event.kind.value),
+    )
+
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert lifecycle == ["terminal", "cleanup"]
+
+
 def test_handler_failure_raises_transport_error_with_safe_partial(tmp_path: Path) -> None:
     def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
         interaction = PlanInteraction(
@@ -438,6 +521,19 @@ def test_terminal_callback_timeout_stays_timed_out(tmp_path: Path) -> None:
     )
 
     assert result.status is HeadlessTerminalStatus.TIMED_OUT
+
+
+def test_short_prompt_is_redacted_from_diagnostics_and_rejected_from_events(tmp_path: Path) -> None:
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.add_warning("failed: secret")
+        context.emit(HeadlessEventKind.WARNING, message="failed: secret")
+        raise AssertionError("unreachable")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path, prompt="secret"))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.warnings[0] == "failed: <redacted>"
+    assert "secret" not in str(result)
 
 
 def test_event_count_payload_and_final_output_are_bounded(
