@@ -376,6 +376,12 @@ class AbstractAITool(ABC):
 
         def finalize_stop(stop: _HeadlessStopError) -> HeadlessSessionResult:
             """Publish the terminal outcome before closing the adapter context."""
+            if not context._claim_runtime_stop(stop):
+                # A result was published before the monitor claimed this stop,
+                # so the natural terminal owner wins.
+                result = context.result
+                assert result is not None
+                return result
             result = context.complete(
                 stop.status,
                 warnings=(stop.warning,),

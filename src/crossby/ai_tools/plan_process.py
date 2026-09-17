@@ -192,8 +192,16 @@ def run_captured(
             if abort_called:
                 return
             abort_called = True
-        with suppress(BaseException):
-            native_abort()
+        abort_finished = threading.Event()
+
+        def invoke_abort() -> None:
+            with suppress(BaseException):
+                native_abort()
+            abort_finished.set()
+
+        thread = threading.Thread(target=invoke_abort, daemon=True)
+        thread.start()
+        abort_finished.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
 
     def read_bounded(stream: IO[bytes], name: str, limit: int) -> None:
         while chunk := stream.read(_CAPTURE_CHUNK_SIZE):

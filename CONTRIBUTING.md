@@ -313,6 +313,11 @@ direct child, and bound worker joins. Terminal-event evidence, native status,
 exit status, and caller schema validation are reconciled before exactly one
 terminal event is delivered.
 
+Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
+its cleanup-stage deadline and cancellation signal. Hooks must use that budget
+for blocking work and exit when cancelled; the runtime continues hard process
+teardown after a bounded cooperative wait.
+
 Use `ai_tools/session_process.py` for shared captured/JSON-RPC primitives. It is
 the same live module as the historical `ai_tools/plan_process.py` path, keeping
 existing Plan imports and safety-limit patches compatible. Carry the runtime's

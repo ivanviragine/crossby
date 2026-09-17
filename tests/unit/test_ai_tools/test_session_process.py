@@ -43,6 +43,37 @@ def test_captured_child_cancellation_aborts_then_kills_and_reaps(tmp_path: Path)
     assert time.monotonic() - started < 2
 
 
+def test_stalled_native_abort_does_not_delay_hard_child_cleanup(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    abort_started = threading.Event()
+    release_abort = threading.Event()
+
+    def cancel_soon() -> None:
+        time.sleep(0.05)
+        cancel.set()
+
+    def stall_abort() -> None:
+        abort_started.set()
+        release_abort.wait()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(SessionProcessCancelledError):
+            run_captured(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                timeout=10,
+                cancel_event=cancel,
+                native_abort=stall_abort,
+            )
+
+        assert abort_started.is_set()
+        assert time.monotonic() - started < 1
+    finally:
+        release_abort.set()
+
+
 def test_existing_absolute_deadline_shortens_child_timeout(tmp_path: Path) -> None:
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):

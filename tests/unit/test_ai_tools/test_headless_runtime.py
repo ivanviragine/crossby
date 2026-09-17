@@ -321,6 +321,26 @@ def test_conflicting_native_terminal_events_are_invalid(tmp_path: Path) -> None:
     assert len([event for event in result.events if event.kind is HeadlessEventKind.TERMINAL]) == 1
 
 
+def test_terminal_reconciliation_renumbers_surviving_events(tmp_path: Path) -> None:
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.emit(
+            HeadlessEventKind.STARTED,
+            session_id="session-1",
+        )
+        context.emit(
+            HeadlessEventKind.TERMINAL,
+            terminal_status=HeadlessTerminalStatus.SUCCEEDED,
+        )
+        context.emit(HeadlessEventKind.PROGRESS, message="late native progress")
+        return context.complete(final_text="untrusted")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert [event.sequence for event in result.events] == [1, 2, 3]
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.INVALID_OUTPUT
+
+
 def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: Path) -> None:
     cleanup: list[str] = []
     capability = _capability(supports_native_abort=True)
@@ -328,12 +348,12 @@ def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: 
     def run(context: HeadlessRuntimeContext) -> None:
         context.register_cleanup(
             HeadlessCleanupHooks(
-                native_abort=lambda: cleanup.append("abort"),
-                close_input=lambda: cleanup.append("close"),
-                terminate=lambda: cleanup.append("terminate"),
-                force_kill=lambda: cleanup.append("kill"),
-                reap=lambda: cleanup.append("reap"),
-                join_workers=lambda: cleanup.append("join"),
+                native_abort=lambda _cleanup: cleanup.append("abort"),
+                close_input=lambda _cleanup: cleanup.append("close"),
+                terminate=lambda _cleanup: cleanup.append("terminate"),
+                force_kill=lambda _cleanup: cleanup.append("kill"),
+                reap=lambda _cleanup: cleanup.append("reap"),
+                join_workers=lambda _cleanup: cleanup.append("join"),
             )
         )
         time.sleep(2)
@@ -349,20 +369,21 @@ def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: 
 
 
 @pytest.mark.parametrize("stalled_hook", ["native_abort", "close_input"])
-def test_stalled_cooperative_cleanup_still_kills_and_reaps(
+def test_cancelled_cooperative_cleanup_still_kills_and_reaps(
     tmp_path: Path, stalled_hook: str
 ) -> None:
     cleanup: list[str] = []
-    release_stalled_hook = threading.Event()
+    hook_finished = threading.Event()
 
-    def stall() -> None:
+    def stall(cleanup_context: Any) -> None:
         cleanup.append(stalled_hook)
-        release_stalled_hook.wait()
+        cleanup_context.cancel_event.wait()
+        hook_finished.set()
 
-    cleanup_hooks: dict[str, Callable[[], object]] = {
+    cleanup_hooks: dict[str, Callable[[Any], object]] = {
         stalled_hook: stall,
-        "force_kill": lambda: cleanup.append("kill"),
-        "reap": lambda: cleanup.append("reap"),
+        "force_kill": lambda _cleanup: cleanup.append("kill"),
+        "reap": lambda _cleanup: cleanup.append("reap"),
     }
     capability = _capability(supports_native_abort=stalled_hook == "native_abort")
 
@@ -370,14 +391,13 @@ def test_stalled_cooperative_cleanup_still_kills_and_reaps(
         context.register_cleanup(HeadlessCleanupHooks(**cleanup_hooks))
         time.sleep(2)
 
-    try:
-        result = FakeHeadlessAdapter(run, capability=capability).run_headless_session(
-            _request(tmp_path, timeout_seconds=0.05)
-        )
-        assert result.status is HeadlessTerminalStatus.TIMED_OUT
-        assert cleanup == [stalled_hook, "kill", "reap"]
-    finally:
-        release_stalled_hook.set()
+    result = FakeHeadlessAdapter(run, capability=capability).run_headless_session(
+        _request(tmp_path, timeout_seconds=0.05)
+    )
+
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert cleanup == [stalled_hook, "kill", "reap"]
+    assert hook_finished.wait(timeout=0.1)
 
 
 def test_idle_timeout_can_only_shorten_overall_deadline(tmp_path: Path) -> None:
@@ -410,7 +430,7 @@ def test_adapter_stop_finalizes_terminal_before_cleanup(tmp_path: Path) -> None:
 
     def run(context: HeadlessRuntimeContext) -> None:
         context.register_cleanup(
-            HeadlessCleanupHooks(close_input=lambda: lifecycle.append("cleanup"))
+            HeadlessCleanupHooks(close_input=lambda _cleanup: lifecycle.append("cleanup"))
         )
         context.interact(question)
 
@@ -428,7 +448,7 @@ def test_runtime_stop_finalizes_terminal_before_cleanup(tmp_path: Path) -> None:
 
     def run(context: HeadlessRuntimeContext) -> None:
         context.register_cleanup(
-            HeadlessCleanupHooks(close_input=lambda: lifecycle.append("cleanup"))
+            HeadlessCleanupHooks(close_input=lambda _cleanup: lifecycle.append("cleanup"))
         )
         time.sleep(1)
 
@@ -439,6 +459,45 @@ def test_runtime_stop_finalizes_terminal_before_cleanup(tmp_path: Path) -> None:
 
     assert result.status is HeadlessTerminalStatus.TIMED_OUT
     assert lifecycle == ["terminal", "cleanup"]
+
+
+def test_runtime_stop_overrides_completion_still_validating_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_normalize = HeadlessRuntimeContext._normalize_output
+    normalization_started = threading.Event()
+
+    def slow_normalize(
+        context: HeadlessRuntimeContext,
+        final_text: str | None,
+        final_json: Any,
+        *,
+        final_json_present: bool,
+    ) -> tuple[str | None, Any, bool]:
+        normalization_started.set()
+        time.sleep(0.15)
+        return original_normalize(
+            context,
+            final_text,
+            final_json,
+            final_json_present=final_json_present,
+        )
+
+    monkeypatch.setattr(HeadlessRuntimeContext, "_normalize_output", slow_normalize)
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_json={"answer": "done"})
+    ).run_headless_session(
+        _request(
+            tmp_path,
+            timeout_seconds=0.05,
+            native_output=HeadlessNativeOutput.JSON,
+        )
+    )
+
+    assert normalization_started.is_set()
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert result.final_json is None
 
 
 def test_handler_failure_raises_transport_error_with_safe_partial(tmp_path: Path) -> None:

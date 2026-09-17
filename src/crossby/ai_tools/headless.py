@@ -158,15 +158,41 @@ class _HeadlessStopError(Exception):
 
 
 @dataclass(frozen=True)
-class HeadlessCleanupHooks:
-    """Adapter-owned operations invoked by the runtime's one cleanup path."""
+class HeadlessCleanupContext:
+    """Deadline and cancellation signal supplied to one cleanup operation.
 
-    native_abort: Callable[[], object] | None = None
-    close_input: Callable[[], object] | None = None
-    terminate: Callable[[], object] | None = None
-    force_kill: Callable[[], object] | None = None
-    reap: Callable[[], object] | None = None
-    join_workers: Callable[[], object] | None = None
+    Cleanup hooks run in bounded daemon workers because process teardown must
+    continue if a cooperative operation stalls. Hooks must watch
+    :attr:`cancel_event` and use :meth:`remaining_seconds` for every blocking
+    operation so they exit when their cleanup stage expires.
+    """
+
+    deadline: float
+    cancel_event: threading.Event
+
+    def remaining_seconds(self) -> float:
+        """Return the remaining budget for this cleanup stage."""
+        return max(0.0, self.deadline - time.monotonic())
+
+
+CleanupOperation = Callable[[HeadlessCleanupContext], object]
+
+
+@dataclass(frozen=True)
+class HeadlessCleanupHooks:
+    """Adapter cleanup operations invoked by the runtime's one cleanup path.
+
+    Every operation receives :class:`HeadlessCleanupContext` and must be
+    cooperative: it may not block past the supplied deadline or after the
+    cancellation signal is set.
+    """
+
+    native_abort: CleanupOperation | None = None
+    close_input: CleanupOperation | None = None
+    terminate: CleanupOperation | None = None
+    force_kill: CleanupOperation | None = None
+    reap: CleanupOperation | None = None
+    join_workers: CleanupOperation | None = None
 
 
 def validate_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +256,8 @@ class HeadlessRuntimeContext:
         self._closed = False
         self._native_abort_called = False
         self._completion_lock = threading.Lock()
+        self._terminal_state_lock = threading.Lock()
+        self._runtime_stop: _HeadlessStopError | None = None
         self._result: HeadlessSessionResult | None = None
         self._provenance: dict[str, Any] = {
             "native_status": None,
@@ -254,6 +282,10 @@ class HeadlessRuntimeContext:
         self._last_progress = time.monotonic()
 
     def _stop_if_needed(self) -> None:
+        with self._terminal_state_lock:
+            runtime_stop = self._runtime_stop
+        if runtime_stop is not None:
+            raise runtime_stop
         now = time.monotonic()
         if self._closed and self._result is None:
             raise _HeadlessStopError(
@@ -566,6 +598,20 @@ class HeadlessRuntimeContext:
             )
         self._cleanup_hooks = candidate
 
+    def _claim_runtime_stop(self, stop: _HeadlessStopError) -> bool:
+        """Atomically give a detected runtime stop terminal ownership.
+
+        Completion can spend time parsing or validating output. The monitor
+        must be able to claim a deadline/cancellation while that work is in
+        progress so a late success cannot publish over the runtime outcome.
+        """
+        with self._terminal_state_lock:
+            if self._result is not None:
+                return False
+            if self._runtime_stop is None:
+                self._runtime_stop = stop
+            return True
+
     def cleanup(self, *, abort: bool) -> None:
         """Run native abort then close/terminate/kill/reap/join, at most once."""
         if self._cleanup_started:
@@ -573,7 +619,7 @@ class HeadlessRuntimeContext:
         self._cleanup_started = True
         self._closed = True
         hooks = self._cleanup_hooks
-        cooperative_operations: list[Callable[[], object] | None] = []
+        cooperative_operations: list[CleanupOperation | None] = []
         if abort and hooks.native_abort is not None and not self._native_abort_called:
             self._native_abort_called = True
             cooperative_operations.append(hooks.native_abort)
@@ -638,9 +684,7 @@ class HeadlessRuntimeContext:
                 HeadlessTerminalStatus.INVALID_OUTPUT,
             }
             if forced_runtime_status and terminal_events:
-                self._events = [
-                    event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
-                ]
+                self._drop_terminal_events()
                 terminal_events = []
             elif len(terminal_events) > 1:
                 status = HeadlessTerminalStatus.INVALID_OUTPUT
@@ -707,9 +751,7 @@ class HeadlessRuntimeContext:
             # Replace any malformed/conflicting native terminal evidence with one
             # normalized terminal event.  Raw frames are never retained.
             if status is HeadlessTerminalStatus.INVALID_OUTPUT and terminal_events:
-                self._events = [
-                    event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
-                ]
+                self._drop_terminal_events()
             if not self._events or self._events[-1].kind is not HeadlessEventKind.TERMINAL:
                 if len(self._events) >= _MAX_EVENTS:
                     self._events = self._events[: _MAX_EVENTS - 1]
@@ -750,16 +792,34 @@ class HeadlessRuntimeContext:
                     label="event handler",
                 )
 
-            self._result = self._build_result(
+            # Re-check immediately before publishing, then claim publication
+            # atomically with the runtime monitor. This lets a deadline or
+            # cancellation that fires during parsing override the adapter's
+            # otherwise successful completion.
+            if not _terminal_finalization:
+                self._stop_if_needed()
+            result = self._build_result(
                 status=status,
                 final_text=final_text,
                 final_json=final_json,
                 final_json_present=final_json_present,
             )
-            return self._result
+            with self._terminal_state_lock:
+                if self._runtime_stop is not None and not _terminal_finalization:
+                    raise self._runtime_stop
+                self._result = result
+                return result
 
     # A natural adapter spelling for successful completion.
     finish = complete
+
+    def _drop_terminal_events(self) -> None:
+        """Remove native terminal evidence and preserve contiguous sequences."""
+        events = [event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL]
+        self._events = [
+            event.model_copy(update={"sequence": sequence})
+            for sequence, event in enumerate(events, start=1)
+        ]
 
     def _normalize_output(
         self,
@@ -969,27 +1029,41 @@ def _redact_prompt(value: str, prompt: str) -> str:
 
 
 def _run_cleanup_stage(
-    operations: tuple[Callable[[], object] | None, ...] | list[Callable[[], object] | None],
+    operations: tuple[CleanupOperation | None, ...] | list[CleanupOperation | None],
 ) -> None:
     cleanup_deadline = time.monotonic() + _CLEANUP_GRACE_SECONDS
-    for operation in operations:
-        if operation is None:
-            continue
-        remaining = cleanup_deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        thread = threading.Thread(target=_ignore_cleanup_error, args=(operation,), daemon=True)
-        thread.start()
-        thread.join(timeout=remaining)
+    cancelled = threading.Event()
+    context = HeadlessCleanupContext(deadline=cleanup_deadline, cancel_event=cancelled)
+    try:
+        for operation in operations:
+            if operation is None:
+                continue
+            remaining = context.remaining_seconds()
+            if remaining <= 0:
+                return
+            thread = threading.Thread(
+                target=_ignore_cleanup_error,
+                args=(operation, context),
+                daemon=True,
+            )
+            thread.start()
+            thread.join(timeout=remaining)
+            if thread.is_alive():
+                return
+    finally:
+        # Well-behaved hooks use this signal to leave their daemon worker as
+        # soon as the bounded stage completes or expires.
+        cancelled.set()
 
 
-def _ignore_cleanup_error(operation: Callable[[], object]) -> None:
+def _ignore_cleanup_error(operation: CleanupOperation, context: HeadlessCleanupContext) -> None:
     with suppress(BaseException):
-        operation()
+        operation(context)
 
 
 __all__ = [
     "HeadlessAdapterContractError",
+    "HeadlessCleanupContext",
     "HeadlessCleanupHooks",
     "HeadlessEventHandler",
     "HeadlessInteractionHandler",
