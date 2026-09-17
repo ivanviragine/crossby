@@ -17,6 +17,7 @@ import crossby.ai_tools.vscode  # noqa: F401
 from crossby.ai_tools.base import AbstractAITool, pick_best_model
 from crossby.ai_tools.headless import (
     HeadlessAdapterContractError,
+    HeadlessCleanupContext,
     HeadlessCleanupHooks,
     HeadlessEventHandler,
     HeadlessInteractionHandler,
@@ -146,6 +147,7 @@ __all__ = [
     "AbstractAITool",
     "HeadlessAdapterContractError",
     "HeadlessCapability",
+    "HeadlessCleanupContext",
     "HeadlessCleanupHooks",
     "HeadlessEvent",
     "HeadlessEventHandler",

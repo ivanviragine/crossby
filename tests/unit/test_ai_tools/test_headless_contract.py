@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from crossby.ai_tools import (
     AbstractAITool,
     HeadlessCapability,
+    HeadlessCleanupContext,
     HeadlessEvent,
     HeadlessEventKind,
     HeadlessInteractionMode,
@@ -37,6 +38,7 @@ def _terminal(status: HeadlessTerminalStatus) -> HeadlessEvent:
 
 
 def test_public_models_forbid_unknown_fields_and_are_frozen(tmp_path: Path) -> None:
+    assert HeadlessCleanupContext.__module__ == "crossby.ai_tools.headless"
     with pytest.raises(ValidationError, match="extra_forbidden"):
         HeadlessSessionRequest(prompt="task", working_dir=tmp_path, unknown=True)
 
