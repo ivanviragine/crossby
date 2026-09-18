@@ -61,6 +61,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# A single unattended turn can be denied many times; keep the normalized
+# denial list bounded rather than mirroring an unbounded native array.
+_MAX_REPORTED_DENIALS = 64
+
 
 def _encode_claude_path(path: Path) -> str:
     """Encode a filesystem path the way Claude Code does for project directories.
@@ -400,10 +404,19 @@ class ClaudeAdapter(AbstractAITool):
             )
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
-        for denial in envelope.get("permission_denials") or []:
+        denials = envelope.get("permission_denials")
+        denials = denials if isinstance(denials, list) else []
+        # Only the denied tool name is safe to keep: the native entry also
+        # carries the tool input the model proposed.
+        for denial in denials[:_MAX_REPORTED_DENIALS]:
             tool = non_blank_text(denial.get("tool_name")) if isinstance(denial, dict) else None
             context.add_denial(
                 f"Claude Code denied {tool or 'an unnamed tool'} under --permission-prompts none"
+            )
+        if len(denials) > _MAX_REPORTED_DENIALS:
+            context.add_denial(
+                f"Claude Code denied {len(denials) - _MAX_REPORTED_DENIALS} further tool calls "
+                "under --permission-prompts none"
             )
         response_text = non_blank_text(envelope.get("result"))
         # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so

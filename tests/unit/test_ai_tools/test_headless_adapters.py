@@ -347,6 +347,27 @@ def test_claude_native_error_is_not_success_on_exit_zero(
     assert any("Bash" in denial for denial in result.denials)
 
 
+def test_claude_denial_reporting_is_bounded_and_drops_tool_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    noisy = json.loads(json.dumps(CLAUDE_RESULT))
+    noisy["permission_denials"] = [
+        {"tool_name": "Bash", "tool_use_id": f"toolu_{index}", "tool_input": {"command": PROMPT}}
+        for index in range(200)
+    ]
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=json.dumps(noisy)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert len(result.denials) == 65
+    assert "136 further tool calls" in result.denials[-1]
+    # The native entry carries the proposed tool input; only the name survives.
+    _assert_prompt_is_private(result)
+
+
 def test_claude_stream_json_progress_never_leaks_native_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
