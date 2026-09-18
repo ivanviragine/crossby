@@ -25,6 +25,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanApprovalPolicy,
@@ -54,6 +62,7 @@ from crossby.models.ai import (
 from crossby.utils.git_worktree import outside_root_git_metadata_dirs
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
@@ -65,6 +74,18 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
+
+
+def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
+    """Describe one ``codex exec --json`` frame without exposing its content."""
+    from crossby.ai_tools.headless_cli import non_blank_text
+
+    kind = non_blank_text(frame.get("type"))
+    if kind != "item.completed":
+        return kind
+    item = frame.get("item")
+    item_kind = non_blank_text(item.get("type")) if isinstance(item, dict) else None
+    return f"item.completed/{item_kind or 'item'}"
 
 
 class CodexAdapter(AbstractAITool):
@@ -89,6 +110,28 @@ class CodexAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                # ``codex exec`` without --json prints a human transcript rather
+                # than an isolated final response, so every managed run uses the
+                # JSONL event wire and derives TEXT from its agent messages.
+                native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=True,
+                successful_native_statuses=("turn.completed",),
+                sandbox_behavior=PlanRequestBehavior.PRESERVED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement=(
+                    "Codex CLI exposing codex exec --json turn events and --output-schema."
+                ),
+                verified_version="0.154.0",
+                remediation=(
+                    "Upgrade Codex CLI to 0.154.0 or newer so codex exec emits thread/turn "
+                    "JSONL events and accepts a final-response --output-schema file."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 activation=PlanModeActivation.TERMINAL_INPUT,
                 activation_detail=(
@@ -289,6 +332,205 @@ class CodexAdapter(AbstractAITool):
         """``codex exec`` reads instructions from stdin when no positional prompt
         is passed (a piped stdin is otherwise appended as a ``<stdin>`` block)."""
         return ["exec"]
+
+    def _headless_command(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        schema_path: Path | None,
+    ) -> list[str]:
+        """Build the exact unattended ``codex exec`` invocation.
+
+        ``codex exec`` has no interactive approval channel, so the requested
+        sandbox posture is the whole policy: a command the sandbox refuses fails
+        the turn natively instead of waiting for an approval nobody can give.
+        """
+        command = [
+            "codex",
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            "--sandbox",
+            "workspace-write" if request.sandbox else "danger-full-access",
+        ]
+        for path in request.trusted_dirs:
+            command.extend(self.plan_dir_args(str(path)))
+        for meta_dir in outside_root_git_metadata_dirs(request.working_dir):
+            command.extend(self.plan_dir_args(str(meta_dir)))
+        if request.sandbox:
+            # Pin the flag both ways so an ambient config value can never
+            # silently widen networking inside a crossby-managed sandbox.
+            enabled = "true" if request.network_access else "false"
+            command.extend(("-c", f"sandbox_workspace_write.network_access={enabled}"))
+        if request.model:
+            command.extend(("-m", request.model))
+        if request.effort is not None:
+            command.extend(self.effort_args(request.effort))
+        if schema_path is not None:
+            command.extend(("--output-schema", str(schema_path)))
+        # A bare ``-`` keeps the prompt on stdin instead of in argv.
+        command.append("-")
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended ``codex exec`` turn and normalize its JSONL events."""
+        import json
+        import shutil
+        import tempfile
+
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        schema_root: str | None = None
+        schema_path: Path | None = None
+        if request.response_schema is not None:
+            # --output-schema takes a file path, never inline JSON. Keep it out
+            # of the workspace so a managed run never writes tracked files.
+            schema_root = tempfile.mkdtemp(prefix="crossby-codex-schema-")
+            schema_path = Path(schema_root) / "response-schema.json"
+            schema_path.write_text(
+                json.dumps(request.response_schema, separators=(",", ":")),
+                encoding="utf-8",
+            )
+        try:
+            output = run_managed_command(
+                context,
+                argv=self._headless_command(request, schema_path=schema_path),
+                cwd=request.working_dir,
+                env=child_environment({"NO_COLOR": "1"}),
+                stdin_text=request.prompt,
+                on_stdout_lines=frame_streamer(
+                    context,
+                    label="codex",
+                    kind_of=_codex_frame_kind,
+                    provenance_of=lambda frame: {
+                        "thread_id": non_blank_text(frame.get("thread_id"))
+                    },
+                ),
+            )
+        finally:
+            if schema_root is not None:
+                shutil.rmtree(schema_root, ignore_errors=True)
+
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        frames = parse_json_lines(output.stdout)
+        if frames is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "Codex CLI emitted malformed JSONL events."),
+            )
+
+        # Progress and thread provenance were already emitted live by the streamer.
+        thread_id: str | None = None
+        agent_items: list[dict[str, Any]] = []
+        terminal: str | None = None
+        failure: str | None = None
+        native_errors = 0
+        last_error: str | None = None
+        usage_values: Any = None
+        for frame in frames:
+            kind = non_blank_text(frame.get("type"))
+            if kind is None:
+                continue
+            if kind == "thread.started":
+                thread_id = thread_id or non_blank_text(frame.get("thread_id"))
+            elif kind == "item.completed":
+                item = frame.get("item")
+                if isinstance(item, dict) and non_blank_text(item.get("type")) == "agent_message":
+                    agent_items.append(item)
+            elif kind == "turn.completed":
+                terminal = kind
+                usage_values = frame.get("usage")
+            elif kind == "turn.failed":
+                terminal = kind
+                error = frame.get("error")
+                failure = non_blank_text(error.get("message")) if isinstance(error, dict) else None
+            elif kind == "error":
+                native_errors += 1
+                last_error = non_blank_text(frame.get("message")) or last_error
+
+        if native_errors:
+            # Codex retries transport errors, so keep one bounded summary rather
+            # than one warning per retry frame.
+            warnings = (
+                *warnings,
+                f"Codex CLI reported {native_errors} native error event(s); "
+                f"last: {last_error or 'no detail'}",
+            )
+        if terminal is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                thread_id=thread_id,
+                warnings=(*warnings, "Codex CLI ended without a terminal turn event."),
+            )
+        if terminal == "turn.failed":
+            warnings = (*warnings, f"Codex CLI turn failed: {failure or 'no detail'}")
+
+        texts = [
+            text
+            for item in agent_items
+            if (text := non_blank_text(item.get("text")) or non_blank_text(item.get("message")))
+        ]
+        if len(agent_items) > 1 and request.native_output is HeadlessNativeOutput.JSONL:
+            warnings = (
+                *warnings,
+                "Only the final native agent message is returned; request text output for the "
+                "complete response.",
+            )
+        structured: Any = MISSING
+        if request.response_schema is not None and texts:
+            try:
+                structured = json.loads(texts[-1])
+            except json.JSONDecodeError:
+                warnings = (
+                    *warnings,
+                    "Codex CLI returned a final message that was not valid schema JSON.",
+                )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if terminal == "turn.completed" and output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text="\n".join(texts) or None,
+            native_object=agent_items[-1] if agent_items else MISSING,
+            structured_output=structured,
+            native_status=terminal,
+            thread_id=thread_id,
+            usage=usage_from(
+                usage_values,
+                input_tokens="input_tokens",
+                output_tokens="output_tokens",
+                cached="cached_input_tokens",
+            ),
+            warnings=warnings,
+        )
 
     def _run_plan_session(
         self,

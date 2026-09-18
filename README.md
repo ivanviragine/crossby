@@ -360,10 +360,10 @@ Library consumers can choose sandbox confinement independently from autonomy by 
 
 The setting never changes approval behavior: Codex `danger-full-access` does not imply `-a never`, and yolo does not imply an unrestricted sandbox. Cursor now explicitly enables its sandbox on the default adapter path instead of inheriting a potentially disabled user setting. The static `sandboxes_writes` capability still describes an adapter's normal confinement; it is not a guarantee for a particular invocation made with `sandbox=False`.
 
-### Managed headless sessions (library foundation)
+### Managed headless sessions
 
-Library consumers now have a typed boundary for an ordinary, non-Plan agent
-session:
+Library consumers have a typed boundary for an ordinary, non-Plan agent
+session, implemented by every terminal adapter:
 
 ```python
 from pathlib import Path
@@ -403,11 +403,46 @@ raise `HeadlessTransportError` with a bounded, prompt-free partial result.
 `final_json_present` distinguishes an explicit JSON `null` result from missing
 structured output.
 
-This release provides the shared contract and managed runtime only. Every
-concrete adapter conservatively reports managed headless support as unavailable
-until its verified transport lands in the follow-up adapter work. Existing
-`supports_headless` / `headless_flag` command construction, interactive
+Existing `supports_headless` / `headless_flag` command construction, interactive
 `launch()`, collected Plan sessions, and handoff summarization are unchanged.
+
+#### Verified unattended support matrix
+
+Every row was verified against the exact CLI build named in `verified_version`,
+which is also the runtime floor: an older install fails preflight with the
+adapter's remediation rather than running with a guessed contract.
+
+| Tool | Verified build | Native command | Prompt | Native outputs | Response schema | Unattended policy |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | 2.1.263 | `claude --print` | stdin | text, json, stream-json | `--json-schema` | `--permission-prompts none` denies anything that would prompt; `permission_denials` are reported |
+| Codex CLI | 0.154.0 | `codex exec --json` | stdin (`-`) | text, jsonl | `--output-schema` | no approval channel exists in `exec`; the requested `--sandbox` and pinned `network_access` are the whole policy |
+| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
+| GitHub Copilot CLI | 1.0.83 | `copilot --prompt -s` | argument | text | not supported | `--no-ask-user` removes `ask_user`; `--allow-all-tools` is never emitted, so tools outside the session command policy are denied |
+| OpenCode | 1.18.31 | `opencode run --format json` | argument | text, jsonl | not supported | `--auto` is never emitted, so OpenCode's own noninteractive permission behavior stands |
+| Antigravity CLI | 1.2.6 | `agy --print` | argument | text, json, stream-json | `--json-schema` | `--print-timeout` carries the remaining Crossby deadline; a native waiting state fails the session instead of stalling |
+
+Unattended behavior is uniform above the adapters. An unattended run never
+inherits parent stdin — a prompt is written to a pipe that is then closed, and
+every other adapter gets `/dev/null`. An unexpected native question fails the
+session; an unresolved permission is denied. A native terminal error, waiting
+state, or missing terminal event is never reported as success just because the
+exit status was `0`. A timeout or cancellation kills the whole owned process
+group and returns a bounded, prompt-free result that keeps the session,
+thread, or conversation ID observed before the deadline.
+
+Only Claude Code, Codex CLI, and Antigravity CLI accept `response_schema`; the
+other three reject it before spawning anything. Claude and Antigravity also
+require JSON or streaming-JSON output for a schema, because that is the only
+wire on which each exposes structured output. With a schema, `final_json` is
+the validated structured output; otherwise `TEXT` returns the final response
+text and `JSON`/`JSONL` return the native object that carried it, exactly as
+the CLI emitted it. `BROKERED` sessions are not offered by any terminal
+adapter yet — none of these CLIs exposes a verified live question channel in
+its non-interactive mode.
+
+`docs/unattended-headless-verification.md` records exactly what was probed on
+each build, including the two places where a live capture was unavailable and a
+documented contract was used instead.
 
 ### Native plan mode
 

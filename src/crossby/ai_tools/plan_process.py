@@ -636,6 +636,11 @@ class HeaderlessJsonRpcProcess(JsonRpcProcess):
 # this module path remain stable for collected-plan consumers.
 SessionArtifactSizeError = PlanArtifactSizeError
 CapturedSessionProcess = CapturedProcess
+# Public spellings of the owned-process primitives shared with the managed
+# headless transport, which owns its own cleanup ordering instead of reusing
+# ``run_captured``'s single blocking call.
+kill_process_group = _kill_process_group
+join_threads_until = _join_until
 
 
 def child_environment(extra: dict[str, str] | None = None) -> dict[str, str] | None:

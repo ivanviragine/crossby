@@ -7,7 +7,7 @@ import subprocess
 import time
 import warnings
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.plan_mode import (
@@ -20,6 +20,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
@@ -39,6 +47,9 @@ from crossby.models.ai import (
     PlanSessionTransport,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
 
 # agy bakes reasoning effort into the model ID and rejects a separate --effort on
 # an already-suffixed model, while a bare Gemini base model *requires* an effort.
@@ -127,6 +138,29 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                native_outputs=(
+                    HeadlessNativeOutput.TEXT,
+                    HeadlessNativeOutput.JSON,
+                    HeadlessNativeOutput.JSONL,
+                ),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=True,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement=(
+                    "Antigravity CLI exposing --print with --output-format "
+                    "text|json|stream-json, --json-schema, and --print-timeout."
+                ),
+                verified_version="1.2.6",
+                remediation=(
+                    "Upgrade Antigravity CLI to 1.2.6 or newer so --print accepts a native "
+                    "whole-run --print-timeout and echoes the requested --json-schema."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(PlanLaunchApprovalMode.YOLO,),
                 activation=PlanModeActivation.CLI_ARGUMENT,
@@ -191,6 +225,211 @@ class AntigravityCLIAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """agy's ``--mode`` flag accepts ``accept-edits`` or ``plan``."""
         return ["--mode", "plan"]
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Reject schema requests agy cannot answer with structured output."""
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        if (
+            request.response_schema is not None
+            and request.native_output is HeadlessNativeOutput.TEXT
+        ):
+            raise HeadlessUnsupportedError(
+                "Antigravity CLI exposes schema-constrained structured_output only through its "
+                "JSON or streaming-JSON result envelope.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+    def _headless_command(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        print_timeout_seconds: int,
+    ) -> list[str]:
+        """Build the exact unattended ``agy --print`` invocation."""
+        native_formats = {
+            HeadlessNativeOutput.TEXT: "text",
+            HeadlessNativeOutput.JSON: "json",
+            HeadlessNativeOutput.JSONL: "stream-json",
+        }
+        command = [
+            "agy",
+            "--print",
+            request.prompt,
+            "--output-format",
+            native_formats[request.native_output],
+            # agy's own whole-run bound. Crossby's outer deadline still owns
+            # cleanup; this simply lets agy end its turn first when it can.
+            "--print-timeout",
+            f"{print_timeout_seconds}s",
+        ]
+        if request.response_schema is not None:
+            command.extend(
+                ("--json-schema", json.dumps(request.response_schema, separators=(",", ":")))
+            )
+        model = self.resolve_effort_model(request.model, request.effort)
+        if model:
+            command.extend(("--model", model))
+        for path in request.trusted_dirs:
+            command.extend(self.plan_dir_args(str(path)))
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended ``agy --print`` turn and normalize its result."""
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            parse_json_object,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(
+                request,
+                print_timeout_seconds=max(1, int(context.remaining_seconds())),
+            ),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            on_stdout_lines=(
+                frame_streamer(
+                    context,
+                    label="agy",
+                    kind_of=lambda frame: non_blank_text(frame.get("event")),
+                    provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
+                )
+                if streaming
+                else None
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        if request.native_output is HeadlessNativeOutput.TEXT:
+            # agy's text wire carries no conversation ID, status, or usage.
+            return complete_session(
+                context,
+                request,
+                status=(
+                    HeadlessTerminalStatus.SUCCEEDED
+                    if output.returncode == 0
+                    else HeadlessTerminalStatus.FAILED
+                ),
+                exit_code=output.returncode,
+                response_text=output.stdout.strip() or None,
+                warnings=warnings,
+            )
+
+        conversation_id: str | None = None
+        envelope: dict[str, Any] | None = None
+        if request.native_output is HeadlessNativeOutput.JSON:
+            envelope = parse_json_object(output.stdout)
+        else:
+            frames = parse_json_lines(output.stdout)
+            if frames is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    warnings=(*warnings, "Antigravity CLI emitted malformed streaming JSON."),
+                )
+            # Progress and provenance were already emitted live by the streamer,
+            # which never copies agy's streamed response text deltas.
+            for frame in frames:
+                conversation_id = conversation_id or _agy_conversation_id(frame)
+                if non_blank_text(frame.get("event")) == "result" and isinstance(
+                    frame.get("result"), dict
+                ):
+                    envelope = frame["result"]
+        if envelope is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                conversation_id=conversation_id,
+                warnings=(*warnings, "Antigravity CLI did not emit its final result envelope."),
+            )
+
+        conversation_id = _agy_conversation_id(envelope) or conversation_id
+        if conversation_id is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "Antigravity CLI output omitted conversation_id."),
+            )
+        context.set_provenance(conversation_id=conversation_id)
+        if _agy_waiting(envelope):
+            # Nobody can answer: route the native question through the runtime's
+            # unattended policy, which fails the session rather than waiting.
+            try:
+                interaction = _agy_interaction(envelope, conversation_id)
+            except ValueError:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    conversation_id=conversation_id,
+                    warnings=(*warnings, "Antigravity CLI emitted malformed interaction data."),
+                )
+            context.interact(interaction)
+
+        schema_echo = envelope.get("json_schema", envelope.get("schema"))
+        if isinstance(schema_echo, str):
+            try:
+                schema_echo = json.loads(schema_echo)
+            except json.JSONDecodeError:
+                schema_echo = None
+        if request.response_schema is not None and schema_echo != request.response_schema:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                conversation_id=conversation_id,
+                warnings=(*warnings, "Antigravity CLI did not echo the requested schema exactly."),
+            )
+        native_status = _agy_status(envelope)
+        if not _agy_success(envelope):
+            warnings = (
+                *warnings,
+                f"Antigravity CLI ended with native status {native_status or 'unknown'!r}.",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if _agy_success(envelope) and output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text=non_blank_text(envelope.get("response")),
+            native_object=envelope,
+            structured_output=envelope.get("structured_output", MISSING),
+            native_status=native_status,
+            conversation_id=conversation_id,
+            usage=usage_from(
+                envelope.get("usage"),
+                total="total_tokens",
+                input_tokens="input_tokens",
+                output_tokens="output_tokens",
+                cached="cache_read_tokens",
+                session_id=conversation_id,
+            ),
+            warnings=warnings,
+        )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate model/effort pairing before preflight creates any workspace."""
