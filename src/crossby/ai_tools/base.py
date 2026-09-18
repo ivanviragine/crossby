@@ -14,11 +14,17 @@ import shutil
 import threading
 import warnings
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import (
+        HeadlessEventHandler,
+        HeadlessRuntimeContext,
+        SessionInteractionHandler,
+    )
     from crossby.ai_tools.interactive import InteractiveLaunchHandler
     from crossby.handoff.models import ConversationTranscript, SessionRef
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
@@ -36,6 +42,13 @@ from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
     EffortLevel,
+    HeadlessInteractionMode,
+    HeadlessPreflightCheck,
+    HeadlessPreflightDeferredCheck,
+    HeadlessSessionPreflight,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     ModelTier,
     PlanArtifactLocation,
     PlanArtifactSource,
@@ -306,6 +319,463 @@ class AbstractAITool(ABC):
     def _wrap_terminal_plan_command(self, cmd: list[str], initial_message: str | None) -> list[str]:
         """Return an executable command that performs terminal activation, too."""
         raise NotImplementedError("Terminal Plan activation requires a command wrapper")
+
+    def run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        interaction_handler: SessionInteractionHandler | None = None,
+        event_handler: HeadlessEventHandler | None = None,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> HeadlessSessionResult:
+        """Run one ordinary headless session under Crossby's managed boundary.
+
+        The base layer owns the single absolute deadline, capability/version
+        validation, callback isolation, terminal reconciliation, and cleanup.
+        Adapters receive only :class:`HeadlessRuntimeContext`, not caller-owned
+        subprocess responsibilities.
+        """
+        from crossby.ai_tools.headless import (
+            HeadlessAdapterContractError,
+            HeadlessPreflightError,
+            HeadlessRuntimeContext,
+            HeadlessTransportError,
+            _HeadlessStopError,
+        )
+
+        started_at = monotonic()
+        deadline = started_at + request.timeout_seconds
+        if cancel_event is not None and cancel_event.is_set():
+            capability = self.capabilities().headless
+            raise HeadlessPreflightError(
+                "The caller cancelled before managed headless preflight completed.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        normalized = self._validate_headless_request(
+            request,
+            interaction_handler=interaction_handler,
+            require_existing_working_dir=True,
+        )
+        detected = self._detect_headless_version_bounded(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        self._validate_headless_requirements(normalized)
+        context = HeadlessRuntimeContext(
+            tool_id=self.TOOL_ID,
+            version=detected.text,
+            capability=self.capabilities().headless,
+            request=normalized,
+            started_at=started_at,
+            deadline=deadline,
+            interaction_handler=interaction_handler,
+            event_handler=event_handler,
+            cancel_event=cancel_event,
+        )
+
+        def finalize_stop(stop: _HeadlessStopError) -> HeadlessSessionResult:
+            """Publish the terminal outcome before closing the adapter context."""
+            if not context._claim_runtime_stop(stop):
+                # A result was published before the monitor claimed this stop,
+                # so the natural terminal owner wins.
+                result = context.result
+                assert result is not None
+                return result
+            result = context.complete(
+                stop.status,
+                warnings=(stop.warning,),
+                _terminal_finalization=True,
+            )
+            context.cleanup(abort=True)
+            return result
+
+        responses: queue.Queue[HeadlessSessionResult | None | BaseException] = queue.Queue(1)
+
+        def invoke_adapter() -> None:
+            try:
+                value: HeadlessSessionResult | None | BaseException = self._run_headless_session(
+                    normalized,
+                    detected.text,
+                    context,
+                )
+            except BaseException as exc:
+                value = exc
+            with suppress(queue.Full):
+                responses.put_nowait(value)
+                # A timeout/cancellation already closed the runtime.  A late
+                # adapter result can no longer reach the caller.
+
+        threading.Thread(
+            target=invoke_adapter,
+            daemon=True,
+            name=f"crossby-headless-{self.TOOL_ID.value}",
+        ).start()
+        adapter_value: HeadlessSessionResult | None | BaseException
+        try:
+            while True:
+                context.checkpoint()
+                try:
+                    adapter_value = responses.get(timeout=min(0.05, context.remaining_seconds()))
+                except queue.Empty:
+                    continue
+                break
+            context.checkpoint()
+        except _HeadlessStopError as stop:
+            return finalize_stop(stop)
+
+        if isinstance(adapter_value, HeadlessTransportError):
+            context.cleanup(abort=True)
+            # Rebuild the snapshot after cleanup was requested so the caller
+            # receives all safe progress observed before the failure.
+            raise HeadlessTransportError(
+                str(adapter_value),
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+                partial_result=context.partial_snapshot(),
+            ) from None
+        if isinstance(adapter_value, HeadlessAdapterContractError):
+            context.cleanup(abort=True)
+            raise adapter_value
+        if isinstance(adapter_value, _HeadlessStopError):
+            return finalize_stop(adapter_value)
+        if isinstance(adapter_value, BaseException):
+            context.cleanup(abort=True)
+            raise context.transport_error(
+                "The managed headless transport failed before producing a terminal result."
+            ) from None
+
+        result = context.result
+        if result is None:
+            context.cleanup(abort=True)
+            raise context.adapter_contract_error(
+                "The adapter returned without using the runtime's terminal result constructor."
+            )
+        if adapter_value is not None and adapter_value != result:
+            context.cleanup(abort=True)
+            raise context.adapter_contract_error(
+                "The adapter returned a result different from the runtime's terminal result."
+            )
+        self._validate_headless_result(result, detected.text)
+        context.cleanup(
+            abort=result.status
+            in {HeadlessTerminalStatus.CANCELLED, HeadlessTerminalStatus.TIMED_OUT}
+        )
+        return result
+
+    def preflight_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        interaction_handler: SessionInteractionHandler | None = None,
+        *,
+        timeout_seconds: float = 5.0,
+        cancel_event: threading.Event | None = None,
+    ) -> HeadlessSessionPreflight:
+        """Boundedly validate a prospective managed session without starting it."""
+        from crossby.ai_tools.headless import HeadlessPreflightError
+
+        started_at = monotonic()
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("headless preflight timeout must be positive and finite")
+        deadline = started_at + min(timeout_seconds, request.timeout_seconds)
+        if cancel_event is not None and cancel_event.is_set():
+            raise HeadlessPreflightError(
+                "The caller cancelled managed headless preflight.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        normalized = self._validate_headless_request(
+            request,
+            interaction_handler=interaction_handler,
+            require_existing_working_dir=False,
+        )
+        detected = self._detect_headless_version_bounded(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        self._validate_headless_requirements(normalized)
+        return HeadlessSessionPreflight(
+            tool=self.TOOL_ID,
+            detected_version=detected.text,
+            normalized_version=detected.normalized,
+            capability=self.capabilities().headless,
+            working_dir=normalized.working_dir,
+            trusted_dirs=normalized.trusted_dirs,
+            checked=(
+                HeadlessPreflightCheck.SESSION_CAPABILITY,
+                HeadlessPreflightCheck.REQUEST_COMPATIBILITY,
+                HeadlessPreflightCheck.RESPONSE_SCHEMA,
+                HeadlessPreflightCheck.CLI_VERSION,
+            ),
+            deferred=(
+                HeadlessPreflightDeferredCheck.FILESYSTEM,
+                HeadlessPreflightDeferredCheck.AUTHENTICATION,
+                HeadlessPreflightDeferredCheck.MODEL_AVAILABILITY,
+                HeadlessPreflightDeferredCheck.TRANSPORT_STARTUP,
+                HeadlessPreflightDeferredCheck.PROTOCOL_NEGOTIATION,
+                HeadlessPreflightDeferredCheck.OUTPUT_COLLECTION,
+            ),
+        )
+
+    def _validate_headless_request(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        interaction_handler: SessionInteractionHandler | None,
+        require_existing_working_dir: bool,
+    ) -> HeadlessSessionRequest:
+        """Reject every statically knowable incompatibility before startup."""
+        from crossby.ai_tools.headless import (
+            HeadlessRequestError,
+            HeadlessSchemaError,
+            HeadlessUnsupportedError,
+            validate_response_schema,
+        )
+
+        caps = self.capabilities()
+        capability = caps.headless
+        if not capability.managed_supported:
+            raise HeadlessUnsupportedError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+            )
+        if request.interaction_mode not in capability.interaction_modes:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve interaction_mode="
+                f"{request.interaction_mode.value!r} for managed headless sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            if interaction_handler is None:
+                raise HeadlessRequestError(
+                    "A brokered headless session requires an interaction handler.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+        elif interaction_handler is not None:
+            raise HeadlessRequestError(
+                "An unattended headless session cannot accept an interaction handler.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.native_output not in capability.native_outputs:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} does not support native_output="
+                f"{request.native_output.value!r} for managed sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        response_schema = request.response_schema
+        if response_schema is not None:
+            if not capability.supports_response_schema:
+                raise HeadlessUnsupportedError(
+                    f"{caps.display_name} does not support caller response schemas.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            try:
+                response_schema = validate_response_schema(response_schema)
+            except ValueError as exc:
+                raise HeadlessSchemaError(
+                    str(exc),
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                ) from None
+        if request.resume_id is not None and not capability.supports_resume:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} does not support managed session resumption.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        working_dir = request.working_dir.resolve()
+        if require_existing_working_dir and not working_dir.is_dir():
+            raise HeadlessRequestError(
+                f"{caps.display_name} requires an existing working directory: {working_dir}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        trusted_dirs = tuple(path.resolve() for path in request.trusted_dirs)
+        if trusted_dirs and not caps.supports_trusted_dirs:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve trusted_dirs for managed sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.effort is not None and (
+            not caps.supports_effort or request.effort not in caps.supported_efforts
+        ):
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve the requested effort.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.network_access and not caps.supports_network_access:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve network_access=True.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if not request.sandbox and capability.sandbox_behavior is not PlanRequestBehavior.PRESERVED:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve sandbox=False.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.approval_policy not in capability.supported_approval_policies:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve approval_policy="
+                f"{request.approval_policy.value!r}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if (
+            request.command_policy is not None
+            and capability.command_policy_support is PlanCommandPolicySupport.UNSUPPORTED
+        ):
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve command_policy for managed sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        return request.model_copy(
+            update={
+                "working_dir": working_dir,
+                "trusted_dirs": trusted_dirs,
+                "response_schema": response_schema,
+            }
+        )
+
+    def _detect_headless_version_bounded(
+        self,
+        *,
+        deadline: float,
+        cancel_event: threading.Event | None,
+    ) -> BinaryVersion:
+        """Probe within the existing absolute deadline and cancellation budget."""
+        from crossby.ai_tools.headless import HeadlessPreflightError
+
+        responses: queue.Queue[BinaryVersion | BaseException] = queue.Queue(1)
+
+        def invoke() -> None:
+            try:
+                value: BinaryVersion | BaseException = self._detect_headless_version(
+                    timeout_seconds=max(0.0, deadline - monotonic()),
+                    deadline=deadline,
+                )
+            except BaseException as exc:
+                value = exc
+            with suppress(queue.Full):
+                responses.put_nowait(value)
+
+        threading.Thread(target=invoke, daemon=True, name="crossby-headless-version").start()
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise HeadlessPreflightError(
+                    "The caller cancelled during managed headless version probing.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise HeadlessPreflightError(
+                    "Managed headless preflight timed out during version probing.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            try:
+                value = responses.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+    def _detect_headless_version(
+        self,
+        *,
+        timeout_seconds: float,
+        deadline: float | None = None,
+    ) -> BinaryVersion:
+        """Probe the CLI version against the managed capability declaration."""
+        from crossby.ai_tools.headless import (
+            HeadlessAdapterContractError,
+            HeadlessPreflightError,
+            HeadlessUnsupportedError,
+        )
+        from crossby.utils.versioning import detect_binary_version_info, parse_semver
+
+        caps = self.capabilities()
+        capability = caps.headless
+        floor = parse_semver(capability.verified_version or "")
+        if floor is None:
+            raise HeadlessAdapterContractError(
+                f"{caps.display_name} declares managed headless support without a parseable "
+                "verified_version.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        detected = detect_binary_version_info(caps.binary, timeout_seconds=timeout_seconds)
+        if deadline is not None and deadline - monotonic() <= 0:
+            raise HeadlessPreflightError(
+                "Managed headless preflight timed out during version probing.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if detected is None or detected.normalized < floor:
+            raise HeadlessUnsupportedError.for_installed_version(
+                tool_id=self.TOOL_ID,
+                display_name=caps.display_name,
+                capability=capability,
+                installed_version=detected.text if detected is not None else None,
+            )
+        return detected
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Adapter hook for request constraints known without transport I/O."""
+        return None
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult | None:
+        """Protected adapter hook for one complete managed native lifecycle."""
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        caps = self.capabilities()
+        raise HeadlessUnsupportedError.for_tool(
+            tool_id=self.TOOL_ID,
+            display_name=caps.display_name,
+            capability=caps.headless,
+        )
+
+    def _validate_headless_result(self, result: HeadlessSessionResult, version: str) -> None:
+        """Validate adapter identity/provenance not expressible in the model."""
+        from crossby.ai_tools.headless import HeadlessAdapterContractError
+
+        caps = self.capabilities()
+        if result.tool is not self.TOOL_ID:
+            raise HeadlessAdapterContractError(
+                f"{caps.display_name} returned the wrong managed-session tool identifier.",
+                tool_id=self.TOOL_ID,
+                capability=caps.headless,
+            )
+        if result.version != version:
+            raise HeadlessAdapterContractError(
+                f"{caps.display_name} did not preserve the exact probed version text.",
+                tool_id=self.TOOL_ID,
+                capability=caps.headless,
+            )
+        terminals = [event for event in result.events if event.kind.value == "terminal"]
+        if len(terminals) != 1 or result.events[-1] is not terminals[0]:
+            raise HeadlessAdapterContractError(
+                f"{caps.display_name} did not return exactly one final terminal event.",
+                tool_id=self.TOOL_ID,
+                capability=caps.headless,
+            )
 
     def run_plan_session(
         self,

@@ -26,6 +26,7 @@ dependencies = [
     "typer>=0.12,<0.26",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
+    "jsonschema>=4.23,<5",
     "pyyaml>=6.0",
     "rich>=13.0",
     "structlog>=24.0",
@@ -83,7 +84,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["questionary.*", "prompt_toolkit.*", "pexpect.*", "pyte.*"]
+module = ["jsonschema.*", "questionary.*", "prompt_toolkit.*", "pexpect.*", "pyte.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

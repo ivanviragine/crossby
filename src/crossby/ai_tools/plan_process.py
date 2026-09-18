@@ -1,4 +1,9 @@
-"""Small stdlib process and wire helpers for native plan collectors."""
+"""Shared bounded process and wire helpers for managed AI-tool sessions.
+
+The historical module path remains because plan collectors and downstream
+tests import it directly.  ``crossby.ai_tools.session_process`` is an alias to
+this same module, so both APIs share limits, monkeypatches, and cleanup code.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import stat
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +58,10 @@ class CapturedOutputDecodeError(subprocess.SubprocessError):
         super().__init__(f"captured {stream} was not valid {encoding} text")
         self.stream = stream
         self.encoding = encoding
+
+
+class SessionProcessCancelledError(subprocess.SubprocessError):
+    """A caller cancellation event stopped an owned child process group."""
 
 
 class PlanArtifactSizeError(OSError):
@@ -134,9 +144,19 @@ def run_captured(
     timeout: float,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
+    deadline: float | None = None,
+    cancel_event: threading.Event | None = None,
+    native_abort: Callable[[], object] | None = None,
 ) -> CapturedProcess:
-    """Run a bounded child with hard stdout/stderr memory limits and no shell."""
-    deadline = time.monotonic() + timeout
+    """Run a bounded child with hard output limits and one cleanup path.
+
+    ``deadline`` lets a caller carry an already-running absolute budget across
+    preflight, startup, prompt delivery, and collection.  ``timeout`` remains
+    for compatibility and can only shorten that deadline.
+    """
+    computed_deadline = time.monotonic() + timeout
+    if deadline is not None:
+        computed_deadline = min(computed_deadline, deadline)
     encoding = "utf-8"
     input_bytes = input_text.encode(encoding) if input_text is not None else None
     proc = subprocess.Popen(
@@ -161,6 +181,27 @@ def run_captured(
     outputs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     overflow: list[tuple[str, int]] = []
     overflow_lock = threading.Lock()
+    abort_lock = threading.Lock()
+    abort_called = False
+
+    def abort_once() -> None:
+        nonlocal abort_called
+        if native_abort is None:
+            return
+        with abort_lock:
+            if abort_called:
+                return
+            abort_called = True
+        abort_finished = threading.Event()
+
+        def invoke_abort() -> None:
+            with suppress(BaseException):
+                native_abort()
+            abort_finished.set()
+
+        thread = threading.Thread(target=invoke_abort, daemon=True)
+        thread.start()
+        abort_finished.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
 
     def read_bounded(stream: IO[bytes], name: str, limit: int) -> None:
         while chunk := stream.read(_CAPTURE_CHUNK_SIZE):
@@ -171,6 +212,7 @@ def run_captured(
                 with overflow_lock:
                     if not overflow:
                         overflow.append((name, limit))
+                        abort_once()
                         _kill_process_group(proc)
 
     readers = (
@@ -208,17 +250,36 @@ def run_captured(
 
     workers = (*readers, *((writer,) if writer is not None else ()))
     try:
-        remaining = deadline - time.monotonic()
+        remaining = computed_deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(command, timeout)
-        returncode = proc.wait(timeout=remaining)
+        if cancel_event is None:
+            returncode = proc.wait(timeout=remaining)
+        else:
+            while True:
+                if cancel_event.is_set():
+                    raise SessionProcessCancelledError("captured child was cancelled")
+                remaining = computed_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    returncode = proc.wait(timeout=min(_QUEUE_PUT_TIMEOUT_SECONDS, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
 
-        if not _join_until(workers, deadline):
+        # A direct child may exit while a descendant retains inherited capture
+        # descriptors.  Bound that ambiguity by fixed cleanup grace rather than
+        # consuming the rest of a long session deadline; the timeout cleanup
+        # below then clears the whole owned group.
+        join_deadline = min(
+            computed_deadline,
+            time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS,
+        )
+        if not _join_until(workers, join_deadline):
             if overflow:
                 raise CapturedOutputLimitError(*overflow[0])
             raise subprocess.TimeoutExpired(command, timeout)
-        # The direct child may exit after spawning a helper that redirects the
-        # capture pipes. Always clear the run-owned process group before returning.
         _kill_process_group(proc)
         if overflow:
             raise CapturedOutputLimitError(*overflow[0])
@@ -232,12 +293,21 @@ def run_captured(
 
         return CapturedProcess(returncode, decoded["stdout"], decoded["stderr"])
     except subprocess.TimeoutExpired:
+        abort_once()
         _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
         raise subprocess.TimeoutExpired(command, timeout) from None
+    except SessionProcessCancelledError:
+        abort_once()
+        _kill_process_group(proc)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+        _join_until(workers, time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS)
+        raise
     except BaseException:
+        abort_once()
         _kill_process_group(proc)
         with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
@@ -297,9 +367,15 @@ class JsonRpcProcess:
         cwd: Path,
         env: dict[str, str] | None = None,
         timeout: float = 600.0,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.command = command
-        self._deadline = time.monotonic() + timeout
+        computed_deadline = time.monotonic() + timeout
+        self._deadline = (
+            min(computed_deadline, deadline) if deadline is not None else computed_deadline
+        )
+        self._cancel_event = cancel_event
         self._write_thread: threading.Thread | None = None
         self._proc = subprocess.Popen(
             command,
@@ -400,6 +476,9 @@ class JsonRpcProcess:
                 raise
 
     def send(self, payload: dict[str, Any]) -> None:
+        cancel_event = getattr(self, "_cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise SessionProcessCancelledError("JSON-RPC child was cancelled")
         if self._proc.poll() is not None:
             raise EOFError(f"JSON-RPC child exited with status {self._proc.returncode}")
         envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
@@ -418,7 +497,16 @@ class JsonRpcProcess:
             raise TimeoutError("timed out writing a JSON-RPC message")
         self._write_thread = threading.Thread(target=write, daemon=True)
         self._write_thread.start()
-        self._write_thread.join(timeout=remaining)
+        while self._write_thread.is_alive():
+            cancel_event = getattr(self, "_cancel_event", None)
+            if cancel_event is not None and cancel_event.is_set():
+                _kill_process_group(self._proc)
+                self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+                raise SessionProcessCancelledError("JSON-RPC child was cancelled")
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._write_thread.join(timeout=min(_QUEUE_PUT_TIMEOUT_SECONDS, remaining))
         if self._write_thread.is_alive():
             _kill_process_group(self._proc)
             self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
@@ -446,10 +534,22 @@ class JsonRpcProcess:
 
     def read_line(self, *, timeout: float) -> str:
         """Read a bounded stdout line, also usable for a server's startup banner."""
-        try:
-            line = self._stdout_queue.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise TimeoutError("timed out waiting for a JSON-RPC message") from exc
+        read_deadline = min(
+            getattr(self, "_deadline", float("inf")),
+            time.monotonic() + timeout,
+        )
+        while True:
+            cancel_event = getattr(self, "_cancel_event", None)
+            if cancel_event is not None and cancel_event.is_set():
+                raise SessionProcessCancelledError("JSON-RPC child was cancelled")
+            remaining = read_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("timed out waiting for a JSON-RPC message")
+            try:
+                line = self._stdout_queue.get(timeout=min(_QUEUE_PUT_TIMEOUT_SECONDS, remaining))
+            except queue.Empty:
+                continue
+            break
         if line is None:
             code = self._proc.poll()
             raise EOFError(f"JSON-RPC stream closed (exit status {code})")
@@ -530,6 +630,12 @@ class HeaderlessJsonRpcProcess(JsonRpcProcess):
     """Codex app-server's JSONL dialect, which omits the JSON-RPC version field."""
 
     _include_jsonrpc_version = False
+
+
+# Neutral names for new ordinary-session transports.  Plan-prefixed names and
+# this module path remain stable for collected-plan consumers.
+SessionArtifactSizeError = PlanArtifactSizeError
+CapturedSessionProcess = CapturedProcess
 
 
 def child_environment(extra: dict[str, str] | None = None) -> dict[str, str] | None:
