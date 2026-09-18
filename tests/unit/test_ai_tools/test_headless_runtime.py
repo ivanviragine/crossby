@@ -204,6 +204,26 @@ def test_malformed_structured_output_returns_invalid_output(
 
 
 @pytest.mark.parametrize(
+    "text",
+    (
+        'NaN\n{"ok": true}',
+        '{"ok": true}\nInfinity',
+        '{"ok": true}\n-Infinity',
+    ),
+)
+def test_jsonl_non_finite_values_return_invalid_output(tmp_path: Path, text: str) -> None:
+    adapter = FakeHeadlessAdapter(lambda context: context.complete(final_text=text))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_json is None
+    assert not result.final_json_present
+
+
+@pytest.mark.parametrize(
     "status",
     (
         HeadlessTerminalStatus.CANCELLED,
@@ -524,6 +544,28 @@ def test_handler_failure_raises_transport_error_with_safe_partial(tmp_path: Path
     assert raised.value.partial_result.session_id == "session-1"
     assert "private callback detail" not in str(raised.value)
     assert "native private question" not in str(raised.value.partial_result)
+
+
+def test_transport_error_snapshot_renumbers_events_after_terminal(tmp_path: Path) -> None:
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.emit(HeadlessEventKind.STARTED)
+        context.emit(
+            HeadlessEventKind.TERMINAL,
+            terminal_status=HeadlessTerminalStatus.FAILED,
+        )
+        context.emit(HeadlessEventKind.PROGRESS, message="safe late progress")
+        raise context.transport_error("native protocol failed")
+
+    with pytest.raises(HeadlessTransportError, match="native protocol failed") as raised:
+        FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path))
+
+    partial = raised.value.partial_result
+    assert partial.is_partial
+    assert [event.kind for event in partial.events] == [
+        HeadlessEventKind.STARTED,
+        HeadlessEventKind.PROGRESS,
+    ]
+    assert [event.sequence for event in partial.events] == [1, 2]
 
 
 def test_interaction_timeout_never_forwards_a_late_answer(tmp_path: Path) -> None:

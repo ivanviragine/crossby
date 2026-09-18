@@ -869,11 +869,17 @@ class HeadlessRuntimeContext:
                 if not line.strip():
                     continue
                 try:
-                    values.append(json.loads(line))
+                    value = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise ValueError(
                         f"The native transport returned malformed JSONL at line {number}."
                     ) from exc
+                _json_bytes(
+                    value,
+                    limit=_MAX_FINAL_PAYLOAD_BYTES,
+                    label="final JSONL output",
+                )
+                values.append(value)
             if not values:
                 raise ValueError("The native transport returned empty JSONL output.")
             final_json = values[-1]
@@ -940,14 +946,16 @@ class HeadlessRuntimeContext:
 
     def partial_snapshot(self) -> HeadlessSessionResult:
         """Build a safe, non-terminal snapshot without exposing native buffers."""
-        events = tuple(
-            event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL
+        events = [event for event in self._events if event.kind is not HeadlessEventKind.TERMINAL]
+        safe_events = tuple(
+            event.model_copy(update={"sequence": sequence})
+            for sequence, event in enumerate(events, start=1)
         )
         return HeadlessSessionResult(
             tool=self.tool_id,
             version=self.version,
             status=HeadlessTerminalStatus.FAILED,
-            events=events,
+            events=safe_events,
             duration_seconds=max(0.0, time.monotonic() - self.started_at),
             denials=tuple(self._denials),
             warnings=tuple(self._warnings),
