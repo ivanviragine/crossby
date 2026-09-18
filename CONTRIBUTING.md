@@ -322,9 +322,40 @@ Use `ai_tools/session_process.py` for shared captured/JSON-RPC primitives. It is
 the same live module as the historical `ai_tools/plan_process.py` path, keeping
 existing Plan imports and safety-limit patches compatible. Carry the runtime's
 absolute deadline and cancellation event into version probes, prompt writes,
-protocol reads/writes, parsing, and final collection. New integrations belong
-to the dedicated adapter follow-up issues; this foundation intentionally leaves
-all concrete adapters unavailable.
+protocol reads/writes, parsing, and final collection.
+
+#### The shared unattended CLI transport
+
+Every terminal adapter runs its native non-interactive CLI through
+`ai_tools/headless_cli.py`, never its own `subprocess` call. `run_managed_command`
+owns one child process group, gives the child a stdin pipe it closes right after
+delivering the prompt (or `/dev/null` when the prompt travels in argv), registers
+the cleanup sequence *before* the first blocking read, and takes every wait
+budget from `context.remaining_seconds()`.
+
+Its `on_stdout_lines` callback is what makes a streaming transport observable.
+Native lines are handed to the adapter from the same thread that is waiting on
+the child, so provenance is recorded and the idle deadline refreshes while the
+run is still in flight — and a timed-out session still returns the session,
+thread, or conversation ID it had already seen. `frame_streamer` builds that
+callback from a `kind_of`/`provenance_of` pair; only a frame's *kind* becomes an
+event message, because native frames echo prompt and response text (Cursor's
+`user` frame and agy's `text_delta` are the proof).
+
+`complete_session` then renders the terminal result in the caller's requested
+shape: a `response_schema` selects the native structured output for the runtime
+to validate, `TEXT` returns the final response text, and `JSON`/`JSONL` return
+the native object that carried it. An adapter that cannot honor a schema must
+reject it in `_validate_headless_requirements` so the request fails before
+spawn.
+
+Capability declarations are evidence, not aspiration. `verified_version` is the
+exact build the flags and envelope were checked against and becomes the runtime
+floor, and `successful_native_statuses` may only be declared when *every*
+supported native output carries that status. The recorded payloads in
+`tests/unit/test_ai_tools/test_headless_adapters.py` come from live runs of
+those builds; when a CLI changes its envelope, update the fixture and the
+verified version together.
 
 ### Collected native plan sessions
 
