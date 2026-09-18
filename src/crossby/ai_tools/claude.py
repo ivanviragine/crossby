@@ -28,6 +28,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
@@ -48,6 +56,7 @@ from crossby.models.ai import (
 )
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 logger = structlog.get_logger()
@@ -117,6 +126,32 @@ class ClaudeAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                native_outputs=(
+                    HeadlessNativeOutput.TEXT,
+                    HeadlessNativeOutput.JSON,
+                    HeadlessNativeOutput.JSONL,
+                ),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=True,
+                # Claude owns approvals itself; ``--print`` has no writable-root
+                # selector, so a sandbox=False request cannot be preserved.
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                version_requirement=(
+                    "Claude Code exposing --print with --permission-prompts none, "
+                    "--output-format text|json|stream-json, and --json-schema."
+                ),
+                verified_version="2.1.263",
+                remediation=(
+                    "Upgrade Claude Code to 2.1.263 or newer; older builds have no "
+                    "--permission-prompts selector, so an unattended run could stall on a "
+                    "permission request nobody can answer."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(
                     PlanLaunchApprovalMode.YOLO,
@@ -221,6 +256,188 @@ class ClaudeAdapter(AbstractAITool):
         value = "." if relative == Path(".") else f"./{relative}"
         settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
         return ["--settings", settings]
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Reject schema requests Claude cannot answer with structured output."""
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        if (
+            request.response_schema is not None
+            and request.native_output is HeadlessNativeOutput.TEXT
+        ):
+            raise HeadlessUnsupportedError(
+                "Claude Code exposes schema-constrained structured_output only through its JSON "
+                "or streaming-JSON result envelope.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``claude --print`` invocation."""
+        native_formats = {
+            HeadlessNativeOutput.TEXT: "text",
+            HeadlessNativeOutput.JSON: "json",
+            HeadlessNativeOutput.JSONL: "stream-json",
+        }
+        command = [
+            "claude",
+            "--print",
+            "--output-format",
+            native_formats[request.native_output],
+            # Nobody is available to answer, so anything that would prompt is
+            # denied natively instead of waiting on a terminal that is not there.
+            "--permission-prompts",
+            "none",
+        ]
+        if request.native_output is HeadlessNativeOutput.JSONL:
+            # Verified on 2.1.263: --print rejects stream-json without --verbose.
+            command.append("--verbose")
+        if request.response_schema is not None:
+            command.extend(
+                ("--json-schema", json.dumps(request.response_schema, separators=(",", ":")))
+            )
+        if request.model:
+            command.extend(("--model", request.model))
+        if request.effort is not None:
+            command.extend(self.effort_args(request.effort))
+        for path in request.trusted_dirs:
+            command.extend(("--add-dir", str(path)))
+        if request.command_policy is not None:
+            command.extend(
+                self.allowed_commands_args(list(request.command_policy.allowed_commands))
+            )
+            # Exclude ambient settings sources so no user, project, or local
+            # allowlist can widen the session-scoped command policy.
+            command.extend(("--setting-sources", ""))
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended ``claude --print`` turn and normalize its result."""
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            parse_json_object,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
+            on_stdout_lines=(
+                frame_streamer(
+                    context,
+                    label="claude",
+                    kind_of=lambda frame: non_blank_text(frame.get("type")),
+                    provenance_of=lambda frame: {
+                        "session_id": non_blank_text(frame.get("session_id"))
+                    },
+                )
+                if streaming
+                else None
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        if request.native_output is HeadlessNativeOutput.TEXT:
+            return complete_session(
+                context,
+                request,
+                status=(
+                    HeadlessTerminalStatus.SUCCEEDED
+                    if output.returncode == 0
+                    else HeadlessTerminalStatus.FAILED
+                ),
+                exit_code=output.returncode,
+                response_text=output.stdout.strip() or None,
+                warnings=warnings,
+            )
+
+        session_id: str | None = None
+        envelope: dict[str, Any] | None = None
+        if request.native_output is HeadlessNativeOutput.JSON:
+            envelope = parse_json_object(output.stdout)
+            if envelope is not None and envelope.get("type") != "result":
+                envelope = None
+        else:
+            frames = parse_json_lines(output.stdout)
+            if frames is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    warnings=(*warnings, "Claude Code emitted malformed streaming JSON."),
+                )
+            # Progress and provenance were already emitted live by the streamer.
+            for frame in frames:
+                session_id = session_id or non_blank_text(frame.get("session_id"))
+                if non_blank_text(frame.get("type")) == "result":
+                    envelope = frame
+        if envelope is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Claude Code did not emit its final result envelope."),
+            )
+
+        session_id = session_id or non_blank_text(envelope.get("session_id"))
+        for denial in envelope.get("permission_denials") or []:
+            tool = non_blank_text(denial.get("tool_name")) if isinstance(denial, dict) else None
+            context.add_denial(
+                f"Claude Code denied {tool or 'an unnamed tool'} under --permission-prompts none"
+            )
+        response_text = non_blank_text(envelope.get("result"))
+        # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so
+        # ``is_error`` is the only authoritative native failure signal.
+        native_error = bool(envelope.get("is_error"))
+        if native_error:
+            warnings = (
+                *warnings,
+                f"Claude Code reported a native error result: {response_text or 'no detail'}",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.FAILED
+                if native_error or output.returncode != 0
+                else HeadlessTerminalStatus.SUCCEEDED
+            ),
+            exit_code=output.returncode,
+            response_text=response_text,
+            native_object=envelope,
+            structured_output=envelope.get("structured_output", MISSING),
+            native_status=non_blank_text(envelope.get("terminal_reason"))
+            or non_blank_text(envelope.get("subtype")),
+            session_id=session_id,
+            usage=usage_from(
+                envelope.get("usage"),
+                input_tokens="input_tokens",
+                output_tokens="output_tokens",
+                cached="cache_read_input_tokens",
+                session_id=session_id,
+            ),
+            warnings=warnings,
+        )
 
     def _run_plan_session(
         self,

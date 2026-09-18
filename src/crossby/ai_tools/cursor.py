@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import time
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import structlog
 
@@ -23,6 +23,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanApprovalPolicy,
@@ -48,6 +56,9 @@ from crossby.models.ai import (
     PlanSessionResult,
     PlanSessionTransport,
 )
+
+if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
 
 logger = structlog.get_logger()
 
@@ -219,6 +230,30 @@ class CursorAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_yolo=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # Cursor's print mode has no verified stdin contract, and its
+                # plain-text output carries no terminal status, so only the two
+                # execution-output formats are offered.
+                native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=False,
+                successful_native_statuses=("success",),
+                sandbox_behavior=PlanRequestBehavior.PRESERVED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement=(
+                    "Cursor Agent exposing --print with --output-format json|stream-json "
+                    "and --trust."
+                ),
+                verified_version="2026.09.10-fd3934a",
+                remediation=(
+                    "Upgrade Cursor Agent to the 2026.09.10 build or newer. Cursor exposes no "
+                    "final-response JSON Schema flag, so schema-constrained sessions must use "
+                    "Claude Code, Codex CLI, or Antigravity CLI."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(
                     PlanLaunchApprovalMode.YOLO,
@@ -326,6 +361,140 @@ class CursorAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Cursor supports ``--mode plan``."""
         return ["--mode", "plan"]
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``agent --print`` invocation."""
+        command = [
+            "agent",
+            "--print",
+            "--output-format",
+            "json" if request.native_output is HeadlessNativeOutput.JSON else "stream-json",
+            # Without this Cursor stops on its interactive workspace-trust
+            # gate, which an unattended session can never answer. Approval of
+            # individual tool calls stays separate: --force/--yolo is never
+            # emitted here.
+            "--trust",
+            "--sandbox",
+            "enabled" if request.sandbox else "disabled",
+        ]
+        model = self.resolve_effort_model(request.model, request.effort)
+        if model:
+            command.extend(("--model", model))
+        command.append(request.prompt)
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended Cursor print turn and normalize its result envelope."""
+        from crossby.ai_tools.headless_cli import (
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            parse_json_object,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            on_stdout_lines=(
+                frame_streamer(
+                    context,
+                    label="cursor",
+                    kind_of=lambda frame: non_blank_text(frame.get("type")),
+                    provenance_of=lambda frame: {
+                        "session_id": non_blank_text(frame.get("session_id"))
+                    },
+                )
+                if streaming
+                else None
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        # Print mode was not granted force/yolo, so Cursor decides each tool call
+        # under its own default policy: file changes can remain proposals rather
+        # than applied edits, and nothing escalates to a terminal prompt.
+        warnings = (
+            *warnings,
+            "Cursor print mode ran without --force/--yolo, so tool calls needing explicit "
+            "approval are not auto-approved and file changes may remain proposals.",
+        )
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+
+        session_id: str | None = None
+        envelope: dict[str, Any] | None = None
+        if request.native_output is HeadlessNativeOutput.JSON:
+            envelope = parse_json_object(output.stdout)
+            if envelope is not None and envelope.get("type") != "result":
+                envelope = None
+        else:
+            frames = parse_json_lines(output.stdout)
+            if frames is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    warnings=(*warnings, "Cursor emitted malformed streaming JSON."),
+                )
+            # Progress and provenance were already emitted live by the streamer,
+            # which never copies Cursor's prompt-echoing ``user`` frame content.
+            for frame in frames:
+                session_id = session_id or non_blank_text(frame.get("session_id"))
+                if non_blank_text(frame.get("type")) == "result":
+                    envelope = frame
+        if envelope is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Cursor did not emit its final result envelope."),
+            )
+
+        session_id = session_id or non_blank_text(envelope.get("session_id"))
+        response_text = non_blank_text(envelope.get("result"))
+        native_error = bool(envelope.get("is_error"))
+        if native_error:
+            warnings = (
+                *warnings,
+                f"Cursor reported a native error result: {response_text or 'no detail'}",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.FAILED
+                if native_error or output.returncode != 0
+                else HeadlessTerminalStatus.SUCCEEDED
+            ),
+            exit_code=output.returncode,
+            response_text=response_text,
+            native_object=envelope,
+            native_status=non_blank_text(envelope.get("subtype")),
+            session_id=session_id,
+            usage=usage_from(
+                envelope.get("usage"),
+                input_tokens="inputTokens",
+                output_tokens="outputTokens",
+                cached="cacheReadTokens",
+                session_id=session_id,
+            ),
+            warnings=warnings,
+        )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate model/effort encodings before prospective workspace creation."""

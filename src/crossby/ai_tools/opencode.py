@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.model_utils import classify_tier_universal, has_date_suffix
@@ -17,6 +18,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -31,6 +40,9 @@ from crossby.models.ai import (
     PlanSessionTransport,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
 
 
 class OpenCodeAdapter(AbstractAITool):
@@ -63,6 +75,26 @@ class OpenCodeAdapter(AbstractAITool):
             supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
             supports_resume=True,
             supports_yolo=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # Every managed run uses the --format json event wire; TEXT
+                # returns the joined assistant text parts from those events.
+                native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=False,
+                successful_native_statuses=("stop",),
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement="OpenCode exposing opencode run --format json raw events.",
+                verified_version="1.18.31",
+                remediation=(
+                    "Upgrade OpenCode to 1.18.31 or newer. OpenCode exposes no final-response "
+                    "JSON Schema flag, so schema-constrained sessions must use Claude Code, "
+                    "Codex CLI, or Antigravity CLI."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(PlanLaunchApprovalMode.YOLO,),
                 activation=PlanModeActivation.CLI_ARGUMENT,
@@ -143,6 +175,114 @@ class OpenCodeAdapter(AbstractAITool):
         This is not Crossby's classifier-mediated --auto tier.
         """
         return ["--auto"]
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``opencode run`` invocation.
+
+        ``--auto`` is deliberately never emitted: OpenCode's own noninteractive
+        permission behavior stays in force, so a permission it cannot resolve is
+        refused natively instead of being auto-approved.
+        """
+        command = ["opencode", "run", "--format", "json", "--log-level", "ERROR"]
+        if request.model:
+            command.extend(("--model", request.model))
+        if request.effort is not None:
+            command.extend(self.effort_args(request.effort))
+        command.append(request.prompt)
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended ``opencode run`` turn and normalize its raw events."""
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            run_managed_command,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            on_stdout_lines=frame_streamer(
+                context,
+                label="opencode",
+                kind_of=lambda frame: non_blank_text(frame.get("type")),
+                provenance_of=lambda frame: {"session_id": non_blank_text(frame.get("sessionID"))},
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        frames = parse_json_lines(output.stdout)
+        if frames is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "OpenCode emitted malformed raw JSON events."),
+            )
+
+        # Progress and provenance were already emitted live by the streamer.
+        session_id: str | None = None
+        text_parts: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+        usage: TokenUsage | None = None
+        for frame in frames:
+            session_id = session_id or non_blank_text(frame.get("sessionID"))
+            kind = non_blank_text(frame.get("type"))
+            part = frame.get("part")
+            if kind == "text" and isinstance(part, dict):
+                text_parts.append(part)
+            elif kind == "step_finish" and isinstance(part, dict):
+                finish_reason = non_blank_text(part.get("reason")) or finish_reason
+                usage = _opencode_usage(part.get("tokens"), session_id) or usage
+
+        if finish_reason is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "OpenCode ended without a terminal step_finish event."),
+            )
+        texts = [text for part in text_parts if (text := non_blank_text(part.get("text")))]
+        if len(text_parts) > 1 and request.native_output is HeadlessNativeOutput.JSONL:
+            warnings = (
+                *warnings,
+                "Only the final native text part is returned; request text output for the "
+                "complete response.",
+            )
+        if finish_reason != "stop":
+            warnings = (*warnings, f"OpenCode finished with native reason {finish_reason!r}.")
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if finish_reason == "stop" and output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text="\n".join(texts) or None,
+            native_object=text_parts[-1] if text_parts else MISSING,
+            native_status=finish_reason,
+            session_id=session_id,
+            usage=usage,
+            warnings=warnings,
+        )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate a caller-supplied public model identifier without server I/O."""
@@ -363,6 +503,27 @@ class OpenCodeAdapter(AbstractAITool):
         """OpenCode uses ``--variant <level>`` (xhigh/max map to high for launches)."""
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
+
+
+def _opencode_usage(tokens: Any, session_id: str | None) -> TokenUsage | None:
+    """Normalize one OpenCode ``step_finish`` token object, cache included."""
+    from crossby.ai_tools.headless_cli import optional_int
+
+    if not isinstance(tokens, Mapping):
+        return None
+    cache = tokens.get("cache")
+    usage = TokenUsage(
+        total_tokens=optional_int(tokens.get("total")),
+        input_tokens=optional_int(tokens.get("input")),
+        output_tokens=optional_int(tokens.get("output")),
+        cached_tokens=optional_int(cache.get("read")) if isinstance(cache, Mapping) else None,
+        session_id=session_id,
+    )
+    if all(
+        value is None for value in (usage.total_tokens, usage.input_tokens, usage.output_tokens)
+    ):
+        return None
+    return usage
 
 
 def _export_session_ids(payload: dict[str, Any]) -> list[str]:

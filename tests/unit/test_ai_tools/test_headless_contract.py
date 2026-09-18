@@ -145,13 +145,56 @@ def test_managed_capability_defaults_unavailable_and_rejects_false_advertising()
     assert capability.managed_supported
 
 
-def test_real_adapters_do_not_advertise_managed_support_yet() -> None:
-    capabilities = [
-        AbstractAITool.get(tool).capabilities() for tool in AbstractAITool.available_tools()
-    ]
+_TERMINAL_HEADLESS_TOOLS = (
+    AIToolID.CLAUDE,
+    AIToolID.CODEX,
+    AIToolID.CURSOR,
+    AIToolID.COPILOT,
+    AIToolID.OPENCODE,
+    AIToolID.ANTIGRAVITY_CLI,
+)
 
-    assert any(capability.supports_headless for capability in capabilities)
-    assert all(not capability.supports_managed_headless_session for capability in capabilities)
+
+def test_every_terminal_adapter_implements_unattended_sessions() -> None:
+    for tool in _TERMINAL_HEADLESS_TOOLS:
+        adapter = AbstractAITool.get(tool)
+        capability = adapter.capabilities().headless
+
+        assert capability.managed_supported, tool
+        assert HeadlessInteractionMode.UNATTENDED in capability.interaction_modes, tool
+        assert capability.verified_version, tool
+        # A declaration is only truthful when the protected hook is real.
+        assert type(adapter)._run_headless_session is not AbstractAITool._run_headless_session, tool
+
+
+def test_non_terminal_adapters_stay_unavailable() -> None:
+    terminal = set(_TERMINAL_HEADLESS_TOOLS)
+    others = [tool for tool in AbstractAITool.available_tools() if tool not in terminal]
+
+    assert others
+    for tool in others:
+        assert not AbstractAITool.get(tool).capabilities().supports_managed_headless_session, tool
+
+
+@pytest.mark.parametrize(
+    ("tool", "schema_supported"),
+    [
+        (AIToolID.CLAUDE, True),
+        (AIToolID.CODEX, True),
+        (AIToolID.ANTIGRAVITY_CLI, True),
+        (AIToolID.CURSOR, False),
+        (AIToolID.COPILOT, False),
+        (AIToolID.OPENCODE, False),
+    ],
+)
+def test_response_schema_support_matches_verified_native_flags(
+    tool: AIToolID,
+    schema_supported: bool,
+) -> None:
+    assert (
+        AbstractAITool.get(tool).capabilities().headless.supports_response_schema
+        is schema_supported
+    )
 
 
 def test_generalized_session_types_preserve_plan_import_identity() -> None:

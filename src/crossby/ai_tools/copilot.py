@@ -12,16 +12,27 @@ from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
     AIToolType,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanArtifactLocation,
+    PlanCommandPolicySupport,
     PlanLaunchApprovalMode,
     PlanModeActivation,
     PlanModeCapability,
+    PlanRequestBehavior,
     TokenUsage,
 )
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 
@@ -44,6 +55,30 @@ class CopilotAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # 1.0.83 advertises --output-format json (JSONL), but its event
+                # schema is not verified, so the managed transport stays on the
+                # documented text response rather than guessing a shape.
+                native_outputs=(HeadlessNativeOutput.TEXT,),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=False,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                # Per-invocation --allow-tool shell(...) entries; no other tool
+                # is auto-approved because --allow-all-tools is never emitted.
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                version_requirement=(
+                    "GitHub Copilot CLI exposing --prompt, --silent, and --no-ask-user."
+                ),
+                verified_version="1.0.83",
+                remediation=(
+                    "Upgrade GitHub Copilot CLI to 1.0.83 or newer. Copilot exposes no "
+                    "final-response JSON Schema flag, so schema-constrained sessions must use "
+                    "Claude Code, Codex CLI, or Antigravity CLI."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(
                     PlanLaunchApprovalMode.YOLO,
@@ -164,6 +199,79 @@ class CopilotAdapter(AbstractAITool):
             # Only convert version number separators (digit-digit)
             return re.sub(r"(\d)-(\d)", r"\1.\2", model_id)
         return model_id
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``copilot --prompt`` invocation."""
+        command = [
+            "copilot",
+            "--prompt",
+            request.prompt,
+            # -s keeps stdout to the agent response alone, and --no-ask-user
+            # removes the ask_user tool so the agent cannot stop on a question
+            # nobody can answer.
+            "-s",
+            "--no-ask-user",
+            "--no-color",
+            "--log-level",
+            "none",
+        ]
+        if request.model:
+            command.extend(("--model", request.model))
+        for path in request.trusted_dirs:
+            command.extend(self.plan_dir_args(str(path)))
+        if request.command_policy is not None:
+            command.extend(
+                self.allowed_commands_args(list(request.command_policy.allowed_commands))
+            )
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended Copilot prompt turn and normalize its text response."""
+        from crossby.ai_tools.headless_cli import (
+            capture_failure_warnings,
+            complete_session,
+            run_managed_command,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+        )
+        warnings = capture_failure_warnings(output)
+        # --allow-all-tools is deliberately never emitted, so any tool call
+        # outside the session's explicit --allow-tool entries is refused by
+        # Copilot rather than escalated to a prompt.
+        warnings = (
+            *warnings,
+            "Copilot ran without --allow-all-tools, so tool calls outside the session command "
+            "policy are denied natively.",
+        )
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text=output.stdout.strip() or None,
+            warnings=warnings,
+        )
 
     def scene_launch_concerns(self) -> set[str]:
         """Copilot scopes only MCP at launch (per-server disable + allow filter)."""
