@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from crossby.models.ai import (
     HeadlessSessionRequest,
     HeadlessSessionResult,
     HeadlessTerminalStatus,
+    PlanCommandPolicy,
 )
 from crossby.utils.versioning import BinaryVersion, parse_semver
 
@@ -755,3 +757,178 @@ def test_timeout_kills_the_process_tree_and_keeps_partial_provenance(
     else:  # pragma: no cover - only on a cleanup regression
         os.kill(grandchild, signal.SIGKILL)
         pytest.fail("the managed timeout left an owned descendant running")
+
+
+# --- exact unattended argv assembly ------------------------------------------
+#
+# The suite above replaces ``_headless_command`` with a deterministic stub so it
+# can drive a real child process. These cases cover the opposite half: the real
+# flags each adapter hands the native CLI, including the ones that make a run
+# unattended in the first place.
+
+
+def _command(tool: AIToolID, request: HeadlessSessionRequest, **kwargs: Any) -> list[str]:
+    """Return the argv one adapter would hand its native CLI for ``request``."""
+    # _headless_command is defined per adapter, not on AbstractAITool.
+    build: Callable[..., list[str]] = AbstractAITool.get(tool)._headless_command  # type: ignore[attr-defined]
+    return build(request, **kwargs)
+
+
+def test_claude_headless_argv_denies_prompts_and_keeps_the_prompt_off_argv(
+    tmp_path: Path,
+) -> None:
+    command = _command(
+        AIToolID.CLAUDE,
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL, response_schema=SCHEMA),
+    )
+
+    assert command == [
+        "claude",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--permission-prompts",
+        "none",
+        "--verbose",
+        "--json-schema",
+        json.dumps(SCHEMA, separators=(",", ":")),
+    ]
+    assert PROMPT not in command
+
+
+def test_claude_headless_argv_normalizes_the_model_to_dashed_form(tmp_path: Path) -> None:
+    # Crossby's internal spelling is dotted; the Claude CLI only accepts dashed.
+    command = _command(AIToolID.CLAUDE, _request(tmp_path, model="claude-haiku-4.5"))
+
+    assert command[command.index("--model") + 1] == "claude-haiku-4-5"
+
+
+def test_claude_headless_argv_scopes_the_command_policy_to_the_session(tmp_path: Path) -> None:
+    command = _command(
+        AIToolID.CLAUDE,
+        _request(
+            tmp_path,
+            trusted_dirs=(tmp_path / "shared",),
+            command_policy=PlanCommandPolicy(allowed_commands=["pytest:*"]),
+        ),
+    )
+
+    assert command[command.index("--add-dir") + 1] == str(tmp_path / "shared")
+    assert command[command.index("--allowedTools") + 1] == "Bash(pytest:*)"
+    # An empty --setting-sources keeps ambient allowlists from widening the policy.
+    assert command[command.index("--setting-sources") + 1] == ""
+
+
+def test_codex_headless_argv_pins_sandbox_and_network(tmp_path: Path) -> None:
+    command = _command(AIToolID.CODEX, _request(tmp_path), schema_path=None)
+
+    assert command[:6] == ["codex", "exec", "--json", "--color", "never", "--sandbox"]
+    assert command[6] == "workspace-write"
+    assert "sandbox_workspace_write.network_access=false" in command
+    # A bare trailing "-" is what keeps the prompt on stdin.
+    assert command[-1] == "-"
+    assert PROMPT not in command
+
+
+def test_codex_headless_argv_opens_the_sandbox_only_when_asked(tmp_path: Path) -> None:
+    command = _command(
+        AIToolID.CODEX,
+        _request(tmp_path, sandbox=False, network_access=True),
+        schema_path=None,
+    )
+
+    assert command[command.index("--sandbox") + 1] == "danger-full-access"
+    # Outside a sandbox there is no workspace-write policy to pin.
+    assert not any(part.startswith("sandbox_workspace_write.") for part in command)
+
+
+def test_codex_headless_argv_passes_the_schema_file(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.json"
+    command = _command(
+        AIToolID.CODEX, _request(tmp_path, response_schema=SCHEMA), schema_path=schema_path
+    )
+
+    assert command[command.index("--output-schema") + 1] == str(schema_path)
+
+
+def test_cursor_headless_argv_trusts_the_workspace_without_forcing_edits(
+    tmp_path: Path,
+) -> None:
+    command = _command(AIToolID.CURSOR, _request(tmp_path, native_output=HeadlessNativeOutput.JSON))
+
+    assert command[:4] == ["agent", "--print", "--output-format", "json"]
+    # --trust answers the workspace-trust gate; per-tool approval stays gated.
+    assert "--trust" in command
+    assert command[command.index("--sandbox") + 1] == "enabled"
+    assert "--force" not in command and "--yolo" not in command
+    # Cursor takes its prompt as the trailing positional argument.
+    assert command[-1] == PROMPT
+
+
+def test_copilot_headless_argv_removes_the_question_tool(tmp_path: Path) -> None:
+    command = _command(AIToolID.COPILOT, _request(tmp_path))
+
+    assert command[:3] == ["copilot", "--prompt", PROMPT]
+    # -s keeps stdout to the response; --no-ask-user removes the ask_user tool
+    # so the agent cannot stall on a question nobody can answer.
+    assert "-s" in command
+    assert "--no-ask-user" in command
+
+
+def test_copilot_headless_argv_normalizes_the_model_to_dotted_form(tmp_path: Path) -> None:
+    # The Copilot CLI rejects Claude IDs unless the version uses dotted notation.
+    command = _command(AIToolID.COPILOT, _request(tmp_path, model="claude-haiku-4-5"))
+
+    assert command[command.index("--model") + 1] == "claude-haiku-4.5"
+
+
+def test_opencode_headless_argv_never_auto_approves(tmp_path: Path) -> None:
+    command = _command(AIToolID.OPENCODE, _request(tmp_path, model="anthropic/claude-haiku-4-5"))
+
+    assert command[:6] == ["opencode", "run", "--format", "json", "--log-level", "ERROR"]
+    # --auto would auto-approve permissions; OpenCode's own noninteractive
+    # refusal is the intended behavior instead.
+    assert "--auto" not in command
+    assert command[command.index("--model") + 1] == "anthropic/claude-haiku-4-5"
+    assert command[-1] == PROMPT
+
+
+def test_antigravity_headless_argv_carries_the_schema_and_print_timeout(
+    tmp_path: Path,
+) -> None:
+    command = _command(
+        AIToolID.ANTIGRAVITY_CLI,
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON, response_schema=SCHEMA),
+        print_timeout_seconds=120,
+    )
+
+    assert command[:4] == ["agy", "--print", PROMPT, "--output-format"]
+    assert command[4] == "json"
+    assert command[command.index("--print-timeout") + 1] == "120s"
+    assert command[command.index("--json-schema") + 1] == json.dumps(SCHEMA, separators=(",", ":"))
+
+
+def test_antigravity_print_timeout_uses_the_whole_run_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agy --print-timeout`` bounds the whole run, not one idle stretch.
+
+    Deriving it from the idle budget would abort a healthy streaming turn as
+    soon as the shorter idle window elapsed.
+    """
+    recorded: list[int] = []
+    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout="OK\n"))
+    stub: Callable[..., list[str]] = type(adapter)._headless_command  # type: ignore[attr-defined]
+
+    def record(self: AbstractAITool, request: HeadlessSessionRequest, **kwargs: Any) -> list[str]:
+        recorded.append(int(kwargs["print_timeout_seconds"]))
+        return list(stub(self, request, **kwargs))
+
+    monkeypatch.setattr(type(adapter), "_headless_command", record, raising=True)
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, timeout_seconds=120.0, idle_timeout_seconds=5.0)
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert recorded and recorded[0] > 5

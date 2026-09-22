@@ -419,7 +419,7 @@ adapter's remediation rather than running with a guessed contract.
 | Cursor | 2026.09.10-fd3934a | `agent --print` | argument | json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
 | GitHub Copilot CLI | 1.0.83 | `copilot --prompt -s` | argument | text | not supported | `--no-ask-user` removes `ask_user`; `--allow-all-tools` is never emitted, so tools outside the session command policy are denied |
 | OpenCode | 1.18.31 | `opencode run --format json` | argument | text, jsonl | not supported | `--auto` is never emitted, so OpenCode's own noninteractive permission behavior stands |
-| Antigravity CLI | 1.2.6 | `agy --print` | argument | text, json, stream-json | `--json-schema` | `--print-timeout` carries the remaining Crossby deadline; a native waiting state fails the session instead of stalling |
+| Antigravity CLI | 1.2.6 | `agy --print` | argument | text, json, stream-json | `--json-schema` | `--print-timeout` carries the session's overall Crossby deadline (it bounds the whole run, not one idle stretch); a native waiting state fails the session instead of stalling |
 
 Unattended behavior is uniform above the adapters. An unattended run never
 inherits parent stdin — a prompt is written to a pipe that is then closed, and

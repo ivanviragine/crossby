@@ -20,7 +20,9 @@ and is enforced as the runtime floor.
 --output-format=stream-json requires --verbose"), so the adapter always emits
 it. `codex exec --output-schema` takes a *file path*, not inline JSON, so the
 adapter writes a temporary schema file outside the workspace.
-`agy --print-timeout` takes a duration string (`60s`). `agent --print` stops on
+`agy --print-timeout` takes a duration string (`60s`) and bounds the *whole*
+run, so the adapter derives it from the session's overall deadline rather than
+from the shorter idle budget. `agent --print` stops on
 an interactive workspace-trust gate — "Pass --trust, --yolo, or -f if you trust
 this directory" — which is exactly the class of stall an unattended session must
 never hit, so the adapter passes `--trust` while still withholding

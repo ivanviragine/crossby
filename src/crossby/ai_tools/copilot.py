@@ -216,7 +216,7 @@ class CopilotAdapter(AbstractAITool):
             "none",
         ]
         if request.model:
-            command.extend(("--model", request.model))
+            command.extend(("--model", self.normalize_model_format(request.model)))
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
         if request.command_policy is not None:

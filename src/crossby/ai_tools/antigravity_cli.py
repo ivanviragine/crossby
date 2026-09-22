@@ -300,7 +300,10 @@ class AntigravityCLIAdapter(AbstractAITool):
             context,
             argv=self._headless_command(
                 request,
-                print_timeout_seconds=max(1, int(context.remaining_seconds())),
+                # --print-timeout bounds the whole run, so it must carry the
+                # overall deadline. context.remaining_seconds() is clamped to the
+                # idle budget, which would abort a healthy streaming turn.
+                print_timeout_seconds=max(1, int(context.deadline - time.monotonic())),
             ),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),

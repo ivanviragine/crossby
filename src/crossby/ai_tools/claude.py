@@ -301,7 +301,7 @@ class ClaudeAdapter(AbstractAITool):
                 ("--json-schema", json.dumps(request.response_schema, separators=(",", ":")))
             )
         if request.model:
-            command.extend(("--model", request.model))
+            command.extend(("--model", self.normalize_model_format(request.model)))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
         for path in request.trusted_dirs:
