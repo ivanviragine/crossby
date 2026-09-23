@@ -166,6 +166,14 @@ class TestModelRegistry:
             ("opencode", "google/gemini-2.0-flash"),
             # Marked deprecated by OpenCode Zen.
             ("opencode", "opencode/hy3-free"),
+            # No longer offered by the tool's own CLI (logged-in probe run), and
+            # absent from the provider's docs as well.
+            ("codex", "gpt-5.1"),
+            ("codex", "gpt-5.3-codex-spark"),
+            ("antigravity-cli", "gemini-3.5-flash"),
+            ("opencode", "google/gemini-1.5-pro"),
+            ("opencode", "google/antigravity-claude-sonnet-4.6"),
+            ("opencode", "github-copilot/gpt-4o"),
             # Claude models older than 4.6 are out of scope for crossby.
             ("cursor", "claude-4.5-opus-high"),
             ("cursor", "sonnet-4.5"),
@@ -205,16 +213,17 @@ class TestRegistryGetModels:
         assert "gemini-3.8-flash-low" not in model_ids
         assert "gemini-3.6-flash" in model_ids
         assert "gemini-3.6-flash-high" not in model_ids
-        # Not an effort variant of gpt-oss-120b: `agy models` reports both as
-        # distinct fixed IDs, so the catalog stores the suffix verbatim.
-        assert "gpt-oss-120b" in model_ids
+        # A fixed provider ID, not an effort variant: `agy models` reports it
+        # with the suffix (and no longer offers the bare gpt-oss-120b), so the
+        # catalog stores the suffix verbatim.
         assert "gpt-oss-120b-medium" in model_ids
+        assert "gpt-oss-120b" not in model_ids
 
     def test_codex_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.CODEX)
         models = adapter.get_models()
         assert len(models) == len(get_models_for_tool("codex"))
-        assert any("codex" in m.id for m in models)
+        assert "gpt-6-sol" in [m.id for m in models]
 
     def test_opencode_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.OPENCODE)
