@@ -546,15 +546,15 @@ class TestCrossProviderModelTranslation:
             cmd = adapter.build_launch_command(model="claude-sonnet-4.6")
         assert "--model" in cmd
         idx = cmd.index("--model")
-        # Sonnet maps to gpt-5.4-mini per family mapping.
-        assert cmd[idx + 1] == "gpt-5.4-mini"
+        # Sonnet maps to gpt-6-luna per family mapping.
+        assert cmd[idx + 1] == "gpt-6-luna"
 
     def test_claude_opus_to_codex(self) -> None:
         adapter = AbstractAITool.get("codex")
         with pytest.warns(UserWarning, match="Translating model"):
             cmd = adapter.build_launch_command(model="claude-opus-4.6")
         idx = cmd.index("--model")
-        assert cmd[idx + 1] == "gpt-5.4"
+        assert cmd[idx + 1] == "gpt-6-sol"
 
     def test_effort_biased_when_translating_to_codex(self) -> None:
         from crossby.models.ai import EffortLevel
@@ -574,11 +574,11 @@ class TestCrossProviderModelTranslation:
     def test_codex_model_translated_for_claude(self) -> None:
         adapter = AbstractAITool.get("claude")
         with pytest.warns(UserWarning, match="Translating model"):
-            cmd = adapter.build_launch_command(model="gpt-5.4")
+            cmd = adapter.build_launch_command(model="gpt-6-sol")
         idx = cmd.index("--model")
-        # gpt-5.4 reverse-maps to claude-opus-5; normalize_model_format leaves
-        # it unchanged (no dotted digit pair to dash).
-        assert cmd[idx + 1] == "claude-opus-5"
+        # gpt-6-sol reverse-maps to claude-opus-5.5, which
+        # normalize_model_format dashes for the Claude CLI.
+        assert cmd[idx + 1] == "claude-opus-5-5"
 
     def test_native_model_not_translated(self) -> None:
         # Claude → Claude with a native id should not warn.

@@ -85,9 +85,22 @@ class ModelFamilyMapping:
 # Family mapping with effort-bias-by-family, plus an XHIGH ↔ MAX
 # round-trip so reverse(forward(x)) ≈ x for the common cases.
 MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
+    # Fable and Opus follow OpenAI's own GPT-6 tiering: Astra is the most
+    # capable model and Sol is the documented replacement for gpt-5.4.
+    ModelFamilyMapping(
+        claude_prefix="claude-fable",
+        codex_model="gpt-6-astra",
+        effort_forward=(
+            (EffortLevel.LOW, EffortLevel.LOW),
+            (EffortLevel.MEDIUM, EffortLevel.MEDIUM),
+            (EffortLevel.HIGH, EffortLevel.HIGH),
+            (EffortLevel.XHIGH, EffortLevel.XHIGH),
+            (EffortLevel.MAX, EffortLevel.XHIGH),
+        ),
+    ),
     ModelFamilyMapping(
         claude_prefix="claude-opus",
-        codex_model="gpt-5.4",
+        codex_model="gpt-6-sol",
         effort_forward=(
             (EffortLevel.LOW, EffortLevel.LOW),
             (EffortLevel.MEDIUM, EffortLevel.MEDIUM),
@@ -100,7 +113,7 @@ MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
     # coding-agent behavior expectations.
     ModelFamilyMapping(
         claude_prefix="claude-sonnet",
-        codex_model="gpt-5.4-mini",
+        codex_model="gpt-6-luna",
         effort_forward=(
             (EffortLevel.LOW, EffortLevel.MEDIUM),
             (EffortLevel.MEDIUM, EffortLevel.HIGH),
@@ -111,7 +124,7 @@ MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
     ),
     ModelFamilyMapping(
         claude_prefix="claude-haiku",
-        codex_model="gpt-5.4-mini",
+        codex_model="gpt-6-luna",
         effort_forward=(
             (EffortLevel.LOW, EffortLevel.LOW),
             (EffortLevel.MEDIUM, EffortLevel.MEDIUM),
@@ -127,9 +140,17 @@ MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
 # (multiple Claude families collapse to one Codex family), so we pick a
 # sensible default per Codex family and let users override.
 CODEX_TO_CLAUDE_DEFAULTS: dict[str, str] = {
-    "gpt-5.4": "claude-opus-5",
-    "gpt-5.5": "claude-opus-5",
-    "gpt-5.4-mini": "claude-sonnet-4.6",
+    "gpt-6-astra": "claude-fable-5.1",
+    "gpt-6-sol": "claude-opus-5.5",
+    "gpt-6-luna": "claude-sonnet-5",
+    "gpt-5.6-sol": "claude-opus-5.5",
+    "gpt-5.6-terra": "claude-sonnet-5",
+    "gpt-5.6-luna": "claude-sonnet-5",
+    # Retired from Codex with ChatGPT sign-in, but still accepted by the
+    # OpenAI API, so existing configs that name them keep translating.
+    "gpt-5.5": "claude-opus-5.5",
+    "gpt-5.4": "claude-opus-5.5",
+    "gpt-5.4-mini": "claude-sonnet-5",
 }
 
 

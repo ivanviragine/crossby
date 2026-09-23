@@ -84,12 +84,10 @@ class TestModelRegistry:
     @pytest.mark.parametrize(
         "model",
         [
-            "gemini-3.1-pro-preview",
-            "gemini-3.5-flash",
-            "gemini-3.6-flash",
             "gemini-3.7-flash",
+            "gemini-3.8-flash",
             "gpt-5.4",
-            "mai-code-1-flash",
+            "mai-code-1.1-flash",
         ],
     )
     def test_copilot_registry_includes_current_cli_models(self, model: str) -> None:
@@ -98,7 +96,6 @@ class TestModelRegistry:
     @pytest.mark.parametrize(
         "model",
         [
-            "github-copilot/gemini-3.6-flash",
             "github-copilot/gemini-3.7-flash",
             "github-copilot/grok-4.5",
             "github-copilot/grok-4.6",
@@ -108,7 +105,6 @@ class TestModelRegistry:
             "google/antigravity-claude-sonnet-4-6",
             "google/gemini-3.7-flash",
             "google/gemini-3.8-flash",
-            "opencode/hy3-free",
             "opencode/ling-3.0-flash-fin-free",
             "opencode/muse-spark-1.2-contributor-free",
             "opencode/muse-spark-1.3-contributor-free",
@@ -144,6 +140,34 @@ class TestModelRegistry:
     def test_copilot_registry_includes_new_generation(self, model: str) -> None:
         assert model in get_models_for_tool("copilot")
 
+    @pytest.mark.parametrize(
+        ("tool", "model"),
+        [
+            # Retired from Codex with ChatGPT sign-in (Codex models docs).
+            ("codex", "gpt-5.4"),
+            ("codex", "gpt-5.4-mini"),
+            ("codex", "gpt-5.5"),
+            ("codex", "gpt-5.3-codex"),
+            # Retired or scheduled for retirement in Copilot's retirement history.
+            ("copilot", "claude-sonnet-4.6"),
+            ("copilot", "claude-opus-4.7"),
+            ("copilot", "gpt-4.1"),
+            ("copilot", "mai-code-1-flash"),
+            # Retired on the Claude API.
+            ("opencode", "anthropic/claude-3-opus-20240229"),
+            ("opencode", "anthropic/claude-opus-4.1"),
+            # Shut down on the OpenAI API.
+            ("cursor", "gpt-5.2-codex"),
+            ("opencode", "openai/codex-mini-latest"),
+            # Shut down on the Gemini API.
+            ("opencode", "google/gemini-2.0-flash"),
+            # Marked deprecated by OpenCode Zen.
+            ("opencode", "opencode/hy3-free"),
+        ],
+    )
+    def test_deprecated_models_are_pruned(self, tool: str, model: str) -> None:
+        assert model not in get_models_for_tool(tool)
+
 
 class TestRegistryGetModels:
     """Verify that adapters read correctly from the static registry."""
@@ -158,7 +182,7 @@ class TestRegistryGetModels:
         adapter = AbstractAITool.get(AIToolID.COPILOT)
         models = adapter.get_models()
         assert len(models) == len(get_models_for_tool("copilot"))
-        assert "gpt-4.1" in [m.id for m in models]
+        assert "gpt-6-sol" in [m.id for m in models]
 
     def test_antigravity_cli_adapter_reads_registry(self) -> None:
         adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)

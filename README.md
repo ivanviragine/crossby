@@ -295,7 +295,7 @@ crossby launch --scene pr-review
 
 # Precedence is explicit flags > scene > profile > ai: defaults, so an explicit
 # --profile or --model still wins over the scene's profile.
-crossby launch --scene pr-review --tool codex --model gpt-5.2
+crossby launch --scene pr-review --tool codex --model gpt-6-sol
 ```
 
 `--scene` selects exactly **one** launch tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`). A persistent fallback may additionally record another installed tool that shares the same physical capability directory (currently Codex and Antigravity CLI share `.agents/skills`), because re-pointing that directory necessarily affects both. Rendered session artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one. If that exact path contains a hand-written profile, crossby preserves it byte-for-byte and routes the launch through the recoverable persistent fallback instead.
@@ -749,12 +749,12 @@ CLI flags can drift between versions, so treat the table as a point-in-time snap
 `crossby launch` translates model ids across families when the target tool wouldn't accept the source family natively:
 
 ```bash
-# Pass a Claude model id to Codex — translated to gpt-5.4-mini under the hood
-crossby launch --tool codex --model claude-sonnet-4.6 --effort high
-# → codex --model gpt-5.4-mini -c model_reasoning_effort=xhigh
+# Pass a Claude model id to Codex — translated to gpt-6-luna under the hood
+crossby launch --tool codex --model claude-sonnet-5 --effort high
+# → codex --model gpt-6-luna -c model_reasoning_effort=xhigh
 ```
 
-Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-5.4` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
+Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-6-sol` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
 
 ### Codex interactive Plan startup and events
 
@@ -984,7 +984,7 @@ models:                           # per-tool, per-complexity-tier overrides
     complex_effort: high          # …and raise effort to `high` for that tier
     very_complex_effort: xhigh
   codex:
-    complex: gpt-5.4
+    complex: gpt-6-sol
     complex_effort: xhigh
 
 profiles:

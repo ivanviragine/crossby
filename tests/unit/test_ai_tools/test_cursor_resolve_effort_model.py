@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import pytest
 
-from crossby.ai_tools.cursor import CursorAdapter
+from crossby.ai_tools.cursor import _EFFORT_LEVEL_SUFFIXES, CursorAdapter
 from crossby.data import get_models_for_tool
 from crossby.models.ai import EffortLevel
 
 
 def _pick_known_base_with_thinking() -> str:
-    """Pick a registry entry where ``<base>-thinking`` also exists."""
+    """Pick a registry entry where ``<base>-thinking`` also exists.
+
+    Bases that already encode an effort level (``claude-4.5-opus-high``) are
+    skipped: the resolver deliberately leaves those unchanged.
+    """
     known = set(get_models_for_tool("cursor"))
     for model in sorted(known):
-        if not model.endswith("-thinking") and f"{model}-thinking" in known:
+        if (
+            not model.endswith("-thinking")
+            and not model.endswith(tuple(_EFFORT_LEVEL_SUFFIXES))
+            and f"{model}-thinking" in known
+        ):
             return model
     pytest.skip("No cursor model with a '-thinking' variant in the registry")
 

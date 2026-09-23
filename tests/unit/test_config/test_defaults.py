@@ -48,7 +48,6 @@ _EXPECTED_TIERS: dict[str, ModelTier] = {
     "claude-haiku-4.5": ModelTier.FAST,
     "claude-opus-5.5": ModelTier.POWERFUL,
     "claude-opus-5-high": ModelTier.POWERFUL,
-    "claude-sonnet-4.6": ModelTier.BALANCED,
     "claude-sonnet-5": ModelTier.BALANCED,
     "composer-2.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
     # "fast" is not a FAST keyword (haiku/flash/spark/mini/luna are), so this
@@ -198,7 +197,7 @@ class TestClaudeTierDefaults:
     [
         (
             AIToolID.COPILOT,
-            ("claude-haiku-4.5", "claude-sonnet-4.6", "claude-sonnet-4.6", "gpt-5.4"),
+            ("claude-haiku-4.5", "claude-sonnet-5", "claude-sonnet-5", "gpt-5.4"),
         ),
         (
             AIToolID.ANTIGRAVITY_CLI,

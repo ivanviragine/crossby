@@ -63,24 +63,31 @@ class TestModelFamily:
     def test_find_opus(self) -> None:
         mapping = find_claude_family("claude-opus-4-7")
         assert mapping is not None
-        assert mapping.codex_model == "gpt-5.4"
+        assert mapping.codex_model == "gpt-6-sol"
 
-    def test_find_opus_5(self) -> None:
-        # Opus 5 resolves via the existing claude-opus family prefix (no code change).
-        mapping = find_claude_family("claude-opus-5")
+    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-opus-5.5"])
+    def test_find_opus_5(self, model: str) -> None:
+        # Opus 5.x resolves via the existing claude-opus family prefix.
+        mapping = find_claude_family(model)
         assert mapping is not None
         assert mapping.claude_prefix == "claude-opus"
-        assert mapping.codex_model == "gpt-5.4"
+        assert mapping.codex_model == "gpt-6-sol"
+
+    def test_find_fable(self) -> None:
+        mapping = find_claude_family("claude-fable-5.1")
+        assert mapping is not None
+        assert mapping.claude_prefix == "claude-fable"
+        assert mapping.codex_model == "gpt-6-astra"
 
     def test_find_sonnet(self) -> None:
         mapping = find_claude_family("claude-sonnet-4.6")
         assert mapping is not None
-        assert mapping.codex_model == "gpt-5.4-mini"
+        assert mapping.codex_model == "gpt-6-luna"
 
     def test_find_haiku(self) -> None:
         mapping = find_claude_family("claude-haiku-4-5")
         assert mapping is not None
-        assert mapping.codex_model == "gpt-5.4-mini"
+        assert mapping.codex_model == "gpt-6-luna"
 
     def test_unknown_returns_none(self) -> None:
         assert find_claude_family("gpt-5.4") is None
@@ -91,10 +98,14 @@ class TestModelTranslation:
     @pytest.mark.parametrize(
         ("claude", "codex"),
         [
-            ("claude-opus-4-7", "gpt-5.4"),
-            ("claude-opus-4.6", "gpt-5.4"),
-            ("claude-sonnet-4.6", "gpt-5.4-mini"),
-            ("claude-haiku-4-5", "gpt-5.4-mini"),
+            ("claude-fable-5.1", "gpt-6-astra"),
+            ("claude-fable-5-1", "gpt-6-astra"),
+            ("claude-opus-5.5", "gpt-6-sol"),
+            ("claude-opus-4-7", "gpt-6-sol"),
+            ("claude-opus-4.6", "gpt-6-sol"),
+            ("claude-sonnet-5", "gpt-6-luna"),
+            ("claude-sonnet-4.6", "gpt-6-luna"),
+            ("claude-haiku-4-5", "gpt-6-luna"),
         ],
     )
     def test_claude_to_codex(self, claude: str, codex: str) -> None:
@@ -106,9 +117,16 @@ class TestModelTranslation:
     @pytest.mark.parametrize(
         ("codex", "claude"),
         [
-            ("gpt-5.4", "claude-opus-5"),
-            ("gpt-5.5", "claude-opus-5"),
-            ("gpt-5.4-mini", "claude-sonnet-4.6"),
+            ("gpt-6-astra", "claude-fable-5.1"),
+            ("gpt-6-sol", "claude-opus-5.5"),
+            ("gpt-6-luna", "claude-sonnet-5"),
+            ("gpt-5.6-sol", "claude-opus-5.5"),
+            ("gpt-5.6-terra", "claude-sonnet-5"),
+            ("gpt-5.6-luna", "claude-sonnet-5"),
+            # Retired from Codex, still translated for existing configs.
+            ("gpt-5.4", "claude-opus-5.5"),
+            ("gpt-5.5", "claude-opus-5.5"),
+            ("gpt-5.4-mini", "claude-sonnet-5"),
         ],
     )
     def test_codex_to_claude(self, codex: str, claude: str) -> None:
@@ -168,6 +186,11 @@ class TestEffortCodexToClaude:
             # Codex MEDIUM came from Sonnet LOW, Codex HIGH came from Sonnet MEDIUM.
             ("gpt-5.4-mini", EffortLevel.MEDIUM, EffortLevel.LOW),
             ("gpt-5.4-mini", EffortLevel.HIGH, EffortLevel.MEDIUM),
+            # GPT-6: Astra/Sol reverse to Fable/Opus 1:1; Luna reverses the
+            # Sonnet bias.
+            ("gpt-6-astra", EffortLevel.HIGH, EffortLevel.HIGH),
+            ("gpt-6-sol", EffortLevel.HIGH, EffortLevel.HIGH),
+            ("gpt-6-luna", EffortLevel.HIGH, EffortLevel.MEDIUM),
         ],
     )
     def test_known_pairs(
