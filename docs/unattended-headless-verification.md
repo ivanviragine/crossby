@@ -24,9 +24,11 @@ adapter writes a temporary schema file outside the workspace.
 message is supplied, so the managed adapter delivers its prompt on stdin and
 closes the stream at EOF. Antigravity's verified `--print` text and JSON modes
 take their prompt from argv; its stdin stream-json protocol requires a paired
-stream-json output redesign, so the adapter does not substitute it. Argument
-transports reject prompts above 120,000 UTF-8 bytes on POSIX or 30,000 rendered
-UTF-16 command-line units on Windows before any version probe or child spawn.
+stream-json output redesign, so the adapter does not substitute it. Any prompt
+or inline response schema carried in argv is validated before a version probe
+or child spawn: POSIX arguments are limited to 120,000 UTF-8 bytes, and Windows
+validates the complete rendered command line against its 32,767 UTF-16-unit
+limit.
 `agy --print-timeout` takes a duration string (`60s`) and bounds the *whole*
 run, so the adapter derives it from the session's overall deadline rather than
 from the shorter idle budget. `agent --print` stops on
