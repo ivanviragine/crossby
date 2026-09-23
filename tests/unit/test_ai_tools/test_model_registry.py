@@ -57,10 +57,25 @@ class TestModelRegistry:
             "kimi-k3-high",
             "kimi-k3-low",
             "kimi-k3-max",
+            "grok-4.7-high",
+            "grok-4.7-xhigh-fast",
+            "muse-spark-1.3-minimal",
+            "muse-spark-1.3-max",
         ],
     )
     def test_cursor_registry_includes_live_cli_models(self, model: str) -> None:
         assert model in get_models_for_tool("cursor")
+
+    def test_cursor_registry_includes_all_opus_5_5_variants(self) -> None:
+        # Exactly what a logged-in `agent --list-models` reports: every effort
+        # level with a -fast twin, and no -thinking variants.
+        efforts = ("low", "medium", "high", "xhigh", "max")
+        expected = {e for effort in efforts for e in (effort, f"{effort}-fast")}
+        assert {
+            model.removeprefix("claude-opus-5-5-")
+            for model in get_models_for_tool("cursor")
+            if model.startswith("claude-opus-5-5-")
+        } == expected
 
     def test_cursor_registry_includes_all_fable_5_1_variants(self) -> None:
         suffixes = {
@@ -161,6 +176,12 @@ class TestModelRegistry:
             ("opencode", "anthropic/claude-opus-4.1"),
             # Shut down on the OpenAI API.
             ("cursor", "gpt-5.2-codex"),
+            # No longer offered by a logged-in `agent --list-models`.
+            ("cursor", "composer-2"),
+            ("cursor", "gpt-5.3-codex-spark-preview"),
+            ("cursor", "sonnet-4.6"),
+            # Still offered by Cursor, but below the 4.6 Claude cutoff.
+            ("cursor", "claude-4-sonnet"),
             ("opencode", "openai/codex-mini-latest"),
             # Shut down on the Gemini API.
             ("opencode", "google/gemini-2.0-flash"),

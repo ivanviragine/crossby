@@ -35,7 +35,7 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         easy="composer-2.5-fast",
         medium="composer-2.5",
         complex="composer-2.5",
-        very_complex="claude-opus-5-high",
+        very_complex="claude-opus-5-5-high",
     ),
     AIToolID.OPENCODE: ComplexityModelMapping(
         easy="anthropic/claude-haiku-4.5",
