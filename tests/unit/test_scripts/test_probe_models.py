@@ -277,3 +277,176 @@ def test_probe_routing_matches_registry_keys_exactly() -> None:
 
     assert set(PROBE_MODULE._MODEL_PROBES) == registry_keys
     assert set(PROBE_MODULE._MODEL_PROBE_SOURCES) == registry_keys
+
+
+class TestDeprecationParsing:
+    """Provider retirement pages feed the probe's deprecation filter."""
+
+    def test_claude_reads_status_table_not_replacements(self) -> None:
+        # The history below the status table names each retirement's
+        # replacement, which is an active model and must not be picked up.
+        page = """
+        <a id="model-status" href="#model-status">Model status</a>
+        <h2 id="model-status">Model status</h2>
+        <table>
+        <tr><td>claude-opus-5-5</td><td>Active</td></tr>
+        <tr><td>claude-mythos-preview</td><td>Deprecated</td></tr>
+        <tr><td>claude-opus-4-1-20250805</td><td>Retired</td></tr>
+        <tr><td>claude-haiku-4-5-20251001</td><td>Active</td></tr>
+        </table>
+        <h2 id="deprecation-history">Deprecation history</h2>
+        <tr><td>claude-opus-4-1-20250805</td><td>claude-opus-4-8</td></tr>
+        """
+
+        assert PROBE_MODULE.parse_claude_deprecations(page) == {
+            "claude-mythos-preview",
+            "claude-opus-4.1",
+        }
+
+    def test_copilot_retirement_table_slugs_display_names(self) -> None:
+        page = """
+        <a href="#model-retirement-history">Model retirement history</a>
+        <h2 id="model-retirement-history">Model retirement history</h2>
+        <table>
+        <tr><th>Model name</th><th>Retirement date</th><th>Suggested alternative</th></tr>
+        <tr><th scope="row">Claude Sonnet 4.6<sup><a href="#fn">5</a></sup></th>
+            <td>2026-09-01</td><td>Claude Sonnet 5</td></tr>
+        <tr><th scope="row">GPT-5.2-Codex</th><td>2026-06-05</td><td>GPT-5.3-Codex</td></tr>
+        <tr><th scope="row">Claude Opus 4.6 (fast mode) (preview)</th>
+            <td>2026-06-29</td><td>Claude Opus 4.8 (fast mode) (preview)</td></tr>
+        </table>
+        <h2 id="next-steps">Next steps</h2>
+        <table><tr><th>Claude Opus 5</th></tr></table>
+        """
+
+        # A retired fast-mode variant must not read as its base model retiring,
+        # and the suggested alternatives are never collected.
+        assert PROBE_MODULE.parse_copilot_retirements(page) == {
+            "claude-sonnet-4.6",
+            "gpt-5.2-codex",
+            "claude-opus-4.6-fast",
+        }
+
+    def test_codex_deprecated_section_excludes_recommended_replacements(self) -> None:
+        page = """
+        <nav><a id="recommended-models"></a><a id="other-models"></a>
+        <a id="deprecated-codex-models"></a>
+        <a id="configure-your-default-local-model"></a></nav>
+        <h2 id="recommended-models">Recommended models</h2>
+        <code>codex -m gpt-6-sol</code> <code>codex -m gpt-6-luna</code>
+        <h2 id="other-models">Other models</h2>
+        <code>codex -m gpt-5.5</code>
+        <h2 id="deprecated-codex-models">Deprecated Codex models</h2>
+        <p>Replace gpt-5.4 with gpt-6-sol and gpt-5.4-mini with gpt-6-luna.</p>
+        <p>The gpt-5.2 and gpt-5.3-codex models are already deprecated.</p>
+        <h2 id="configure-your-default-local-model">Configure</h2>
+        <p>model = "gpt-6-sol"</p>
+        """
+
+        assert PROBE_MODULE.parse_codex_deprecations(page) == {
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.2",
+            "gpt-5.3-codex",
+        }
+
+    def test_opencode_combines_models_dev_status_and_copilot_retirements(self) -> None:
+        catalog = {
+            "opencode": {
+                "models": {
+                    "hy3-free": {"name": "Hy3", "status": "deprecated"},
+                    "mimo-v2.6-flash-free": {"name": "MiMo"},
+                }
+            },
+            "github-copilot": {
+                "models": {
+                    "mai-code-1-flash-picker": {"name": "MAI-Code-1-Flash"},
+                    "claude-opus-5": {"name": "Claude Opus 5"},
+                }
+            },
+        }
+
+        deprecated = PROBE_MODULE.parse_opencode_deprecations(
+            json.dumps(catalog), {"claude-opus-4.7", "mai-code-1-flash"}
+        )
+
+        assert "opencode/hy3-free" in deprecated
+        assert "opencode/mimo-v2.6-flash-free" not in deprecated
+        assert "github-copilot/claude-opus-4.7" in deprecated
+        assert "github-copilot/claude-opus-4.7-fast" in deprecated
+        # OpenCode spells MAI-Code-1-Flash differently; matched by display name.
+        assert "github-copilot/mai-code-1-flash-picker" in deprecated
+        assert "github-copilot/claude-opus-5" not in deprecated
+
+    def test_gemini_counts_only_passed_or_imminent_shutdowns(self) -> None:
+        page = """
+        <tr><td>gemini-3-pro-preview</td><td>November 18, 2025</td>
+            <td>March 9, 2026</td><td>gemini-3.1-pro-preview</td></tr>
+        <tr><td>gemini-2.5-flash-image</td><td>October 2, 2025</td>
+            <td>October 2, 2026</td><td>gemini-3.1-flash-image-preview</td></tr>
+        <tr><td>gemini-3.5-live-translate-preview</td><td>June 2026</td>
+            <td>No shutdown date announced</td></tr>
+        <tr><td>gemini-3.1-flash-lite</td><td>May 7, 2026</td>
+            <td>May 7, 2027</td><td>gemini-3.5-flash-lite</td></tr>
+        <tr><td>gemini-embedding-001</td><td>July 14, 2025</td>
+            <td>May 14, 2028</td><td>gemini-embedding-2</td></tr>
+        """
+
+        # Already shut down, and shutting down within the horizon, count; a
+        # launch-time lifecycle date a year or more out does not.
+        assert PROBE_MODULE.parse_gemini_deprecations(
+            page, PROBE_MODULE.datetime.date(2026, 9, 23)
+        ) == {"gemini-3-pro-preview", "gemini-2.5-flash-image"}
+
+    def test_opencode_applies_gemini_shutdowns_to_google_prefix(self) -> None:
+        deprecated = PROBE_MODULE.parse_opencode_deprecations(
+            json.dumps({}), set(), {"gemini-3-pro-preview"}
+        )
+        assert deprecated == {"google/gemini-3-pro-preview"}
+
+    def test_antigravity_uses_gemini_deprecations(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        urls: list[str] = []
+
+        def fake_fetch(url: str) -> str:
+            urls.append(url)
+            return "<td>gemini-3-pro-preview</td><td>November 18, 2025</td><td>March 9, 2026</td>"
+
+        monkeypatch.setattr(PROBE_MODULE, "_fetch", fake_fetch)
+
+        assert PROBE_MODULE.probe_deprecations("antigravity-cli") == {"gemini-3-pro-preview"}
+        assert urls == [PROBE_MODULE._DEPRECATION_URLS["gemini"]]
+
+    @pytest.mark.parametrize(
+        "parser",
+        ["parse_claude_deprecations", "parse_copilot_retirements", "parse_codex_deprecations"],
+    )
+    def test_missing_anchors_yield_nothing(self, parser: str) -> None:
+        assert getattr(PROBE_MODULE, parser)("no anchors here") == set()
+
+    def test_malformed_models_dev_payload_yields_nothing(self) -> None:
+        assert PROBE_MODULE.parse_opencode_deprecations("<html>", set()) == set()
+
+
+class TestCliArgExpectations:
+    def test_codex_expects_the_flags_the_adapter_emits(self) -> None:
+        # CodexAdapter uses ``-a never`` for yolo and ``-c
+        # model_reasoning_effort=...`` for effort, never ``--yolo``.
+        codex = PROBE_MODULE._EXPECTED_FLAGS["codex"]
+        assert codex["yolo"] == "--ask-for-approval"
+        assert codex["model_reasoning_effort"] == "--config"
+
+    def test_subcommand_help_is_searched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ``--variant`` only appears in ``opencode run --help``.
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(cmd)
+            stdout = "--variant  model variant" if cmd[1:] == ["run", "--help"] else "run  -s"
+            stdout += " --model"
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(PROBE_MODULE.shutil, "which", lambda _binary: "/usr/bin/opencode")
+        monkeypatch.setattr(PROBE_MODULE.subprocess, "run", fake_run)
+
+        assert PROBE_MODULE.probe_cli_args("opencode")["effort"] is True
+        assert ["opencode", "run", "--help"] in calls
