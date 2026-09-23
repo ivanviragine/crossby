@@ -73,12 +73,14 @@ from crossby.models.config import ComplexityModelMapping
 
 logger = structlog.get_logger()
 
-# Argument-delivered prompts must fit the native process contract before an
-# adapter begins version probing or spawns a child. POSIX limits one argument to
-# 131,072 bytes on Linux; Windows limits the rendered *whole* command line to
-# 32,767 UTF-16 code units. These ceilings leave room for the adapter's fixed
-# flags while keeping stdin and protocol transports unlimited.
+# Argument-delivered prompts and adapter-supplied argv values must fit the
+# native process contract before an adapter begins version probing or spawns a
+# child. POSIX limits one argument to 131,072 bytes on Linux; Windows limits
+# the rendered *whole* command line to 32,767 UTF-16 code units. These ceilings
+# leave room for the adapter's fixed flags while keeping stdin and protocol
+# transports unlimited.
 _MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
+_MAX_HEADLESS_WINDOWS_COMMAND_LINE = 32_767
 
 
 def _argument_prompt_length(prompt: str) -> int:
@@ -668,13 +670,15 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        return request.model_copy(
+        normalized = request.model_copy(
             update={
                 "working_dir": working_dir,
                 "trusted_dirs": trusted_dirs,
                 "response_schema": response_schema,
             }
         )
+        self._validate_headless_argv(normalized)
+        return normalized
 
     def _detect_headless_version_bounded(
         self,
@@ -764,6 +768,46 @@ class AbstractAITool(ABC):
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Adapter hook for request constraints known without transport I/O."""
         return None
+
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str] | None:
+        """Return the native argv to validate before a version probe, if applicable."""
+        return None
+
+    def _validate_headless_argv(self, request: HeadlessSessionRequest) -> None:
+        """Reject an adapter's native argv when it exceeds process limits."""
+        from crossby.ai_tools.headless import HeadlessRequestError
+
+        argv = self._headless_argv_for_validation(request)
+        if argv is None:
+            return
+
+        caps = self.capabilities()
+        capability = caps.headless
+        if sys.platform.startswith("win"):
+            rendered = subprocess.list2cmdline(argv)
+            command_length = len(rendered.encode("utf-16-le")) // 2
+            if command_length > _MAX_HEADLESS_WINDOWS_COMMAND_LINE:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {command_length}-unit "
+                    "native command line "
+                    f"(limit: {_MAX_HEADLESS_WINDOWS_COMMAND_LINE}). Shorten the prompt, "
+                    "response schema, or other command arguments.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            return
+
+        for argument in argv:
+            argument_length = len(argument.encode("utf-8"))
+            if argument_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {argument_length}-byte "
+                    "native argv argument "
+                    f"(limit: {_MAX_HEADLESS_ARGUMENT_PROMPT}). Shorten the prompt, "
+                    "response schema, or other command arguments.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
 
     def _run_headless_session(
         self,

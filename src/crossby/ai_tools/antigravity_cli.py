@@ -242,6 +242,13 @@ class AntigravityCLIAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return agy's complete command with the largest possible timeout value."""
+        return self._headless_command(
+            request,
+            print_timeout_seconds=max(1, math.ceil(request.timeout_seconds)),
+        )
+
     def _headless_command(
         self,
         request: HeadlessSessionRequest,

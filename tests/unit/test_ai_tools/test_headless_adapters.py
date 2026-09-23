@@ -31,10 +31,12 @@ from typing import Any
 
 import pytest
 
+from crossby.ai_tools import base as base_mod
 from crossby.ai_tools import plan_process
-from crossby.ai_tools.antigravity_cli import _whole_run_timeout_seconds
+from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter, _whole_run_timeout_seconds
 from crossby.ai_tools.base import AbstractAITool
-from crossby.ai_tools.headless import HeadlessUnsupportedError
+from crossby.ai_tools.claude import ClaudeAdapter
+from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
 from crossby.models.ai import (
     AIToolID,
     HeadlessEventKind,
@@ -717,6 +719,58 @@ def test_schema_requests_fail_before_spawn(
         )
 
     assert not started.exists()
+
+
+def test_claude_oversized_schema_argument_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = ClaudeAdapter()
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized schema must fail before version probing")
+
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native argv argument"):
+        adapter.run_headless_session(
+            _request(
+                tmp_path,
+                native_output=HeadlessNativeOutput.JSON,
+                response_schema={"type": "object", "description": "x" * 120_000},
+            )
+        )
+
+    assert version_probes == 0
+
+
+def test_antigravity_windows_command_overflow_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AntigravityCLIAdapter()
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized command must fail before version probing")
+
+    monkeypatch.setattr(base_mod.sys, "platform", "win32")
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native command line"):
+        adapter.run_headless_session(
+            _request(
+                tmp_path,
+                prompt="x" * 30_000,
+                native_output=HeadlessNativeOutput.JSON,
+                response_schema={"type": "object", "description": "x" * 3_000},
+            )
+        )
+
+    assert version_probes == 0
 
 
 @pytest.mark.parametrize("tool", [AIToolID.CLAUDE, AIToolID.ANTIGRAVITY_CLI])

@@ -276,6 +276,10 @@ class ClaudeAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return Claude's complete command, including any serialized schema."""
+        return self._headless_command(request)
+
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
         """Build the exact unattended ``claude --print`` invocation."""
         native_formats = {
