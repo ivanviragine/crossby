@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.models.ai import AIToolCapabilities, AIToolID
+    from crossby.models.ai import AIToolCapabilities, AIToolID, EffortLevel
     from crossby.models.config import CrossbyConfig, SceneConfig
     from crossby.scenes.launch import SceneLaunchContext
     from crossby.services.scene_activation import SceneActivationOutcome
@@ -365,7 +367,7 @@ def launch(
     # approval flags retain yolo > auto > accept-edits precedence.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
-        console.kv("Model", resolved_model)
+        console.kv("Model", _launched_model_label(adapter, resolved_model, resolved_effort))
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
     if plan:
@@ -748,3 +750,22 @@ def _warn_unsupported_scene_concerns(
             f"{'those' if len(unsupported) > 1 else 'that'} only via persistent "
             "'crossby scene use'."
         )
+
+
+def _launched_model_label(adapter: AbstractAITool, model: str, effort: EffortLevel | None) -> str:
+    """Render the model the tool will actually receive, escaped for Rich.
+
+    Cursor and Antigravity CLI bake effort into the model ID, so the adapter's
+    ``resolve_effort_model`` may swap in a sibling ID at launch
+    (``claude-opus-5-5-medium`` at high effort -> ``claude-opus-5-5-high``, or a
+    bare Gemini model -> its default ``-medium`` tier). Showing that ID, with the
+    requested one alongside, keeps the summary truthful. Warnings are left to
+    the launch itself so they are not printed twice.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        launched = adapter.resolve_effort_model(model, effort)
+    if not isinstance(launched, str) or not launched or launched == model:
+        return escape(model)
+    source = f"{model} at {effort.value} effort" if effort else f"{model} at its default effort"
+    return escape(f"{launched} (from {source})")
