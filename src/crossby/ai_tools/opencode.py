@@ -77,7 +77,7 @@ class OpenCodeAdapter(AbstractAITool):
             supports_yolo=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                prompt_transport=HeadlessPromptTransport.STDIN,
                 # Every managed run uses the --format json event wire; TEXT
                 # returns the joined assistant text parts from those events.
                 native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
@@ -188,7 +188,6 @@ class OpenCodeAdapter(AbstractAITool):
             command.extend(("--model", request.model))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
-        command.extend(("--", request.prompt))
         return command
 
     def _run_headless_session(
@@ -214,6 +213,7 @@ class OpenCodeAdapter(AbstractAITool):
             argv=self._headless_command(request),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
             on_stdout_lines=frame_streamer(
                 context,
                 label="opencode",

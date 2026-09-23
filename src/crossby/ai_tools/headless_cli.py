@@ -120,8 +120,57 @@ def run_managed_command(
     context.checkpoint()
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     proc: subprocess.Popen[bytes] | None = None
+    proc_lock = threading.Lock()
+    workers: list[threading.Thread] = []
+    input_stream: IO[bytes] | None = None
+    cleanup_requested = threading.Event()
+
+    def current_process() -> subprocess.Popen[bytes] | None:
+        with proc_lock:
+            return proc
+
+    def close_input(_cleanup: HeadlessCleanupContext) -> None:
+        # This is the first cleanup hook. Remember the state so a child that
+        # finishes spawning after cleanup has begun is synchronously torn down.
+        cleanup_requested.set()
+        if input_stream is not None and not input_stream.closed:
+            with suppress(OSError):
+                input_stream.close()
+
+    def terminate(_cleanup: HeadlessCleanupContext) -> None:
+        child = current_process()
+        if child is not None and child.poll() is None:
+            with suppress(OSError):
+                child.terminate()
+
+    def force_kill(_cleanup: HeadlessCleanupContext) -> None:
+        owned_process = current_process()
+        if owned_process is not None:
+            kill_process_group(owned_process)
+
+    def reap(cleanup: HeadlessCleanupContext) -> None:
+        child = current_process()
+        remaining = cleanup.remaining_seconds()
+        if child is not None and remaining > 0:
+            with suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=remaining)
+
+    def join_workers(cleanup: HeadlessCleanupContext) -> None:
+        join_threads_until(tuple(workers), cleanup.deadline)
+
+    # Popen itself can block. Register hooks first so a deadline or cancellation
+    # that fires in that window cannot strand a child once Popen returns.
+    context.register_cleanup(
+        HeadlessCleanupHooks(
+            close_input=close_input,
+            terminate=terminate,
+            force_kill=force_kill,
+            reap=reap,
+            join_workers=join_workers,
+        )
+    )
     try:
-        proc = subprocess.Popen(
+        child = subprocess.Popen(
             argv,
             cwd=cwd,
             env=env,
@@ -130,14 +179,23 @@ def run_managed_command(
             stderr=subprocess.PIPE,
             **process_tree_popen_kwargs(),
         )
-        own_process_tree(proc)
+        with proc_lock:
+            proc = child
+        own_process_tree(child)
     except (OSError, ValueError):
-        if proc is not None:
-            kill_process_group(proc)
+        owned_process = current_process()
+        if owned_process is not None:
+            kill_process_group(owned_process)
         raise context.transport_error(
             "The managed headless transport could not start the native CLI."
         ) from None
     assert proc is not None
+    if cleanup_requested.is_set():
+        kill_process_group(proc)
+    # Cleanup may have run while Popen blocked. This checkpoint either lets the
+    # normal launch continue or returns the already-published runtime outcome;
+    # the process above is always torn down first in the latter case.
+    context.checkpoint()
     if (
         proc.stdout is None
         or proc.stderr is None
@@ -153,8 +211,7 @@ def run_managed_command(
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     state_lock = threading.Lock()
     overflowed = False
-    workers: list[threading.Thread] = []
-    input_stream: IO[bytes] | None = proc.stdin
+    input_stream = proc.stdin
 
     def read_bounded(stream: IO[bytes], name: str, limit: int) -> None:
         nonlocal overflowed
@@ -221,37 +278,6 @@ def run_managed_command(
             )
         )
 
-    def close_input(_cleanup: HeadlessCleanupContext) -> None:
-        if input_stream is not None and not input_stream.closed:
-            with suppress(OSError):
-                input_stream.close()
-
-    def terminate(_cleanup: HeadlessCleanupContext) -> None:
-        if proc.poll() is None:
-            with suppress(OSError):
-                proc.terminate()
-
-    def force_kill(_cleanup: HeadlessCleanupContext) -> None:
-        kill_process_group(proc)
-
-    def reap(cleanup: HeadlessCleanupContext) -> None:
-        remaining = cleanup.remaining_seconds()
-        if remaining > 0:
-            with suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=remaining)
-
-    def join_workers(cleanup: HeadlessCleanupContext) -> None:
-        join_threads_until(tuple(workers), cleanup.deadline)
-
-    context.register_cleanup(
-        HeadlessCleanupHooks(
-            close_input=close_input,
-            terminate=terminate,
-            force_kill=force_kill,
-            reap=reap,
-            join_workers=join_workers,
-        )
-    )
     for worker in workers:
         worker.start()
     context.emit(HeadlessEventKind.STARTED)

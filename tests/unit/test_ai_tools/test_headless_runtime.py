@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from crossby.ai_tools import base as base_mod
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.headless import (
     HeadlessCleanupHooks,
@@ -149,6 +150,38 @@ def test_invalid_schema_is_rejected_before_adapter_start(tmp_path: Path) -> None
         )
 
     assert not adapter.started
+
+
+def test_argument_prompt_overflow_fails_before_version_probe_or_adapter_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeHeadlessAdapter(
+        lambda _context: None,
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+    monkeypatch.setattr(base_mod, "_MAX_HEADLESS_ARGUMENT_PROMPT", 10)
+
+    with pytest.raises(HeadlessRequestError, match="argv transport"):
+        adapter.run_headless_session(_request(tmp_path, prompt="x" * 11))
+
+    assert adapter.version_probes == 0
+    assert not adapter.started
+
+
+def test_argument_prompt_overflow_counts_windows_rendered_utf16_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeHeadlessAdapter(
+        lambda _context: None,
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+    monkeypatch.setattr(base_mod.sys, "platform", "win32")
+    monkeypatch.setattr(base_mod, "_MAX_HEADLESS_ARGUMENT_PROMPT", 5)
+
+    with pytest.raises(HeadlessRequestError, match="argv transport"):
+        adapter.run_headless_session(_request(tmp_path, prompt="😀" * 3))
+
+    assert adapter.version_probes == 0
 
 
 def test_brokered_mode_requires_handler_before_adapter_start(tmp_path: Path) -> None:

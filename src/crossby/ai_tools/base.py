@@ -11,6 +11,8 @@ import math
 import os
 import queue
 import shutil
+import subprocess
+import sys
 import threading
 import warnings
 from abc import ABC, abstractmethod
@@ -45,6 +47,7 @@ from crossby.models.ai import (
     HeadlessInteractionMode,
     HeadlessPreflightCheck,
     HeadlessPreflightDeferredCheck,
+    HeadlessPromptTransport,
     HeadlessSessionPreflight,
     HeadlessSessionRequest,
     HeadlessSessionResult,
@@ -69,6 +72,21 @@ from crossby.models.ai import (
 from crossby.models.config import ComplexityModelMapping
 
 logger = structlog.get_logger()
+
+# Argument-delivered prompts must fit the native process contract before an
+# adapter begins version probing or spawns a child. POSIX limits one argument to
+# 131,072 bytes on Linux; Windows limits the rendered *whole* command line to
+# 32,767 UTF-16 code units. These ceilings leave room for the adapter's fixed
+# flags while keeping stdin and protocol transports unlimited.
+_MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
+
+
+def _argument_prompt_length(prompt: str) -> int:
+    """Return the native argv space used by one argument-delivered prompt."""
+    if sys.platform.startswith("win"):
+        rendered = subprocess.list2cmdline([prompt])
+        return len(rendered.encode("utf-16-le")) // 2
+    return len(prompt.encode("utf-8"))
 
 
 class AbstractAITool(ABC):
@@ -540,6 +558,17 @@ class AbstractAITool(ABC):
                 display_name=caps.display_name,
                 capability=capability,
             )
+        if capability.prompt_transport is HeadlessPromptTransport.ARGUMENT:
+            prompt_length = _argument_prompt_length(request.prompt)
+            if prompt_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {prompt_length}-unit prompt "
+                    f"through its native argv transport (limit: "
+                    f"{_MAX_HEADLESS_ARGUMENT_PROMPT}). Use an adapter with stdin or protocol "
+                    "prompt delivery, or shorten the prompt.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
         if request.interaction_mode not in capability.interaction_modes:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve interaction_mode="

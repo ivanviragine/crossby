@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -817,6 +818,51 @@ def test_timeout_kills_the_process_tree_and_keeps_partial_provenance(
         pytest.fail("the managed timeout left an owned descendant running")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process cleanup verification uses POSIX PIDs")
+def test_timeout_tears_down_a_child_started_after_popen_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deadline during Popen cannot strand a child returned after cleanup."""
+    pid_file = tmp_path / "late-child.pid"
+    program = [
+        sys.executable,
+        "-c",
+        (
+            "import os, time\n"
+            "from pathlib import Path\n"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+            "time.sleep(60)\n"
+        ),
+    ]
+    adapter = _adapter(monkeypatch, AIToolID.CODEX, program)
+    native_popen = subprocess.Popen
+
+    def delayed_popen(*args: Any, **kwargs: Any) -> Any:
+        child = native_popen(*args, **kwargs)
+        deadline = time.monotonic() + 2
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return child
+
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.subprocess.Popen", delayed_popen)
+
+    result = adapter.run_headless_session(_request(tmp_path, timeout_seconds=0.05))
+
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert pid_file.exists()
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(0.01)
+    else:  # pragma: no cover - only on a cleanup regression
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("Popen returned after cleanup and left its child running")
+
+
 # --- exact unattended argv assembly ------------------------------------------
 #
 # The suite above replaces ``_headless_command`` with a deterministic stub so it
@@ -940,7 +986,7 @@ def test_copilot_headless_argv_normalizes_the_model_to_dotted_form(tmp_path: Pat
     assert command[command.index("--model") + 1] == "claude-haiku-4.5"
 
 
-def test_opencode_headless_argv_never_auto_approves(tmp_path: Path) -> None:
+def test_opencode_headless_argv_never_auto_approves_or_exposes_the_prompt(tmp_path: Path) -> None:
     command = _command(AIToolID.OPENCODE, _request(tmp_path, model="anthropic/claude-haiku-4-5"))
 
     assert command[:6] == ["opencode", "run", "--format", "json", "--log-level", "ERROR"]
@@ -948,7 +994,7 @@ def test_opencode_headless_argv_never_auto_approves(tmp_path: Path) -> None:
     # refusal is the intended behavior instead.
     assert "--auto" not in command
     assert command[command.index("--model") + 1] == "anthropic/claude-haiku-4-5"
-    assert command[-2:] == ["--", PROMPT]
+    assert PROMPT not in command
 
 
 def test_antigravity_headless_argv_carries_the_schema_and_print_timeout(
