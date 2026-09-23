@@ -12,7 +12,7 @@ from crossby.models.ai import EffortLevel
 def _pick_known_base_with_thinking() -> str:
     """Pick a registry entry where ``<base>-thinking`` also exists.
 
-    Bases that already encode an effort level (``claude-4.5-opus-high``) are
+    Bases that already encode an effort level (``claude-4.6-opus-high``) are
     skipped: the resolver deliberately leaves those unchanged.
     """
     known = set(get_models_for_tool("cursor"))

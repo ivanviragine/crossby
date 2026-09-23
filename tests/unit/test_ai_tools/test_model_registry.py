@@ -163,6 +163,11 @@ class TestModelRegistry:
             ("opencode", "google/gemini-2.0-flash"),
             # Marked deprecated by OpenCode Zen.
             ("opencode", "opencode/hy3-free"),
+            # Claude models older than 4.6 are out of scope for crossby.
+            ("cursor", "claude-4.5-opus-high"),
+            ("cursor", "sonnet-4.5"),
+            ("opencode", "anthropic/claude-opus-4.5"),
+            ("opencode", "anthropic/claude-sonnet-4.5-20250929"),
         ],
     )
     def test_deprecated_models_are_pruned(self, tool: str, model: str) -> None:
