@@ -756,6 +756,8 @@ crossby launch --tool codex --model claude-sonnet-5 --effort high
 
 Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-6-sol` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
 
+The GPT-6 targets need a current Codex CLI: with ChatGPT sign-in, Codex 0.154 rejects `gpt-6-sol` as unsupported, while 0.156.1 accepts it. Run `npm i -g @openai/codex@latest` if a translated launch fails that way.
+
 ### Codex interactive Plan startup and events
 
 Codex 0.154 has no native `--plan` launch flag. Crossby opens the real Codex UI
