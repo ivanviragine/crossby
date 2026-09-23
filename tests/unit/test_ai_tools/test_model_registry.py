@@ -31,6 +31,7 @@ class TestModelRegistry:
             "claude-sonnet-5",
             "claude-opus-4.8",
             "claude-opus-5",
+            "claude-opus-5.5",
             "claude-fable-5",
             "claude-fable-5.1",
         ):
@@ -110,7 +111,14 @@ class TestModelRegistry:
             "opencode/hy3-free",
             "opencode/ling-3.0-flash-fin-free",
             "opencode/muse-spark-1.2-contributor-free",
+            "opencode/muse-spark-1.3-contributor-free",
+            "opencode/mimo-v2.6-flash-free",
             "opencode/nemotron-3.5-lightning-free",
+            "github-copilot/claude-opus-5.5",
+            "github-copilot/gpt-6-astra",
+            "openai/gpt-6-astra",
+            "openai/gpt-6-luna",
+            "openai/gpt-6-sol",
         ],
     )
     def test_opencode_registry_includes_live_cli_models(self, model: str) -> None:
@@ -126,6 +134,15 @@ class TestModelRegistry:
         gpt-5.6-codex* variant slipped in."""
         codex_5_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-5.6")}
         assert codex_5_6 == {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
+
+    def test_codex_gpt_6_subset_is_exactly_astra_luna_sol(self) -> None:
+        """GPT-6 ships as Astra, Sol, and Luna — there is no gpt-6-terra."""
+        codex_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-6")}
+        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol"}
+
+    @pytest.mark.parametrize("model", ["claude-opus-5.5", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"])
+    def test_copilot_registry_includes_new_generation(self, model: str) -> None:
+        assert model in get_models_for_tool("copilot")
 
 
 class TestRegistryGetModels:

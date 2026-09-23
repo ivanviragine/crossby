@@ -183,7 +183,10 @@ class TestModelCompatibility:
         assert adapter.is_model_compatible("o3") is True
         assert adapter.is_model_compatible("claude-opus") is False
 
-    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"],
+    )
     def test_codex_accepts_gpt_5_6(self, model: str) -> None:
         """The gpt-5.6 family (luna/sol/terra) is codex-native — Issue #112."""
         adapter = AbstractAITool.get("codex")
@@ -386,6 +389,22 @@ class TestClassifyTierUniversal:
     def test_codex_gpt_5_6_uses_documented_family_roles(
         self, model: str, expected: ModelTier
     ) -> None:
+        assert classify_tier_universal(model) == expected
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gpt-6-luna", ModelTier.FAST),
+            ("gpt-6-sol", ModelTier.POWERFUL),
+            ("gpt-6-astra", ModelTier.POWERFUL),
+            ("openai/gpt-6-astra", ModelTier.POWERFUL),
+        ],
+    )
+    def test_codex_gpt_6_uses_documented_family_roles(
+        self, model: str, expected: ModelTier
+    ) -> None:
+        """Astra is OpenAI's most capable GPT-6 model, so it must not fall
+        through to the BALANCED default like an unrecognized ID would."""
         assert classify_tier_universal(model) == expected
 
 
