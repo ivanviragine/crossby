@@ -884,7 +884,7 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval only)                 | —          | `--force`                  | —       | —               |
 | `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan` (private artifacts) | unsupported                                | `--agent plan`    | `--mode plan`              | unsupported | unsupported   |
 | `--plan-output-dir` | `--settings` with project-relative `plansDirectory` | rejected (private store) | rejected (private store) | rejected with `--plan` | rejected (managed plan path) | rejected (session only) | rejected | rejected |
-| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
+| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | catalog sibling (`-<level>`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
@@ -897,18 +897,29 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI (Gemini only) |
-| ------------- | -------- | ------- | -------- | ------------------- | ----------------------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`                 |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium`              |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
-| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor                           | Antigravity CLI (Gemini only) |
+| ------------- | -------- | ------- | -------- | -------------------------------- | ----------------------------- |
+| `low`         | `low`    | `low`   | `low`    | `<family>-low`                   | `<model>-low`                 |
+| `medium`      | `medium` | `medium`| `medium` | `<family>-medium` or bare family | `<model>-medium`              |
+| `high`        | `high`   | `high`  | `high`   | `<family>-high`                  | `<model>-high`                |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<family>-xhigh` / `-extra-high` | `<model>-high`                |
+| `max`         | `max`    | `xhigh` | `high`   | `<family>-max`                   | `<model>-high`                |
 
 The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
 compatibility. Complete collection accepts only `low`, `medium`, and `high`,
 because `run_plan_session()` rejects a requested effort tier that OpenCode's
 native `variant` value cannot preserve exactly.
+
+Cursor has no effort flag; its catalog encodes effort in the model ID
+(`claude-opus-5-5-high-fast`, `claude-opus-5-thinking-xhigh`,
+`claude-4.6-sonnet-medium-thinking`). At launch, `CursorAdapter.resolve_effort_model`
+swaps the given model for the registered sibling carrying the requested effort,
+keeping its `-thinking`/`-fast` choice; a family's bare ID (`gpt-5.3-codex`) is
+its medium tier. A family missing the requested tier gets the nearest one (ties
+go higher) with a warning, and a model with no registered effort siblings,
+`auto`, or bracket overrides (`claude-opus-4-8[effort=high]`, which the CLI
+accepts only for some "parameterized" models) passes through unchanged, so the
+result is always a registry ID or the input.
 
 The Cursor entries also describe interactive launch compatibility. Complete
 collection never collapses two requested tiers onto that generic mapping: it

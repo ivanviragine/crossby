@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import time
+import warnings
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -51,15 +52,64 @@ from crossby.models.ai import (
 
 logger = structlog.get_logger()
 
-# Cursor model IDs that already encode an effort level in their name — e.g.
-# "claude-opus-4-7-high", "claude-opus-4-7-thinking-xhigh". Appending
-# "-thinking" to these would produce invalid IDs.
-_EFFORT_LEVEL_SUFFIXES = frozenset({"-low", "-medium", "-high", "-xhigh", "-max"})
+# Cursor encodes reasoning effort in the model ID rather than a flag:
+# ``<family>[-thinking]-<effort>[-fast]`` (``claude-opus-5-5-high-fast``,
+# ``claude-opus-5-thinking-xhigh``) or, for older families,
+# ``<family>-<effort>-thinking`` (``claude-4.6-sonnet-medium-thinking``). GPT-5.5
+# spells xhigh as ``extra-high``, and some bare IDs (``gpt-5.3-codex``) are the
+# family's default effort. ``none``/``minimal`` exist in the catalog but are not
+# Crossby effort levels, so they are recognized only as a position, never chosen.
+_EFFORT_WORDS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+_EFFORT_SPELLINGS: dict[EffortLevel, tuple[str, ...]] = {
+    EffortLevel.LOW: ("low",),
+    EffortLevel.MEDIUM: ("medium",),
+    EffortLevel.HIGH: ("high",),
+    EffortLevel.XHIGH: ("xhigh", "extra-high"),
+    EffortLevel.MAX: ("max",),
+}
+_EFFORT_ORDER: tuple[EffortLevel, ...] = tuple(_EFFORT_SPELLINGS)
+# Tokens that may follow the effort word without being part of the family name.
+_TRAILING_VARIANT_TOKENS = frozenset({"fast", "thinking"})
+_EFFORT_SLOT = "\0"
 
 # Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
 _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
+
+
+def _effort_template(model: str) -> tuple[str, EffortLevel | None, bool]:
+    """Split a Cursor model ID into an effort template and its effort.
+
+    Returns ``(template, effort, explicit)``: ``template`` has the effort token
+    replaced by ``_EFFORT_SLOT``; ``explicit`` is False for a bare ID (no effort
+    token), whose template gains a slot before any trailing ``-fast``. Only an
+    effort word followed solely by ``-fast``/``-thinking`` counts, so an effort
+    word inside a family name is never mistaken for the effort.
+    """
+    tokens = model.split("-")
+    end = len(tokens)
+    while end > 0 and tokens[end - 1] in _TRAILING_VARIANT_TOKENS:
+        end -= 1
+    if end > 0 and tokens[end - 1] in _EFFORT_WORDS:
+        start = end - 1
+        if tokens[start] == "high" and start > 0 and tokens[start - 1] == "extra":
+            start -= 1
+        word = "-".join(tokens[start:end])
+        effort = next((lvl for lvl, names in _EFFORT_SPELLINGS.items() if word in names), None)
+        template = "-".join([*tokens[:start], _EFFORT_SLOT, *tokens[end:]])
+        return template, effort, True
+    base, fast = model.removesuffix("-fast"), model.endswith("-fast")
+    return f"{base}-{_EFFORT_SLOT}" + ("-fast" if fast else ""), None, False
+
+
+def _nearest_effort(requested: EffortLevel, offered: set[EffortLevel]) -> EffortLevel:
+    """Pick ``requested`` if offered, else the closest tier (ties go higher)."""
+    rank = _EFFORT_ORDER.index(requested)
+    return min(
+        offered,
+        key=lambda lvl: (abs(_EFFORT_ORDER.index(lvl) - rank), -_EFFORT_ORDER.index(lvl)),
+    )
 
 
 def _encoded_effort(model: str) -> EffortLevel | None:
@@ -197,8 +247,9 @@ class CursorAdapter(AbstractAITool):
     ``claude-opus-4-6``, ``gpt-5.3-codex`` — so no format normalization is
     needed.
 
-    For high/max effort, Cursor uses thinking model variants (e.g.,
-    ``sonnet-4.6-thinking``) rather than a separate effort flag.
+    Cursor has no effort flag: effort is part of the model ID
+    (``claude-opus-5-5-high``), so ``resolve_effort_model`` swaps in the catalog
+    sibling that carries the requested effort.
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
@@ -876,28 +927,58 @@ class CursorAdapter(AbstractAITool):
         return []
 
     def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
-        """For high/xhigh/max effort, append ``-thinking`` to the model ID.
+        """Swap ``model`` for the Cursor catalog ID that encodes ``effort``.
 
-        Models that already encode effort (e.g. ``-high``, ``-xhigh``) or
-        thinking mode (``-thinking``) in their name are returned unchanged.
+        Cursor bakes effort into the model ID, so the requested effort selects a
+        sibling of ``model`` from the bundled Cursor registry:
+        ``claude-opus-5-5-medium`` + HIGH -> ``claude-opus-5-5-high``. The
+        requested effort overrides one already in the ID; the ``-thinking`` and
+        ``-fast`` choices are kept. A bare ID whose family also ships explicit
+        efforts (``gpt-5.3-codex``) stands for medium.
 
-        The constructed ``<model>-thinking`` ID is validated against the
-        bundled Cursor model registry. If the registry has no matching
-        entry (e.g. the model has no thinking variant, or is unknown to
-        crossby), the original ``model`` is returned unchanged so the
-        Cursor CLI receives a valid ID.
+        When the family lacks the requested tier, the nearest offered tier is
+        used (ties go higher) with a warning. A result is always a registry ID:
+        unknown models, families without effort variants (``gemini-3.1-pro``),
+        ``auto``, and IDs carrying Cursor's bracket overrides
+        (``claude-opus-4-8[effort=high]``, which only some models accept) are
+        returned unchanged. As a last resort, a bare ID with a registered
+        ``<model>-thinking`` twin still upgrades to it for high/xhigh/max.
         """
-        if (
-            effort in _THINKING_EFFORTS
-            and model
-            and model not in _NO_THINKING_MODELS
-            and not model.endswith("-thinking")
-            and not model.endswith(tuple(_EFFORT_LEVEL_SUFFIXES))
-        ):
-            candidate = f"{model}-thinking"
-            if candidate in get_models_for_tool(AIToolID.CURSOR):
-                return candidate
-        return model
+        if not model or effort is None or model in _NO_THINKING_MODELS or "[" in model:
+            return model
+
+        registry = set(get_models_for_tool(AIToolID.CURSOR))
+        template, current, explicit = _effort_template(model)
+        offered: dict[EffortLevel, str] = {}
+        for level, spellings in _EFFORT_SPELLINGS.items():
+            for spelling in spellings:
+                candidate = template.replace(_EFFORT_SLOT, spelling)
+                if candidate in registry:
+                    offered[level] = candidate
+                    break
+        bare = template.replace(f"-{_EFFORT_SLOT}", "")
+        if offered and EffortLevel.MEDIUM not in offered and bare in registry:
+            # The family's bare ID (gpt-5.3-codex) is its default, medium tier.
+            offered[EffortLevel.MEDIUM] = bare
+        if model == offered.get(EffortLevel.MEDIUM):
+            current = EffortLevel.MEDIUM
+
+        if not offered:
+            thinking = f"{model}-thinking"
+            if effort in _THINKING_EFFORTS and not explicit and thinking in registry:
+                return thinking
+            return model
+
+        chosen = _nearest_effort(effort, set(offered))
+        if chosen is not effort:
+            kept = " (keeping the model as given)" if chosen is current else ""
+            warnings.warn(
+                f"Cursor offers no {effort.value!r} effort for {model!r}; "
+                f"using {chosen.value!r} ({offered[chosen]!r}) instead{kept}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return offered[chosen]
 
     def preserve_session_data(self, working_dir: Path, main_checkout_path: Path) -> bool:
         """Copy Cursor session data from source directory to target's project dir.
