@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import time
 import warnings
@@ -303,7 +304,9 @@ class AntigravityCLIAdapter(AbstractAITool):
                 # --print-timeout bounds the whole run, so it must carry the
                 # overall deadline. context.remaining_seconds() is clamped to the
                 # idle budget, which would abort a healthy streaming turn.
-                print_timeout_seconds=max(1, int(context.deadline - time.monotonic())),
+                print_timeout_seconds=_whole_run_timeout_seconds(
+                    context.deadline, time.monotonic()
+                ),
             ),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
@@ -829,6 +832,11 @@ class AntigravityCLIAdapter(AbstractAITool):
         parseable text, so this mirrors the known Gemini-CLI
         transcript-persistence limitation for a different underlying reason."""
         return TokenUsage()
+
+
+def _whole_run_timeout_seconds(deadline: float, now: float) -> int:
+    """Return an agy whole-run timeout that cannot predate Crossby's deadline."""
+    return max(1, math.ceil(deadline - now))
 
 
 def _agy_model_encodes_effort(model: str | None, effort: EffortLevel) -> bool:

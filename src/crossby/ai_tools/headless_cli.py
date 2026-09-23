@@ -27,7 +27,12 @@ from crossby.ai_tools.headless import (
     HeadlessCleanupHooks,
     HeadlessRuntimeContext,
 )
-from crossby.ai_tools.plan_process import join_threads_until, kill_process_group
+from crossby.ai_tools.plan_process import (
+    join_threads_until,
+    kill_process_group,
+    own_process_tree,
+    process_tree_popen_kwargs,
+)
 from crossby.models.ai import (
     HeadlessEventKind,
     HeadlessNativeOutput,
@@ -114,6 +119,7 @@ def run_managed_command(
     """
     context.checkpoint()
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
+    proc: subprocess.Popen[bytes] | None = None
     try:
         proc = subprocess.Popen(
             argv,
@@ -122,12 +128,16 @@ def run_managed_command(
             stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            start_new_session=os.name == "posix",
+            **process_tree_popen_kwargs(),
         )
+        own_process_tree(proc)
     except (OSError, ValueError):
+        if proc is not None:
+            kill_process_group(proc)
         raise context.transport_error(
             "The managed headless transport could not start the native CLI."
         ) from None
+    assert proc is not None
     if (
         proc.stdout is None
         or proc.stderr is None

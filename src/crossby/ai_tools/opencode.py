@@ -249,7 +249,13 @@ class OpenCodeAdapter(AbstractAITool):
                 text_parts.append(part)
             elif kind == "step_finish" and isinstance(part, dict):
                 finish_reason = non_blank_text(part.get("reason")) or finish_reason
-                usage = _opencode_usage(part.get("tokens"), session_id) or usage
+                step_usage = _opencode_usage(part.get("tokens"), session_id)
+                if step_usage is not None:
+                    usage = (
+                        step_usage
+                        if usage is None
+                        else _combine_opencode_usage(usage, step_usage, session_id)
+                    )
 
         if finish_reason is None:
             return context.complete(
@@ -524,6 +530,26 @@ def _opencode_usage(tokens: Any, session_id: str | None) -> TokenUsage | None:
     ):
         return None
     return usage
+
+
+def _combine_opencode_usage(
+    previous: TokenUsage, step: TokenUsage, session_id: str | None
+) -> TokenUsage:
+    """Accumulate per-step OpenCode token usage without inventing absent counts."""
+    return TokenUsage(
+        total_tokens=_sum_token_counts(previous.total_tokens, step.total_tokens),
+        input_tokens=_sum_token_counts(previous.input_tokens, step.input_tokens),
+        output_tokens=_sum_token_counts(previous.output_tokens, step.output_tokens),
+        cached_tokens=_sum_token_counts(previous.cached_tokens, step.cached_tokens),
+        session_id=session_id or previous.session_id or step.session_id,
+    )
+
+
+def _sum_token_counts(first: int | None, second: int | None) -> int | None:
+    """Add native counts while retaining ``None`` when neither step supplied one."""
+    if first is None and second is None:
+        return None
+    return (first or 0) + (second or 0)
 
 
 def _export_session_ids(payload: dict[str, Any]) -> list[str]:

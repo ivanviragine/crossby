@@ -30,6 +30,8 @@ from typing import Any
 
 import pytest
 
+from crossby.ai_tools import plan_process
+from crossby.ai_tools.antigravity_cli import _whole_run_timeout_seconds
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.headless import HeadlessUnsupportedError
 from crossby.models.ai import (
@@ -304,6 +306,28 @@ def _assert_prompt_is_private(result: HeadlessSessionResult) -> None:
         assert PROMPT not in diagnostic
 
 
+def test_windows_managed_transport_claims_and_closes_the_complete_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pass
+
+    process = FakeProcess()
+    closed: list[int] = []
+    resumed: list[FakeProcess] = []
+    tree = plan_process._WindowsProcessTree(1234, lambda handle: closed.append(handle))
+    monkeypatch.setattr(plan_process, "_is_windows", lambda: True)
+    monkeypatch.setattr(plan_process, "_create_windows_process_tree", lambda _proc: tree)
+    monkeypatch.setattr(plan_process, "_resume_windows_process", lambda proc: resumed.append(proc))
+
+    assert plan_process.process_tree_popen_kwargs() == {"creationflags": 0x00000004}
+    plan_process.own_process_tree(process)  # type: ignore[arg-type]
+    plan_process.kill_process_group(process)  # type: ignore[arg-type]
+
+    assert resumed == [process]
+    assert closed == [1234]
+
+
 # --- per-adapter native envelope coverage ------------------------------------
 
 
@@ -517,6 +541,38 @@ def test_opencode_raw_events_are_normalized(
     assert result.session_id == OPENCODE_SESSION
     assert result.native_status == "stop"
     assert result.usage is not None and result.usage.total_tokens == 9811
+
+
+def test_opencode_accumulates_usage_from_each_model_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_finish = json.loads(json.dumps(OPENCODE_EVENTS[-1]))
+    first_finish["part"]["reason"] = "tool-calls"
+    first_finish["part"]["tokens"] = {
+        "total": 40,
+        "input": 30,
+        "output": None,
+        "cache": {"read": 5},
+    }
+    final_finish = json.loads(json.dumps(OPENCODE_EVENTS[-1]))
+    final_finish["part"]["tokens"] = {
+        "total": 10,
+        "input": None,
+        "output": 4,
+        "cache": {"read": None},
+    }
+    events = (*OPENCODE_EVENTS[:-1], first_finish, final_finish)
+    adapter = _adapter(monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(events)))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.usage is not None
+    assert result.usage.total_tokens == 50
+    assert result.usage.input_tokens == 30
+    assert result.usage.output_tokens == 4
+    assert result.usage.cached_tokens == 5
+    assert result.usage.session_id == OPENCODE_SESSION
 
 
 def test_opencode_non_stop_finish_reason_fails(
@@ -934,3 +990,8 @@ def test_antigravity_print_timeout_uses_the_whole_run_deadline(
 
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert recorded and recorded[0] > 5
+
+
+def test_antigravity_whole_run_timeout_rounds_fractional_seconds_up() -> None:
+    assert _whole_run_timeout_seconds(deadline=120.0, now=0.001) == 120
+    assert _whole_run_timeout_seconds(deadline=120.0, now=120.0) == 1
