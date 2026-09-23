@@ -413,6 +413,10 @@ class CursorAdapter(AbstractAITool):
         """Cursor supports ``--mode plan``."""
         return ["--mode", "plan"]
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return Cursor's complete command, including its argument-delivered prompt."""
+        return self._headless_command(request)
+
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
         """Build the exact unattended ``agent --print`` invocation."""
         command = [
@@ -522,7 +526,7 @@ class CursorAdapter(AbstractAITool):
         if native_error:
             warnings = (
                 *warnings,
-                f"Cursor reported a native error result: {response_text or 'no detail'}",
+                "Cursor reported a native error result.",
             )
         return complete_session(
             context,

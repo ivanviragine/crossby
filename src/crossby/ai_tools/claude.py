@@ -429,7 +429,7 @@ class ClaudeAdapter(AbstractAITool):
         if native_error:
             warnings = (
                 *warnings,
-                f"Claude Code reported a native error result: {response_text or 'no detail'}",
+                "Claude Code reported a native error result.",
             )
         return complete_session(
             context,

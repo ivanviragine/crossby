@@ -200,6 +200,10 @@ class CopilotAdapter(AbstractAITool):
             return re.sub(r"(\d)-(\d)", r"\1.\2", model_id)
         return model_id
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return Copilot's complete command, including its argument-delivered prompt."""
+        return self._headless_command(request)
+
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
         """Build the exact unattended ``copilot --prompt`` invocation."""
         command = [

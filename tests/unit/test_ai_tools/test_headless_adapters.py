@@ -378,6 +378,31 @@ def test_claude_native_error_is_not_success_on_exit_zero(
     assert any("Bash" in denial for denial in result.denials)
 
 
+@pytest.mark.parametrize(
+    ("tool", "native_output", "envelope"),
+    [
+        (AIToolID.CLAUDE, HeadlessNativeOutput.JSON, CLAUDE_ERROR_RESULT),
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSON, {**CURSOR_RESULT, "is_error": True}),
+    ],
+)
+def test_native_error_diagnostics_do_not_include_response_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+    envelope: dict[str, Any],
+) -> None:
+    native_error_text = "untrusted native response text that must stay private"
+    payload = {**envelope, "result": native_error_text}
+    adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=json.dumps(payload), exit_code=0))
+
+    result = adapter.run_headless_session(_request(tmp_path, native_output=native_output))
+
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.final_text is None and not result.final_json_present
+    assert all(native_error_text not in warning for warning in result.warnings)
+
+
 def test_claude_denial_reporting_is_bounded_and_drops_tool_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -767,6 +792,43 @@ def test_antigravity_windows_command_overflow_fails_before_version_probe(
                 prompt="x" * 30_000,
                 native_output=HeadlessNativeOutput.JSON,
                 response_schema={"type": "object", "description": "x" * 3_000},
+            )
+        )
+
+    assert version_probes == 0
+
+
+@pytest.mark.parametrize(
+    ("tool", "native_output"),
+    [
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSON),
+        (AIToolID.COPILOT, HeadlessNativeOutput.TEXT),
+    ],
+)
+def test_windows_complete_argument_argv_overflow_fails_before_version_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+) -> None:
+    adapter = AbstractAITool.get(tool)
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized command must fail before version probing")
+
+    monkeypatch.setattr(base_mod.sys, "platform", "win32")
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native command line"):
+        adapter.run_headless_session(
+            _request(
+                tmp_path,
+                prompt="x" * 30_000,
+                model="m" * 3_000,
+                native_output=native_output,
             )
         )
 
