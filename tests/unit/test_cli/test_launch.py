@@ -1078,3 +1078,62 @@ class TestComplexityEffort:
         result = self._run(tmp_path, self._CONFIG)
         assert result.exit_code == 0, result.output
         assert "Effort" not in result.output
+
+
+class TestLaunchedModelSummary:
+    """The post-confirmation summary shows the model the tool actually receives.
+
+    Cursor and Antigravity CLI bake effort into the model ID, so the adapter may
+    swap in a sibling ID at launch; the summary must show that ID rather than
+    the one the user typed. Real adapters are used; only the process launch is
+    stubbed.
+    """
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    def _summary(self, tmp_path: Path, tool: str, *flags: str) -> str:
+        adapter = AbstractAITool.get(tool)
+        with (
+            patch.object(type(adapter), "launch", return_value=0),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", tool, *flags])
+        assert result.exit_code == 0, result.output
+        # Rich wraps long lines at the test console width; compare word-joined.
+        return " ".join(result.output.split())
+
+    def test_cursor_effort_shows_the_swapped_model(self, tmp_path: Path) -> None:
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-5-5-medium", "--effort", "high"
+        )
+        assert "claude-opus-5-5-high (from claude-opus-5-5-medium at high effort)" in summary
+
+    def test_antigravity_default_effort_is_shown(self, tmp_path: Path) -> None:
+        summary = self._summary(tmp_path, "antigravity-cli", "--model", "gemini-3.8-flash")
+        assert "gemini-3.8-flash-medium (from gemini-3.8-flash at its default effort)" in summary
+
+    def test_unchanged_model_is_shown_as_given(self, tmp_path: Path) -> None:
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-5-5-high", "--effort", "high"
+        )
+        assert "Model claude-opus-5-5-high" in summary
+        assert "(from" not in summary
+
+    def test_bracket_overrides_are_not_swallowed_as_markup(self, tmp_path: Path) -> None:
+        # Rich would otherwise read "[effort=high]" as a style tag and drop it.
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-4-8[effort=high]", "--effort", "high"
+        )
+        assert "Model claude-opus-4-8[effort=high]" in summary
