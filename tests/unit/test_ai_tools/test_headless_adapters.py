@@ -1,7 +1,9 @@
 """Unattended headless coverage for the six terminal adapters.
 
-The native payloads below are recorded from live runs of the exact CLI builds
-each adapter declares as its ``verified_version``:
+The native payloads below combine live captures from the exact CLI builds each
+adapter declares as its ``verified_version``, documented Codex success events,
+and a synthetic Antigravity waiting state. Their exact provenance is recorded
+in ``docs/unattended-headless-verification.md``:
 
 * Claude Code 2.1.263 — ``claude --print --output-format json|stream-json``
 * Codex CLI 0.154.0 — ``codex exec --json``
@@ -890,7 +892,7 @@ def test_opencode_headless_argv_never_auto_approves(tmp_path: Path) -> None:
     # refusal is the intended behavior instead.
     assert "--auto" not in command
     assert command[command.index("--model") + 1] == "anthropic/claude-haiku-4-5"
-    assert command[-1] == PROMPT
+    assert command[-2:] == ["--", PROMPT]
 
 
 def test_antigravity_headless_argv_carries_the_schema_and_print_timeout(

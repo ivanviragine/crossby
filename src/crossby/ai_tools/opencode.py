@@ -188,7 +188,7 @@ class OpenCodeAdapter(AbstractAITool):
             command.extend(("--model", request.model))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
-        command.append(request.prompt)
+        command.extend(("--", request.prompt))
         return command
 
     def _run_headless_session(

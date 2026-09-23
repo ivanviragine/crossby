@@ -352,10 +352,11 @@ spawn.
 Capability declarations are evidence, not aspiration. `verified_version` is the
 exact build the flags and envelope were checked against and becomes the runtime
 floor, and `successful_native_statuses` may only be declared when *every*
-supported native output carries that status. The recorded payloads in
-`tests/unit/test_ai_tools/test_headless_adapters.py` come from live runs of
-those builds; when a CLI changes its envelope, update the fixture and the
-verified version together.
+supported native output carries that status. Each fixture's exact provenance is
+recorded in `docs/unattended-headless-verification.md`: live captures,
+documented Codex success events, or a synthetic Antigravity waiting state. When
+a CLI changes its envelope, update the fixture and the verified version
+together.
 
 ### Collected native plan sessions
 
