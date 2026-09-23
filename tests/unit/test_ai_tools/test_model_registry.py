@@ -114,6 +114,9 @@ class TestModelRegistry:
             "github-copilot/gpt-6-astra",
             "openai/gpt-6-astra",
             "openai/gpt-6-luna",
+            "openai/gpt-6-astra-fast",
+            "openai/gpt-6-luna-fast",
+            "openai/gpt-6-sol-fast",
             "openai/gpt-6-sol",
         ],
     )

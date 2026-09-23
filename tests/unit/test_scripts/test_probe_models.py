@@ -378,6 +378,44 @@ class TestDeprecationParsing:
         assert "github-copilot/mai-code-1-flash-picker" in deprecated
         assert "github-copilot/claude-opus-5" not in deprecated
 
+    def test_gemini_counts_only_passed_or_imminent_shutdowns(self) -> None:
+        page = """
+        <tr><td>gemini-3-pro-preview</td><td>November 18, 2025</td>
+            <td>March 9, 2026</td><td>gemini-3.1-pro-preview</td></tr>
+        <tr><td>gemini-2.5-flash-image</td><td>October 2, 2025</td>
+            <td>October 2, 2026</td><td>gemini-3.1-flash-image-preview</td></tr>
+        <tr><td>gemini-3.5-live-translate-preview</td><td>June 2026</td>
+            <td>No shutdown date announced</td></tr>
+        <tr><td>gemini-3.1-flash-lite</td><td>May 7, 2026</td>
+            <td>May 7, 2027</td><td>gemini-3.5-flash-lite</td></tr>
+        <tr><td>gemini-embedding-001</td><td>July 14, 2025</td>
+            <td>May 14, 2028</td><td>gemini-embedding-2</td></tr>
+        """
+
+        # Already shut down, and shutting down within the horizon, count; a
+        # launch-time lifecycle date a year or more out does not.
+        assert PROBE_MODULE.parse_gemini_deprecations(
+            page, PROBE_MODULE.datetime.date(2026, 9, 23)
+        ) == {"gemini-3-pro-preview", "gemini-2.5-flash-image"}
+
+    def test_opencode_applies_gemini_shutdowns_to_google_prefix(self) -> None:
+        deprecated = PROBE_MODULE.parse_opencode_deprecations(
+            json.dumps({}), set(), {"gemini-3-pro-preview"}
+        )
+        assert deprecated == {"google/gemini-3-pro-preview"}
+
+    def test_antigravity_uses_gemini_deprecations(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        urls: list[str] = []
+
+        def fake_fetch(url: str) -> str:
+            urls.append(url)
+            return "<td>gemini-3-pro-preview</td><td>November 18, 2025</td><td>March 9, 2026</td>"
+
+        monkeypatch.setattr(PROBE_MODULE, "_fetch", fake_fetch)
+
+        assert PROBE_MODULE.probe_deprecations("antigravity-cli") == {"gemini-3-pro-preview"}
+        assert urls == [PROBE_MODULE._DEPRECATION_URLS["gemini"]]
+
     @pytest.mark.parametrize(
         "parser",
         ["parse_claude_deprecations", "parse_copilot_retirements", "parse_codex_deprecations"],

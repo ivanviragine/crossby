@@ -11,6 +11,7 @@ as additions, and catalog entries it marks that way are reported for removal.
 
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import os
@@ -45,7 +46,14 @@ _DEPRECATION_URLS: dict[str, str] = {
     "copilot": "https://docs.github.com/en/copilot/reference/ai-models/supported-models",
     "codex": _DOCS_URLS["codex"],
     "opencode": "https://models.dev/api.json",
+    # Shared by antigravity-cli (bare Gemini IDs) and OpenCode's google/ prefix.
+    "gemini": "https://ai.google.dev/gemini-api/docs/deprecations",
 }
+
+# Google publishes a shutdown date for most models at launch, often a year or
+# more out. Only a shutdown that has passed or falls within this window counts
+# as a retirement; a far-off lifecycle date alone does not.
+_GEMINI_SHUTDOWN_HORIZON = datetime.timedelta(days=180)
 
 _SCRAPE_PATTERNS: dict[str, str] = {
     # Family-anchored, word-boundary pattern. Matches single-number families
@@ -260,11 +268,35 @@ def parse_codex_deprecations(text: str) -> set[str]:
     return mentioned - set(re.findall(r"codex -m (gpt-[a-z0-9._-]+)", recommended))
 
 
-def parse_opencode_deprecations(text: str, copilot_retired: set[str]) -> set[str]:
+def parse_gemini_deprecations(text: str, today: datetime.date) -> set[str]:
+    """Extract Google models whose shutdown date has passed or is imminent.
+
+    Each row of the Gemini API deprecations tables reads "<model> <release
+    date> <shutdown date> <replacement>"; rows whose shutdown column says "No
+    shutdown date announced" never match.
+    """
+    date = r"[A-Z][a-z]+ \d{1,2}, \d{4}"
+    rows = re.findall(
+        rf"\b((?:gemini|gemma|veo|lyria|imagen)-[a-z0-9.-]*[a-z0-9]) "
+        rf"(?:{date}|[A-Z][a-z]+ \d{{4}}) ({date})",
+        _html_to_text(text),
+    )
+    cutoff = today + _GEMINI_SHUTDOWN_HORIZON
+    return {
+        model
+        for model, shutdown in rows
+        if datetime.datetime.strptime(shutdown, "%B %d, %Y").date() <= cutoff
+    }
+
+
+def parse_opencode_deprecations(
+    text: str, copilot_retired: set[str], gemini_retired: frozenset[str] | set[str] = frozenset()
+) -> set[str]:
     """Deprecated ``provider/model`` IDs for OpenCode.
 
     models.dev (OpenCode's catalog source) flags deprecated models directly.
-    Its ``github-copilot`` provider lags GitHub's own retirement table, so
+    Google's shutdowns apply to the ``google/`` prefix, and its
+    ``github-copilot`` provider lags GitHub's own retirement table, so
     Copilot retirements apply to that prefix too: by exact ID, by the fast-mode
     variant of a retired model, and by display name for IDs OpenCode spells
     differently (``mai-code-1-flash-picker`` is "MAI-Code-1-Flash").
@@ -288,14 +320,21 @@ def parse_opencode_deprecations(text: str, copilot_retired: set[str]) -> set[str
                 deprecated.add(f"{provider}/{model_id}")
     for model in copilot_retired:
         deprecated |= {f"github-copilot/{model}", f"github-copilot/{model}-fast"}
-    return deprecated
+    return deprecated | {f"google/{model}" for model in gemini_retired}
 
 
 def probe_deprecations(tool: str) -> set[str]:
     """Return the model IDs ``tool``'s provider marks deprecated or retired."""
+    if tool == "antigravity-cli":
+        text = _fetch(_DEPRECATION_URLS["gemini"])
+        return parse_gemini_deprecations(text, datetime.date.today()) if text else set()
     if tool == "opencode":
         text = _fetch(_DEPRECATION_URLS["opencode"])
-        return parse_opencode_deprecations(text, probe_deprecations("copilot")) if text else set()
+        if not text:
+            return set()
+        return parse_opencode_deprecations(
+            text, probe_deprecations("copilot"), probe_deprecations("antigravity-cli")
+        )
     parsers: dict[str, Callable[[str], set[str]]] = {
         "claude": parse_claude_deprecations,
         "copilot": parse_copilot_retirements,
