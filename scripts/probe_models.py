@@ -3,10 +3,15 @@
 
 Compares discovered models against src/crossby/data/models.json and reports
 any differences. Exits 1 if updates are needed.
+
+Each provider's own retirement page is read too: newly discovered models that
+the provider marks deprecated or retired are reported as ignored rather than
+as additions, and catalog entries it marks that way are reported for removal.
 """
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -28,6 +33,18 @@ _DOCS_URLS: dict[str, str] = {
         "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference"
     ),
     "codex": "https://learn.chatgpt.com/docs/models",
+}
+
+# Pages where each provider publishes retirements. The model probes report what
+# a CLI or docs page *mentions*, and those sources keep listing a model until
+# its shutdown date (Codex's "other models" cards, Copilot's CLI reference,
+# OpenCode's bundled catalog), so without this list the probe would keep asking
+# to re-add models the catalog dropped on purpose.
+_DEPRECATION_URLS: dict[str, str] = {
+    "claude": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+    "copilot": "https://docs.github.com/en/copilot/reference/ai-models/supported-models",
+    "codex": _DOCS_URLS["codex"],
+    "opencode": "https://models.dev/api.json",
 }
 
 _SCRAPE_PATTERNS: dict[str, str] = {
@@ -64,10 +81,14 @@ _ANTIGRAVITY_GEMINI_EFFORT_RE = re.compile(
 # Values are substrings to search for in `--help` / `-h` output.
 _EXPECTED_FLAGS: dict[str, dict[str, str]] = {
     "codex": {
-        "yolo": "--yolo",
+        # CodexAdapter.yolo_args() is ``-a never``; ``--yolo`` is a hidden alias
+        # that would also drop the sandbox, and crossby never emits it.
+        "yolo": "--ask-for-approval",
         "ask_for_approval": "--ask-for-approval",
         "headless": "exec",
-        "model_reasoning_effort": "model_reasoning_effort",
+        # Effort is passed as ``-c model_reasoning_effort=...``; the key name
+        # itself never appears in --help, only the ``--config`` flag does.
+        "model_reasoning_effort": "--config",
         "profile": "--profile",
         "image": "--image",
     },
@@ -105,6 +126,13 @@ _EXPECTED_FLAGS: dict[str, dict[str, str]] = {
     },
 }
 
+# Subcommands whose ``--help`` is also searched, for flags that live on the
+# subcommand crossby actually runs rather than on the top-level command.
+_EXTRA_HELP_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
+    # ``--variant`` is an option of ``opencode run`` (the headless path).
+    "opencode": (("run", "--help"),),
+}
+
 # Maps capability names in _EXPECTED_FLAGS to AIToolCapabilities boolean fields.
 _CAP_FIELD_MAP: dict[str, str] = {
     "headless": "supports_headless",
@@ -132,13 +160,10 @@ def _token_match(pattern: str, text: str) -> bool:
     return bool(re.search(r"\b" + escaped + r"\b", text))
 
 
-def _scrape_models(tool: str) -> set[str]:
-    """Scrape model IDs from docs."""
-    if tool not in _DOCS_URLS or not shutil.which("curl"):
-        return set()
-
-    url = _DOCS_URLS[tool]
-
+def _fetch(url: str) -> str | None:
+    """Return the body at ``url``, or None when curl is missing or the fetch fails."""
+    if not shutil.which("curl"):
+        return None
     try:
         result = subprocess.run(
             ["curl", "-fsSL", "--max-time", "10", url],
@@ -146,12 +171,140 @@ def _scrape_models(tool: str) -> set[str]:
             text=True,
             timeout=15,
         )
-        if result.returncode != 0:
-            return set()
-
-        return parse_documented_models(tool, result.stdout)
     except Exception:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _scrape_models(tool: str) -> set[str]:
+    """Scrape model IDs from docs."""
+    if tool not in _DOCS_URLS:
         return set()
+    text = _fetch(_DOCS_URLS[tool])
+    return parse_documented_models(tool, text) if text is not None else set()
+
+
+def _html_section(text: str, start_id: str, end_marker: str) -> str | None:
+    """Return the HTML between ``id="<start_id>"`` and the next ``end_marker``.
+
+    Docs sites repeat heading IDs in their tables of contents, so the section
+    starts at the last occurrence: the heading itself follows its TOC entries.
+    """
+    start = text.rfind(f'id="{start_id}"')
+    if start < 0:
+        return None
+    end = text.find(end_marker, start)
+    return text[start:end] if end >= 0 else None
+
+
+def _html_to_text(fragment: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", fragment)))
+
+
+def parse_claude_deprecations(text: str) -> set[str]:
+    """Extract Deprecated/Retired IDs from the Claude model-deprecations page.
+
+    Reads only the "Model status" table: the history below it also names each
+    retirement's *replacement*, which is an active model. IDs are returned in
+    the registry's dotted alias form (``claude-opus-4.1``).
+    """
+    section = _html_section(text, "model-status", 'id="deprecation-history"')
+    if section is None:
+        return set()
+    adapter = AbstractAITool.get("claude")
+    rows = re.findall(r"(claude-[a-z0-9-]+)\s+(?:Deprecated|Retired)\b", _html_to_text(section))
+    return {adapter.standardize_model_id(_CLAUDE_DATED_ALIAS_RE.sub(r"\1", m)) for m in rows}
+
+
+def _copilot_model_slug(name: str) -> str:
+    """Turn a Copilot display name into its CLI model ID.
+
+    ``Claude Sonnet 4.6`` -> ``claude-sonnet-4.6``; ``Claude Opus 4.6 (fast
+    mode) (preview)`` -> ``claude-opus-4.6-fast``, so retiring a fast-mode
+    variant never reads as retiring its base model.
+    """
+    lower = name.lower()
+    fast = "(fast mode)" in lower
+    lower = re.sub(r"\([^)]*\)", " ", lower)
+    slug = "-".join(lower.split())
+    return f"{slug}-fast" if fast else slug
+
+
+def parse_copilot_retirements(text: str) -> set[str]:
+    """Extract retired and scheduled-for-retirement IDs from Copilot's
+    supported-models page ("Model retirement history" table)."""
+    section = _html_section(text, "model-retirement-history", "</table>")
+    if section is None:
+        return set()
+    names = re.findall(r"<tr>\s*<t[hd][^>]*>(.*?)</t[hd]>", section, flags=re.S)
+    slugs = {
+        _copilot_model_slug(_html_to_text(re.sub(r"<sup>.*?</sup>", "", n, flags=re.S)))
+        for n in names
+    }
+    return {s for s in slugs if s and s != "model-name"}
+
+
+def parse_codex_deprecations(text: str) -> set[str]:
+    """Extract model IDs named in the Codex docs' "Deprecated Codex models" section.
+
+    That prose also names the replacements ("Replace gpt-5.4 with gpt-6-sol"),
+    so IDs offered under "Recommended models" are never treated as deprecated.
+    """
+    section = _html_section(
+        text, "deprecated-codex-models", 'id="configure-your-default-local-model"'
+    )
+    recommended = _html_section(text, "recommended-models", 'id="other-models"')
+    if section is None or recommended is None:
+        return set()
+    mentioned = set(re.findall(r"\b(gpt-\d[a-z0-9.-]*[a-z0-9])", _html_to_text(section)))
+    return mentioned - set(re.findall(r"codex -m (gpt-[a-z0-9._-]+)", recommended))
+
+
+def parse_opencode_deprecations(text: str, copilot_retired: set[str]) -> set[str]:
+    """Deprecated ``provider/model`` IDs for OpenCode.
+
+    models.dev (OpenCode's catalog source) flags deprecated models directly.
+    Its ``github-copilot`` provider lags GitHub's own retirement table, so
+    Copilot retirements apply to that prefix too: by exact ID, by the fast-mode
+    variant of a retired model, and by display name for IDs OpenCode spells
+    differently (``mai-code-1-flash-picker`` is "MAI-Code-1-Flash").
+    """
+    try:
+        catalog: dict[str, Any] = json.loads(text)
+    except ValueError:
+        return set()
+    deprecated: set[str] = set()
+    for provider, entry in catalog.items():
+        if not isinstance(entry, dict):
+            continue
+        for model_id, model in entry.get("models", {}).items():
+            if not isinstance(model, dict):
+                continue
+            retired_by_name = (
+                provider == "github-copilot"
+                and _copilot_model_slug(str(model.get("name", ""))) in copilot_retired
+            )
+            if model.get("status") == "deprecated" or retired_by_name:
+                deprecated.add(f"{provider}/{model_id}")
+    for model in copilot_retired:
+        deprecated |= {f"github-copilot/{model}", f"github-copilot/{model}-fast"}
+    return deprecated
+
+
+def probe_deprecations(tool: str) -> set[str]:
+    """Return the model IDs ``tool``'s provider marks deprecated or retired."""
+    if tool == "opencode":
+        text = _fetch(_DEPRECATION_URLS["opencode"])
+        return parse_opencode_deprecations(text, probe_deprecations("copilot")) if text else set()
+    parsers: dict[str, Callable[[str], set[str]]] = {
+        "claude": parse_claude_deprecations,
+        "copilot": parse_copilot_retirements,
+        "codex": parse_codex_deprecations,
+    }
+    if tool not in parsers:
+        return set()
+    text = _fetch(_DEPRECATION_URLS[tool])
+    return parsers[tool](text) if text else set()
 
 
 def _pattern_matches(pattern: str, text: str) -> set[str]:
@@ -370,6 +523,9 @@ def model_catalog_diff(registered: set[str], discovered: set[str]) -> tuple[set[
 def probe_cli_args(tool: str) -> dict[str, bool]:
     """Run ``<tool> --help`` and check for expected flag patterns.
 
+    Tools listed in ``_EXTRA_HELP_COMMANDS`` also have those subcommands'
+    ``--help`` searched.
+
     Returns a dict mapping capability_name -> found (bool) for each entry in
     ``_EXPECTED_FLAGS[tool]``.  Returns an empty dict when the tool is not in
     ``_EXPECTED_FLAGS``, its binary is not installed, or the help output is empty.
@@ -388,10 +544,11 @@ def probe_cli_args(tool: str) -> dict[str, bool]:
         return {}
 
     combined = ""
-    for help_flag in ["--help", "-h"]:
+    help_commands = [("--help",), ("-h",), *_EXTRA_HELP_COMMANDS.get(tool, ())]
+    for help_args in help_commands:
         try:
             result = subprocess.run(
-                [binary, help_flag],
+                [binary, *help_args],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -485,6 +642,7 @@ def main() -> int:
         found: dict[str, set[str]] = {
             tool: _MODEL_PROBES[tool]() for tool in registry if tool in _MODEL_PROBES
         }
+        deprecations: dict[str, set[str]] = {tool: probe_deprecations(tool) for tool in registry}
 
     has_diff = False
     console.empty()
@@ -492,6 +650,22 @@ def main() -> int:
 
     for tool, expected in registry.items():
         actual_raw = found.get(tool, set())
+        deprecated = deprecations.get(tool, set())
+
+        # Checked even when discovery is unavailable: retirement evidence comes
+        # from the provider's own deprecation page, not from the model probe.
+        still_listed = expected & deprecated
+        if still_listed:
+            has_diff = True
+            console.warn(
+                f"[{tool}] DEPRECATED (provider marks retired/deprecated; "
+                f"remove from {JSON_PATH.name}):"
+            )
+            for m in sorted(still_listed):
+                console.detail(f"  - {m}")
+            diff_summary.append(
+                f"For the '{tool}' tools list, REMOVE these items: {sorted(still_listed)}"
+            )
 
         # An unavailable source is not evidence that every registered model was
         # removed. Make the affected tool/source explicit and skip its diff.
@@ -504,8 +678,14 @@ def main() -> int:
             continue
 
         not_returned, new = model_catalog_diff(expected, actual_raw)
+        ignored = new & deprecated
+        new -= deprecated
 
         console.header(f"Provider: {tool}")
+        if ignored:
+            console.warn("IGNORED (in probe, but the provider marks these retired/deprecated):")
+            for m in sorted(ignored):
+                console.detail(f"  · {m}")
         if not not_returned and not new:
             console.detail("✓ Up to date.")
         else:
