@@ -47,6 +47,11 @@ never hit, so the adapter passes `--trust` while still withholding
 `successful_native_statuses` is *not* declared for Claude: its text wire carries
 no status at all, so a blanket declaration would be false.
 
+Codex contributes exactly one `turn.completed` or `turn.failed` frame for an
+execution. Missing, repeated, or conflicting terminal frames are invalid native
+output; the adapter never lets a later success frame overwrite an earlier
+failure.
+
 **Envelopes and event names.** Recorded shapes now live as fixtures in
 `tests/unit/test_ai_tools/test_headless_adapters.py`:
 
