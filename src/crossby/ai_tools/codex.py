@@ -333,6 +333,10 @@ class CodexAdapter(AbstractAITool):
         is passed (a piped stdin is otherwise appended as a ``<stdin>`` block)."""
         return ["exec"]
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return Codex's command without the temporary response-schema path."""
+        return self._headless_command(request, schema_path=None)
+
     def _headless_command(
         self,
         request: HeadlessSessionRequest,
@@ -446,9 +450,7 @@ class CodexAdapter(AbstractAITool):
         thread_id: str | None = None
         agent_items: list[dict[str, Any]] = []
         terminal: str | None = None
-        failure: str | None = None
         native_errors = 0
-        last_error: str | None = None
         usage_values: Any = None
         for frame in frames:
             kind = non_blank_text(frame.get("type"))
@@ -465,19 +467,15 @@ class CodexAdapter(AbstractAITool):
                 usage_values = frame.get("usage")
             elif kind == "turn.failed":
                 terminal = kind
-                error = frame.get("error")
-                failure = non_blank_text(error.get("message")) if isinstance(error, dict) else None
             elif kind == "error":
                 native_errors += 1
-                last_error = non_blank_text(frame.get("message")) or last_error
 
         if native_errors:
             # Codex retries transport errors, so keep one bounded summary rather
             # than one warning per retry frame.
             warnings = (
                 *warnings,
-                f"Codex CLI reported {native_errors} native error event(s); "
-                f"last: {last_error or 'no detail'}",
+                f"Codex CLI reported {native_errors} native error event(s).",
             )
         if terminal is None:
             return context.complete(
@@ -487,7 +485,7 @@ class CodexAdapter(AbstractAITool):
                 warnings=(*warnings, "Codex CLI ended without a terminal turn event."),
             )
         if terminal == "turn.failed":
-            warnings = (*warnings, f"Codex CLI turn failed: {failure or 'no detail'}")
+            warnings = (*warnings, "Codex CLI turn failed.")
 
         texts = [
             text

@@ -430,7 +430,8 @@ exit status was `0`. A timeout or cancellation kills the whole owned process
 group and returns a bounded, prompt-free result that keeps the session,
 thread, or conversation ID observed before the deadline. Native stderr is
 reported only as a fixed diagnostic, so caller-visible warnings cannot echo
-session content.
+session content. Codex native error and failed-turn messages are likewise
+summarized without copying native text.
 
 Only Claude Code, Codex CLI, and Antigravity CLI accept `response_schema`; the
 other three reject it before spawning anything. Claude and Antigravity also
@@ -440,7 +441,9 @@ the validated structured output; otherwise `TEXT` returns the final response
 text and `JSON`/`JSONL` return the native object that carried it, exactly as
 the CLI emitted it. `BROKERED` sessions are not offered by any terminal
 adapter yet — none of these CLIs exposes a verified live question channel in
-its non-interactive mode.
+its non-interactive mode. Cursor and Antigravity CLI encode `effort` in the
+model argument, so a headless request that specifies `effort` must also specify
+`model`; it otherwise fails before spawning.
 
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a

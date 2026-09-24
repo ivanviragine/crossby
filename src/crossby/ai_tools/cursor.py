@@ -413,6 +413,17 @@ class CursorAdapter(AbstractAITool):
         """Cursor supports ``--mode plan``."""
         return ["--mode", "plan"]
 
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Reject effort requests that Cursor cannot encode without a model."""
+        if request.effort is not None and not request.model:
+            from crossby.ai_tools.headless import HeadlessRequestError
+
+            raise HeadlessRequestError(
+                "Cursor requires an explicit model when effort is requested.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
     def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
         """Return Cursor's complete command, including its argument-delivered prompt."""
         return self._headless_command(request)

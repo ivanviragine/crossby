@@ -228,8 +228,15 @@ class AntigravityCLIAdapter(AbstractAITool):
         return ["--mode", "plan"]
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
-        """Reject schema requests agy cannot answer with structured output."""
-        from crossby.ai_tools.headless import HeadlessUnsupportedError
+        """Reject headless requests agy cannot preserve."""
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+
+        if request.effort is not None and not request.model:
+            raise HeadlessRequestError(
+                "Antigravity CLI requires an explicit model when effort is requested.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
 
         if (
             request.response_schema is not None

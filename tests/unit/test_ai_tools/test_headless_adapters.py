@@ -39,6 +39,7 @@ from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
 from crossby.models.ai import (
     AIToolID,
+    EffortLevel,
     HeadlessEventKind,
     HeadlessInteractionMode,
     HeadlessNativeOutput,
@@ -473,10 +474,13 @@ def test_codex_turn_events_are_normalized(tmp_path: Path, monkeypatch: pytest.Mo
 def test_codex_turn_failed_is_failure_on_exit_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    failed_events = json.loads(json.dumps(CODEX_FAILED_EVENTS))
+    failed_events[2]["message"] = f"failed command includes {PROMPT}"
+    failed_events[3]["error"]["message"] = f"failed response includes {PROMPT}"
     adapter = _adapter(
         monkeypatch,
         AIToolID.CODEX,
-        _fake_cli(stdout=_jsonl(CODEX_FAILED_EVENTS), exit_code=0),
+        _fake_cli(stdout=_jsonl(tuple(failed_events)), exit_code=0),
     )
 
     result = adapter.run_headless_session(_request(tmp_path))
@@ -484,7 +488,11 @@ def test_codex_turn_failed_is_failure_on_exit_zero(
     assert result.exit_code == 0
     assert result.status is HeadlessTerminalStatus.FAILED
     assert result.native_status == "turn.failed"
-    assert any("401" in warning for warning in result.warnings)
+    assert "Codex CLI reported 1 native error event(s)." in result.warnings
+    assert "Codex CLI turn failed." in result.warnings
+    assert all("failed command" not in warning for warning in result.warnings)
+    assert all("failed response" not in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 def test_codex_without_a_terminal_turn_event_is_invalid_output(
@@ -749,6 +757,7 @@ def test_schema_requests_fail_before_spawn(
     assert not started.exists()
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX execve limits")
 def test_claude_oversized_schema_argument_fails_before_version_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -774,6 +783,7 @@ def test_claude_oversized_schema_argument_fails_before_version_probe(
     assert version_probes == 0
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX execve limits")
 def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_version_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -810,6 +820,7 @@ def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_versio
     assert version_probes == 0
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX execve limits")
 def test_opencode_oversized_model_argument_fails_before_version_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -827,6 +838,84 @@ def test_opencode_oversized_model_argument_fails_before_version_probe(
         adapter.run_headless_session(_request(tmp_path, model="m" * 120_001))
 
     assert version_probes == 0
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX execve limits")
+def test_codex_aggregate_argv_overflow_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.CODEX)
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized argv must fail before version probing")
+
+    request = _request(
+        tmp_path,
+        trusted_dirs=tuple(tmp_path / f"trusted-{index}" for index in range(8)),
+    )
+    argv = adapter._headless_argv_for_validation(request)
+    exec_size = base_mod._headless_posix_exec_size(argv)
+    monkeypatch.setattr(
+        base_mod,
+        "_headless_posix_exec_limit",
+        lambda: exec_size + base_mod._HEADLESS_POSIX_EXEC_SAFETY_MARGIN - 1,
+    )
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native argv and environment"):
+        adapter.run_headless_session(request)
+
+    assert (
+        max(len(argument.encode("utf-8")) for argument in argv)
+        < base_mod._MAX_HEADLESS_ARGUMENT_PROMPT
+    )
+    assert version_probes == 0
+
+
+def test_codex_oversized_model_argument_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.CODEX)
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized model must fail before version probing")
+
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native argv argument"):
+        adapter.run_headless_session(_request(tmp_path, model="m" * 120_001))
+
+    assert version_probes == 0
+
+
+@pytest.mark.parametrize(
+    ("tool", "native_output"),
+    [
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSON),
+        (AIToolID.ANTIGRAVITY_CLI, HeadlessNativeOutput.TEXT),
+    ],
+)
+def test_model_encoded_effort_without_model_fails_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(monkeypatch, tool, _fake_cli(stdout="{}", stdin_record=started))
+
+    with pytest.raises(HeadlessRequestError, match="explicit model"):
+        adapter.run_headless_session(
+            _request(tmp_path, effort=EffortLevel.HIGH, native_output=native_output)
+        )
+
+    assert not started.exists()
 
 
 def test_antigravity_windows_command_overflow_fails_before_version_probe(
