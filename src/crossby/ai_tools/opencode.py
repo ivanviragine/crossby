@@ -250,14 +250,14 @@ class OpenCodeAdapter(AbstractAITool):
         for frame in frames:
             session_id = session_id or non_blank_text(frame.get("sessionID"))
             kind = non_blank_text(frame.get("type"))
-            if saw_terminal_stop and kind in {"step_start", "step_finish"}:
+            if saw_terminal_stop and kind in {"step_start", "step_finish", "text"}:
                 return context.complete(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
                     exit_code=output.returncode,
                     session_id=session_id,
                     warnings=(
                         *warnings,
-                        "OpenCode emitted a step event after its terminal stop event.",
+                        "OpenCode emitted a result-bearing event after its terminal stop event.",
                     ),
                 )
             part = frame.get("part")

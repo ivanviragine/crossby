@@ -314,6 +314,14 @@ def _request(tmp_path: Path, **updates: Any) -> HeadlessSessionRequest:
 
 def _assert_prompt_is_private(result: HeadlessSessionResult) -> None:
     """No normalized event or diagnostic may echo the caller's prompt."""
+    for name in ("session_id", "thread_id", "turn_id", "conversation_id"):
+        value = getattr(result, name)
+        assert value is None or PROMPT not in value
+    assert (
+        result.usage is None
+        or result.usage.session_id is None
+        or PROMPT not in result.usage.session_id
+    )
     for event in result.events:
         assert event.message is None or PROMPT not in event.message
         assert PROMPT not in json.dumps(event.payload or {})
@@ -628,6 +636,29 @@ def test_codex_without_a_terminal_turn_event_is_invalid_output(
     assert any("terminal turn event" in warning for warning in result.warnings)
 
 
+def test_codex_rejects_item_events_after_its_terminal_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    late_agent_message = {
+        "type": "item.completed",
+        "item": {"id": "item_late", "type": "agent_message", "text": "late response"},
+    }
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CODEX,
+        _fake_cli(stdout=_jsonl((*CODEX_EVENTS, late_agent_message)), exit_code=0),
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any(
+        "turn or item event after its terminal turn event" in warning for warning in result.warnings
+    )
+    _assert_prompt_is_private(result)
+
+
 def test_cursor_json_envelope_reports_proposal_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -754,7 +785,51 @@ def test_opencode_rejects_step_events_after_terminal_stop(
     assert result.exit_code == 0
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
-    assert any("step event after its terminal stop event" in warning for warning in result.warnings)
+    assert any(
+        "result-bearing event after its terminal stop event" in warning
+        for warning in result.warnings
+    )
+    _assert_prompt_is_private(result)
+
+
+def test_opencode_rejects_text_events_after_terminal_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    late_text = {
+        "type": "text",
+        "sessionID": OPENCODE_SESSION,
+        "part": {"id": "prt_late", "type": "text", "text": "late response"},
+    }
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.OPENCODE,
+        _fake_cli(stdout=_jsonl((*OPENCODE_EVENTS, late_text)), exit_code=0),
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any(
+        "result-bearing event after its terminal stop event" in warning
+        for warning in result.warnings
+    )
+    _assert_prompt_is_private(result)
+
+
+def test_opencode_rejects_prompt_bearing_session_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = json.loads(json.dumps(OPENCODE_EVENTS))
+    for event in events:
+        event["sessionID"] = PROMPT
+    adapter = _adapter(monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(events)))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("unsafe session provenance" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 

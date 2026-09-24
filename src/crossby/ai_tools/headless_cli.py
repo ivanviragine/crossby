@@ -374,6 +374,12 @@ def frame_streamer(
             if frame is None:
                 continue
             observed = provenance_of(frame)
+            context.validate_provenance(
+                session_id=observed.get("session_id"),
+                thread_id=observed.get("thread_id"),
+                turn_id=observed.get("turn_id"),
+                conversation_id=observed.get("conversation_id"),
+            )
             context.set_provenance(
                 session_id=observed.get("session_id"),
                 thread_id=observed.get("thread_id"),

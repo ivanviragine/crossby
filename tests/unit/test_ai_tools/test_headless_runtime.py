@@ -39,6 +39,7 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    TokenUsage,
 )
 from crossby.utils.versioning import BinaryVersion
 
@@ -317,6 +318,52 @@ def test_schema_invalid_output_keeps_safe_events_and_provenance(tmp_path: Path) 
     assert result.final_json is None
     assert result.session_id == "session-1"
     assert result.events[0].message == "safe progress"
+
+
+@pytest.mark.parametrize("field", ("session_id", "thread_id", "turn_id", "conversation_id"))
+def test_prompt_bearing_provenance_is_rejected_before_result_publication(
+    tmp_path: Path, field: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(
+            final_text="untrusted", **{field: "private session prompt"}
+        )
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert all(
+        getattr(result, name) is None
+        for name in ("session_id", "thread_id", "turn_id", "conversation_id")
+    )
+    assert any("unsafe session provenance" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("identifier", ("contains whitespace", "x" * 513))
+def test_malformed_native_provenance_is_rejected_before_result_publication(
+    tmp_path: Path, identifier: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_text="untrusted", session_id=identifier)
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert result.session_id is None
+
+
+def test_prompt_bearing_usage_provenance_is_rejected_before_result_publication(
+    tmp_path: Path,
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(
+            final_text="untrusted", usage=TokenUsage(session_id="private session prompt")
+        )
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert result.usage is None
 
 
 def test_missing_required_terminal_event_is_invalid(tmp_path: Path) -> None:

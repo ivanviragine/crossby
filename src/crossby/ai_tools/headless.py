@@ -41,10 +41,14 @@ _MAX_EVENT_MESSAGE_BYTES = 64 * 1024
 _MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 _MAX_FINAL_PAYLOAD_BYTES = 8 * 1024 * 1024
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
+_MAX_PROVENANCE_ID_BYTES = 512
 _CALLBACK_POLL_SECONDS = 0.05
 _CLEANUP_GRACE_SECONDS = 0.25
 _TERMINAL_CALLBACK_GRACE_SECONDS = 0.25
 _MISSING_FINAL_JSON = object()
+_PROVENANCE_ID_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-~:@+=/"
+)
 _SENSITIVE_EVENT_KEYS = {
     "answer",
     "answers",
@@ -567,6 +571,13 @@ class HeadlessRuntimeContext:
         usage: TokenUsage | None = None,
     ) -> None:
         """Accumulate safe session IDs, status, exit code, and normalized usage."""
+        self.validate_provenance(
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            usage=usage,
+        )
         updates = {
             "native_status": native_status,
             "exit_code": exit_code,
@@ -587,6 +598,30 @@ class HeadlessRuntimeContext:
                     f"The adapter changed authoritative {name.replace('_', ' ')} provenance."
                 )
             self._provenance[name] = value
+
+    def validate_provenance(
+        self,
+        *,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        conversation_id: str | None = None,
+        usage: TokenUsage | None = None,
+    ) -> None:
+        """Reject malformed or prompt-bearing provenance before it is retained."""
+        identifiers = (session_id, thread_id, turn_id, conversation_id)
+        if any(
+            identifier is not None and not _is_safe_provenance_id(identifier, self.request.prompt)
+            for identifier in identifiers
+        ) or (
+            usage is not None
+            and usage.session_id is not None
+            and not _is_safe_provenance_id(usage.session_id, self.request.prompt)
+        ):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted unsafe session provenance.",
+            )
 
     def add_warning(self, warning: str) -> None:
         self._warnings.append(_bounded_diagnostic(_redact_prompt(warning, self.request.prompt)))
@@ -1038,6 +1073,17 @@ def _contains_sensitive_key(value: Any) -> bool:
 
 def _contains_prompt(value: str, prompt: str) -> bool:
     return bool(prompt) and prompt in value
+
+
+def _is_safe_provenance_id(value: Any, prompt: str) -> bool:
+    """Whether native provenance is bounded identifier data, not session content."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES
+        and not _contains_prompt(value, prompt)
+        and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
+    )
 
 
 def _contains_prompt_value(value: Any, prompt: str) -> bool:
