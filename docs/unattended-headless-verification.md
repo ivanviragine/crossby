@@ -26,9 +26,11 @@ closes the stream at EOF. Antigravity's verified `--print` text and JSON modes
 take their prompt from argv; its stdin stream-json protocol requires a paired
 stream-json output redesign, so the adapter does not substitute it. Any prompt
 or inline response schema carried in argv is validated before a version probe
-or child spawn: POSIX arguments are limited to 120,000 UTF-8 bytes, and Windows
-validates the complete rendered command line against its 32,767 UTF-16-unit
-limit.
+or child spawn: POSIX arguments are limited to 120,000 UTF-8 bytes and the
+complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
+an 8 KiB safety margin; Windows validates the complete rendered command line
+against its 32,767 UTF-16-unit limit. Native stderr becomes a fixed warning
+rather than being copied into caller-visible diagnostics.
 `agy --print-timeout` takes a duration string (`60s`) and bounds the *whole*
 run, so the adapter derives it from the session's overall deadline rather than
 from the shorter idle budget. `agent --print` stops on

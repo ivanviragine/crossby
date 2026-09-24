@@ -541,20 +541,23 @@ def test_copilot_text_response_is_normalized(
     assert any("--allow-all-tools" in warning for warning in result.warnings)
 
 
-def test_copilot_policy_failure_surfaces_bounded_diagnostics(
+def test_copilot_policy_failure_withholds_native_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    native_diagnostic = f"Error: Access denied by policy settings for {PROMPT}"
     adapter = _adapter(
         monkeypatch,
         AIToolID.COPILOT,
-        _fake_cli(stderr="Error: Access denied by policy settings", exit_code=1),
+        _fake_cli(stderr=native_diagnostic, exit_code=1),
     )
 
     result = adapter.run_headless_session(_request(tmp_path))
 
     assert result.status is HeadlessTerminalStatus.FAILED
     assert result.final_text is None
-    assert any("Access denied by policy" in warning for warning in result.warnings)
+    assert any("diagnostics that are withheld" in warning for warning in result.warnings)
+    assert all(native_diagnostic not in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 def test_opencode_raw_events_are_normalized(
@@ -767,6 +770,61 @@ def test_claude_oversized_schema_argument_fails_before_version_probe(
                 response_schema={"type": "object", "description": "x" * 120_000},
             )
         )
+
+    assert version_probes == 0
+
+
+def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AntigravityCLIAdapter()
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized argv and environment must fail before version probing")
+
+    request = _request(
+        tmp_path,
+        prompt="p" * 80_000,
+        native_output=HeadlessNativeOutput.JSON,
+        response_schema={"type": "object", "description": "s" * 80_000},
+    )
+    argv = adapter._headless_argv_for_validation(request)
+    exec_size = base_mod._headless_posix_exec_size(argv)
+    monkeypatch.setattr(
+        base_mod,
+        "_headless_posix_exec_limit",
+        lambda: exec_size + base_mod._HEADLESS_POSIX_EXEC_SAFETY_MARGIN - 1,
+    )
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native argv and environment"):
+        adapter.run_headless_session(request)
+
+    assert (
+        max(len(argument.encode("utf-8")) for argument in argv)
+        < base_mod._MAX_HEADLESS_ARGUMENT_PROMPT
+    )
+    assert version_probes == 0
+
+
+def test_opencode_oversized_model_argument_fails_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.OPENCODE)
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("oversized model must fail before version probing")
+
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="native argv argument"):
+        adapter.run_headless_session(_request(tmp_path, model="m" * 120_001))
 
     assert version_probes == 0
 

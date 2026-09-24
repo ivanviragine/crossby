@@ -176,6 +176,10 @@ class OpenCodeAdapter(AbstractAITool):
         """
         return ["--auto"]
 
+    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+        """Return OpenCode's complete command, including model and effort arguments."""
+        return self._headless_command(request)
+
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
         """Build the exact unattended ``opencode run`` invocation.
 

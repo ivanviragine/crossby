@@ -428,7 +428,9 @@ session; an unresolved permission is denied. A native terminal error, waiting
 state, or missing terminal event is never reported as success just because the
 exit status was `0`. A timeout or cancellation kills the whole owned process
 group and returns a bounded, prompt-free result that keeps the session,
-thread, or conversation ID observed before the deadline.
+thread, or conversation ID observed before the deadline. Native stderr is
+reported only as a fixed diagnostic, so caller-visible warnings cannot echo
+session content.
 
 Only Claude Code, Codex CLI, and Antigravity CLI accept `response_schema`; the
 other three reject it before spawning anything. Claude and Antigravity also

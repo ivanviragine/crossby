@@ -11,6 +11,7 @@ import math
 import os
 import queue
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -78,9 +79,11 @@ logger = structlog.get_logger()
 # child. POSIX limits one argument to 131,072 bytes on Linux; Windows limits
 # the rendered *whole* command line to 32,767 UTF-16 code units. These ceilings
 # leave room for the adapter's fixed flags while keeping stdin and protocol
-# transports unlimited.
+# transports unlimited. POSIX additionally caps the aggregate argv and
+# environment passed to execve.
 _MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
 _MAX_HEADLESS_WINDOWS_COMMAND_LINE = 32_767
+_HEADLESS_POSIX_EXEC_SAFETY_MARGIN = 8 * 1024
 
 
 def _argument_prompt_length(prompt: str) -> int:
@@ -89,6 +92,32 @@ def _argument_prompt_length(prompt: str) -> int:
         rendered = subprocess.list2cmdline([prompt])
         return len(rendered.encode("utf-16-le")) // 2
     return len(prompt.encode("utf-8"))
+
+
+def _headless_posix_exec_size(argv: list[str]) -> int:
+    """Return a conservative byte count for the child argv and environment."""
+    # Every managed native adapter inherits the current environment and pins
+    # NO_COLOR for its child. Include NUL terminators and pointer slots so the
+    # preflight remains below execve's aggregate allocation, not just below its
+    # maximum single-argument limit.
+    environment = {**os.environ, "NO_COLOR": "1"}
+    strings = sum(len(os.fsencode(argument)) + 1 for argument in argv)
+    strings += sum(
+        len(os.fsencode(name)) + len(os.fsencode(value)) + 2 for name, value in environment.items()
+    )
+    pointer_bytes = (len(argv) + len(environment) + 2) * struct.calcsize("P")
+    return strings + pointer_bytes
+
+
+def _headless_posix_exec_limit() -> int:
+    """Return the platform's aggregate execve budget with a safe fallback."""
+    try:
+        limit = os.sysconf("SC_ARG_MAX")
+    except (AttributeError, OSError, ValueError):
+        # This is below the per-argument ceiling and is the Linux minimum used
+        # by the managed transport's existing argument guard.
+        return 131_072
+    return limit if isinstance(limit, int) and limit > 0 else 131_072
 
 
 class AbstractAITool(ABC):
@@ -808,6 +837,17 @@ class AbstractAITool(ABC):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
+
+        exec_size = _headless_posix_exec_size(argv)
+        exec_limit = _headless_posix_exec_limit()
+        if exec_size > exec_limit - _HEADLESS_POSIX_EXEC_SAFETY_MARGIN:
+            raise HeadlessRequestError(
+                f"{caps.display_name} cannot safely deliver a {exec_size}-byte native argv "
+                f"and environment (limit: {exec_limit} bytes). Shorten the prompt, "
+                "response schema, or other command arguments.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
 
     def _run_headless_session(
         self,

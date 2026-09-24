@@ -69,7 +69,7 @@ class HeadlessCommandOutput:
 
     @property
     def stderr_tail(self) -> str:
-        """Whitespace-collapsed stderr tail safe to attach to a warning."""
+        """Return a bounded stderr tail for private diagnostics, never result warnings."""
         collapsed = " ".join(self.stderr.split())
         return collapsed[-_STDERR_TAIL_CHARS:]
 
@@ -506,9 +506,10 @@ def capture_failure_warnings(output: HeadlessCommandOutput) -> tuple[str, ...]:
         warnings.append("The native CLI exceeded the fixed captured-output limit.")
     if output.undecodable:
         warnings.append("The native CLI emitted output that was not valid UTF-8 text.")
-    tail = output.stderr_tail
-    if tail:
-        warnings.append(f"Native diagnostics: {tail}")
+    if output.stderr:
+        warnings.append(
+            "The native CLI emitted diagnostics that are withheld to protect session content."
+        )
     return tuple(warnings)
 
 
