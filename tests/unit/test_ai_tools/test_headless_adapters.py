@@ -1142,6 +1142,32 @@ def test_antigravity_windows_command_overflow_fails_before_version_probe(
     assert version_probes == 0
 
 
+def test_windows_command_limit_counts_terminating_nul_before_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 32,767-unit rendered command still needs its CreateProcess NUL."""
+    adapter = AntigravityCLIAdapter()
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("full Windows command line must fail before version probing")
+
+    monkeypatch.setattr(base_mod.sys, "platform", "win32")
+    monkeypatch.setattr(
+        base_mod.subprocess,
+        "list2cmdline",
+        lambda _argv: "x" * base_mod._MAX_HEADLESS_WINDOWS_COMMAND_LINE,
+    )
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(HeadlessRequestError, match="32768-unit native command line"):
+        adapter.run_headless_session(_request(tmp_path, native_output=HeadlessNativeOutput.JSON))
+
+    assert version_probes == 0
+
+
 @pytest.mark.parametrize(
     ("tool", "native_output"),
     [

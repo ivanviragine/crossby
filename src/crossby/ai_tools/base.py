@@ -77,10 +77,10 @@ logger = structlog.get_logger()
 # Argument-delivered prompts and adapter-supplied argv values must fit the
 # native process contract before an adapter begins version probing or spawns a
 # child. POSIX limits one argument to 131,072 bytes on Linux; Windows limits
-# the rendered *whole* command line to 32,767 UTF-16 code units. These ceilings
-# leave room for the adapter's fixed flags while keeping stdin and protocol
-# transports unlimited. POSIX additionally caps the aggregate argv and
-# environment passed to execve.
+# the rendered *whole* command line to 32,767 UTF-16 code units, including its
+# terminating NUL. These ceilings leave room for the adapter's fixed flags
+# while keeping stdin and protocol transports unlimited. POSIX additionally
+# caps the aggregate argv and environment passed to execve.
 _MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
 _MAX_HEADLESS_WINDOWS_COMMAND_LINE = 32_767
 _HEADLESS_POSIX_EXEC_SAFETY_MARGIN = 8 * 1024
@@ -840,7 +840,9 @@ class AbstractAITool(ABC):
         capability = caps.headless
         if sys.platform.startswith("win"):
             rendered = subprocess.list2cmdline(argv)
-            command_length = len(rendered.encode("utf-16-le")) // 2
+            # CreateProcess counts the terminating NUL in its 32,767-unit
+            # command-line limit; list2cmdline returns only the rendered text.
+            command_length = len(rendered.encode("utf-16-le")) // 2 + 1
             if command_length > _MAX_HEADLESS_WINDOWS_COMMAND_LINE:
                 raise HeadlessRequestError(
                     f"{caps.display_name} cannot safely deliver a {command_length}-unit "
