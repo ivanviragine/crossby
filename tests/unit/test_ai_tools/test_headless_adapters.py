@@ -495,6 +495,37 @@ def test_codex_turn_failed_is_failure_on_exit_zero(
     _assert_prompt_is_private(result)
 
 
+@pytest.mark.parametrize(
+    "terminal_frames",
+    [
+        (
+            {"type": "turn.completed"},
+            {"type": "turn.completed"},
+        ),
+        (
+            {"type": "turn.failed"},
+            {"type": "turn.completed"},
+        ),
+    ],
+    ids=["duplicated", "conflicting"],
+)
+def test_codex_multiple_terminal_turn_events_are_invalid_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_frames: tuple[dict[str, str], dict[str, str]],
+) -> None:
+    events = (*CODEX_EVENTS[:3], *terminal_frames)
+    adapter = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(events), exit_code=0))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.exit_code == 0
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None
+    assert any("multiple terminal turn events" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
 def test_codex_without_a_terminal_turn_event_is_invalid_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -913,6 +944,28 @@ def test_model_encoded_effort_without_model_fails_before_spawn(
     with pytest.raises(HeadlessRequestError, match="explicit model"):
         adapter.run_headless_session(
             _request(tmp_path, effort=EffortLevel.HIGH, native_output=native_output)
+        )
+
+    assert not started.exists()
+
+
+def test_antigravity_conflicting_model_encoded_effort_fails_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.ANTIGRAVITY_CLI,
+        _fake_cli(stdout="{}", stdin_record=started),
+    )
+
+    with pytest.raises(HeadlessRequestError, match="conflicting reasoning effort"):
+        adapter.run_headless_session(
+            _request(
+                tmp_path,
+                model="gemini-3.8-flash-low",
+                effort=EffortLevel.HIGH,
+            )
         )
 
     assert not started.exists()

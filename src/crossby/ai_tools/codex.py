@@ -449,7 +449,7 @@ class CodexAdapter(AbstractAITool):
         # Progress and thread provenance were already emitted live by the streamer.
         thread_id: str | None = None
         agent_items: list[dict[str, Any]] = []
-        terminal: str | None = None
+        terminal_events: list[str] = []
         native_errors = 0
         usage_values: Any = None
         for frame in frames:
@@ -463,10 +463,10 @@ class CodexAdapter(AbstractAITool):
                 if isinstance(item, dict) and non_blank_text(item.get("type")) == "agent_message":
                     agent_items.append(item)
             elif kind == "turn.completed":
-                terminal = kind
+                terminal_events.append(kind)
                 usage_values = frame.get("usage")
             elif kind == "turn.failed":
-                terminal = kind
+                terminal_events.append(kind)
             elif kind == "error":
                 native_errors += 1
 
@@ -477,13 +477,24 @@ class CodexAdapter(AbstractAITool):
                 *warnings,
                 f"Codex CLI reported {native_errors} native error event(s).",
             )
-        if terminal is None:
+        if not terminal_events:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 exit_code=output.returncode,
                 thread_id=thread_id,
                 warnings=(*warnings, "Codex CLI ended without a terminal turn event."),
             )
+        if len(terminal_events) != 1:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                thread_id=thread_id,
+                warnings=(
+                    *warnings,
+                    "Codex CLI emitted multiple terminal turn events for one execution.",
+                ),
+            )
+        terminal = terminal_events[0]
         if terminal == "turn.failed":
             warnings = (*warnings, "Codex CLI turn failed.")
 

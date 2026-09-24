@@ -238,6 +238,22 @@ class AntigravityCLIAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
+        if request.model is not None and request.effort is not None:
+            base, suffix_effort = _split_effort_suffix(request.model)
+            if (
+                base in _ANTIGRAVITY_CLI_EFFORT_TIERS
+                and suffix_effort is not None
+                and suffix_effort is not request.effort
+            ):
+                raise HeadlessRequestError(
+                    "Antigravity CLI request specifies conflicting reasoning effort: "
+                    f"model {request.model!r} encodes {suffix_effort.value!r}, but "
+                    f"effort={request.effort.value!r}. Use a matching model suffix or omit "
+                    "one setting.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+
         if (
             request.response_schema is not None
             and request.native_output is HeadlessNativeOutput.TEXT
@@ -775,8 +791,9 @@ class AntigravityCLIAdapter(AbstractAITool):
         - **Fixed/bare models** (``claude-*``, ``gpt-oss-120b*``): returned
           unchanged — effort does not apply. ``gpt-oss-120b-medium`` is an
           exact provider ID whose suffix is part of its name, not an effort.
-        - **Precedence**: an effort already baked into the ID wins over a
-          separately supplied ``effort`` (agy would reject the two together).
+        - **Precedence**: interactive launches keep an effort already baked
+          into the ID. Headless requests reject a conflicting explicit effort,
+          so the managed request parameters stay unambiguous.
         - **No effort anywhere**: a deterministic default is baked in so the
           command is valid (``gemini-3.8-flash`` → ``…-medium``, ``gemini-3.1-pro``
           → ``…-high``) rather than the rejected bare base model.
