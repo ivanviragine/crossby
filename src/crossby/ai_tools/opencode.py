@@ -222,7 +222,6 @@ class OpenCodeAdapter(AbstractAITool):
             stdin_text=request.prompt,
             on_stdout_lines=frame_streamer(
                 context,
-                label="opencode",
                 kind_of=lambda frame: non_blank_text(frame.get("type")),
                 provenance_of=lambda frame: {"session_id": non_blank_text(frame.get("sessionID"))},
             ),

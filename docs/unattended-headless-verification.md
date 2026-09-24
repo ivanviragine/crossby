@@ -80,7 +80,8 @@ earlier native error or waiting state.
   `step_update` frames.
 
 Two of these streams echo caller input back — Cursor's `user` frame and agy's
-`text_delta` — which is why normalized events carry only a frame's *kind*.
+`text_delta` — which is why a frame's *kind* only controls whether Crossby emits
+a content-free progress event; no native frame value enters an event message.
 
 **Retry behavior justifies the outer deadline.** With invalid credentials both
 `claude --print` and `codex exec` retried for far longer than a caller would
@@ -114,5 +115,6 @@ payload through a **real** child process, so process ownership, stdin delivery,
 and cleanup are exercised rather than mocked. It covers per-adapter envelope
 parsing, native failure on a zero exit, malformed output, schema enforcement and
 pre-spawn schema rejection, prompt privacy in events and diagnostics, stdin
-never being inherited, and a timeout that kills a grandchild in the owned
-process group while keeping the streamed `thread_id` in the partial result.
+never being inherited, and fail-closed prompt delivery when a child closes stdin
+before a complete write. It also covers a timeout that kills a grandchild in the
+owned process group while keeping the streamed `thread_id` in the partial result.

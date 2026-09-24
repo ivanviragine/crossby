@@ -87,13 +87,13 @@ class BoundedProgress:
         self._limit = limit
         self._emitted = 0
 
-    def note(self, message: str) -> None:
-        """Record one milestone described by fixed adapter vocabulary only."""
+    def note(self) -> None:
+        """Record one fixed progress milestone without exposing native frame data."""
         if self._emitted >= self._limit:
             self._context.mark_progress()
             return
         self._emitted += 1
-        self._context.emit(HeadlessEventKind.PROGRESS, message=message)
+        self._context.emit(HeadlessEventKind.PROGRESS)
 
 
 def run_managed_command(
@@ -108,9 +108,11 @@ def run_managed_command(
     """Run one owned native CLI process under the managed headless boundary.
 
     ``stdin_text`` is delivered on a pipe that is closed immediately afterwards.
-    When it is ``None`` the child receives ``/dev/null``: an unattended session
-    never inherits arbitrary parent terminal input, so a native prompt can never
-    block on a caller that is not there.
+    A broken or short write fails the transport rather than allowing a native
+    response for only part of the requested prompt. When it is ``None`` the
+    child receives ``/dev/null``: an unattended session never inherits arbitrary
+    parent terminal input, so a native prompt can never block on a caller that
+    is not there.
 
     ``on_stdout_lines`` receives every complete native line while the child is
     still running, from this same thread.  Live delivery is what lets a long
@@ -211,6 +213,7 @@ def run_managed_command(
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     state_lock = threading.Lock()
     overflowed = False
+    stdin_delivery_failed = threading.Event()
     input_stream = proc.stdin
 
     def read_bounded(stream: IO[bytes], name: str, limit: int) -> None:
@@ -260,14 +263,17 @@ def run_managed_command(
 
         def write_prompt() -> None:
             try:
-                prompt_stream.write(stdin_bytes)
+                written = prompt_stream.write(stdin_bytes)
+                if written != len(stdin_bytes):
+                    stdin_delivery_failed.set()
+                    return
                 prompt_stream.flush()
-            except (BrokenPipeError, OSError):
-                pass
+            except (BrokenPipeError, OSError, ValueError):
+                stdin_delivery_failed.set()
             finally:
                 # Closing is part of delivery: a native CLI that reads its whole
                 # prompt from stdin only starts once the stream reaches EOF.
-                with suppress(OSError):
+                with suppress(OSError, ValueError):
                     prompt_stream.close()
 
         workers.append(
@@ -322,6 +328,11 @@ def run_managed_command(
         kill_process_group(proc)
         join_threads_until(tuple(workers), time.monotonic() + _WORKER_JOIN_GRACE_SECONDS)
     kill_process_group(proc)
+    if stdin_delivery_failed.is_set():
+        raise context.transport_error(
+            "The managed headless transport could not deliver the complete prompt "
+            "to the native CLI."
+        )
     # A short-lived child can exit before any poll observed its frames.
     drain_stdout_lines()
 
@@ -345,16 +356,15 @@ def run_managed_command(
 def frame_streamer(
     context: HeadlessRuntimeContext,
     *,
-    label: str,
     kind_of: Callable[[dict[str, Any]], str | None],
     provenance_of: Callable[[dict[str, Any]], dict[str, str | None]],
 ) -> StdoutLineHandler:
     """Turn live native JSONL frames into provenance and bounded progress.
 
-    Native frames echo prompt and response text, so only a frame's *kind* ever
-    becomes a normalized event message.  Provenance is recorded as soon as the
-    transport emits it, which is what a timed-out session keeps in its safe
-    partial result.
+    Native frames echo prompt and response text, so their data only determines
+    whether to emit a content-free progress event. Provenance is recorded as
+    soon as the transport emits it, which is what a timed-out session keeps in
+    its safe partial result.
     """
     progress = BoundedProgress(context)
 
@@ -372,7 +382,7 @@ def frame_streamer(
             )
             kind = kind_of(frame)
             if kind:
-                progress.note(f"{label} {kind} frame")
+                progress.note()
 
     return consume
 

@@ -443,7 +443,6 @@ class CodexAdapter(AbstractAITool):
                 stdin_text=request.prompt,
                 on_stdout_lines=frame_streamer(
                     context,
-                    label="codex",
                     kind_of=_codex_frame_kind,
                     provenance_of=lambda frame: {
                         "thread_id": non_blank_text(frame.get("thread_id"))

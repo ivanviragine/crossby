@@ -550,7 +550,6 @@ class CursorAdapter(AbstractAITool):
             on_stdout_lines=(
                 frame_streamer(
                     context,
-                    label="cursor",
                     kind_of=lambda frame: non_blank_text(frame.get("type")),
                     provenance_of=lambda frame: {
                         "session_id": non_blank_text(frame.get("session_id"))

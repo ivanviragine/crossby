@@ -350,7 +350,6 @@ class AntigravityCLIAdapter(AbstractAITool):
             on_stdout_lines=(
                 frame_streamer(
                     context,
-                    label="agy",
                     kind_of=lambda frame: non_blank_text(frame.get("event")),
                     provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
                 )

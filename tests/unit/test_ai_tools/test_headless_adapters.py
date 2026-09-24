@@ -37,7 +37,11 @@ from crossby.ai_tools import plan_process
 from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter, _whole_run_timeout_seconds
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.claude import ClaudeAdapter
-from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+from crossby.ai_tools.headless import (
+    HeadlessRequestError,
+    HeadlessTransportError,
+    HeadlessUnsupportedError,
+)
 from crossby.models.ai import (
     AIToolID,
     EffortLevel,
@@ -239,15 +243,21 @@ def _fake_cli(
     stdin_record: Path | None = None,
     sleep_seconds: float = 0.0,
     child_pid_file: Path | None = None,
+    close_stdin_early: bool = False,
 ) -> list[str]:
     """Build a real child process that replays a recorded native payload."""
     program = [
         "import os,sys,time",
         f"stdin_record={str(stdin_record)!r}",
         f"child_pid_file={str(child_pid_file)!r}",
-        "data=sys.stdin.read()",
-        "open(stdin_record,'w').write(data) if stdin_record!='None' else None",
     ]
+    if close_stdin_early:
+        program.append("sys.stdin.close()")
+    else:
+        program += [
+            "data=sys.stdin.read()",
+            "open(stdin_record,'w').write(data) if stdin_record!='None' else None",
+        ]
     if child_pid_file is not None:
         # A grandchild in the same owned process group proves tree cleanup.
         program += [
@@ -442,6 +452,60 @@ def test_claude_stream_json_progress_never_leaks_native_text(
     assert kinds[0] is HeadlessEventKind.STARTED
     assert HeadlessEventKind.PROGRESS in kinds
     _assert_prompt_is_private(result)
+
+
+@pytest.mark.parametrize(
+    ("tool", "native_output", "frames", "prompt"),
+    [
+        (AIToolID.CLAUDE, HeadlessNativeOutput.JSONL, CLAUDE_STREAM, "result"),
+        (AIToolID.CODEX, HeadlessNativeOutput.TEXT, CODEX_EVENTS, "codex"),
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSONL, CURSOR_STREAM, "result"),
+    ],
+)
+def test_streaming_progress_labels_do_not_reject_matching_prompts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+    frames: tuple[dict[str, Any], ...],
+    prompt: str,
+) -> None:
+    adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=_jsonl(frames)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=native_output, prompt=prompt)
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert any(event.kind is HeadlessEventKind.PROGRESS for event in result.events)
+
+
+@pytest.mark.parametrize(
+    ("tool", "stdout"),
+    [
+        (AIToolID.CLAUDE, "OK\n"),
+        (AIToolID.CODEX, _jsonl(CODEX_EVENTS)),
+        (AIToolID.OPENCODE, _jsonl(OPENCODE_EVENTS)),
+    ],
+)
+def test_stdin_delivery_failure_rejects_valid_native_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    stdout: str,
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        tool,
+        _fake_cli(stdout=stdout, close_stdin_early=True),
+    )
+
+    with pytest.raises(HeadlessTransportError, match="deliver the complete prompt") as raised:
+        adapter.run_headless_session(_request(tmp_path, prompt="p" * (1024 * 1024)))
+
+    assert raised.value.partial_result.is_partial
+    assert raised.value.partial_result.final_text is None
+    assert not raised.value.partial_result.final_json_present
 
 
 @pytest.mark.parametrize(
@@ -1158,7 +1222,7 @@ def test_windows_command_limit_counts_terminating_nul_before_version_probe(
     monkeypatch.setattr(
         base_mod.subprocess,
         "list2cmdline",
-        lambda _argv: "x" * base_mod._MAX_HEADLESS_WINDOWS_COMMAND_LINE,
+        lambda argv: "x" * base_mod._MAX_HEADLESS_WINDOWS_COMMAND_LINE if len(argv) > 1 else "x",
     )
     monkeypatch.setattr(adapter, "_detect_headless_version", probe)
 

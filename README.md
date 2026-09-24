@@ -423,15 +423,17 @@ adapter's remediation rather than running with a guessed contract.
 
 Unattended behavior is uniform above the adapters. An unattended run never
 inherits parent stdin — a prompt is written to a pipe that is then closed, and
-every other adapter gets `/dev/null`. An unexpected native question fails the
-session; an unresolved permission is denied. A native terminal error, waiting
-state, or missing, repeated, or conflicting terminal result or event is never
-reported as success just because the exit status was `0`. A timeout or cancellation
-kills the whole owned process group and returns a bounded, prompt-free result
-that keeps the session, thread, or conversation ID observed before the
-deadline. Native stderr is reported only as a fixed diagnostic, so
-caller-visible warnings cannot echo session content. Codex native error and
-failed-turn messages are likewise summarized without copying native text.
+every other adapter gets `/dev/null`. A failed or short prompt write is a
+transport failure, never an eligible native success. An unexpected native
+question fails the session; an unresolved permission is denied. A native
+terminal error, waiting state, or missing, repeated, or conflicting terminal
+result or event is never reported as success just because the exit status was
+`0`. A timeout or cancellation kills the whole owned process group and returns
+a bounded, prompt-free result that keeps the session, thread, or conversation
+ID observed before the deadline. Native stderr is reported only as a fixed
+diagnostic, so caller-visible warnings cannot echo session content. Codex native
+error and failed-turn messages are likewise summarized without copying native
+text.
 
 Only Claude Code, Codex CLI, and Antigravity CLI accept `response_schema`; the
 other three reject it before spawning anything. Claude and Antigravity also
