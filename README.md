@@ -425,8 +425,8 @@ Unattended behavior is uniform above the adapters. An unattended run never
 inherits parent stdin — a prompt is written to a pipe that is then closed, and
 every other adapter gets `/dev/null`. An unexpected native question fails the
 session; an unresolved permission is denied. A native terminal error, waiting
-state, or missing, repeated, or conflicting terminal event is never reported
-as success just because the exit status was `0`. A timeout or cancellation
+state, or missing, repeated, or conflicting terminal result or event is never
+reported as success just because the exit status was `0`. A timeout or cancellation
 kills the whole owned process group and returns a bounded, prompt-free result
 that keeps the session, thread, or conversation ID observed before the
 deadline. Native stderr is reported only as a fixed diagnostic, so
@@ -443,9 +443,13 @@ the CLI emitted it. `BROKERED` sessions are not offered by any terminal
 adapter yet — none of these CLIs exposes a verified live question channel in
 its non-interactive mode. Cursor and Antigravity CLI encode `effort` in the
 model argument, so a headless request that specifies `effort` must also specify
-`model`; for Antigravity, that model must be a Gemini family with the requested
-native tier, and an already-suffixed ID must encode the same effort. Otherwise
-the request fails before spawning.
+`model`. Cursor accepts the request only when the model encodes the requested
+tier exactly: matching `[effort=…]` overrides and registered bare-medium
+families are preserved, while `auto`, malformed or conflicting overrides,
+unknown models, and unavailable tiers fail before spawning. For Antigravity,
+the model must be a Gemini family with the requested native tier, and an
+already-suffixed ID must encode the same effort. Otherwise the request fails
+before spawning.
 
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a
