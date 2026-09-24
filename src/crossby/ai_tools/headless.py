@@ -42,6 +42,7 @@ _MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 _MAX_FINAL_PAYLOAD_BYTES = 8 * 1024 * 1024
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
 _MAX_PROVENANCE_ID_BYTES = 512
+_MAX_NATIVE_STATUS_BYTES = 512
 _CALLBACK_POLL_SECONDS = 0.05
 _CLEANUP_GRACE_SECONDS = 0.25
 _TERMINAL_CALLBACK_GRACE_SECONDS = 0.25
@@ -572,6 +573,7 @@ class HeadlessRuntimeContext:
     ) -> None:
         """Accumulate safe session IDs, status, exit code, and normalized usage."""
         self.validate_provenance(
+            native_status=native_status,
             session_id=session_id,
             thread_id=thread_id,
             turn_id=turn_id,
@@ -602,13 +604,14 @@ class HeadlessRuntimeContext:
     def validate_provenance(
         self,
         *,
+        native_status: str | None = None,
         session_id: str | None = None,
         thread_id: str | None = None,
         turn_id: str | None = None,
         conversation_id: str | None = None,
         usage: TokenUsage | None = None,
     ) -> None:
-        """Reject malformed or prompt-bearing provenance before it is retained."""
+        """Reject unsafe native metadata before it is retained or exposed."""
         identifiers = (session_id, thread_id, turn_id, conversation_id)
         if any(
             identifier is not None and not _is_safe_provenance_id(identifier, self.request.prompt)
@@ -621,6 +624,29 @@ class HeadlessRuntimeContext:
             raise _HeadlessStopError(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 "The native transport emitted unsafe session provenance.",
+            )
+        if native_status is not None and not _is_safe_native_status(
+            native_status, self.request.prompt
+        ):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted an unsafe native status.",
+            )
+        observed = {
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "conversation_id": conversation_id,
+        }
+        if any(
+            value is not None
+            and self._provenance[name] is not None
+            and self._provenance[name] != value
+            for name, value in observed.items()
+        ):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted conflicting session provenance.",
             )
 
     def add_warning(self, warning: str) -> None:
@@ -1081,6 +1107,17 @@ def _is_safe_provenance_id(value: Any, prompt: str) -> bool:
         isinstance(value, str)
         and bool(value)
         and len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES
+        and not _contains_prompt(value, prompt)
+        and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
+    )
+
+
+def _is_safe_native_status(value: Any, prompt: str) -> bool:
+    """Whether native status is a bounded token rather than response content."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_NATIVE_STATUS_BYTES
         and not _contains_prompt(value, prompt)
         and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
     )

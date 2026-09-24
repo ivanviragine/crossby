@@ -314,6 +314,7 @@ def _request(tmp_path: Path, **updates: Any) -> HeadlessSessionRequest:
 
 def _assert_prompt_is_private(result: HeadlessSessionResult) -> None:
     """No normalized event or diagnostic may echo the caller's prompt."""
+    assert result.native_status is None or PROMPT not in result.native_status
     for name in ("session_id", "thread_id", "turn_id", "conversation_id"):
         value = getattr(result, name)
         assert value is None or PROMPT not in value
@@ -396,6 +397,35 @@ def test_claude_native_error_is_not_success_on_exit_zero(
     assert result.final_json is None and not result.final_json_present
     assert result.native_status == "api_error"
     assert any("Bash" in denial for denial in result.denials)
+
+
+@pytest.mark.parametrize(
+    "status_updates",
+    [
+        {"terminal_reason": PROMPT},
+        {"terminal_reason": None, "subtype": PROMPT},
+        {"terminal_reason": "x" * 513},
+    ],
+    ids=["terminal-reason-prompt", "subtype-prompt", "terminal-reason-oversized"],
+)
+def test_claude_rejects_unsafe_native_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_updates: dict[str, str | None]
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CLAUDE,
+        _fake_cli(stdout=json.dumps({**CLAUDE_RESULT, **status_updates})),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.native_status is None
+    assert result.final_text is None and not result.final_json_present
+    assert any("unsafe native status" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 @pytest.mark.parametrize(
@@ -539,6 +569,101 @@ def test_streaming_adapters_reject_repeated_final_result_envelopes(
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
     assert any("multiple final result envelopes" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+@pytest.mark.parametrize(
+    "late_frame",
+    [
+        {
+            "type": "assistant",
+            "session_id": CLAUDE_RESULT["session_id"],
+            "message": {"role": "assistant", "content": []},
+        },
+        {"type": "system", "session_id": CLAUDE_RESULT["session_id"], "subtype": "init"},
+    ],
+    ids=["assistant", "system"],
+)
+def test_claude_rejects_frames_after_final_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_frame: dict[str, Any]
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CLAUDE,
+        _fake_cli(stdout=_jsonl((*CLAUDE_STREAM, late_frame))),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("frame after its final result envelope" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+@pytest.mark.parametrize(
+    ("tool", "frames"),
+    [
+        (
+            AIToolID.CLAUDE,
+            (
+                CLAUDE_STREAM[0],
+                {**CLAUDE_STREAM[1], "session_id": "different-session"},
+                CLAUDE_STREAM[2],
+            ),
+        ),
+        (
+            AIToolID.CURSOR,
+            (
+                CURSOR_STREAM[0],
+                {**CURSOR_STREAM[1], "session_id": "different-session"},
+                CURSOR_STREAM[2],
+                CURSOR_STREAM[3],
+            ),
+        ),
+        (
+            AIToolID.CODEX,
+            (
+                CODEX_EVENTS[0],
+                {"type": "thread.started", "thread_id": "different-thread"},
+                *CODEX_EVENTS[1:],
+            ),
+        ),
+        (
+            AIToolID.OPENCODE,
+            (
+                OPENCODE_EVENTS[0],
+                {**OPENCODE_EVENTS[1], "sessionID": "different-session"},
+                OPENCODE_EVENTS[2],
+            ),
+        ),
+        (
+            AIToolID.ANTIGRAVITY_CLI,
+            (
+                AGY_STREAM[0],
+                {**AGY_STREAM[1], "conversation_id": "different-conversation"},
+                AGY_STREAM[2],
+            ),
+        ),
+    ],
+)
+def test_streaming_adapters_reject_conflicting_native_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    frames: tuple[dict[str, Any], ...],
+) -> None:
+    adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=_jsonl(frames)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("conflicting session provenance" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 
