@@ -421,6 +421,34 @@ def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: 
     assert cleanup == ["abort", "close", "terminate", "kill", "reap", "join"]
 
 
+def test_late_cleanup_registration_runs_after_runtime_shutdown(tmp_path: Path) -> None:
+    """Hooks registered after cleanup ownership is claimed still run once."""
+    cleanup: list[str] = []
+    registration_finished = threading.Event()
+
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.cleanup(abort=True)
+        try:
+            context.register_cleanup(
+                HeadlessCleanupHooks(
+                    close_input=lambda _cleanup: cleanup.append("close"),
+                    terminate=lambda _cleanup: cleanup.append("terminate"),
+                    force_kill=lambda _cleanup: cleanup.append("kill"),
+                    reap=lambda _cleanup: cleanup.append("reap"),
+                    join_workers=lambda _cleanup: cleanup.append("join"),
+                )
+            )
+            context.checkpoint()
+        finally:
+            registration_finished.set()
+
+    result = FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.CANCELLED
+    assert registration_finished.wait(timeout=1)
+    assert cleanup == ["close", "terminate", "kill", "reap", "join"]
+
+
 @pytest.mark.parametrize("stalled_hook", ["native_abort", "close_input"])
 def test_cancelled_cooperative_cleanup_still_kills_and_reaps(
     tmp_path: Path, stalled_hook: str

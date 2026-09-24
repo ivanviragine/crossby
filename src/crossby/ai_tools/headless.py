@@ -253,8 +253,10 @@ class HeadlessRuntimeContext:
         self._last_progress = time.monotonic()
         self._cleanup_hooks = HeadlessCleanupHooks()
         self._cleanup_started = False
+        self._cleanup_abort = False
         self._closed = False
         self._native_abort_called = False
+        self._cleanup_lock = threading.Lock()
         self._completion_lock = threading.Lock()
         self._terminal_state_lock = threading.Lock()
         self._runtime_stop: _HeadlessStopError | None = None
@@ -594,14 +596,22 @@ class HeadlessRuntimeContext:
 
     def register_cleanup(self, hooks: HeadlessCleanupHooks | None = None, **kwargs: Any) -> None:
         """Register exactly one adapter cleanup sequence before blocking I/O."""
-        if self._cleanup_hooks != HeadlessCleanupHooks():
-            raise self.adapter_contract_error("The adapter registered cleanup more than once.")
         candidate = hooks or HeadlessCleanupHooks(**kwargs)
         if candidate.native_abort is not None and not self.capability.supports_native_abort:
             raise self.adapter_contract_error(
                 "The adapter registered native abort without declaring support."
             )
-        self._cleanup_hooks = candidate
+        with self._cleanup_lock:
+            if self._cleanup_hooks != HeadlessCleanupHooks():
+                raise self.adapter_contract_error("The adapter registered cleanup more than once.")
+            self._cleanup_hooks = candidate
+            cleanup_started = self._cleanup_started
+            abort = self._cleanup_abort
+        # The monitor can enter cleanup between the adapter's initial checkpoint
+        # and this registration. Run late hooks synchronously so a process that
+        # finishes spawning after that stop is still torn down.
+        if cleanup_started:
+            self._run_cleanup(candidate, abort=abort)
 
     def _claim_runtime_stop(self, stop: _HeadlessStopError) -> bool:
         """Atomically give a detected runtime stop terminal ownership.
@@ -619,11 +629,17 @@ class HeadlessRuntimeContext:
 
     def cleanup(self, *, abort: bool) -> None:
         """Run native abort then close/terminate/kill/reap/join, at most once."""
-        if self._cleanup_started:
-            return
-        self._cleanup_started = True
-        self._closed = True
-        hooks = self._cleanup_hooks
+        with self._cleanup_lock:
+            if self._cleanup_started:
+                return
+            self._cleanup_started = True
+            self._cleanup_abort = abort
+            self._closed = True
+            hooks = self._cleanup_hooks
+        self._run_cleanup(hooks, abort=abort)
+
+    def _run_cleanup(self, hooks: HeadlessCleanupHooks, *, abort: bool) -> None:
+        """Run one registered hook sequence after cleanup ownership is claimed."""
         cooperative_operations: list[CleanupOperation | None] = []
         if abort and hooks.native_abort is not None and not self._native_abort_called:
             self._native_abort_called = True

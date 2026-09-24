@@ -444,6 +444,32 @@ def test_claude_stream_json_progress_never_leaks_native_text(
     _assert_prompt_is_private(result)
 
 
+@pytest.mark.parametrize(
+    ("tool", "frames"),
+    [
+        (AIToolID.CLAUDE, (*CLAUDE_STREAM, CLAUDE_ERROR_RESULT)),
+        (AIToolID.CURSOR, (*CURSOR_STREAM, {**CURSOR_RESULT, "is_error": True})),
+        (AIToolID.ANTIGRAVITY_CLI, (*AGY_STREAM, {"event": "result", "result": AGY_WAITING})),
+    ],
+)
+def test_streaming_adapters_reject_repeated_final_result_envelopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    frames: tuple[dict[str, Any], ...],
+) -> None:
+    adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=_jsonl(frames)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("multiple final result envelopes" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
 def test_claude_text_output_returns_the_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -948,6 +974,67 @@ def test_model_encoded_effort_without_model_fails_before_spawn(
         )
 
     assert not started.exists()
+
+
+@pytest.mark.parametrize(
+    ("model", "effort", "message"),
+    [
+        ("auto", EffortLevel.HIGH, "selected model is not known"),
+        ("fake-future-model-high", EffortLevel.HIGH, "unknown model"),
+        ("claude-opus-5-high", EffortLevel.MAX, "it resolves to"),
+        ("claude-opus-4-8[effort=invalid]", EffortLevel.HIGH, "invalid effort overrides"),
+        ("gpt-5.4-low[effort=high]", EffortLevel.HIGH, "conflicting effort encodings"),
+        ("claude-opus-4-8[effort=low]", EffortLevel.HIGH, "which encodes effort='low'"),
+    ],
+)
+def test_cursor_unrepresentable_effort_fails_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    effort: EffortLevel,
+    message: str,
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout="{}", stdin_record=started))
+
+    with pytest.raises(HeadlessRequestError, match=message):
+        adapter.run_headless_session(
+            _request(
+                tmp_path,
+                model=model,
+                effort=effort,
+                native_output=HeadlessNativeOutput.JSON,
+            )
+        )
+
+    assert not started.exists()
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("claude-opus-4-8[effort=high]", EffortLevel.HIGH),
+        ("gpt-5.3-codex", EffortLevel.MEDIUM),
+    ],
+)
+def test_cursor_exactly_representable_effort_is_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    effort: EffortLevel,
+) -> None:
+    adapter = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout=json.dumps(CURSOR_RESULT)))
+
+    result = adapter.run_headless_session(
+        _request(
+            tmp_path,
+            model=model,
+            effort=effort,
+            native_output=HeadlessNativeOutput.JSON,
+        )
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
 
 
 def test_antigravity_conflicting_model_encoded_effort_fails_before_spawn(

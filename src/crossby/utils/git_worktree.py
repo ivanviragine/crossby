@@ -137,9 +137,12 @@ def _run_git(
     cannot steer the result.
     """
     env = {k: v for k, v in os.environ.items() if k not in _CONTAMINATING_GIT_ENV}
+    git_deadline = time.monotonic() + _GIT_TIMEOUT_S
+    if deadline is not None:
+        git_deadline = min(git_deadline, deadline)
     if cancel_event is not None and cancel_event.is_set():
         return None
-    if _git_remaining_seconds(deadline) <= 0:
+    if _git_remaining_seconds(git_deadline) <= 0:
         return None
     try:
         proc = subprocess.Popen(
@@ -158,7 +161,7 @@ def _run_git(
             if cancel_event is not None and cancel_event.is_set():
                 _stop_git(proc)
                 return None
-            remaining = _git_remaining_seconds(deadline)
+            remaining = _git_remaining_seconds(git_deadline)
             if remaining <= 0:
                 _stop_git(proc)
                 return None
@@ -176,11 +179,9 @@ def _run_git(
     return stdout.splitlines()
 
 
-def _git_remaining_seconds(deadline: float | None) -> float:
-    """Return the remaining resolver budget, bounded by its normal timeout."""
-    if deadline is None:
-        return _GIT_TIMEOUT_S
-    return min(_GIT_TIMEOUT_S, max(0.0, deadline - time.monotonic()))
+def _git_remaining_seconds(deadline: float) -> float:
+    """Return the remaining time in the probe's fixed absolute budget."""
+    return max(0.0, deadline - time.monotonic())
 
 
 def _stop_git(proc: subprocess.Popen[str]) -> None:

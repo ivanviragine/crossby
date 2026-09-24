@@ -397,10 +397,19 @@ class ClaudeAdapter(AbstractAITool):
                     warnings=(*warnings, "Claude Code emitted malformed streaming JSON."),
                 )
             # Progress and provenance were already emitted live by the streamer.
+            result_count = 0
             for frame in frames:
                 session_id = session_id or non_blank_text(frame.get("session_id"))
                 if non_blank_text(frame.get("type")) == "result":
+                    result_count += 1
                     envelope = frame
+            if result_count > 1:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    session_id=session_id,
+                    warnings=(*warnings, "Claude Code emitted multiple final result envelopes."),
+                )
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,

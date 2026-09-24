@@ -414,15 +414,86 @@ class CursorAdapter(AbstractAITool):
         return ["--mode", "plan"]
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
-        """Reject effort requests that Cursor cannot encode without a model."""
-        if request.effort is not None and not request.model:
-            from crossby.ai_tools.headless import HeadlessRequestError
+        """Reject effort requests whose selected model cannot encode the exact tier."""
+        from crossby.ai_tools.headless import HeadlessRequestError
 
+        if request.effort is None:
+            return
+        if not request.model:
             raise HeadlessRequestError(
                 "Cursor requires an explicit model when effort is requested.",
                 tool_id=self.TOOL_ID,
                 capability=self.capabilities().headless,
             )
+
+        model = request.model
+        try:
+            parameterized_effort = _parameterized_effort(model)
+        except ValueError as exc:
+            raise HeadlessRequestError(
+                f"Cursor model {model!r} has invalid effort overrides: {exc}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            ) from exc
+        encoded_effort = _encoded_effort(model)
+        if parameterized_effort is not None and encoded_effort is not None and (
+            parameterized_effort is not encoded_effort
+        ):
+            raise HeadlessRequestError(
+                f"Cursor model {model!r} contains conflicting effort encodings.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if model.split("[", 1)[0] == "auto":
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
+                "because the selected model is not known before launch.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if parameterized_effort is not None:
+            if parameterized_effort is request.effort:
+                return
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with model {model!r}, "
+                f"which encodes effort={parameterized_effort.value!r}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+        resolved = self.resolve_effort_model(model, request.effort, warn_on_fallback=False)
+        registry = set(get_models_for_tool(AIToolID.CURSOR))
+        if resolved not in registry:
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with unknown model "
+                f"{model!r}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if _encoded_effort(resolved) is request.effort:
+            return
+
+        template, _current, _explicit = _effort_template(resolved)
+        bare = template.replace(f"-{_EFFORT_SLOT}", "")
+        has_explicit_sibling = any(
+            template.replace(_EFFORT_SLOT, spelling) in registry
+            for spellings in _EFFORT_SPELLINGS.values()
+            for spelling in spellings
+        )
+        if (
+            request.effort is EffortLevel.MEDIUM
+            and resolved == bare
+            and has_explicit_sibling
+        ):
+            # The registry documents these bare families (e.g. gpt-5.3-codex)
+            # as the medium tier when no explicit -medium sibling exists.
+            return
+        raise HeadlessRequestError(
+            f"Cursor cannot preserve effort={request.effort.value!r} with model {model!r}; "
+            f"it resolves to {resolved!r}.",
+            tool_id=self.TOOL_ID,
+            capability=self.capabilities().headless,
+        )
 
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
@@ -521,10 +592,19 @@ class CursorAdapter(AbstractAITool):
                 )
             # Progress and provenance were already emitted live by the streamer,
             # which never copies Cursor's prompt-echoing ``user`` frame content.
+            result_count = 0
             for frame in frames:
                 session_id = session_id or non_blank_text(frame.get("session_id"))
                 if non_blank_text(frame.get("type")) == "result":
+                    result_count += 1
                     envelope = frame
+            if result_count > 1:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    session_id=session_id,
+                    warnings=(*warnings, "Cursor emitted multiple final result envelopes."),
+                )
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
@@ -1112,7 +1192,13 @@ class CursorAdapter(AbstractAITool):
         CLI and IDE differ.)"""
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
+    def resolve_effort_model(
+        self,
+        model: str | None,
+        effort: EffortLevel | None,
+        *,
+        warn_on_fallback: bool = True,
+    ) -> str | None:
         """Swap ``model`` for the Cursor catalog ID that encodes ``effort``.
 
         Cursor bakes effort into the model ID, so the requested effort selects a
@@ -1156,7 +1242,7 @@ class CursorAdapter(AbstractAITool):
             return model
 
         chosen = _nearest_effort(effort, set(offered))
-        if chosen is not effort:
+        if chosen is not effort and warn_on_fallback:
             kept = " (keeping the model as given)" if chosen is current else ""
             warnings.warn(
                 f"Cursor offers no {effort.value!r} effort for {model!r}; "

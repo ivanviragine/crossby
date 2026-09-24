@@ -181,6 +181,41 @@ class TestFailureModes:
         assert git_worktree._run_git(tmp_path, "--show-toplevel", cancel_event=cancelled) is None
         assert process.terminated
 
+    @pytest.mark.parametrize(("caller_deadline", "expected_timeout"), [(None, 5.0), (1.0, 1.0)])
+    def test_hanging_probe_uses_one_absolute_timeout_budget(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caller_deadline: float | None,
+        expected_timeout: float,
+    ) -> None:
+        clock = [0.0]
+
+        class HangingGit:
+            returncode: int | None = None
+            terminated = False
+
+            def communicate(self, *, timeout: float) -> tuple[str, str]:
+                clock[0] += timeout
+                raise subprocess.TimeoutExpired("git", timeout)
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, *, timeout: float) -> int:
+                self.returncode = -15
+                return self.returncode
+
+        process = HangingGit()
+        monkeypatch.setattr(git_worktree.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(git_worktree.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+        assert (
+            git_worktree._run_git(tmp_path, "--show-toplevel", deadline=caller_deadline) is None
+        )
+        assert process.terminated
+        assert clock[0] == pytest.approx(expected_timeout)
+
     def test_env_contamination_does_not_skew_resolution(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
