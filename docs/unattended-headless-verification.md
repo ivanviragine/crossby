@@ -28,8 +28,9 @@ stream-json output redesign, so the adapter does not substitute it. Every
 rendered native argv is validated before a version probe or child spawn: POSIX
 arguments are limited to 120,000 UTF-8 bytes and the
 complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
-an 8 KiB safety margin; Windows validates the complete rendered command line
-against its 32,767 UTF-16-unit limit. Native stderr and error-envelope text are
+an 8 KiB safety margin; Windows validates the complete rendered command line,
+including its terminating NUL, against its 32,767 UTF-16-unit limit. Native
+stderr and error-envelope text are
 replaced with fixed or count-only warnings rather than being copied into
 caller-visible diagnostics.
 `agy --print-timeout` takes a duration string (`60s`) and bounds the *whole*
