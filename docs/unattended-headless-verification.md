@@ -53,6 +53,10 @@ execution. Missing, repeated, or conflicting terminal frames are invalid native
 output; the adapter never lets a later success frame overwrite an earlier
 failure.
 
+OpenCode permits nonterminal `step_finish` frames (such as `tool-calls`) while
+it works. Its single `step_finish` with reason `stop` is terminal; missing,
+repeated, or later step frames are invalid native output.
+
 Claude, Cursor, and Antigravity CLI likewise contribute exactly one final
 `result` envelope to their streaming protocol. A missing or repeated result
 envelope is invalid native output; a later result can never overwrite an

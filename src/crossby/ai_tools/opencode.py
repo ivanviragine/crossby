@@ -246,14 +246,26 @@ class OpenCodeAdapter(AbstractAITool):
         text_parts: list[dict[str, Any]] = []
         finish_reason: str | None = None
         usage: TokenUsage | None = None
+        saw_terminal_stop = False
         for frame in frames:
             session_id = session_id or non_blank_text(frame.get("sessionID"))
             kind = non_blank_text(frame.get("type"))
+            if saw_terminal_stop and kind in {"step_start", "step_finish"}:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    session_id=session_id,
+                    warnings=(
+                        *warnings,
+                        "OpenCode emitted a step event after its terminal stop event.",
+                    ),
+                )
             part = frame.get("part")
             if kind == "text" and isinstance(part, dict):
                 text_parts.append(part)
             elif kind == "step_finish" and isinstance(part, dict):
-                finish_reason = non_blank_text(part.get("reason")) or finish_reason
+                step_reason = non_blank_text(part.get("reason"))
+                finish_reason = step_reason or finish_reason
                 step_usage = _opencode_usage(part.get("tokens"), session_id)
                 if step_usage is not None:
                     usage = (
@@ -261,6 +273,7 @@ class OpenCodeAdapter(AbstractAITool):
                         if usage is None
                         else _combine_opencode_usage(usage, step_usage, session_id)
                     )
+                saw_terminal_stop = step_reason == "stop"
 
         if finish_reason is None:
             return context.complete(

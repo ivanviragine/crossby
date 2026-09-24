@@ -736,6 +736,28 @@ def test_opencode_accumulates_usage_from_each_model_step(
     assert result.usage.session_id == OPENCODE_SESSION
 
 
+@pytest.mark.parametrize(
+    "late_step",
+    [OPENCODE_EVENTS[0], OPENCODE_EVENTS[-1]],
+    ids=["next-step", "duplicate-stop"],
+)
+def test_opencode_rejects_step_events_after_terminal_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_step: dict[str, Any]
+) -> None:
+    events = (*OPENCODE_EVENTS, late_step)
+    adapter = _adapter(
+        monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(events), exit_code=0)
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.exit_code == 0
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("step event after its terminal stop event" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
 def test_opencode_non_stop_finish_reason_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
