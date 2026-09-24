@@ -443,8 +443,9 @@ the CLI emitted it. `BROKERED` sessions are not offered by any terminal
 adapter yet — none of these CLIs exposes a verified live question channel in
 its non-interactive mode. Cursor and Antigravity CLI encode `effort` in the
 model argument, so a headless request that specifies `effort` must also specify
-`model`; an already-suffixed Antigravity Gemini model must encode the same
-effort. Otherwise the request fails before spawning.
+`model`; for Antigravity, that model must be a Gemini family with the requested
+native tier, and an already-suffixed ID must encode the same effort. Otherwise
+the request fails before spawning.
 
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a

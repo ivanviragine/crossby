@@ -277,6 +277,11 @@ class HeadlessRuntimeContext:
     def result(self) -> HeadlessSessionResult | None:
         return self._result
 
+    @property
+    def cancel_event(self) -> threading.Event | None:
+        """Return the caller cancellation signal for bounded adapter helpers."""
+        return self._cancel_event
+
     def mark_progress(self) -> None:
         """Reset the idle deadline after a semantically valid native milestone."""
         self._last_progress = time.monotonic()

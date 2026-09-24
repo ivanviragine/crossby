@@ -276,7 +276,9 @@ class ClaudeAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
-    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
         """Return Claude's complete command, including any serialized schema."""
         return self._headless_command(request)
 

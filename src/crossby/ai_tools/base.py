@@ -405,6 +405,8 @@ class AbstractAITool(ABC):
             request,
             interaction_handler=interaction_handler,
             require_existing_working_dir=True,
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
@@ -537,6 +539,8 @@ class AbstractAITool(ABC):
             request,
             interaction_handler=interaction_handler,
             require_existing_working_dir=False,
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
@@ -572,6 +576,8 @@ class AbstractAITool(ABC):
         *,
         interaction_handler: SessionInteractionHandler | None,
         require_existing_working_dir: bool,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> HeadlessSessionRequest:
         """Reject every statically knowable incompatibility before startup."""
         from crossby.ai_tools.headless import (
@@ -706,7 +712,11 @@ class AbstractAITool(ABC):
                 "response_schema": response_schema,
             }
         )
-        self._validate_headless_argv(normalized)
+        self._validate_headless_argv(
+            normalized,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
         return normalized
 
     def _detect_headless_version_bounded(
@@ -798,15 +808,31 @@ class AbstractAITool(ABC):
         """Adapter hook for request constraints known without transport I/O."""
         return None
 
-    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str] | None:
+    def _headless_argv_for_validation(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[str] | None:
         """Return the native argv to validate before a version probe, if applicable."""
         return None
 
-    def _validate_headless_argv(self, request: HeadlessSessionRequest) -> None:
+    def _validate_headless_argv(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         """Reject an adapter's native argv when it exceeds process limits."""
         from crossby.ai_tools.headless import HeadlessRequestError
 
-        argv = self._headless_argv_for_validation(request)
+        argv = self._headless_argv_for_validation(
+            request,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
         if argv is None:
             return
 

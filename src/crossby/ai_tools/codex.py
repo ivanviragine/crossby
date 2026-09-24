@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -333,15 +334,28 @@ class CodexAdapter(AbstractAITool):
         is passed (a piped stdin is otherwise appended as a ``<stdin>`` block)."""
         return ["exec"]
 
-    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+    def _headless_argv_for_validation(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[str]:
         """Return Codex's command without the temporary response-schema path."""
-        return self._headless_command(request, schema_path=None)
+        return self._headless_command(
+            request,
+            schema_path=None,
+            git_deadline=deadline,
+            cancel_event=cancel_event,
+        )
 
     def _headless_command(
         self,
         request: HeadlessSessionRequest,
         *,
         schema_path: Path | None,
+        git_deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> list[str]:
         """Build the exact unattended ``codex exec`` invocation.
 
@@ -360,7 +374,11 @@ class CodexAdapter(AbstractAITool):
         ]
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
-        for meta_dir in outside_root_git_metadata_dirs(request.working_dir):
+        for meta_dir in outside_root_git_metadata_dirs(
+            request.working_dir,
+            deadline=git_deadline,
+            cancel_event=cancel_event,
+        ):
             command.extend(self.plan_dir_args(str(meta_dir)))
         if request.sandbox:
             # Pin the flag both ways so an ambient config value can never
@@ -414,7 +432,12 @@ class CodexAdapter(AbstractAITool):
         try:
             output = run_managed_command(
                 context,
-                argv=self._headless_command(request, schema_path=schema_path),
+                argv=self._headless_command(
+                    request,
+                    schema_path=schema_path,
+                    git_deadline=context.deadline,
+                    cancel_event=context.cancel_event,
+                ),
                 cwd=request.working_dir,
                 env=child_environment({"NO_COLOR": "1"}),
                 stdin_text=request.prompt,

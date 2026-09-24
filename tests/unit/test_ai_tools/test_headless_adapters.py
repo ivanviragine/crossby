@@ -24,6 +24,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -969,6 +970,62 @@ def test_antigravity_conflicting_model_encoded_effort_fails_before_spawn(
         )
 
     assert not started.exists()
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("gemini-3.1-pro", EffortLevel.MEDIUM),
+        ("claude-sonnet-4-6", EffortLevel.HIGH),
+    ],
+)
+def test_antigravity_unrepresentable_effort_fails_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    effort: EffortLevel,
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.ANTIGRAVITY_CLI,
+        _fake_cli(stdout="{}", stdin_record=started),
+    )
+
+    with pytest.raises(
+        HeadlessRequestError, match="cannot preserve the requested reasoning effort"
+    ):
+        adapter.run_headless_session(_request(tmp_path, model=model, effort=effort))
+
+    assert not started.exists()
+
+
+def test_codex_headless_argv_metadata_probe_receives_deadline_and_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[tuple[float | None, threading.Event | None]] = []
+    cancelled = threading.Event()
+
+    def metadata_dirs(
+        _working_dir: Path,
+        *,
+        deadline: float | None,
+        cancel_event: threading.Event | None,
+    ) -> list[Path]:
+        captured.append((deadline, cancel_event))
+        return []
+
+    monkeypatch.setattr("crossby.ai_tools.codex.outside_root_git_metadata_dirs", metadata_dirs)
+    adapter = AbstractAITool.get(AIToolID.CODEX)
+
+    argv = adapter._headless_argv_for_validation(  # type: ignore[attr-defined]
+        _request(tmp_path),
+        deadline=123.0,
+        cancel_event=cancelled,
+    )
+
+    assert argv[-1] == "-"
+    assert captured == [(123.0, cancelled)]
 
 
 def test_antigravity_windows_command_overflow_fails_before_version_probe(

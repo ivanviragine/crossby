@@ -8,10 +8,12 @@ needs. The resolver must never raise: every failure mode returns ``[]``.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
+from crossby.utils import git_worktree
 from crossby.utils.git_worktree import (
     _looks_like_git_metadata,
     outside_root_git_metadata_dirs,
@@ -152,6 +154,32 @@ class TestFailureModes:
         # which the resolver swallows into [].
         monkeypatch.setenv("PATH", "")
         assert outside_root_git_metadata_dirs(wt) == []
+
+    def test_cancelled_probe_terminates_its_git_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cancelled = threading.Event()
+
+        class HangingGit:
+            returncode: int | None = None
+            terminated = False
+
+            def communicate(self, *, timeout: float) -> tuple[str, str]:
+                cancelled.set()
+                raise subprocess.TimeoutExpired("git", timeout)
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, *, timeout: float) -> int:
+                self.returncode = -15
+                return self.returncode
+
+        process = HangingGit()
+        monkeypatch.setattr(git_worktree.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+        assert git_worktree._run_git(tmp_path, "--show-toplevel", cancel_event=cancelled) is None
+        assert process.terminated
 
     def test_env_contamination_does_not_skew_resolution(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

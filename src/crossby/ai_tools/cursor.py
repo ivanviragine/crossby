@@ -424,7 +424,9 @@ class CursorAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
-    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
         """Return Cursor's complete command, including its argument-delivered prompt."""
         return self._headless_command(request)
 

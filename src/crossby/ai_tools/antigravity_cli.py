@@ -240,11 +240,16 @@ class AntigravityCLIAdapter(AbstractAITool):
 
         if request.model is not None and request.effort is not None:
             base, suffix_effort = _split_effort_suffix(request.model)
-            if (
-                base in _ANTIGRAVITY_CLI_EFFORT_TIERS
-                and suffix_effort is not None
-                and suffix_effort is not request.effort
-            ):
+            tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
+            if tiers is None or request.effort not in tiers:
+                raise HeadlessRequestError(
+                    "Antigravity CLI cannot preserve the requested reasoning effort for "
+                    f"model {request.model!r}. Choose a Gemini model with a matching native "
+                    "effort tier, or omit effort.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            if suffix_effort is not None and suffix_effort is not request.effort:
                 raise HeadlessRequestError(
                     "Antigravity CLI request specifies conflicting reasoning effort: "
                     f"model {request.model!r} encodes {suffix_effort.value!r}, but "
@@ -265,7 +270,9 @@ class AntigravityCLIAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
-    def _headless_argv_for_validation(self, request: HeadlessSessionRequest) -> list[str]:
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
         """Return agy's complete command with the largest possible timeout value."""
         return self._headless_command(
             request,
