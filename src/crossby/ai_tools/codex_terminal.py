@@ -1,4 +1,4 @@
-"""Temporary Codex 0.154 terminal Plan activation.
+"""Temporary Codex terminal Plan activation.
 
 Only startup is automated. After activation/input acknowledgement the same PTY
 relays the user's terminal unchanged. No model answers or artifacts are parsed.
@@ -90,8 +90,11 @@ class _Startup:
         lines = [line.rstrip() for line in rendered.splitlines() if line.strip()]
         footer = lines[-1] if lines else ""
         empty = any(line.lstrip() == "\u203a Ask Codex to do anything" for line in lines)
+        # Slash-command suggestions can also start with the prompt marker and appear above the
+        # actual composer. The composer is the bottommost such line.
         composer = next(
-            (line.lstrip()[2:] for line in lines if line.lstrip().startswith("\u203a ")), ""
+            (line.lstrip()[2:] for line in reversed(lines) if line.lstrip().startswith("\u203a ")),
+            "",
         )
         self.user_screen = self.phase is _Phase.READY and (
             "Do you trust the contents of this directory?" in " ".join(rendered.split())

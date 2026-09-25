@@ -1,6 +1,7 @@
 # Codex terminal Plan startup verification
 
-Verified 2026-09-15 on macOS with Codex CLI 0.154.0.
+Verified 2026-09-15 on macOS with Codex CLI 0.154.0. Startup and first-turn
+submission were rechecked 2026-09-25 with Codex CLI 0.157.0.
 
 ## Why the terminal adapter exists
 
@@ -39,6 +40,16 @@ fixture. The callback submitted the task only on `PLAN_READY`.
 This does not establish a plan-file destination or artifact collection contract;
 those belong to the consumer's handoff or Crossby's existing collected API.
 
+## Codex CLI 0.157.0 check
+
+The 0.157.0 command menu places a selected `/plan` suggestion above the actual
+`› /plan` composer. The earlier adapter read the first `›` line and timed out
+before sending the task. Reading the bottommost composer line allowed Crossby to
+observe the Plan indicator, emit `PLAN_READY`, submit a short task, and emit
+`MESSAGE_SUBMITTED` after the first native Plan turn began. This live check used
+an isolated temporary directory and exited normally. It did not exercise the
+full plan artifact handoff or every approval/sandbox combination.
+
 ## Deterministic checks
 
 `./scripts/test.sh tests/unit/test_ai_tools/test_codex_terminal.py
@@ -51,7 +62,7 @@ are checked independently without requesting unrestricted live execution.
 
 ## Scope
 
-Interactive startup is limited to Codex 0.154.x on POSIX and must run on the
+Interactive startup is limited to Codex 0.154.x or 0.157.x on POSIX and must run on the
 main thread with terminal stdin/stdout. Unknown versions and unrecognized
 screens fail closed within the startup deadline. The real provider run was on
 macOS; Linux PTY behavior is covered by the deterministic CI suite. Windows is
