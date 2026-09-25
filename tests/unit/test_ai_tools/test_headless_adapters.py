@@ -854,7 +854,30 @@ def test_codex_rejects_item_events_after_its_terminal_turn(
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
     assert any(
-        "turn or item event after its terminal turn event" in warning for warning in result.warnings
+        "turn, item, or error event after its terminal turn event" in warning
+        for warning in result.warnings
+    )
+    _assert_prompt_is_private(result)
+
+
+def test_codex_rejects_error_events_after_its_terminal_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CODEX,
+        _fake_cli(
+            stdout=_jsonl((*CODEX_EVENTS, {"type": "error", "message": "late error"})), exit_code=0
+        ),
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any(
+        "turn, item, or error event after its terminal turn event" in warning
+        for warning in result.warnings
     )
     _assert_prompt_is_private(result)
 

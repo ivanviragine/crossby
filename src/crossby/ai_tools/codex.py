@@ -479,11 +479,16 @@ class CodexAdapter(AbstractAITool):
             kind = non_blank_text(frame.get("type"))
             if kind is None:
                 continue
-            if saw_terminal_event and (kind.startswith("turn.") or kind.startswith("item.")):
+            if saw_terminal_event and (
+                kind.startswith("turn.") or kind.startswith("item.") or kind == "error"
+            ):
                 late_event_warning = (
                     "Codex CLI emitted multiple terminal turn events for one execution."
                     if kind in {"turn.completed", "turn.failed"}
-                    else "Codex CLI emitted a turn or item event after its terminal turn event."
+                    else (
+                        "Codex CLI emitted a turn, item, or error event after its terminal "
+                        "turn event."
+                    )
                 )
                 return context.complete(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
