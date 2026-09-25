@@ -81,6 +81,7 @@ _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
     "-xhigh": EffortLevel.XHIGH,
     "-max": EffortLevel.MAX,
 }
+_AGY_STREAM_EVENT_KINDS = frozenset({"init", "step_update", "result"})
 
 
 def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
@@ -328,6 +329,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             non_blank_text,
             parse_json_lines,
             parse_json_object,
+            recognized_frame_kind,
             run_managed_command,
             usage_from,
         )
@@ -350,7 +352,9 @@ class AntigravityCLIAdapter(AbstractAITool):
             on_stdout_lines=(
                 frame_streamer(
                     context,
-                    kind_of=lambda frame: non_blank_text(frame.get("event")),
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
+                    ),
                     provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
                 )
                 if streaming
@@ -395,7 +399,9 @@ class AntigravityCLIAdapter(AbstractAITool):
             # which never copies agy's streamed response text deltas.
             saw_result = False
             for frame in frames:
-                conversation_id = conversation_id or _agy_conversation_id(frame)
+                observed_conversation_id = _agy_conversation_id(frame)
+                context.validate_provenance(conversation_id=observed_conversation_id)
+                conversation_id = conversation_id or observed_conversation_id
                 if saw_result:
                     warning = (
                         "Antigravity CLI emitted multiple final result envelopes."

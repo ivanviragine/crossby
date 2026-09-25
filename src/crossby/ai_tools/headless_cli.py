@@ -393,6 +393,19 @@ def frame_streamer(
     return consume
 
 
+def recognized_frame_kind(
+    frame: Mapping[str, Any], *, field: str, recognized: frozenset[str]
+) -> str | None:
+    """Return a verified protocol kind, never arbitrary native frame data.
+
+    Only a recognized milestone may refresh an unattended session's idle
+    deadline. Unknown JSON objects remain available to the adapter's terminal
+    parser but cannot keep a stalled process alive until its overall deadline.
+    """
+    kind = non_blank_text(frame.get(field))
+    return kind if kind in recognized else None
+
+
 def parse_json_object(text: str) -> dict[str, Any] | None:
     """Parse one native JSON object envelope, or ``None`` when malformed."""
     stripped = text.strip()

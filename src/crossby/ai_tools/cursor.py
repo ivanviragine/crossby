@@ -82,6 +82,7 @@ _EFFORT_ORDER: tuple[EffortLevel, ...] = tuple(_EFFORT_SPELLINGS)
 # Tokens that may follow the effort word without being part of the family name.
 _TRAILING_VARIANT_TOKENS = frozenset({"fast", "thinking"})
 _EFFORT_SLOT = "\0"
+_CURSOR_STREAM_EVENT_KINDS = frozenset({"system", "user", "thinking", "assistant", "result"})
 
 # Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
@@ -534,6 +535,7 @@ class CursorAdapter(AbstractAITool):
             non_blank_text,
             parse_json_lines,
             parse_json_object,
+            recognized_frame_kind,
             run_managed_command,
             usage_from,
         )
@@ -548,7 +550,9 @@ class CursorAdapter(AbstractAITool):
             on_stdout_lines=(
                 frame_streamer(
                     context,
-                    kind_of=lambda frame: non_blank_text(frame.get("type")),
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="type", recognized=_CURSOR_STREAM_EVENT_KINDS
+                    ),
                     provenance_of=lambda frame: {
                         "session_id": non_blank_text(frame.get("session_id"))
                     },
@@ -591,7 +595,9 @@ class CursorAdapter(AbstractAITool):
             # which never copies Cursor's prompt-echoing ``user`` frame content.
             saw_result = False
             for frame in frames:
-                session_id = session_id or non_blank_text(frame.get("session_id"))
+                observed_session_id = non_blank_text(frame.get("session_id"))
+                context.validate_provenance(session_id=observed_session_id)
+                session_id = session_id or observed_session_id
                 if saw_result:
                     warning = (
                         "Cursor emitted multiple final result envelopes."

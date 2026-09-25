@@ -278,6 +278,24 @@ def _fake_cli(
     return [sys.executable, "-c", "\n".join(program)]
 
 
+def _periodic_jsonl_cli(frame: dict[str, Any]) -> list[str]:
+    """Build a child that keeps emitting one JSONL frame until idle expiry."""
+    return [
+        sys.executable,
+        "-c",
+        "\n".join(
+            (
+                "import json,sys,time",
+                f"frame={frame!r}",
+                "for _ in range(50):",
+                "    sys.stdout.write(json.dumps(frame) + '\\n')",
+                "    sys.stdout.flush()",
+                "    time.sleep(0.01)",
+            )
+        ),
+    ]
+
+
 def _adapter(monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]) -> AbstractAITool:
     """Return an adapter whose native CLI and version probe are deterministic."""
     adapter = AbstractAITool.get(tool)
@@ -387,7 +405,9 @@ def test_claude_native_error_is_not_success_on_exit_zero(
     assert result.status is HeadlessTerminalStatus.FAILED
     assert result.final_json is None and not result.final_json_present
     assert result.native_status == "api_error"
-    assert any("Bash" in denial for denial in result.denials)
+    assert result.denials == (
+        "Claude Code reported 1 permission denials under --permission-prompts none",
+    )
 
 
 @pytest.mark.parametrize("invalid_is_error", [None, 0, "false"], ids=["null", "zero", "string"])
@@ -485,12 +505,16 @@ def test_native_error_diagnostics_do_not_include_response_text(
     assert all(native_error_text not in warning for warning in result.warnings)
 
 
-def test_claude_denial_reporting_is_bounded_and_drops_tool_input(
+def test_claude_denial_reporting_keeps_only_the_native_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     noisy = json.loads(json.dumps(CLAUDE_RESULT))
     noisy["permission_denials"] = [
-        {"tool_name": "Bash", "tool_use_id": f"toolu_{index}", "tool_input": {"command": PROMPT}}
+        {
+            "tool_name": f"untrusted command with {PROMPT} and credential-{index}",
+            "tool_use_id": f"toolu_{index}",
+            "tool_input": {"command": PROMPT},
+        }
         for index in range(200)
     ]
     adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=json.dumps(noisy)))
@@ -500,9 +524,9 @@ def test_claude_denial_reporting_is_bounded_and_drops_tool_input(
     )
 
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
-    assert len(result.denials) == 65
-    assert "136 further tool calls" in result.denials[-1]
-    # The native entry carries the proposed tool input; only the name survives.
+    assert result.denials == (
+        "Claude Code reported 200 permission denials under --permission-prompts none",
+    )
     _assert_prompt_is_private(result)
 
 
@@ -548,6 +572,38 @@ def test_streaming_progress_labels_do_not_reject_matching_prompts(
 
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert any(event.kind is HeadlessEventKind.PROGRESS for event in result.events)
+
+
+@pytest.mark.parametrize(
+    ("tool", "native_output", "unknown_frame"),
+    [
+        (AIToolID.CLAUDE, HeadlessNativeOutput.JSONL, {"type": "unknown"}),
+        (AIToolID.CODEX, HeadlessNativeOutput.TEXT, {"type": "unknown"}),
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSONL, {"type": "unknown"}),
+        (AIToolID.OPENCODE, HeadlessNativeOutput.TEXT, {"type": "unknown"}),
+        (AIToolID.ANTIGRAVITY_CLI, HeadlessNativeOutput.JSONL, {"event": "unknown"}),
+    ],
+)
+def test_unrecognized_streaming_frames_do_not_extend_idle_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+    unknown_frame: dict[str, str],
+) -> None:
+    adapter = _adapter(monkeypatch, tool, _periodic_jsonl_cli(unknown_frame))
+
+    result = adapter.run_headless_session(
+        _request(
+            tmp_path,
+            native_output=native_output,
+            timeout_seconds=1.0,
+            idle_timeout_seconds=0.05,
+        )
+    )
+
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert any("idle deadline" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize(
@@ -731,6 +787,25 @@ def test_streaming_adapters_reject_conflicting_native_provenance(
     frames: tuple[dict[str, Any], ...],
 ) -> None:
     adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=_jsonl(frames)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("conflicting session provenance" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+def test_claude_rejects_conflicting_provenance_in_unterminated_final_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = {**CLAUDE_STREAM[0], "session_id": "session-a"}
+    final = {**CLAUDE_RESULT, "session_id": "session-b"}
+    stdout = f"{json.dumps(initial)}\n{json.dumps(final)}"
+    assert not stdout.endswith("\n")
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=stdout))
 
     result = adapter.run_headless_session(
         _request(tmp_path, native_output=HeadlessNativeOutput.JSONL)

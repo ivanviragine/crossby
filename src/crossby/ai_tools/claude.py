@@ -61,9 +61,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# A single unattended turn can be denied many times; keep the normalized
-# denial list bounded rather than mirroring an unbounded native array.
-_MAX_REPORTED_DENIALS = 64
+_CLAUDE_STREAM_EVENT_KINDS = frozenset({"system", "assistant", "result"})
 
 
 def _encode_claude_path(path: Path) -> str:
@@ -336,6 +334,7 @@ class ClaudeAdapter(AbstractAITool):
             non_blank_text,
             parse_json_lines,
             parse_json_object,
+            recognized_frame_kind,
             run_managed_command,
             usage_from,
         )
@@ -351,7 +350,9 @@ class ClaudeAdapter(AbstractAITool):
             on_stdout_lines=(
                 frame_streamer(
                     context,
-                    kind_of=lambda frame: non_blank_text(frame.get("type")),
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="type", recognized=_CLAUDE_STREAM_EVENT_KINDS
+                    ),
                     provenance_of=lambda frame: {
                         "session_id": non_blank_text(frame.get("session_id"))
                     },
@@ -399,7 +400,9 @@ class ClaudeAdapter(AbstractAITool):
             result_count = 0
             saw_result = False
             for frame in frames:
-                session_id = session_id or non_blank_text(frame.get("session_id"))
+                observed_session_id = non_blank_text(frame.get("session_id"))
+                context.validate_provenance(session_id=observed_session_id)
+                session_id = session_id or observed_session_id
                 if saw_result:
                     warning = (
                         "Claude Code emitted multiple final result envelopes."
@@ -434,17 +437,12 @@ class ClaudeAdapter(AbstractAITool):
         session_id = session_id or non_blank_text(envelope.get("session_id"))
         denials = envelope.get("permission_denials")
         denials = denials if isinstance(denials, list) else []
-        # Only the denied tool name is safe to keep: the native entry also
-        # carries the tool input the model proposed.
-        for denial in denials[:_MAX_REPORTED_DENIALS]:
-            tool = non_blank_text(denial.get("tool_name")) if isinstance(denial, dict) else None
+        # Native denial entries include untrusted tool names and proposed input;
+        # keep only their locally computed count in caller-visible diagnostics.
+        if denials:
             context.add_denial(
-                f"Claude Code denied {tool or 'an unnamed tool'} under --permission-prompts none"
-            )
-        if len(denials) > _MAX_REPORTED_DENIALS:
-            context.add_denial(
-                f"Claude Code denied {len(denials) - _MAX_REPORTED_DENIALS} further tool calls "
-                "under --permission-prompts none"
+                f"Claude Code reported {len(denials)} permission denials under "
+                "--permission-prompts none"
             )
         response_text = non_blank_text(envelope.get("result"))
         # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so

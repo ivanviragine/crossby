@@ -75,13 +75,16 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
+_CODEX_STREAM_EVENT_KINDS = frozenset(
+    {"thread.started", "turn.started", "item.completed", "turn.completed", "turn.failed", "error"}
+)
 
 
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
     """Describe one ``codex exec --json`` frame without exposing its content."""
-    from crossby.ai_tools.headless_cli import non_blank_text
+    from crossby.ai_tools.headless_cli import non_blank_text, recognized_frame_kind
 
-    kind = non_blank_text(frame.get("type"))
+    kind = recognized_frame_kind(frame, field="type", recognized=_CODEX_STREAM_EVENT_KINDS)
     if kind != "item.completed":
         return kind
     item = frame.get("item")
@@ -476,6 +479,8 @@ class CodexAdapter(AbstractAITool):
         usage_values: Any = None
         saw_terminal_event = False
         for frame in frames:
+            observed_thread_id = non_blank_text(frame.get("thread_id"))
+            context.validate_provenance(thread_id=observed_thread_id)
             kind = non_blank_text(frame.get("type"))
             if kind is None:
                 continue
@@ -492,7 +497,7 @@ class CodexAdapter(AbstractAITool):
                     warnings=(*warnings, late_event_warning),
                 )
             if kind == "thread.started":
-                thread_id = thread_id or non_blank_text(frame.get("thread_id"))
+                thread_id = thread_id or observed_thread_id
             elif kind == "item.completed":
                 item = frame.get("item")
                 if isinstance(item, dict) and non_blank_text(item.get("type")) == "agent_message":

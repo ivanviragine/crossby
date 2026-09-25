@@ -44,6 +44,8 @@ from crossby.models.ai import (
 if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
 
+_OPENCODE_STREAM_EVENT_KINDS = frozenset({"step_start", "text", "step_finish"})
+
 
 class OpenCodeAdapter(AbstractAITool):
     """Adapter for OpenCode CLI.
@@ -210,6 +212,7 @@ class OpenCodeAdapter(AbstractAITool):
             frame_streamer,
             non_blank_text,
             parse_json_lines,
+            recognized_frame_kind,
             run_managed_command,
         )
         from crossby.ai_tools.plan_process import child_environment
@@ -222,7 +225,9 @@ class OpenCodeAdapter(AbstractAITool):
             stdin_text=request.prompt,
             on_stdout_lines=frame_streamer(
                 context,
-                kind_of=lambda frame: non_blank_text(frame.get("type")),
+                kind_of=lambda frame: recognized_frame_kind(
+                    frame, field="type", recognized=_OPENCODE_STREAM_EVENT_KINDS
+                ),
                 provenance_of=lambda frame: {"session_id": non_blank_text(frame.get("sessionID"))},
             ),
         )
@@ -248,7 +253,9 @@ class OpenCodeAdapter(AbstractAITool):
         usage: TokenUsage | None = None
         saw_terminal_stop = False
         for frame in frames:
-            session_id = session_id or non_blank_text(frame.get("sessionID"))
+            observed_session_id = non_blank_text(frame.get("sessionID"))
+            context.validate_provenance(session_id=observed_session_id)
+            session_id = session_id or observed_session_id
             kind = non_blank_text(frame.get("type"))
             if saw_terminal_stop and kind in {"step_start", "step_finish", "text"}:
                 return context.complete(
