@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import warnings
@@ -11,6 +12,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from crossby.ai_tools import base as base_mod
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.headless import (
     HeadlessCleanupHooks,
@@ -38,6 +40,7 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    TokenUsage,
 )
 from crossby.utils.versioning import BinaryVersion
 
@@ -149,6 +152,53 @@ def test_invalid_schema_is_rejected_before_adapter_start(tmp_path: Path) -> None
         )
 
     assert not adapter.started
+
+
+def test_argument_prompt_overflow_fails_before_version_probe_or_adapter_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeHeadlessAdapter(
+        lambda _context: None,
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+    monkeypatch.setattr(base_mod, "_MAX_HEADLESS_ARGUMENT_PROMPT", 10)
+
+    with pytest.raises(HeadlessRequestError, match="argv transport"):
+        adapter.run_headless_session(_request(tmp_path, prompt="x" * 11))
+
+    assert adapter.version_probes == 0
+    assert not adapter.started
+
+
+def test_argument_prompt_overflow_counts_windows_rendered_utf16_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeHeadlessAdapter(
+        lambda _context: None,
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+    monkeypatch.setattr(base_mod.sys, "platform", "win32")
+    monkeypatch.setattr(base_mod, "_MAX_HEADLESS_ARGUMENT_PROMPT", 5)
+
+    with pytest.raises(HeadlessRequestError, match="argv transport"):
+        adapter.run_headless_session(_request(tmp_path, prompt="😀" * 3))
+
+    assert adapter.version_probes == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem encoding")
+def test_argument_prompt_uses_posix_filesystem_encoding(tmp_path: Path) -> None:
+    prompt = os.fsdecode(b"filename-\xff")
+    adapter = FakeHeadlessAdapter(
+        lambda context: context.complete(HeadlessTerminalStatus.SUCCEEDED, final_text="OK"),
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path, prompt=prompt))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert adapter.version_probes == 1
+    assert adapter.started
 
 
 def test_brokered_mode_requires_handler_before_adapter_start(tmp_path: Path) -> None:
@@ -286,6 +336,71 @@ def test_schema_invalid_output_keeps_safe_events_and_provenance(tmp_path: Path) 
     assert result.events[0].message == "safe progress"
 
 
+@pytest.mark.parametrize("field", ("session_id", "thread_id", "turn_id", "conversation_id"))
+def test_prompt_bearing_provenance_is_rejected_before_result_publication(
+    tmp_path: Path, field: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(
+            final_text="untrusted", **{field: "private session prompt"}
+        )
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert all(
+        getattr(result, name) is None
+        for name in ("session_id", "thread_id", "turn_id", "conversation_id")
+    )
+    assert any("unsafe session provenance" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("identifier", ("contains whitespace", "x" * 513))
+def test_malformed_native_provenance_is_rejected_before_result_publication(
+    tmp_path: Path, identifier: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_text="untrusted", session_id=identifier)
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert result.session_id is None
+
+
+@pytest.mark.parametrize(
+    ("field", "warning"),
+    [
+        ("session_id", "unsafe session provenance"),
+        ("native_status", "unsafe native status"),
+    ],
+)
+def test_unencodable_native_metadata_is_rejected_before_result_publication(
+    tmp_path: Path, field: str, warning: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_text="untrusted", **{field: "\ud800"})
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any(warning in item for item in result.warnings)
+
+
+def test_prompt_bearing_usage_provenance_is_rejected_before_result_publication(
+    tmp_path: Path,
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(
+            final_text="untrusted", usage=TokenUsage(session_id="private session prompt")
+        )
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert result.usage is None
+
+
 def test_missing_required_terminal_event_is_invalid(tmp_path: Path) -> None:
     capability = _capability(terminal_event_required=True)
     result = FakeHeadlessAdapter(
@@ -386,6 +501,34 @@ def test_overall_timeout_interrupts_adapter_and_runs_cleanup_in_order(tmp_path: 
     assert result.status is HeadlessTerminalStatus.TIMED_OUT
     assert time.monotonic() - started < 1
     assert cleanup == ["abort", "close", "terminate", "kill", "reap", "join"]
+
+
+def test_late_cleanup_registration_runs_after_runtime_shutdown(tmp_path: Path) -> None:
+    """Hooks registered after cleanup ownership is claimed still run once."""
+    cleanup: list[str] = []
+    registration_finished = threading.Event()
+
+    def run(context: HeadlessRuntimeContext) -> None:
+        context.cleanup(abort=True)
+        try:
+            context.register_cleanup(
+                HeadlessCleanupHooks(
+                    close_input=lambda _cleanup: cleanup.append("close"),
+                    terminate=lambda _cleanup: cleanup.append("terminate"),
+                    force_kill=lambda _cleanup: cleanup.append("kill"),
+                    reap=lambda _cleanup: cleanup.append("reap"),
+                    join_workers=lambda _cleanup: cleanup.append("join"),
+                )
+            )
+            context.checkpoint()
+        finally:
+            registration_finished.set()
+
+    result = FakeHeadlessAdapter(run).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.CANCELLED
+    assert registration_finished.wait(timeout=1)
+    assert cleanup == ["close", "terminate", "kill", "reap", "join"]
 
 
 @pytest.mark.parametrize("stalled_hook", ["native_abort", "close_input"])

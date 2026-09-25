@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
+from contextlib import suppress
 from pathlib import Path
 
 import structlog
@@ -34,6 +37,8 @@ logger = structlog.get_logger()
 
 # Bound the probe so a hung git binary can never stall a launch.
 _GIT_TIMEOUT_S = 5.0
+_GIT_POLL_SECONDS = 0.05
+_GIT_TERMINATE_GRACE_SECONDS = 0.2
 
 # Env vars that redirect git's notion of where metadata lives. Left in place they
 # would let an ambient value (e.g. wade's own worktree, a parent repo) skew the
@@ -41,7 +46,12 @@ _GIT_TIMEOUT_S = 5.0
 _CONTAMINATING_GIT_ENV = ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
 
 
-def outside_root_git_metadata_dirs(working_dir: Path) -> list[Path]:
+def outside_root_git_metadata_dirs(
+    working_dir: Path,
+    *,
+    deadline: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[Path]:
     """Return absolute git-metadata dirs that live outside ``working_dir``'s root.
 
     Resolution is **root-relative**: the worktree root comes from ``git
@@ -57,7 +67,14 @@ def outside_root_git_metadata_dirs(working_dir: Path) -> list[Path]:
     """
     # One ``git rev-parse`` emits the three values as three ordered lines, so a
     # single spawn (not three) keeps the launch path cheap.
-    lines = _run_git(working_dir, "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
+    lines = _run_git(
+        working_dir,
+        "--show-toplevel",
+        "--absolute-git-dir",
+        "--git-common-dir",
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     if lines is None or len(lines) != 3:
         return []
     toplevel, private, common = lines
@@ -107,7 +124,12 @@ def _looks_like_git_metadata(path: Path) -> bool:
         return False
 
 
-def _run_git(working_dir: Path, *args: str) -> list[str] | None:
+def _run_git(
+    working_dir: Path,
+    *args: str,
+    deadline: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[str] | None:
     """Run ``git -C <working_dir> rev-parse <args...>`` and return its lines.
 
     Returns ``None`` on git-absent, non-zero exit, or timeout. Never raises. The
@@ -115,19 +137,61 @@ def _run_git(working_dir: Path, *args: str) -> list[str] | None:
     cannot steer the result.
     """
     env = {k: v for k, v in os.environ.items() if k not in _CONTAMINATING_GIT_ENV}
+    git_deadline = time.monotonic() + _GIT_TIMEOUT_S
+    if deadline is not None:
+        git_deadline = min(git_deadline, deadline)
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+    if _git_remaining_seconds(git_deadline) <= 0:
+        return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["git", "-C", str(working_dir), "rev-parse", *args],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=_GIT_TIMEOUT_S,
-            check=False,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         # UnicodeError: text=True can hit a path with non-UTF-8 bytes.
+        logger.debug("git_worktree.git_failed", args=args, error=str(exc))
+        return None
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                _stop_git(proc)
+                return None
+            remaining = _git_remaining_seconds(git_deadline)
+            if remaining <= 0:
+                _stop_git(proc)
+                return None
+            try:
+                stdout, _ = proc.communicate(timeout=min(_GIT_POLL_SECONDS, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            break
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        _stop_git(proc)
         logger.debug("git_worktree.git_failed", args=args, error=str(exc))
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.splitlines()
+    return stdout.splitlines()
+
+
+def _git_remaining_seconds(deadline: float) -> float:
+    """Return the remaining time in the probe's fixed absolute budget."""
+    return max(0.0, deadline - time.monotonic())
+
+
+def _stop_git(proc: subprocess.Popen[str]) -> None:
+    """Terminate a cancelled or expired metadata probe before returning."""
+    with suppress(OSError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=_GIT_TERMINATE_GRACE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        with suppress(OSError):
+            proc.kill()
+        with suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=_GIT_TERMINATE_GRACE_SECONDS)

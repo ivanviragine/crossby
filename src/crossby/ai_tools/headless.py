@@ -41,10 +41,15 @@ _MAX_EVENT_MESSAGE_BYTES = 64 * 1024
 _MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 _MAX_FINAL_PAYLOAD_BYTES = 8 * 1024 * 1024
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
+_MAX_PROVENANCE_ID_BYTES = 512
+_MAX_NATIVE_STATUS_BYTES = 512
 _CALLBACK_POLL_SECONDS = 0.05
 _CLEANUP_GRACE_SECONDS = 0.25
 _TERMINAL_CALLBACK_GRACE_SECONDS = 0.25
 _MISSING_FINAL_JSON = object()
+_PROVENANCE_ID_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-~:@+=/"
+)
 _SENSITIVE_EVENT_KEYS = {
     "answer",
     "answers",
@@ -253,8 +258,10 @@ class HeadlessRuntimeContext:
         self._last_progress = time.monotonic()
         self._cleanup_hooks = HeadlessCleanupHooks()
         self._cleanup_started = False
+        self._cleanup_abort = False
         self._closed = False
         self._native_abort_called = False
+        self._cleanup_lock = threading.Lock()
         self._completion_lock = threading.Lock()
         self._terminal_state_lock = threading.Lock()
         self._runtime_stop: _HeadlessStopError | None = None
@@ -276,6 +283,11 @@ class HeadlessRuntimeContext:
     @property
     def result(self) -> HeadlessSessionResult | None:
         return self._result
+
+    @property
+    def cancel_event(self) -> threading.Event | None:
+        """Return the caller cancellation signal for bounded adapter helpers."""
+        return self._cancel_event
 
     def mark_progress(self) -> None:
         """Reset the idle deadline after a semantically valid native milestone."""
@@ -560,6 +572,14 @@ class HeadlessRuntimeContext:
         usage: TokenUsage | None = None,
     ) -> None:
         """Accumulate safe session IDs, status, exit code, and normalized usage."""
+        self.validate_provenance(
+            native_status=native_status,
+            session_id=session_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            usage=usage,
+        )
         updates = {
             "native_status": native_status,
             "exit_code": exit_code,
@@ -581,6 +601,52 @@ class HeadlessRuntimeContext:
                 )
             self._provenance[name] = value
 
+    def validate_provenance(
+        self,
+        *,
+        native_status: str | None = None,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        conversation_id: str | None = None,
+        usage: TokenUsage | None = None,
+    ) -> None:
+        """Reject unsafe native metadata before it is retained or exposed."""
+        identifiers = (session_id, thread_id, turn_id, conversation_id)
+        if any(
+            identifier is not None and not _is_safe_provenance_id(identifier)
+            for identifier in identifiers
+        ) or (
+            usage is not None
+            and usage.session_id is not None
+            and not _is_safe_provenance_id(usage.session_id)
+        ):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted unsafe session provenance.",
+            )
+        if native_status is not None and not _is_safe_native_status(native_status):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted an unsafe native status.",
+            )
+        observed = {
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "conversation_id": conversation_id,
+        }
+        if any(
+            value is not None
+            and self._provenance[name] is not None
+            and self._provenance[name] != value
+            for name, value in observed.items()
+        ):
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                "The native transport emitted conflicting session provenance.",
+            )
+
     def add_warning(self, warning: str) -> None:
         self._warnings.append(_bounded_diagnostic(_redact_prompt(warning, self.request.prompt)))
 
@@ -589,14 +655,22 @@ class HeadlessRuntimeContext:
 
     def register_cleanup(self, hooks: HeadlessCleanupHooks | None = None, **kwargs: Any) -> None:
         """Register exactly one adapter cleanup sequence before blocking I/O."""
-        if self._cleanup_hooks != HeadlessCleanupHooks():
-            raise self.adapter_contract_error("The adapter registered cleanup more than once.")
         candidate = hooks or HeadlessCleanupHooks(**kwargs)
         if candidate.native_abort is not None and not self.capability.supports_native_abort:
             raise self.adapter_contract_error(
                 "The adapter registered native abort without declaring support."
             )
-        self._cleanup_hooks = candidate
+        with self._cleanup_lock:
+            if self._cleanup_hooks != HeadlessCleanupHooks():
+                raise self.adapter_contract_error("The adapter registered cleanup more than once.")
+            self._cleanup_hooks = candidate
+            cleanup_started = self._cleanup_started
+            abort = self._cleanup_abort
+        # The monitor can enter cleanup between the adapter's initial checkpoint
+        # and this registration. Run late hooks synchronously so a process that
+        # finishes spawning after that stop is still torn down.
+        if cleanup_started:
+            self._run_cleanup(candidate, abort=abort)
 
     def _claim_runtime_stop(self, stop: _HeadlessStopError) -> bool:
         """Atomically give a detected runtime stop terminal ownership.
@@ -614,11 +688,17 @@ class HeadlessRuntimeContext:
 
     def cleanup(self, *, abort: bool) -> None:
         """Run native abort then close/terminate/kill/reap/join, at most once."""
-        if self._cleanup_started:
-            return
-        self._cleanup_started = True
-        self._closed = True
-        hooks = self._cleanup_hooks
+        with self._cleanup_lock:
+            if self._cleanup_started:
+                return
+            self._cleanup_started = True
+            self._cleanup_abort = abort
+            self._closed = True
+            hooks = self._cleanup_hooks
+        self._run_cleanup(hooks, abort=abort)
+
+    def _run_cleanup(self, hooks: HeadlessCleanupHooks, *, abort: bool) -> None:
+        """Run one registered hook sequence after cleanup ownership is claimed."""
         cooperative_operations: list[CleanupOperation | None] = []
         if abort and hooks.native_abort is not None and not self._native_abort_called:
             self._native_abort_called = True
@@ -1017,6 +1097,30 @@ def _contains_sensitive_key(value: Any) -> bool:
 
 def _contains_prompt(value: str, prompt: str) -> bool:
     return bool(prompt) and prompt in value
+
+
+def _is_safe_provenance_id(value: Any) -> bool:
+    """Whether native provenance is bounded identifier data, not session content."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES and all(
+            character in _PROVENANCE_ID_CHARACTERS for character in value
+        )
+    except UnicodeEncodeError:
+        return False
+
+
+def _is_safe_native_status(value: Any) -> bool:
+    """Whether native status is a bounded token rather than response content."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= _MAX_NATIVE_STATUS_BYTES and all(
+            character in _PROVENANCE_ID_CHARACTERS for character in value
+        )
+    except UnicodeEncodeError:
+        return False
 
 
 def _contains_prompt_value(value: Any, prompt: str) -> bool:

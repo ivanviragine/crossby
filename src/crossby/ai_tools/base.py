@@ -11,6 +11,9 @@ import math
 import os
 import queue
 import shutil
+import struct
+import subprocess
+import sys
 import threading
 import warnings
 from abc import ABC, abstractmethod
@@ -45,6 +48,7 @@ from crossby.models.ai import (
     HeadlessInteractionMode,
     HeadlessPreflightCheck,
     HeadlessPreflightDeferredCheck,
+    HeadlessPromptTransport,
     HeadlessSessionPreflight,
     HeadlessSessionRequest,
     HeadlessSessionResult,
@@ -69,6 +73,51 @@ from crossby.models.ai import (
 from crossby.models.config import ComplexityModelMapping
 
 logger = structlog.get_logger()
+
+# Argument-delivered prompts and adapter-supplied argv values must fit the
+# native process contract before an adapter begins version probing or spawns a
+# child. POSIX limits one argument to 131,072 bytes on Linux; Windows limits
+# the rendered *whole* command line to 32,767 UTF-16 code units, including its
+# terminating NUL. These ceilings leave room for the adapter's fixed flags
+# while keeping stdin and protocol transports unlimited. POSIX additionally
+# caps the aggregate argv and environment passed to execve.
+_MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
+_MAX_HEADLESS_WINDOWS_COMMAND_LINE = 32_767
+_HEADLESS_POSIX_EXEC_SAFETY_MARGIN = 8 * 1024
+
+
+def _argument_prompt_length(prompt: str) -> int:
+    """Return the native argv space used by one argument-delivered prompt."""
+    if sys.platform.startswith("win"):
+        rendered = subprocess.list2cmdline([prompt])
+        return len(rendered.encode("utf-16-le")) // 2
+    return len(os.fsencode(prompt))
+
+
+def _headless_posix_exec_size(argv: list[str]) -> int:
+    """Return a conservative byte count for the child argv and environment."""
+    # Every managed native adapter inherits the current environment and pins
+    # NO_COLOR for its child. Include NUL terminators and pointer slots so the
+    # preflight remains below execve's aggregate allocation, not just below its
+    # maximum single-argument limit.
+    environment = {**os.environ, "NO_COLOR": "1"}
+    strings = sum(len(os.fsencode(argument)) + 1 for argument in argv)
+    strings += sum(
+        len(os.fsencode(name)) + len(os.fsencode(value)) + 2 for name, value in environment.items()
+    )
+    pointer_bytes = (len(argv) + len(environment) + 2) * struct.calcsize("P")
+    return strings + pointer_bytes
+
+
+def _headless_posix_exec_limit() -> int:
+    """Return the platform's aggregate execve budget with a safe fallback."""
+    try:
+        limit = os.sysconf("SC_ARG_MAX")
+    except (AttributeError, OSError, ValueError):
+        # This is below the per-argument ceiling and is the Linux minimum used
+        # by the managed transport's existing argument guard.
+        return 131_072
+    return limit if isinstance(limit, int) and limit > 0 else 131_072
 
 
 class AbstractAITool(ABC):
@@ -356,12 +405,14 @@ class AbstractAITool(ABC):
             request,
             interaction_handler=interaction_handler,
             require_existing_working_dir=True,
-        )
-        detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
         )
         self._validate_headless_requirements(normalized)
+        detected = self._detect_headless_version_bounded(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
         context = HeadlessRuntimeContext(
             tool_id=self.TOOL_ID,
             version=detected.text,
@@ -488,12 +539,14 @@ class AbstractAITool(ABC):
             request,
             interaction_handler=interaction_handler,
             require_existing_working_dir=False,
-        )
-        detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
         )
         self._validate_headless_requirements(normalized)
+        detected = self._detect_headless_version_bounded(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
         return HeadlessSessionPreflight(
             tool=self.TOOL_ID,
             detected_version=detected.text,
@@ -523,6 +576,8 @@ class AbstractAITool(ABC):
         *,
         interaction_handler: SessionInteractionHandler | None,
         require_existing_working_dir: bool,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> HeadlessSessionRequest:
         """Reject every statically knowable incompatibility before startup."""
         from crossby.ai_tools.headless import (
@@ -540,6 +595,17 @@ class AbstractAITool(ABC):
                 display_name=caps.display_name,
                 capability=capability,
             )
+        if capability.prompt_transport is HeadlessPromptTransport.ARGUMENT:
+            prompt_length = _argument_prompt_length(request.prompt)
+            if prompt_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {prompt_length}-unit prompt "
+                    f"through its native argv transport (limit: "
+                    f"{_MAX_HEADLESS_ARGUMENT_PROMPT}). Use an adapter with stdin or protocol "
+                    "prompt delivery, or shorten the prompt.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
         if request.interaction_mode not in capability.interaction_modes:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve interaction_mode="
@@ -639,13 +705,19 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        return request.model_copy(
+        normalized = request.model_copy(
             update={
                 "working_dir": working_dir,
                 "trusted_dirs": trusted_dirs,
                 "response_schema": response_schema,
             }
         )
+        self._validate_headless_argv(
+            normalized,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        return normalized
 
     def _detect_headless_version_bounded(
         self,
@@ -735,6 +807,75 @@ class AbstractAITool(ABC):
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Adapter hook for request constraints known without transport I/O."""
         return None
+
+    def _headless_argv_for_validation(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[str] | None:
+        """Return the native argv to validate before a version probe, if applicable."""
+        return None
+
+    def _validate_headless_argv(
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        """Reject an adapter's native argv when it exceeds process limits."""
+        from crossby.ai_tools.headless import HeadlessRequestError
+
+        argv = self._headless_argv_for_validation(
+            request,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        if argv is None:
+            return
+
+        caps = self.capabilities()
+        capability = caps.headless
+        if sys.platform.startswith("win"):
+            rendered = subprocess.list2cmdline(argv)
+            # CreateProcess counts the terminating NUL in its 32,767-unit
+            # command-line limit; list2cmdline returns only the rendered text.
+            command_length = len(rendered.encode("utf-16-le")) // 2 + 1
+            if command_length > _MAX_HEADLESS_WINDOWS_COMMAND_LINE:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {command_length}-unit "
+                    "native command line "
+                    f"(limit: {_MAX_HEADLESS_WINDOWS_COMMAND_LINE}). Shorten the prompt, "
+                    "response schema, or other command arguments.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+            return
+
+        for argument in argv:
+            argument_length = len(os.fsencode(argument))
+            if argument_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} cannot safely deliver a {argument_length}-byte "
+                    "native argv argument "
+                    f"(limit: {_MAX_HEADLESS_ARGUMENT_PROMPT}). Shorten the prompt, "
+                    "response schema, or other command arguments.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
+
+        exec_size = _headless_posix_exec_size(argv)
+        exec_limit = _headless_posix_exec_limit()
+        if exec_size > exec_limit - _HEADLESS_POSIX_EXEC_SAFETY_MARGIN:
+            raise HeadlessRequestError(
+                f"{caps.display_name} cannot safely deliver a {exec_size}-byte native argv "
+                f"and environment (limit: {exec_limit} bytes). Shorten the prompt, "
+                "response schema, or other command arguments.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
 
     def _run_headless_session(
         self,

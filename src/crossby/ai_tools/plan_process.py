@@ -7,6 +7,7 @@ this same module, so both APIs share limits, monkeypatches, and cleanup code.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import queue
@@ -31,6 +32,82 @@ _CAPTURED_STDERR_LIMIT = 1024 * 1024
 _CAPTURE_CHUNK_SIZE = 64 * 1024
 _CAPTURE_CLEANUP_GRACE_SECONDS = 0.2
 _PLAN_ARTIFACT_TEXT_LIMIT = 8 * 1024 * 1024
+
+_WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_CLOSE = 0x00002000
+_WINDOWS_INVALID_DWORD = 0xFFFFFFFF
+_WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_WINDOWS_SNAPSHOT_THREADS = 0x00000004
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+
+
+class _WindowsJobBasicLimits(ctypes.Structure):
+    """Layout of the limits prefix used by Windows extended job information."""
+
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_longlong),
+        ("per_job_user_time_limit", ctypes.c_longlong),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _WindowsIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_ulonglong),
+        ("write_operation_count", ctypes.c_ulonglong),
+        ("other_operation_count", ctypes.c_ulonglong),
+        ("read_transfer_count", ctypes.c_ulonglong),
+        ("write_transfer_count", ctypes.c_ulonglong),
+        ("other_transfer_count", ctypes.c_ulonglong),
+    ]
+
+
+class _WindowsExtendedJobLimits(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _WindowsJobBasicLimits),
+        ("io_info", _WindowsIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _WindowsThreadEntry(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("usage", ctypes.c_uint32),
+        ("thread_id", ctypes.c_uint32),
+        ("owner_process_id", ctypes.c_uint32),
+        ("base_priority", ctypes.c_long),
+        ("delta_priority", ctypes.c_long),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _WindowsProcessTree:
+    """A Windows Job Object that terminates every owned descendant on close."""
+
+    def __init__(self, handle: int, close_handle: Callable[[int], object]) -> None:
+        self._handle = handle
+        self._close_handle = close_handle
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        """Close once; ``KILL_ON_JOB_CLOSE`` ends the complete process tree."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        with suppress(OSError):
+            self._close_handle(self._handle)
 
 
 @dataclass(frozen=True)
@@ -114,8 +191,145 @@ def read_text_bounded(
     return content.decode("utf-8")
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def process_tree_popen_kwargs() -> dict[str, Any]:
+    """Return launch options that let the managed transport own descendant processes."""
+    if _is_windows():
+        # Claim the child in a Job Object before it can spawn an unowned descendant.
+        return {"creationflags": getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)}
+    return {"start_new_session": os.name == "posix"}
+
+
+def own_process_tree(proc: subprocess.Popen[Any]) -> None:
+    """Attach a just-created suspended Windows child to its owned process tree."""
+    if not _is_windows():
+        return
+    tree = _create_windows_process_tree(proc)
+    process: Any = proc
+    try:
+        process._crossby_windows_process_tree = tree
+        _resume_windows_process(proc)
+    except Exception:
+        tree.close()
+        process._crossby_windows_process_tree = None
+        raise
+
+
+def _create_windows_process_tree(proc: subprocess.Popen[Any]) -> _WindowsProcessTree:
+    """Create a kill-on-close Job Object and assign the suspended child to it."""
+    windll = getattr(ctypes, "WinDLL", None)
+    if windll is None:
+        raise OSError("Windows Job Objects are unavailable on this Python runtime.")
+    kernel32 = windll("kernel32", use_last_error=True)
+    create_job = kernel32.CreateJobObjectW
+    create_job.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    create_job.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (ctypes.c_void_p,)
+    close_handle.restype = ctypes.c_int
+    handle = create_job(None, None)
+    if not handle:
+        _raise_windows_error("CreateJobObjectW")
+    tree = _WindowsProcessTree(int(handle), close_handle)
+    try:
+        limits = _WindowsExtendedJobLimits()
+        limits.basic_limit_information.limit_flags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_CLOSE
+        set_information = kernel32.SetInformationJobObject
+        set_information.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        set_information.restype = ctypes.c_int
+        if not set_information(
+            handle,
+            _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            _raise_windows_error("SetInformationJobObject")
+        process_handle = getattr(proc, "_handle", None)
+        if not isinstance(process_handle, int) or process_handle == 0:
+            raise OSError("Windows subprocess does not expose a process handle for Job ownership.")
+        assign_process = kernel32.AssignProcessToJobObject
+        assign_process.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        assign_process.restype = ctypes.c_int
+        if not assign_process(handle, process_handle):
+            _raise_windows_error("AssignProcessToJobObject")
+    except Exception:
+        tree.close()
+        raise
+    return tree
+
+
+def _resume_windows_process(proc: subprocess.Popen[Any]) -> None:
+    """Resume a child held at creation until its Job Object owns its descendants."""
+    windll = getattr(ctypes, "WinDLL", None)
+    if windll is None:
+        raise OSError("Windows thread controls are unavailable on this Python runtime.")
+    kernel32 = windll("kernel32", use_last_error=True)
+    snapshot_threads = kernel32.CreateToolhelp32Snapshot
+    snapshot_threads.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+    snapshot_threads.restype = ctypes.c_void_p
+    snapshot = snapshot_threads(_WINDOWS_SNAPSHOT_THREADS, 0)
+    if not snapshot or snapshot == _WINDOWS_INVALID_HANDLE_VALUE:
+        _raise_windows_error("CreateToolhelp32Snapshot")
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (ctypes.c_void_p,)
+    close_handle.restype = ctypes.c_int
+    try:
+        thread_id = _windows_primary_thread_id(kernel32, snapshot, proc.pid)
+        open_thread = kernel32.OpenThread
+        open_thread.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        open_thread.restype = ctypes.c_void_p
+        thread_handle = open_thread(_WINDOWS_THREAD_SUSPEND_RESUME, False, thread_id)
+        if not thread_handle:
+            _raise_windows_error("OpenThread")
+    finally:
+        close_handle(snapshot)
+    resume_thread = kernel32.ResumeThread
+    resume_thread.argtypes = (ctypes.c_void_p,)
+    resume_thread.restype = ctypes.c_uint32
+    try:
+        if resume_thread(thread_handle) == _WINDOWS_INVALID_DWORD:
+            _raise_windows_error("ResumeThread")
+    finally:
+        close_handle(thread_handle)
+
+
+def _windows_primary_thread_id(kernel32: Any, snapshot: int, process_id: int) -> int:
+    """Find the only user thread a newly ``CREATE_SUSPENDED`` child can have."""
+    first_thread = kernel32.Thread32First
+    first_thread.argtypes = (ctypes.c_void_p, ctypes.POINTER(_WindowsThreadEntry))
+    first_thread.restype = ctypes.c_int
+    next_thread = kernel32.Thread32Next
+    next_thread.argtypes = (ctypes.c_void_p, ctypes.POINTER(_WindowsThreadEntry))
+    next_thread.restype = ctypes.c_int
+    entry = _WindowsThreadEntry()
+    entry.size = ctypes.sizeof(entry)
+    if not first_thread(snapshot, ctypes.byref(entry)):
+        _raise_windows_error("Thread32First")
+    while True:
+        if entry.owner_process_id == process_id:
+            return int(entry.thread_id)
+        entry.size = ctypes.sizeof(entry)
+        if not next_thread(snapshot, ctypes.byref(entry)):
+            break
+    raise OSError("Could not find the suspended Windows subprocess primary thread.")
+
+
+def _raise_windows_error(action: str) -> None:
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    error = int(get_last_error()) if get_last_error is not None else 0
+    raise OSError(f"{action} failed with Windows error {error}.")
+
+
 def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
-    """Kill a run-owned process group so descendants cannot outlive the deadline."""
+    """Kill a run-owned process group or tree so descendants cannot outlive it."""
+    if _is_windows():
+        tree = getattr(proc, "_crossby_windows_process_tree", None)
+        if isinstance(tree, _WindowsProcessTree):
+            tree.close()
+            return
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -636,6 +850,11 @@ class HeaderlessJsonRpcProcess(JsonRpcProcess):
 # this module path remain stable for collected-plan consumers.
 SessionArtifactSizeError = PlanArtifactSizeError
 CapturedSessionProcess = CapturedProcess
+# Public spellings of the owned-process primitives shared with the managed
+# headless transport, which owns its own cleanup ordering instead of reusing
+# ``run_captured``'s single blocking call.
+kill_process_group = _kill_process_group
+join_threads_until = _join_until
 
 
 def child_environment(extra: dict[str, str] | None = None) -> dict[str, str] | None:

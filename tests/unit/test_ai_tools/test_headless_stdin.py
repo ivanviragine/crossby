@@ -2,8 +2,9 @@
 
 The summarizer selects stdin vs argv delivery from this method, so the default
 (``None`` — argv path) and the two shipped overrides (Claude, Codex) are pinned
-here. Undocumented-stdin adapters (Cursor, OpenCode, antigravity-cli) and
-Copilot must stay on the ``None`` default until their stdin contract is verified.
+here. This is separate from the managed-session transports: OpenCode's verified
+``run`` stdin wire is assembled in its headless adapter, not by the generic
+interactive-launch builder used by the summarizer.
 """
 
 from __future__ import annotations
@@ -30,7 +31,6 @@ def test_codex_returns_exec() -> None:
     "adapter_cls",
     [CopilotAdapter, CursorAdapter, OpenCodeAdapter, AntigravityCLIAdapter],
 )
-def test_undocumented_stdin_tools_default_to_none(adapter_cls: type) -> None:
-    """Tools without a verified stdin contract inherit the ``None`` default,
-    keeping them on the byte-ceiling argv path this issue."""
+def test_tools_without_a_summarizer_stdin_contract_default_to_none(adapter_cls: type) -> None:
+    """The legacy summarizer path keeps using argv unless it has its own contract."""
     assert adapter_cls().headless_prompt_stdin_args() is None

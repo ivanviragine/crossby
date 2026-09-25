@@ -6,7 +6,7 @@ import shutil
 import time
 import warnings
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import structlog
 
@@ -24,6 +24,14 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
     PlanApprovalPolicy,
@@ -50,6 +58,9 @@ from crossby.models.ai import (
     PlanSessionTransport,
 )
 
+if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
+
 logger = structlog.get_logger()
 
 # Cursor encodes reasoning effort in the model ID rather than a flag:
@@ -71,6 +82,7 @@ _EFFORT_ORDER: tuple[EffortLevel, ...] = tuple(_EFFORT_SPELLINGS)
 # Tokens that may follow the effort word without being part of the family name.
 _TRAILING_VARIANT_TOKENS = frozenset({"fast", "thinking"})
 _EFFORT_SLOT = "\0"
+_CURSOR_STREAM_EVENT_KINDS = frozenset({"system", "user", "thinking", "assistant", "result"})
 
 # Models that have no "-thinking" variant — appending the suffix produces an invalid ID.
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
@@ -270,6 +282,30 @@ class CursorAdapter(AbstractAITool):
             supports_headless=True,
             supports_effort=True,
             supports_yolo=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # Cursor's print mode has no verified stdin contract, and its
+                # plain-text output carries no terminal status, so only the two
+                # execution-output formats are offered.
+                native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=False,
+                successful_native_statuses=("success",),
+                sandbox_behavior=PlanRequestBehavior.PRESERVED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement=(
+                    "Cursor Agent exposing --print with --output-format json|stream-json "
+                    "and --trust."
+                ),
+                verified_version="2026.09.10-fd3934a",
+                remediation=(
+                    "Upgrade Cursor Agent to the 2026.09.10 build or newer. Cursor exposes no "
+                    "final-response JSON Schema flag, so schema-constrained sessions must use "
+                    "Claude Code, Codex CLI, or Antigravity CLI."
+                ),
+            ),
             plan_mode=PlanModeCapability(
                 supported_launch_approval_modes=(
                     PlanLaunchApprovalMode.YOLO,
@@ -377,6 +413,251 @@ class CursorAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Cursor supports ``--mode plan``."""
         return ["--mode", "plan"]
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Reject effort requests whose selected model cannot encode the exact tier."""
+        from crossby.ai_tools.headless import HeadlessRequestError
+
+        if request.effort is None:
+            return
+        if not request.model:
+            raise HeadlessRequestError(
+                "Cursor requires an explicit model when effort is requested.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+        model = request.model
+        try:
+            parameterized_effort = _parameterized_effort(model)
+        except ValueError as exc:
+            raise HeadlessRequestError(
+                f"Cursor model {model!r} has invalid effort overrides: {exc}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            ) from exc
+        encoded_effort = _encoded_effort(model)
+        if (
+            parameterized_effort is not None
+            and encoded_effort is not None
+            and (parameterized_effort is not encoded_effort)
+        ):
+            raise HeadlessRequestError(
+                f"Cursor model {model!r} contains conflicting effort encodings.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if model.split("[", 1)[0] == "auto":
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
+                "because the selected model is not known before launch.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if parameterized_effort is not None:
+            if parameterized_effort is request.effort:
+                return
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with model {model!r}, "
+                f"which encodes effort={parameterized_effort.value!r}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+        resolved = self.resolve_effort_model(model, request.effort, warn_on_fallback=False)
+        registry = set(get_models_for_tool(AIToolID.CURSOR))
+        if resolved not in registry:
+            raise HeadlessRequestError(
+                f"Cursor cannot preserve effort={request.effort.value!r} with unknown model "
+                f"{model!r}.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if _encoded_effort(resolved) is request.effort:
+            return
+
+        template, _current, _explicit = _effort_template(resolved)
+        bare = template.replace(f"-{_EFFORT_SLOT}", "")
+        has_explicit_sibling = any(
+            template.replace(_EFFORT_SLOT, spelling) in registry
+            for spellings in _EFFORT_SPELLINGS.values()
+            for spelling in spellings
+        )
+        if request.effort is EffortLevel.MEDIUM and resolved == bare and has_explicit_sibling:
+            # The registry documents these bare families (e.g. gpt-5.3-codex)
+            # as the medium tier when no explicit -medium sibling exists.
+            return
+        raise HeadlessRequestError(
+            f"Cursor cannot preserve effort={request.effort.value!r} with model {model!r}; "
+            f"it resolves to {resolved!r}.",
+            tool_id=self.TOOL_ID,
+            capability=self.capabilities().headless,
+        )
+
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
+        """Return Cursor's complete command, including its argument-delivered prompt."""
+        return self._headless_command(request)
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``agent --print`` invocation."""
+        command = [
+            "agent",
+            "--print",
+            "--output-format",
+            "json" if request.native_output is HeadlessNativeOutput.JSON else "stream-json",
+            # Without this Cursor stops on its interactive workspace-trust
+            # gate, which an unattended session can never answer. Approval of
+            # individual tool calls stays separate: --force/--yolo is never
+            # emitted here.
+            "--trust",
+            "--sandbox",
+            "enabled" if request.sandbox else "disabled",
+        ]
+        model = self.resolve_effort_model(request.model, request.effort)
+        if model:
+            command.extend(("--model", model))
+        command.append(request.prompt)
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended Cursor print turn and normalize its result envelope."""
+        from crossby.ai_tools.headless_cli import (
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            parse_json_object,
+            recognized_frame_kind,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            on_stdout_lines=(
+                frame_streamer(
+                    context,
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="type", recognized=_CURSOR_STREAM_EVENT_KINDS
+                    ),
+                    provenance_of=lambda frame: {
+                        "session_id": non_blank_text(frame.get("session_id"))
+                    },
+                )
+                if streaming
+                else None
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        # Print mode was not granted force/yolo, so Cursor decides each tool call
+        # under its own default policy: file changes can remain proposals rather
+        # than applied edits, and nothing escalates to a terminal prompt.
+        warnings = (
+            *warnings,
+            "Cursor print mode ran without --force/--yolo, so tool calls needing explicit "
+            "approval are not auto-approved and file changes may remain proposals.",
+        )
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+
+        session_id: str | None = None
+        envelope: dict[str, Any] | None = None
+        if request.native_output is HeadlessNativeOutput.JSON:
+            envelope = parse_json_object(output.stdout)
+            if envelope is not None and envelope.get("type") != "result":
+                envelope = None
+        else:
+            frames = parse_json_lines(output.stdout)
+            if frames is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    warnings=(*warnings, "Cursor emitted malformed streaming JSON."),
+                )
+            # Progress and provenance were already emitted live by the streamer,
+            # which never copies Cursor's prompt-echoing ``user`` frame content.
+            saw_result = False
+            for frame in frames:
+                observed_session_id = non_blank_text(frame.get("session_id"))
+                context.validate_provenance(session_id=observed_session_id)
+                session_id = session_id or observed_session_id
+                if saw_result:
+                    warning = (
+                        "Cursor emitted multiple final result envelopes."
+                        if non_blank_text(frame.get("type")) == "result"
+                        else "Cursor emitted a frame after its final result envelope."
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        exit_code=output.returncode,
+                        session_id=session_id,
+                        warnings=(*warnings, warning),
+                    )
+                if non_blank_text(frame.get("type")) == "result":
+                    envelope = frame
+                    saw_result = True
+        if envelope is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Cursor did not emit its final result envelope."),
+            )
+
+        session_id = session_id or non_blank_text(envelope.get("session_id"))
+        response_text = non_blank_text(envelope.get("result"))
+        native_error = envelope.get("is_error")
+        if not isinstance(native_error, bool):
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Cursor omitted its authoritative boolean is_error marker."),
+            )
+        if native_error:
+            warnings = (
+                *warnings,
+                "Cursor reported a native error result.",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.FAILED
+                if native_error or output.returncode != 0
+                else HeadlessTerminalStatus.SUCCEEDED
+            ),
+            exit_code=output.returncode,
+            response_text=response_text,
+            native_object=envelope,
+            native_status=non_blank_text(envelope.get("subtype")),
+            session_id=session_id,
+            usage=usage_from(
+                envelope.get("usage"),
+                input_tokens="inputTokens",
+                output_tokens="outputTokens",
+                cached="cacheReadTokens",
+                session_id=session_id,
+            ),
+            warnings=warnings,
+        )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate model/effort encodings before prospective workspace creation."""
@@ -926,7 +1207,13 @@ class CursorAdapter(AbstractAITool):
         CLI and IDE differ.)"""
         return []
 
-    def resolve_effort_model(self, model: str | None, effort: EffortLevel | None) -> str | None:
+    def resolve_effort_model(
+        self,
+        model: str | None,
+        effort: EffortLevel | None,
+        *,
+        warn_on_fallback: bool = True,
+    ) -> str | None:
         """Swap ``model`` for the Cursor catalog ID that encodes ``effort``.
 
         Cursor bakes effort into the model ID, so the requested effort selects a
@@ -970,7 +1257,7 @@ class CursorAdapter(AbstractAITool):
             return model
 
         chosen = _nearest_effort(effort, set(offered))
-        if chosen is not effort:
+        if chosen is not effort and warn_on_fallback:
             kept = " (keeping the model as given)" if chosen is current else ""
             warnings.warn(
                 f"Cursor offers no {effort.value!r} effort for {model!r}; "
