@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import warnings
@@ -183,6 +184,21 @@ def test_argument_prompt_overflow_counts_windows_rendered_utf16_units(
         adapter.run_headless_session(_request(tmp_path, prompt="😀" * 3))
 
     assert adapter.version_probes == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem encoding")
+def test_argument_prompt_uses_posix_filesystem_encoding(tmp_path: Path) -> None:
+    prompt = os.fsdecode(b"filename-\xff")
+    adapter = FakeHeadlessAdapter(
+        lambda context: context.complete(HeadlessTerminalStatus.SUCCEEDED, final_text="OK"),
+        capability=_capability(prompt_transport=HeadlessPromptTransport.ARGUMENT),
+    )
+
+    result = adapter.run_headless_session(_request(tmp_path, prompt=prompt))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert adapter.version_probes == 1
+    assert adapter.started
 
 
 def test_brokered_mode_requires_handler_before_adapter_start(tmp_path: Path) -> None:

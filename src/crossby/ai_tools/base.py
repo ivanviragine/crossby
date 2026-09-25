@@ -91,7 +91,7 @@ def _argument_prompt_length(prompt: str) -> int:
     if sys.platform.startswith("win"):
         rendered = subprocess.list2cmdline([prompt])
         return len(rendered.encode("utf-16-le")) // 2
-    return len(prompt.encode("utf-8"))
+    return len(os.fsencode(prompt))
 
 
 def _headless_posix_exec_size(argv: list[str]) -> int:
