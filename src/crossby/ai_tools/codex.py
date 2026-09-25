@@ -144,8 +144,9 @@ class CodexAdapter(AbstractAITool):
                     "This temporary terminal adapter uses observed UI state, not a native flag."
                 ),
                 version_requirement=(
-                    "Codex CLI 0.154.x on a POSIX interactive terminal. Other versions fail "
-                    "closed until their startup UI or a native selector is verified."
+                    "Codex CLI 0.154.x or 0.157.x on a POSIX interactive terminal. "
+                    "Other versions fail closed until their startup UI or a native selector is "
+                    "verified."
                 ),
                 verified_version="0.154.0",
                 collector_verified_version="0.153.4",
@@ -162,8 +163,9 @@ class CodexAdapter(AbstractAITool):
                     "is promised. Collected sessions retain exact app-server thread/turn binding."
                 ),
                 remediation=(
-                    "Use an interactive terminal with Codex 0.154.x, or use run_plan_session() "
-                    "for structured collection without the terminal startup adapter."
+                    "Use an interactive terminal with Codex 0.154.x or 0.157.x, or use "
+                    "run_plan_session() for structured collection without the terminal startup "
+                    "adapter."
                 ),
                 collector_activation=PlanModeActivation.CODEX_APP_SERVER,
                 transport=PlanSessionTransport.CODEX_APP_SERVER,
@@ -221,7 +223,7 @@ class CodexAdapter(AbstractAITool):
     def _validate_terminal_plan_version(self, version: tuple[int, int, int]) -> None:
         from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
 
-        if version[:2] != (0, 154):
+        if version[:2] not in {(0, 154), (0, 157)}:
             raise PlanModeUnsupportedError.for_installed_version(
                 tool_id=self.TOOL_ID,
                 display_name=self.capabilities().display_name,

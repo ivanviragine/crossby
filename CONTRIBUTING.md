@@ -5,7 +5,7 @@ Thanks for your interest in contributing. This document is the maintainer/develo
 ## Codex terminal startup
 
 `ai_tools/codex_terminal.py` owns the temporary POSIX PTY startup adapter.
-It observes Codex 0.154.x screen state, submits `/plan`, and exposes typed
+It observes Codex 0.154.x and 0.157.x screen state, submits `/plan`, and exposes typed
 `PLAN_READY` / `MESSAGE_SUBMITTED` events through `ai_tools.interactive`.
 Consumers own the initial task via the one-shot input port; native questions
 and subsequent keyboard input remain in Codex. Keep version bounds explicit

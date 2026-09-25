@@ -728,7 +728,8 @@ terminal startup adapter for Codex.
 
 Verified startup versions: Claude 2.1.263, Cursor 2026.09.02-c22c1a3,
 Copilot 1.0.83, OpenCode 1.18.29, and Antigravity CLI 1.2.3.
-Codex terminal startup is verified on 0.154.0 and restricted to 0.154.x. GUI
+Codex terminal startup is verified on 0.154.0 and 0.157.0, and restricted to
+0.154.x and 0.157.x. GUI
 activation remains unsupported.
 `capabilities().plan_mode.supported_launch_approval_modes` declares the supported
 combinations; collected-session approval policies are independent and unchanged.
@@ -813,14 +814,14 @@ The GPT-6 targets need a current Codex CLI: with ChatGPT sign-in, Codex 0.154 re
 
 ### Codex interactive Plan startup and events
 
-Codex 0.154 has no native `--plan` launch flag. Crossby opens the real Codex UI
+Codex 0.154 and 0.157 have no native `--plan` launch flag. Crossby opens the real Codex UI
 in an inline terminal, submits `/plan` by itself, waits for its rendered Plan
 indicator, and then submits the initial message. Long prompts use bracketed
 paste after activation. The user then interacts with Codex normally, including
 native questions and approvals. No conversation text is turned into a plan file
 by this adapter.
 
-This temporary adapter requires a POSIX terminal (macOS/Linux), Codex 0.154.x,
+This temporary adapter requires a POSIX terminal (macOS/Linux), Codex 0.154.x or 0.157.x,
 and the main Python thread. It rejects headless/detached launches and unverified
 versions. Startup has a 120-second deadline; unexpected input, an unrecognized
 screen, or early exit fails without resubmitting the task. Trust/login screens

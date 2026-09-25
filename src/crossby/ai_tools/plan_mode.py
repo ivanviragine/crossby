@@ -12,6 +12,7 @@ from crossby.models.ai import (
     PlanInteraction,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    PlanModeActivation,
     PlanModeCapability,
     PlanQuestionOption,
 )
@@ -212,11 +213,14 @@ class PlanModeUnsupportedError(PlanModeLaunchError):
             else "unknown"
         )
         verified = capability.verified_version or "an adapter-verified release"
+        remediation = f"upgrade {display_name} to {verified} or newer, then retry."
+        if capability.activation is PlanModeActivation.TERMINAL_INPUT and capability.remediation:
+            remediation = capability.remediation
         return cls(
             f"{display_name} cannot guarantee native plan mode for installed version "
             f"{detected}. Crossby requires {capability.version_requirement} "
             f"The oldest release verified by this adapter is {verified}. "
-            f"Remediation: upgrade {display_name} to {verified} or newer, then retry.",
+            f"Remediation: {remediation}",
             tool_id=tool_id,
             capability=capability,
         )

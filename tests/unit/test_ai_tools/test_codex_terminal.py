@@ -32,7 +32,7 @@ PLAN = READY + " Plan mode"
 
 def activate(startup: _Startup) -> bytes:
     assert startup.advance(READY) == b"/plan"
-    assert startup.advance("\u203a /plan\n/plan switch to Plan mode") == b"\r"
+    assert startup.advance("\u203a /plan  switch to Plan mode\n\u203a /plan") == b"\r"
     return startup.advance(PLAN)
 
 
@@ -74,6 +74,13 @@ def test_loading_modal_and_plain_text_plan_do_not_trigger_activation() -> None:
     assert startup.advance("\u203a /plan") == b"\r"
     assert startup.advance("An assistant mentioned Plan mode\n" + READY) == b""
     assert startup.phase is _Phase.PLAN
+
+
+def test_plan_suggestion_alone_is_not_a_composer_confirmation() -> None:
+    startup = _Startup(None, None)
+    assert startup.advance(READY) == b"/plan"
+    assert startup.advance("\u203a /plan  switch to Plan mode") == b""
+    assert startup.phase is _Phase.COMMAND
 
 
 def test_no_task_is_valid_for_interactive_plan_only_launch() -> None:
@@ -156,6 +163,22 @@ def test_unverified_terminal_versions_rejected(version: tuple[int, int, int] | N
         pytest.raises(PlanModeUnsupportedError),
     ):
         CodexAdapter().build_launch_command(plan_mode=True)
+
+
+def test_codex_0157_terminal_startup_is_allowed() -> None:
+    with patch("crossby.utils.versioning.detect_binary_version", return_value=(0, 157, 0)):
+        command = CodexAdapter().build_launch_command(plan_mode=True)
+    assert command[:3] == [sys.executable, "-m", "crossby.ai_tools.codex_terminal"]
+
+
+def test_unverified_codex_version_names_supported_families() -> None:
+    with (
+        patch("crossby.utils.versioning.detect_binary_version", return_value=(0, 156, 0)),
+        pytest.raises(PlanModeUnsupportedError) as error,
+    ):
+        CodexAdapter().build_launch_command(plan_mode=True)
+    assert "0.154.x or 0.157.x" in str(error.value)
+    assert "upgrade Codex CLI to 0.154.0 or newer" not in str(error.value)
 
 
 def test_headless_and_non_posix_terminal_plan_rejected() -> None:
