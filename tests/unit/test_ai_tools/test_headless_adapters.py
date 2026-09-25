@@ -312,22 +312,13 @@ def _request(tmp_path: Path, **updates: Any) -> HeadlessSessionRequest:
     return HeadlessSessionRequest(**values)
 
 
-def _assert_prompt_is_private(result: HeadlessSessionResult) -> None:
-    """No normalized event or diagnostic may echo the caller's prompt."""
-    assert result.native_status is None or PROMPT not in result.native_status
-    for name in ("session_id", "thread_id", "turn_id", "conversation_id"):
-        value = getattr(result, name)
-        assert value is None or PROMPT not in value
-    assert (
-        result.usage is None
-        or result.usage.session_id is None
-        or PROMPT not in result.usage.session_id
-    )
+def _assert_prompt_is_private(result: HeadlessSessionResult, prompt: str = PROMPT) -> None:
+    """No untrusted normalized event or diagnostic may echo the caller's prompt."""
     for event in result.events:
-        assert event.message is None or PROMPT not in event.message
-        assert PROMPT not in json.dumps(event.payload or {})
+        assert event.message is None or prompt not in event.message
+        assert prompt not in json.dumps(event.payload or {})
     for diagnostic in (*result.warnings, *result.denials):
-        assert PROMPT not in diagnostic
+        assert prompt not in diagnostic
 
 
 def test_windows_managed_transport_claims_and_closes_the_complete_process_tree(
@@ -397,6 +388,47 @@ def test_claude_native_error_is_not_success_on_exit_zero(
     assert result.final_json is None and not result.final_json_present
     assert result.native_status == "api_error"
     assert any("Bash" in denial for denial in result.denials)
+
+
+@pytest.mark.parametrize("invalid_is_error", [None, 0, "false"], ids=["null", "zero", "string"])
+def test_claude_rejects_non_boolean_error_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_is_error: object
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CLAUDE,
+        _fake_cli(stdout=json.dumps({**CLAUDE_RESULT, "is_error": invalid_is_error})),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("authoritative boolean is_error" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+def test_claude_rejects_missing_error_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope = {**CLAUDE_RESULT}
+    del envelope["is_error"]
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CLAUDE,
+        _fake_cli(stdout=json.dumps(envelope)),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("authoritative boolean is_error" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 @pytest.mark.parametrize(
@@ -573,24 +605,43 @@ def test_streaming_adapters_reject_repeated_final_result_envelopes(
 
 
 @pytest.mark.parametrize(
-    "late_frame",
+    ("tool", "frames"),
     [
-        {
-            "type": "assistant",
-            "session_id": CLAUDE_RESULT["session_id"],
-            "message": {"role": "assistant", "content": []},
-        },
-        {"type": "system", "session_id": CLAUDE_RESULT["session_id"], "subtype": "init"},
+        (
+            AIToolID.CLAUDE,
+            (
+                *CLAUDE_STREAM,
+                {
+                    "type": "assistant",
+                    "session_id": CLAUDE_RESULT["session_id"],
+                    "message": {"role": "assistant", "content": []},
+                },
+            ),
+        ),
+        (
+            AIToolID.CURSOR,
+            (
+                *CURSOR_STREAM,
+                {"type": "system", "session_id": CURSOR_RESULT["session_id"], "subtype": "init"},
+            ),
+        ),
+        (
+            AIToolID.ANTIGRAVITY_CLI,
+            (*AGY_STREAM, {"event": "step_update", "conversation_id": AGY_CONVERSATION}),
+        ),
     ],
-    ids=["assistant", "system"],
+    ids=["claude", "cursor", "antigravity"],
 )
-def test_claude_rejects_frames_after_final_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_frame: dict[str, Any]
+def test_streaming_adapters_reject_frames_after_final_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    frames: tuple[dict[str, Any], ...],
 ) -> None:
     adapter = _adapter(
         monkeypatch,
-        AIToolID.CLAUDE,
-        _fake_cli(stdout=_jsonl((*CLAUDE_STREAM, late_frame))),
+        tool,
+        _fake_cli(stdout=_jsonl(frames)),
     )
 
     result = adapter.run_headless_session(
@@ -601,6 +652,30 @@ def test_claude_rejects_frames_after_final_result(
     assert result.final_text is None and not result.final_json_present
     assert any("frame after its final result envelope" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "metadata_name", "expected_metadata"),
+    [
+        ("stop", "native_status", "stop"),
+        (OPENCODE_SESSION, "session_id", OPENCODE_SESSION),
+    ],
+    ids=["native-status", "provenance-id"],
+)
+def test_opencode_accepts_canonical_metadata_matching_the_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt: str,
+    metadata_name: str,
+    expected_metadata: str,
+) -> None:
+    adapter = _adapter(monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(OPENCODE_EVENTS)))
+
+    result = adapter.run_headless_session(_request(tmp_path, prompt=prompt))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert getattr(result, metadata_name) == expected_metadata
+    _assert_prompt_is_private(result, prompt)
 
 
 @pytest.mark.parametrize(

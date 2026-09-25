@@ -591,19 +591,24 @@ class CursorAdapter(AbstractAITool):
                 )
             # Progress and provenance were already emitted live by the streamer,
             # which never copies Cursor's prompt-echoing ``user`` frame content.
-            result_count = 0
+            saw_result = False
             for frame in frames:
                 session_id = session_id or non_blank_text(frame.get("session_id"))
+                if saw_result:
+                    warning = (
+                        "Cursor emitted multiple final result envelopes."
+                        if non_blank_text(frame.get("type")) == "result"
+                        else "Cursor emitted a frame after its final result envelope."
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        exit_code=output.returncode,
+                        session_id=session_id,
+                        warnings=(*warnings, warning),
+                    )
                 if non_blank_text(frame.get("type")) == "result":
-                    result_count += 1
                     envelope = frame
-            if result_count > 1:
-                return context.complete(
-                    HeadlessTerminalStatus.INVALID_OUTPUT,
-                    exit_code=output.returncode,
-                    session_id=session_id,
-                    warnings=(*warnings, "Cursor emitted multiple final result envelopes."),
-                )
+                    saw_result = True
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,

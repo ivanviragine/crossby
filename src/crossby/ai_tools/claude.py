@@ -449,7 +449,17 @@ class ClaudeAdapter(AbstractAITool):
         response_text = non_blank_text(envelope.get("result"))
         # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so
         # ``is_error`` is the only authoritative native failure signal.
-        native_error = bool(envelope.get("is_error"))
+        native_error = envelope.get("is_error")
+        if not isinstance(native_error, bool):
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(
+                    *warnings,
+                    "Claude Code omitted its authoritative boolean is_error marker.",
+                ),
+            )
         if native_error:
             warnings = (
                 *warnings,

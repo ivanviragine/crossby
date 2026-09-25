@@ -393,24 +393,26 @@ class AntigravityCLIAdapter(AbstractAITool):
                 )
             # Progress and provenance were already emitted live by the streamer,
             # which never copies agy's streamed response text deltas.
-            result_count = 0
+            saw_result = False
             for frame in frames:
                 conversation_id = conversation_id or _agy_conversation_id(frame)
+                if saw_result:
+                    warning = (
+                        "Antigravity CLI emitted multiple final result envelopes."
+                        if non_blank_text(frame.get("event")) == "result"
+                        else "Antigravity CLI emitted a frame after its final result envelope."
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        exit_code=output.returncode,
+                        conversation_id=conversation_id,
+                        warnings=(*warnings, warning),
+                    )
                 if non_blank_text(frame.get("event")) == "result" and isinstance(
                     frame.get("result"), dict
                 ):
-                    result_count += 1
                     envelope = frame["result"]
-            if result_count > 1:
-                return context.complete(
-                    HeadlessTerminalStatus.INVALID_OUTPUT,
-                    exit_code=output.returncode,
-                    conversation_id=conversation_id,
-                    warnings=(
-                        *warnings,
-                        "Antigravity CLI emitted multiple final result envelopes.",
-                    ),
-                )
+                    saw_result = True
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,

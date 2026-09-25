@@ -614,20 +614,18 @@ class HeadlessRuntimeContext:
         """Reject unsafe native metadata before it is retained or exposed."""
         identifiers = (session_id, thread_id, turn_id, conversation_id)
         if any(
-            identifier is not None and not _is_safe_provenance_id(identifier, self.request.prompt)
+            identifier is not None and not _is_safe_provenance_id(identifier)
             for identifier in identifiers
         ) or (
             usage is not None
             and usage.session_id is not None
-            and not _is_safe_provenance_id(usage.session_id, self.request.prompt)
+            and not _is_safe_provenance_id(usage.session_id)
         ):
             raise _HeadlessStopError(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 "The native transport emitted unsafe session provenance.",
             )
-        if native_status is not None and not _is_safe_native_status(
-            native_status, self.request.prompt
-        ):
+        if native_status is not None and not _is_safe_native_status(native_status):
             raise _HeadlessStopError(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 "The native transport emitted an unsafe native status.",
@@ -1101,24 +1099,22 @@ def _contains_prompt(value: str, prompt: str) -> bool:
     return bool(prompt) and prompt in value
 
 
-def _is_safe_provenance_id(value: Any, prompt: str) -> bool:
+def _is_safe_provenance_id(value: Any) -> bool:
     """Whether native provenance is bounded identifier data, not session content."""
     return (
         isinstance(value, str)
         and bool(value)
         and len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES
-        and not _contains_prompt(value, prompt)
         and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
     )
 
 
-def _is_safe_native_status(value: Any, prompt: str) -> bool:
+def _is_safe_native_status(value: Any) -> bool:
     """Whether native status is a bounded token rather than response content."""
     return (
         isinstance(value, str)
         and bool(value)
         and len(value.encode("utf-8")) <= _MAX_NATIVE_STATUS_BYTES
-        and not _contains_prompt(value, prompt)
         and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
     )
 
