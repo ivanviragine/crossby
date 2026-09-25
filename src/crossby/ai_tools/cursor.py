@@ -436,8 +436,10 @@ class CursorAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             ) from exc
         encoded_effort = _encoded_effort(model)
-        if parameterized_effort is not None and encoded_effort is not None and (
-            parameterized_effort is not encoded_effort
+        if (
+            parameterized_effort is not None
+            and encoded_effort is not None
+            and (parameterized_effort is not encoded_effort)
         ):
             raise HeadlessRequestError(
                 f"Cursor model {model!r} contains conflicting effort encodings.",
@@ -480,11 +482,7 @@ class CursorAdapter(AbstractAITool):
             for spellings in _EFFORT_SPELLINGS.values()
             for spelling in spellings
         )
-        if (
-            request.effort is EffortLevel.MEDIUM
-            and resolved == bare
-            and has_explicit_sibling
-        ):
+        if request.effort is EffortLevel.MEDIUM and resolved == bare and has_explicit_sibling:
             # The registry documents these bare families (e.g. gpt-5.3-codex)
             # as the medium tier when no explicit -medium sibling exists.
             return
@@ -619,7 +617,14 @@ class CursorAdapter(AbstractAITool):
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
         response_text = non_blank_text(envelope.get("result"))
-        native_error = bool(envelope.get("is_error"))
+        native_error = envelope.get("is_error")
+        if not isinstance(native_error, bool):
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Cursor omitted its authoritative boolean is_error marker."),
+            )
         if native_error:
             warnings = (
                 *warnings,

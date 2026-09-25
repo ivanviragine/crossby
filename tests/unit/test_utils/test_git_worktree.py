@@ -210,9 +210,7 @@ class TestFailureModes:
         monkeypatch.setattr(git_worktree.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(git_worktree.subprocess, "Popen", lambda *_args, **_kwargs: process)
 
-        assert (
-            git_worktree._run_git(tmp_path, "--show-toplevel", deadline=caller_deadline) is None
-        )
+        assert git_worktree._run_git(tmp_path, "--show-toplevel", deadline=caller_deadline) is None
         assert process.terminated
         assert clock[0] == pytest.approx(expected_timeout)
 

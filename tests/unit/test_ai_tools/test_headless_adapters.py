@@ -853,10 +853,7 @@ def test_codex_rejects_item_events_after_its_terminal_turn(
 
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
-    assert any(
-        "turn, item, or error event after its terminal turn event" in warning
-        for warning in result.warnings
-    )
+    assert any("frame after its terminal turn event" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 
@@ -875,10 +872,24 @@ def test_codex_rejects_error_events_after_its_terminal_turn(
 
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
-    assert any(
-        "turn, item, or error event after its terminal turn event" in warning
-        for warning in result.warnings
+    assert any("frame after its terminal turn event" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+def test_codex_rejects_thread_events_after_its_terminal_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CODEX,
+        _fake_cli(stdout=_jsonl((*CODEX_EVENTS, CODEX_EVENTS[0])), exit_code=0),
     )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("frame after its terminal turn event" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 
@@ -896,6 +907,47 @@ def test_cursor_json_envelope_reports_proposal_semantics(
     assert result.native_status == "success"
     assert result.usage is not None and result.usage.input_tokens == 9118
     assert any("proposals" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("invalid_is_error", [None, 0, "false"], ids=["null", "zero", "string"])
+def test_cursor_rejects_non_boolean_error_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_is_error: object
+) -> None:
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CURSOR,
+        _fake_cli(stdout=json.dumps({**CURSOR_RESULT, "is_error": invalid_is_error})),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("authoritative boolean is_error" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+def test_cursor_rejects_a_missing_error_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    envelope = {**CURSOR_RESULT}
+    del envelope["is_error"]
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.CURSOR,
+        _fake_cli(stdout=json.dumps(envelope)),
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("authoritative boolean is_error" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 def test_cursor_stream_json_hides_the_echoed_user_frame(
