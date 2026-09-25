@@ -413,7 +413,7 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         return None
     try:
         value = json.loads(stripped)
-    except json.JSONDecodeError:
+    except ValueError:
         return None
     return value if isinstance(value, dict) else None
 
@@ -427,7 +427,7 @@ def parse_json_lines(text: str) -> list[dict[str, Any]] | None:
             continue
         try:
             value = json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:
             return None
         if not isinstance(value, dict):
             return None

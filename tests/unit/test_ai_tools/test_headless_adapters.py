@@ -606,6 +606,25 @@ def test_unrecognized_streaming_frames_do_not_extend_idle_deadline(
     assert any("idle deadline" in warning for warning in result.warnings)
 
 
+@pytest.mark.parametrize("native_output", [HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL])
+def test_json_decoder_value_errors_are_invalid_native_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native_output: HeadlessNativeOutput,
+) -> None:
+    max_digits = sys.get_int_max_str_digits()
+    if max_digits == 0:
+        pytest.skip("the interpreter's JSON integer digit limit is disabled")
+    malformed = '{"number":' + "9" * (max_digits + 1) + "}"
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=malformed))
+
+    result = adapter.run_headless_session(_request(tmp_path, native_output=native_output))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    _assert_prompt_is_private(result)
+
+
 @pytest.mark.parametrize(
     ("tool", "stdout"),
     [
@@ -1585,6 +1604,34 @@ def test_antigravity_conflicting_model_encoded_effort_fails_before_spawn(
         )
 
     assert not started.exists()
+
+
+@pytest.mark.parametrize("model", ["gemini-3.1-pro-medium", "managed-experiment-high"])
+def test_antigravity_model_only_suffix_that_would_be_rewritten_fails_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.ANTIGRAVITY_CLI,
+        _fake_cli(stdout="{}", stdin_record=started),
+    )
+
+    with pytest.raises(HeadlessRequestError, match="model-encoded reasoning effort"):
+        adapter.run_headless_session(_request(tmp_path, model=model))
+
+    assert not started.exists()
+
+
+@pytest.mark.parametrize("model", ["gemini-3.8-flash-low", "gpt-oss-120b-medium"])
+def test_antigravity_valid_model_only_suffix_is_preserved(tmp_path: Path, model: str) -> None:
+    command = _command(
+        AIToolID.ANTIGRAVITY_CLI,
+        _request(tmp_path, model=model),
+        print_timeout_seconds=30,
+    )
+
+    assert command[command.index("--model") + 1] == model
 
 
 @pytest.mark.parametrize(

@@ -239,10 +239,10 @@ class AntigravityCLIAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
-        if request.model is not None and request.effort is not None:
+        if request.model is not None:
             base, suffix_effort = _split_effort_suffix(request.model)
             tiers = _ANTIGRAVITY_CLI_EFFORT_TIERS.get(base)
-            if tiers is None or request.effort not in tiers:
+            if request.effort is not None and (tiers is None or request.effort not in tiers):
                 raise HeadlessRequestError(
                     "Antigravity CLI cannot preserve the requested reasoning effort for "
                     f"model {request.model!r}. Choose a Gemini model with a matching native "
@@ -250,12 +250,29 @@ class AntigravityCLIAdapter(AbstractAITool):
                     tool_id=self.TOOL_ID,
                     capability=self.capabilities().headless,
                 )
-            if suffix_effort is not None and suffix_effort is not request.effort:
+            if (
+                request.effort is not None
+                and suffix_effort is not None
+                and suffix_effort is not request.effort
+            ):
                 raise HeadlessRequestError(
                     "Antigravity CLI request specifies conflicting reasoning effort: "
                     f"model {request.model!r} encodes {suffix_effort.value!r}, but "
                     f"effort={request.effort.value!r}. Use a matching model suffix or omit "
                     "one setting.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            if (
+                request.effort is None
+                and suffix_effort is not None
+                and request.model not in _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS
+                and (tiers is None or suffix_effort not in tiers)
+            ):
+                raise HeadlessRequestError(
+                    "Antigravity CLI cannot preserve the model-encoded reasoning effort for "
+                    f"model {request.model!r} without rewriting it. Choose a supported native "
+                    "model tier or specify a matching explicit effort.",
                     tool_id=self.TOOL_ID,
                     capability=self.capabilities().headless,
                 )
@@ -818,8 +835,9 @@ class AntigravityCLIAdapter(AbstractAITool):
           unchanged — effort does not apply. ``gpt-oss-120b-medium`` is an
           exact provider ID whose suffix is part of its name, not an effort.
         - **Precedence**: interactive launches keep an effort already baked
-          into the ID. Headless requests reject a conflicting explicit effort,
-          so the managed request parameters stay unambiguous.
+          into the ID. Headless requests reject any model-encoded effort they
+          cannot preserve exactly, so managed requests never silently select a
+          different model.
         - **No effort anywhere**: a deterministic default is baked in so the
           command is valid (``gemini-3.8-flash`` → ``…-medium``, ``gemini-3.1-pro``
           → ``…-high``) rather than the rejected bare base model.
