@@ -349,7 +349,7 @@ shape: a `response_schema` selects the native structured output for the runtime
 to validate, `TEXT` returns the final response text, and `JSON`/`JSONL` return
 the native object that carried it. An adapter that cannot honor a schema must
 reject it in `_validate_headless_requirements` so the request fails before
-spawn.
+version probing or spawn.
 
 Capability declarations are evidence, not aspiration. `verified_version` is the
 exact build the flags and envelope were checked against and becomes the runtime
