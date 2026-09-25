@@ -59,8 +59,8 @@ repeated, or later step frames are invalid native output.
 
 Claude, Cursor, and Antigravity CLI likewise contribute exactly one final
 `result` envelope to their streaming protocol. A missing or repeated result
-envelope is invalid native output; a later result can never overwrite an
-earlier native error or waiting state.
+envelope is invalid native output, as is any later frame; a later result can
+never overwrite an earlier native error or waiting state.
 
 **Envelopes and event names.** Recorded shapes now live as fixtures in
 `tests/unit/test_ai_tools/test_headless_adapters.py`:
