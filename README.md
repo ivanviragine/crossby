@@ -454,7 +454,10 @@ families are preserved, while `auto`, malformed or conflicting overrides,
 unknown models, and unavailable tiers fail before spawning. For Antigravity,
 the model must be a Gemini family with the requested native tier, and an
 already-suffixed ID must encode the same effort. Otherwise the request fails
-before spawning.
+before spawning. With no separate `effort`, a suffixed Antigravity model must
+still be a known valid native tier (apart from the fixed provider ID
+`gpt-oss-120b-medium`); Crossby rejects a suffix it would otherwise normalize
+or drop rather than launch a different model.
 
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a

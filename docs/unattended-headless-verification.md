@@ -28,7 +28,9 @@ stream-json output redesign, so the adapter does not substitute it. Every
 streaming adapter refreshes the idle deadline only for its verified event kinds;
 an unknown JSON object can be parsed as terminal evidence but cannot keep a
 stalled child alive. Rendered native argv is validated before a version probe or
-child spawn: POSIX
+child spawn. In particular, a model-only Antigravity ID with an unrecognized or
+unsupported effort suffix is rejected rather than normalized or stripped, so a
+managed run never selects a different model. POSIX
 arguments are limited to 120,000 filesystem-encoded bytes and the
 complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
 an 8 KiB safety margin; Windows validates the complete rendered command line,
