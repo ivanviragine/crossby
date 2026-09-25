@@ -28,6 +28,11 @@ from crossby.models.ai import (
 
 READY = "│ model: gpt-5.6-sol low │\n\u203a Ask Codex to do anything\ngpt-5.6-sol"
 PLAN = READY + " Plan mode"
+WIDE_PLAN = (
+    "│ model: gpt-5.6-sol low │\n\u203a Ask Codex to do anything\n"
+    "GPT-5.6-Sol high · /tmp/plan-worktree · Context 0% used · weekly 45% left · session "
+    "Plan mode (shift+tab to cycle)    ⚠ 1 warning · f2 to view"
+)
 
 
 def activate(startup: _Startup) -> bytes:
@@ -63,6 +68,28 @@ def test_caller_receives_ready_before_input_and_submission_after_native_turn() -
     ]
     assert startup.advance(PLAN) == b""
     assert len(received) == 2
+
+
+def test_wide_status_with_shortcut_and_warning_still_submits_task() -> None:
+    received: list[InteractiveLaunchEventKind] = []
+
+    def handler(event: InteractiveLaunchEvent, session: InteractiveSession) -> None:
+        received.append(event.kind)
+        if event.kind is InteractiveLaunchEventKind.PLAN_READY:
+            session.send_message("Plan issue #188")
+
+    startup = _Startup(None, handler)
+    assert startup.advance(READY) == b"/plan"
+    assert startup.advance("\u203a /plan  switch to Plan mode\n\u203a /plan") == b"\r"
+    assert startup.advance(WIDE_PLAN) == b"\x1b[200~Plan issue #188\x1b[201~"
+    assert received == [InteractiveLaunchEventKind.PLAN_READY]
+    assert startup.advance("\u203a Plan issue #188\n" + WIDE_PLAN.splitlines()[-1]) == b"\r"
+    assert startup.advance("Working (0s • esc to interrupt)\n" + WIDE_PLAN.splitlines()[-1]) == b""
+    assert startup.phase is _Phase.ACTIVE
+    assert received == [
+        InteractiveLaunchEventKind.PLAN_READY,
+        InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+    ]
 
 
 def test_loading_modal_and_plain_text_plan_do_not_trigger_activation() -> None:
