@@ -26,7 +26,7 @@ closes the stream at EOF. Antigravity's verified `--print` text and JSON modes
 take their prompt from argv; its stdin stream-json protocol requires a paired
 stream-json output redesign, so the adapter does not substitute it. Every
 rendered native argv is validated before a version probe or child spawn: POSIX
-arguments are limited to 120,000 UTF-8 bytes and the
+arguments are limited to 120,000 filesystem-encoded bytes and the
 complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
 an 8 KiB safety margin; Windows validates the complete rendered command line,
 including its terminating NUL, against its 32,767 UTF-16-unit limit. Native
