@@ -70,8 +70,11 @@ def test_caller_receives_ready_before_input_and_submission_after_native_turn() -
     assert len(received) == 2
 
 
-def test_wide_status_with_shortcut_and_warning_still_submits_task() -> None:
+@pytest.mark.parametrize("with_warning", [False, True])
+def test_wide_status_with_shortcut_still_submits_task(with_warning: bool) -> None:
     received: list[InteractiveLaunchEventKind] = []
+    plan_screen = WIDE_PLAN if with_warning else WIDE_PLAN.split("    ⚠", 1)[0]
+    status_line = plan_screen.splitlines()[-1]
 
     def handler(event: InteractiveLaunchEvent, session: InteractiveSession) -> None:
         received.append(event.kind)
@@ -81,10 +84,10 @@ def test_wide_status_with_shortcut_and_warning_still_submits_task() -> None:
     startup = _Startup(None, handler)
     assert startup.advance(READY) == b"/plan"
     assert startup.advance("\u203a /plan  switch to Plan mode\n\u203a /plan") == b"\r"
-    assert startup.advance(WIDE_PLAN) == b"\x1b[200~Plan issue #188\x1b[201~"
+    assert startup.advance(plan_screen) == b"\x1b[200~Plan issue #188\x1b[201~"
     assert received == [InteractiveLaunchEventKind.PLAN_READY]
-    assert startup.advance("\u203a Plan issue #188\n" + WIDE_PLAN.splitlines()[-1]) == b"\r"
-    assert startup.advance("Working (0s • esc to interrupt)\n" + WIDE_PLAN.splitlines()[-1]) == b""
+    assert startup.advance("\u203a Plan issue #188\n" + status_line) == b"\r"
+    assert startup.advance("Working (0s • esc to interrupt)\n" + status_line) == b""
     assert startup.phase is _Phase.ACTIVE
     assert received == [
         InteractiveLaunchEventKind.PLAN_READY,
