@@ -855,7 +855,7 @@ class AbstractAITool(ABC):
             return
 
         for argument in argv:
-            argument_length = len(argument.encode("utf-8"))
+            argument_length = len(os.fsencode(argument))
             if argument_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
                 raise HeadlessRequestError(
                     f"{caps.display_name} cannot safely deliver a {argument_length}-byte "

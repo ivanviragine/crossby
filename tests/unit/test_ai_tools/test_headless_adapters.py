@@ -1277,6 +1277,21 @@ def test_claude_oversized_schema_argument_fails_before_version_probe(
     assert version_probes == 0
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX filesystem encoding")
+def test_posix_surrogate_escaped_argv_uses_filesystem_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.CODEX)
+    trusted_dir = os.fsdecode(b"/tmp/crossby-trusted-\xff")
+    monkeypatch.setattr(
+        adapter,
+        "_headless_argv_for_validation",
+        lambda _request, **_kwargs: ["codex", "--add-dir", trusted_dir],
+    )
+
+    adapter._validate_headless_argv(_request(tmp_path))
+
+
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX execve limits")
 def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_version_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
