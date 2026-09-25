@@ -625,6 +625,29 @@ def test_json_decoder_value_errors_are_invalid_native_output(
     _assert_prompt_is_private(result)
 
 
+def test_codex_schema_decoder_value_error_is_invalid_native_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    max_digits = sys.get_int_max_str_digits()
+    if max_digits == 0:
+        pytest.skip("the interpreter's JSON integer digit limit is disabled")
+    events = list(CODEX_EVENTS)
+    events[2] = {
+        **events[2],
+        "item": {
+            **events[2]["item"],
+            "text": '{"answer":' + "9" * (max_digits + 1) + "}",
+        },
+    }
+    adapter = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(tuple(events))))
+
+    result = adapter.run_headless_session(_request(tmp_path, response_schema=SCHEMA))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    _assert_prompt_is_private(result)
+
+
 @pytest.mark.parametrize(
     ("tool", "stdout"),
     [
@@ -1660,6 +1683,57 @@ def test_antigravity_unrepresentable_effort_fails_before_spawn(
         adapter.run_headless_session(_request(tmp_path, model=model, effort=effort))
 
     assert not started.exists()
+
+
+@pytest.mark.parametrize("entry_point", ["runtime", "preflight"])
+@pytest.mark.parametrize(
+    ("tool", "updates", "error_type", "message"),
+    [
+        (
+            AIToolID.CLAUDE,
+            {"native_output": HeadlessNativeOutput.TEXT, "response_schema": SCHEMA},
+            HeadlessUnsupportedError,
+            "structured_output",
+        ),
+        (
+            AIToolID.CURSOR,
+            {
+                "model": "auto",
+                "effort": EffortLevel.HIGH,
+                "native_output": HeadlessNativeOutput.JSON,
+            },
+            HeadlessRequestError,
+            "selected model is not known",
+        ),
+    ],
+)
+def test_static_adapter_requirements_fail_before_version_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: str,
+    tool: AIToolID,
+    updates: dict[str, Any],
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    adapter = AbstractAITool.get(tool)
+    version_probes = 0
+
+    def probe(**_kwargs: Any) -> BinaryVersion:
+        nonlocal version_probes
+        version_probes += 1
+        raise AssertionError("static adapter requirements must fail before version probing")
+
+    monkeypatch.setattr(adapter, "_detect_headless_version", probe)
+
+    with pytest.raises(error_type, match=message):
+        request = _request(tmp_path, **updates)
+        if entry_point == "runtime":
+            adapter.run_headless_session(request)
+        else:
+            adapter.preflight_headless_session(request)
+
+    assert version_probes == 0
 
 
 def test_codex_headless_argv_metadata_probe_receives_deadline_and_cancellation(

@@ -408,11 +408,11 @@ class AbstractAITool(ABC):
             deadline=deadline,
             cancel_event=cancel_event,
         )
+        self._validate_headless_requirements(normalized)
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
         )
-        self._validate_headless_requirements(normalized)
         context = HeadlessRuntimeContext(
             tool_id=self.TOOL_ID,
             version=detected.text,
@@ -542,11 +542,11 @@ class AbstractAITool(ABC):
             deadline=deadline,
             cancel_event=cancel_event,
         )
+        self._validate_headless_requirements(normalized)
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
         )
-        self._validate_headless_requirements(normalized)
         return HeadlessSessionPreflight(
             tool=self.TOOL_ID,
             detected_version=detected.text,

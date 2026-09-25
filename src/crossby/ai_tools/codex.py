@@ -555,7 +555,7 @@ class CodexAdapter(AbstractAITool):
         if request.response_schema is not None and texts:
             try:
                 structured = json.loads(texts[-1])
-            except json.JSONDecodeError:
+            except ValueError:
                 warnings = (
                     *warnings,
                     "Codex CLI returned a final message that was not valid schema JSON.",
