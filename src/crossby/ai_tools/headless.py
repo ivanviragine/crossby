@@ -1101,22 +1101,26 @@ def _contains_prompt(value: str, prompt: str) -> bool:
 
 def _is_safe_provenance_id(value: Any) -> bool:
     """Whether native provenance is bounded identifier data, not session content."""
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES
-        and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
-    )
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= _MAX_PROVENANCE_ID_BYTES and all(
+            character in _PROVENANCE_ID_CHARACTERS for character in value
+        )
+    except UnicodeEncodeError:
+        return False
 
 
 def _is_safe_native_status(value: Any) -> bool:
     """Whether native status is a bounded token rather than response content."""
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value.encode("utf-8")) <= _MAX_NATIVE_STATUS_BYTES
-        and all(character in _PROVENANCE_ID_CHARACTERS for character in value)
-    )
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= _MAX_NATIVE_STATUS_BYTES and all(
+            character in _PROVENANCE_ID_CHARACTERS for character in value
+        )
+    except UnicodeEncodeError:
+        return False
 
 
 def _contains_prompt_value(value: Any, prompt: str) -> bool:

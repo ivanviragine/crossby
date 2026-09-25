@@ -1177,10 +1177,7 @@ def test_opencode_rejects_step_events_after_terminal_stop(
     assert result.exit_code == 0
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
-    assert any(
-        "result-bearing event after its terminal stop event" in warning
-        for warning in result.warnings
-    )
+    assert any("frame after its terminal stop event" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 
@@ -1202,10 +1199,25 @@ def test_opencode_rejects_text_events_after_terminal_stop(
 
     assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
     assert result.final_text is None and not result.final_json_present
-    assert any(
-        "result-bearing event after its terminal stop event" in warning
-        for warning in result.warnings
+    assert any("frame after its terminal stop event" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
+
+
+def test_opencode_rejects_unknown_frames_after_terminal_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    late_frame = {"type": "error", "sessionID": OPENCODE_SESSION}
+    adapter = _adapter(
+        monkeypatch,
+        AIToolID.OPENCODE,
+        _fake_cli(stdout=_jsonl((*OPENCODE_EVENTS, late_frame)), exit_code=0),
     )
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("frame after its terminal stop event" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
 
 
@@ -1267,6 +1279,23 @@ def test_antigravity_rejects_a_mismatched_schema_echo(
 ) -> None:
     tampered = json.loads(json.dumps(AGY_RESULT))
     tampered["json_schema"] = {"type": "object"}
+    adapter = _adapter(
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(tampered))
+    )
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON, response_schema=SCHEMA)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert any("echo the requested schema" in warning for warning in result.warnings)
+
+
+def test_antigravity_rejects_a_schema_echo_with_an_oversized_integer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tampered = json.loads(json.dumps(AGY_RESULT))
+    tampered["json_schema"] = f'{{"value": {"9" * 4_301}}}'
     adapter = _adapter(
         monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(tampered))
     )

@@ -368,6 +368,25 @@ def test_malformed_native_provenance_is_rejected_before_result_publication(
     assert result.session_id is None
 
 
+@pytest.mark.parametrize(
+    ("field", "warning"),
+    [
+        ("session_id", "unsafe session provenance"),
+        ("native_status", "unsafe native status"),
+    ],
+)
+def test_unencodable_native_metadata_is_rejected_before_result_publication(
+    tmp_path: Path, field: str, warning: str
+) -> None:
+    result = FakeHeadlessAdapter(
+        lambda context: context.complete(final_text="untrusted", **{field: "\ud800"})
+    ).run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any(warning in item for item in result.warnings)
+
+
 def test_prompt_bearing_usage_provenance_is_rejected_before_result_publication(
     tmp_path: Path,
 ) -> None:

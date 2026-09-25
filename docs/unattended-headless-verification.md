@@ -60,7 +60,7 @@ failure.
 
 OpenCode permits nonterminal `step_finish` frames (such as `tool-calls`) while
 it works. Its single `step_finish` with reason `stop` is terminal; missing,
-repeated, or later step frames are invalid native output.
+repeated, or later frames are invalid native output.
 
 Claude, Cursor, and Antigravity CLI likewise contribute exactly one final
 `result` envelope to their streaming protocol. A missing or repeated result

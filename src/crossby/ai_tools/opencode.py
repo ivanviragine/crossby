@@ -257,14 +257,14 @@ class OpenCodeAdapter(AbstractAITool):
             context.validate_provenance(session_id=observed_session_id)
             session_id = session_id or observed_session_id
             kind = non_blank_text(frame.get("type"))
-            if saw_terminal_stop and kind in {"step_start", "step_finish", "text"}:
+            if saw_terminal_stop:
                 return context.complete(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
                     exit_code=output.returncode,
                     session_id=session_id,
                     warnings=(
                         *warnings,
-                        "OpenCode emitted a result-bearing event after its terminal stop event.",
+                        "OpenCode emitted a frame after its terminal stop event.",
                     ),
                 )
             part = frame.get("part")

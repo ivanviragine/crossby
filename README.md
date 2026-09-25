@@ -428,10 +428,9 @@ transport failure, never an eligible native success. An unexpected native
 question fails the session; an unresolved permission is denied. A native
 terminal error, waiting state, or missing, repeated, or conflicting terminal
 evidence is never reported as success just because the exit status was `0`.
-For framed output, Claude Code, Cursor, and Antigravity CLI reject every later
-frame after their terminal result; Codex rejects every later typed frame, and
-OpenCode rejects later `step_start`, `step_finish`, or `text` frames after its
-terminal stop. A timeout or cancellation kills the whole owned process group and returns
+For framed output, Claude Code, Cursor, Antigravity CLI, and OpenCode reject
+every later frame after their terminal result or stop; Codex rejects every later
+typed frame. A timeout or cancellation kills the whole owned process group and returns
 a bounded, prompt-free result that keeps the session, thread, or conversation
 ID observed before the deadline. Native stderr is reported only as a fixed
 diagnostic, so caller-visible warnings cannot echo session content. Codex native

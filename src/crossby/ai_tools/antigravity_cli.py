@@ -470,7 +470,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         if isinstance(schema_echo, str):
             try:
                 schema_echo = json.loads(schema_echo)
-            except json.JSONDecodeError:
+            except ValueError:
                 schema_echo = None
         if request.response_schema is not None and schema_echo != request.response_schema:
             return context.complete(
