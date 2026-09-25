@@ -275,12 +275,12 @@ class OpenCodeAdapter(AbstractAITool):
                     )
                 saw_terminal_stop = step_reason == "stop"
 
-        if finish_reason is None:
+        if not saw_terminal_stop:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 exit_code=output.returncode,
                 session_id=session_id,
-                warnings=(*warnings, "OpenCode ended without a terminal step_finish event."),
+                warnings=(*warnings, "OpenCode ended without a terminal stop event."),
             )
         texts = [text for part in text_parts if (text := non_blank_text(part.get("text")))]
         if len(text_parts) > 1 and request.native_output is HeadlessNativeOutput.JSONL:
@@ -289,14 +289,12 @@ class OpenCodeAdapter(AbstractAITool):
                 "Only the final native text part is returned; request text output for the "
                 "complete response.",
             )
-        if finish_reason != "stop":
-            warnings = (*warnings, f"OpenCode finished with native reason {finish_reason!r}.")
         return complete_session(
             context,
             request,
             status=(
                 HeadlessTerminalStatus.SUCCEEDED
-                if finish_reason == "stop" and output.returncode == 0
+                if output.returncode == 0
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,

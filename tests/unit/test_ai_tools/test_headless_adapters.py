@@ -1108,21 +1108,23 @@ def test_opencode_rejects_prompt_bearing_session_provenance(
     _assert_prompt_is_private(result)
 
 
-def test_opencode_non_stop_finish_reason_fails(
+def test_opencode_nonterminal_finish_without_stop_is_invalid_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    aborted = list(OPENCODE_EVENTS)
-    aborted[-1] = json.loads(json.dumps(aborted[-1]))
-    aborted[-1]["part"]["reason"] = "aborted"
+    incomplete = list(OPENCODE_EVENTS)
+    incomplete[-1] = json.loads(json.dumps(incomplete[-1]))
+    incomplete[-1]["part"]["reason"] = "tool-calls"
     adapter = _adapter(
-        monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(tuple(aborted)), exit_code=0)
+        monkeypatch, AIToolID.OPENCODE, _fake_cli(stdout=_jsonl(tuple(incomplete)), exit_code=0)
     )
 
     result = adapter.run_headless_session(_request(tmp_path))
 
     assert result.exit_code == 0
-    assert result.status is HeadlessTerminalStatus.FAILED
-    assert result.native_status == "aborted"
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None and not result.final_json_present
+    assert any("without a terminal stop event" in warning for warning in result.warnings)
+    _assert_prompt_is_private(result)
 
 
 def test_antigravity_json_envelope_validates_the_schema_echo(
