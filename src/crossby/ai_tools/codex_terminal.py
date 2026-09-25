@@ -89,6 +89,9 @@ class _Startup:
     def advance(self, rendered: str) -> bytes:
         lines = [line.rstrip() for line in rendered.splitlines() if line.strip()]
         footer = lines[-1] if lines else ""
+        # At wider widths Codex appends a shortcut hint and warnings after the mode label.
+        # Check the status line for the label, not just its final characters.
+        plan_status = bool(re.search(r"(?:^|\s)Plan mode(?:\s|$)", footer))
         empty = any(line.lstrip() == "\u203a Ask Codex to do anything" for line in lines)
         # Slash-command suggestions can also start with the prompt marker and appear above the
         # actual composer. The composer is the bottommost such line.
@@ -108,7 +111,7 @@ class _Startup:
         elif self.phase is _Phase.COMMAND and composer == "/plan":
             self.phase = _Phase.PLAN
             return b"\r"
-        elif self.phase is _Phase.PLAN and footer.endswith("Plan mode") and empty:
+        elif self.phase is _Phase.PLAN and plan_status and empty:
             self.port.open = True
             try:
                 self._emit(InteractiveLaunchEventKind.PLAN_READY)
@@ -136,11 +139,7 @@ class _Startup:
             ):
                 self.phase = _Phase.START
                 return b"\r"
-        elif (
-            self.phase is _Phase.START
-            and "esc to interrupt" in rendered
-            and footer.endswith("Plan mode")
-        ):
+        elif self.phase is _Phase.START and "esc to interrupt" in rendered and plan_status:
             self.phase = _Phase.ACTIVE
             self._emit(InteractiveLaunchEventKind.MESSAGE_SUBMITTED)
         return b""
