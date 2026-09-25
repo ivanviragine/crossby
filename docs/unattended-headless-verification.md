@@ -25,7 +25,10 @@ message is supplied, so the managed adapter delivers its prompt on stdin and
 closes the stream at EOF. Antigravity's verified `--print` text and JSON modes
 take their prompt from argv; its stdin stream-json protocol requires a paired
 stream-json output redesign, so the adapter does not substitute it. Every
-rendered native argv is validated before a version probe or child spawn: POSIX
+streaming adapter refreshes the idle deadline only for its verified event kinds;
+an unknown JSON object can be parsed as terminal evidence but cannot keep a
+stalled child alive. Rendered native argv is validated before a version probe or
+child spawn: POSIX
 arguments are limited to 120,000 filesystem-encoded bytes and the
 complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
 an 8 KiB safety margin; Windows validates the complete rendered command line,

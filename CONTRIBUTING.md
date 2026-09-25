@@ -338,9 +338,11 @@ Native lines are handed to the adapter from the same thread that is waiting on
 the child, so provenance is recorded and the idle deadline refreshes while the
 run is still in flight — and a timed-out session still returns the session,
 thread, or conversation ID it had already seen. `frame_streamer` builds that
-callback from a `kind_of`/`provenance_of` pair; a frame's *kind* only determines
-whether to emit a content-free progress event, because native frames echo prompt
-and response text (Cursor's `user` frame and agy's `text_delta` are the proof).
+callback from a `kind_of`/`provenance_of` pair; only a verified frame *kind*
+refreshes the idle deadline and emits a content-free progress event. Unknown
+JSON frames remain available to terminal parsing but cannot keep a stalled
+process alive, and native frame content is never exposed (Cursor's `user` frame
+and agy's `text_delta` are the proof).
 
 `complete_session` then renders the terminal result in the caller's requested
 shape: a `response_schema` selects the native structured output for the runtime
