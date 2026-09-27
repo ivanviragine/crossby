@@ -1,0 +1,24 @@
+# Structural breaks that explain moves in prices, sales and ratings.
+# Only events verified during research (2026-09-27); add the source URL for each.
+
+events:
+  - id: latin-ncap-protocol-2026
+    date: 2026-01-01
+    kind: safety_protocol
+    title: Latin NCAP protocol update adds rear-seat assessments and stricter criteria; stars before and after are not comparable
+    scope: all
+    url: https://www.folhape.com.br/colunistas/fmotors/latin-ncap-endurece-protocolo-de-seguranca-para-automoveis-em-2026-saiba-o-que-muda/54234/
+
+  - id: carro-sustentavel-ipi-zero-ends
+    date: 2026-12-31
+    kind: tax
+    title: IPI zero for eligible entry cars under "Programa Carro Sustentável" ends
+    scope: eligible entry-level cars made in Brazil
+    url: https://www.otempo.com.br/autotempo/2026/5/6/carro-zero-km-no-brasil-imposto-bate-48-e-reforma-tributaria-pode-piorar-a-conta
+
+  - id: tax-reform-2027
+    date: 2027-01-01
+    kind: tax
+    title: CBS replaces PIS/Cofins, IPI goes to zero for most products and the Imposto Seletivo starts (vehicle rates pending an ordinary law as of Sep 2026)
+    scope: all new vehicles
+    url: https://garagem360.com.br/imposto-seletivo-dos-carros-pode-repetir-ipi-verde-ate-fim-de-2027-anfavea-espera-regras-ainda-em-setembro/

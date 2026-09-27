@@ -1,0 +1,199 @@
+# The first 20 vehicle families (launch catalog).
+#
+# Seed only verified facts. `patterns` are regular expressions applied to the
+# normalized model text (upper case, no accents) that follows the brand in a
+# registry label or a FIPE model name. When several families match, the longest
+# match wins; a tie goes to the review queue. Patterns were written against the
+# real SENATRAN strings (July 2026 file) and FIPE names; see LEARNINGS.md for traps.
+#
+# status: on_sale (seen in August 2026 registration rankings), discontinued, or
+# unverified (not yet checked against an automaker's current range).
+
+brands:
+  volkswagen: {name: Volkswagen, labels: [VW, VOLKSWAGEN, VW - VOLKSWAGEN]}
+  fiat: {name: Fiat, labels: [FIAT]}
+  chevrolet: {name: Chevrolet, labels: [CHEV, GM, CHEVROLET, GM - CHEVROLET]}
+  hyundai: {name: Hyundai, labels: [HYUNDAI]}
+  jeep: {name: Jeep, labels: [JEEP]}
+  toyota: {name: Toyota, labels: [TOYOTA]}
+  honda: {name: Honda, labels: [HONDA]}
+  nissan: {name: Nissan, labels: [NISSAN]}
+  renault: {name: Renault, labels: [RENAULT]}
+  byd: {name: BYD, labels: [BYD]}
+  gwm: {name: GWM, labels: [GWM, GREAT WALL]}
+
+families:
+  - id: volkswagen-gol
+    brand: volkswagen
+    name: Gol
+    segment: hatch compacto
+    body: hatch
+    status: discontinued
+    patterns: ['GOL(?![A-Z])']
+    lookalikes: ['GOLF']
+    notes: Largest car nameplate in the registered fleet (used-market favorite).
+
+  - id: volkswagen-polo
+    brand: volkswagen
+    name: Polo
+    segment: hatch compacto
+    body: hatch
+    status: on_sale
+    patterns: ['POLO(?! ?TRACK)(?![A-Z])']
+    notes: Registry labels include the older "POLO SEDAN"; split by generation pending.
+
+  - id: volkswagen-polo-track
+    brand: volkswagen
+    name: Polo Track
+    segment: hatch de entrada
+    body: hatch
+    status: unverified
+    patterns: ['POLO ?TRACK(?![A-Z])']
+
+  - id: volkswagen-t-cross
+    brand: volkswagen
+    name: T-Cross
+    segment: SUV compacto
+    body: suv
+    status: unverified
+    patterns: ['T[ -]?CROSS(?![A-Z])']
+
+  - id: volkswagen-tera
+    brand: volkswagen
+    name: Tera
+    segment: SUV compacto
+    body: suv
+    status: on_sale
+    patterns: ['TERA(?![A-Z])']
+
+  - id: fiat-strada
+    brand: fiat
+    name: Strada
+    segment: picape compacta
+    body: pickup
+    status: on_sale
+    patterns: ['STRADA(?![A-Z])']
+
+  - id: fiat-argo
+    brand: fiat
+    name: Argo
+    segment: hatch compacto
+    body: hatch
+    status: on_sale
+    patterns: ['ARGO(?![A-Z])']
+
+  - id: fiat-toro
+    brand: fiat
+    name: Toro
+    segment: picape intermediária
+    body: pickup
+    status: unverified
+    patterns: ['TORO(?![A-Z])']
+
+  - id: chevrolet-onix
+    brand: chevrolet
+    name: Onix
+    segment: hatch compacto
+    body: hatch
+    status: unverified
+    patterns: ['ONIX(?! ?PLUS)(?![A-Z])']
+    lookalikes: ['ONIX ?PLUS']
+    notes: '"ONIX PLUS" is the sedan and is deliberately excluded.'
+
+  - id: chevrolet-tracker
+    brand: chevrolet
+    name: Tracker
+    segment: SUV compacto
+    body: suv
+    status: unverified
+    patterns: ['TRACKER(?![A-Z])']
+
+  - id: hyundai-hb20
+    brand: hyundai
+    name: HB20
+    segment: hatch compacto
+    body: hatch
+    status: unverified
+    patterns: ['HB ?20(?![A-Z])']
+    lookalikes: ['HB ?20[SX]']
+    notes: '"HB20S" (sedan) and "HB20X" are excluded; "HB2010TA" is HB20 + 1.0 turbo automatic.'
+
+  - id: hyundai-creta
+    brand: hyundai
+    name: Creta
+    segment: SUV compacto
+    body: suv
+    status: unverified
+    patterns: ['CRETA(?![A-Z])']
+    notes: Registry truncates to labels like "CRETA1TA PLTINUM".
+
+  - id: jeep-compass
+    brand: jeep
+    name: Compass
+    segment: SUV médio
+    body: suv
+    status: unverified
+    patterns: ['COMPASS(?![A-Z])']
+
+  - id: toyota-corolla-cross
+    brand: toyota
+    name: Corolla Cross
+    segment: SUV médio
+    body: suv
+    status: unverified
+    patterns: ['C ?CROSS(?![A-Z])', 'COROLLA ?CROSS(?![A-Z])']
+    notes: Registry label is "CCROSS".
+
+  - id: toyota-hilux
+    brand: toyota
+    name: Hilux
+    segment: picape média
+    body: pickup
+    status: unverified
+    patterns: ['HILUX(?! ?SW)(?![A-Z])']
+    lookalikes: ['HILUX ?SW']
+    notes: '"HILUX SW..." and "HILUXSW4" are the SW4 SUV and are deliberately excluded.'
+
+  - id: honda-hr-v
+    brand: honda
+    name: HR-V
+    segment: SUV compacto
+    body: suv
+    status: unverified
+    patterns: ['HR[ -]?V(?![A-Z])']
+
+  - id: nissan-kicks
+    brand: nissan
+    name: Kicks
+    segment: SUV compacto
+    body: suv
+    status: unverified
+    patterns: ['KICKS(?![A-Z])']
+
+  - id: renault-kwid
+    brand: renault
+    name: Kwid
+    segment: hatch de entrada
+    body: hatch
+    status: unverified
+    patterns: ['KWID(?![A-Z])']
+
+  - id: byd-dolphin-mini
+    brand: byd
+    name: Dolphin Mini
+    segment: hatch compacto
+    body: hatch
+    status: on_sale
+    powertrains: [bev]
+    patterns: ['DOLPHIN ?MINI(?![A-Z])']
+    lookalikes: ['DOLPHIN(?! ?MINI)']
+    notes: Registered both as "BYD/DOLPHIN MINI" and imported "I/BYD DOLPHIN MINI".
+
+  - id: gwm-haval-h6
+    brand: gwm
+    name: Haval H6
+    segment: SUV médio
+    body: suv
+    status: on_sale
+    powertrains: [hev, phev]
+    patterns: ['(HAVAL ?)?H6(?![A-Z0-9])']

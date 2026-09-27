@@ -1,0 +1,118 @@
+{
+ "help": "https://dados.transportes.gov.br/api/3/action/help_show?name=package_show",
+ "success": true,
+ "result": {
+  "author": "Pedro Cesar Vieira Barbosa",
+  "author_email": "pedro.barbosa@transportes.gov.br",
+  "creator_user_id": "c901b983-e863-49d0-9fa9-745684a23404",
+  "id": "12686da0-3d71-4499-b432-d270f785c907",
+  "isopen": true,
+  "license_id": "other-pd",
+  "license_title": "Other (Public Domain)",
+  "maintainer": "Coordenação-Geral de Sistemas, Informação e Estatística",
+  "maintainer_email": "cgsie@Transportes.gov.br",
+  "metadata_created": "2020-04-23T15:52:30.353233",
+  "metadata_modified": "2026-08-07T17:27:25.151489",
+  "name": "registro-nacional-de-veiculos-automotores-renavam",
+  "notes": "Dados do Registro Nacional de Veículos Automotores (RENAVAM), com estatísticas do inventário da frota brasileira. A base reúne informações agregadas por UF e município, como marca/modelo, ano de fabricação e quantidade de veículos.\r\n",
+  "num_resources": 156,
+  "num_tags": 4,
+  "organization": {
+   "id": "66b69495-d65a-4725-aab3-0bf367dd7d3f",
+   "name": "transportes",
+   "title": "Ministério dos Transportes",
+   "type": "organization",
+   "description": "Quadro de Pessoal reúne informações consolidadas sobre a força de trabalho do Ministério dos Transportes, contendo quantitativo de servidores, tipo de servidor, tipo de vínculo, cargos, funções, licenças, lotação e exercício no SIAPE.\r\n",
+   "image_url": "2024-06-26-172201.6443932024-06-20-173604.702969MT.jpg",
+   "created": "2023-03-17T18:11:30.928844",
+   "is_organization": true,
+   "approval_status": "approved",
+   "state": "active"
+  },
+  "owner_org": "66b69495-d65a-4725-aab3-0bf367dd7d3f",
+  "private": false,
+  "state": "active",
+  "title": "Registro Nacional de Veículos Automotores - RENAVAM",
+  "type": "dataset",
+  "url": "Registro Nacional de Veículos Automotores",
+  "version": "",
+  "extras": [
+   {
+    "key": "ID",
+    "value": "692223"
+   },
+   {
+    "key": "Periodicidade",
+    "value": "Anual"
+   }
+  ],
+  "groups": [
+   {
+    "description": "Trânsito",
+    "display_name": "Trânsito",
+    "id": "a9b4bb49-d33f-41f3-9a32-54724b749764",
+    "image_display_url": "",
+    "name": "transito",
+    "title": "Trânsito"
+   }
+  ],
+  "resources": [
+   {
+    "id": "9ebe9c59-02ae-4a0d-973d-76a3b266665a",
+    "name": "Registro Nacional de Veículos Automotores -...",
+    "format": "ZIP",
+    "url": "https://dados.transportes.gov.br/dataset/12686da0-3d71-4499-b432-d270f785c907/resource/9ebe9c59-02ae-4a0d-973d-76a3b266665a/download/i_frota_por_uf_municipio_marca_e_modelo_ano_maio_2026.zip",
+    "created": "2026-06-12T12:38:42.857638",
+    "last_modified": "2026-06-12T12:38:42.325502"
+   },
+   {
+    "id": "c3ea6833-046b-46ed-afce-1ceaecb8b5cb",
+    "name": "Registro Nacional de Veículos Automotores -...",
+    "format": "ZIP",
+    "url": "https://dados.transportes.gov.br/dataset/12686da0-3d71-4499-b432-d270f785c907/resource/c3ea6833-046b-46ed-afce-1ceaecb8b5cb/download/i_frota_por_uf_municipio_marca_e_modelo_ano_junho_2026.zip",
+    "created": "2026-07-09T17:42:48.616740",
+    "last_modified": "2026-07-09T17:42:47.903905"
+   },
+   {
+    "id": "85150148-6a47-4600-8b6a-061871c980f7",
+    "name": "Registro Nacional de Veículos Automotores -...",
+    "format": "ZIP",
+    "url": "https://dados.transportes.gov.br/dataset/12686da0-3d71-4499-b432-d270f785c907/resource/85150148-6a47-4600-8b6a-061871c980f7/download/i_frota_por_uf_municipio_marca_e_modelo_ano_julho_2026.zip",
+    "created": "2026-08-07T17:27:25.300324",
+    "last_modified": "2026-08-07T17:27:24.685114"
+   }
+  ],
+  "tags": [
+   {
+    "display_name": "denatran",
+    "id": "58b83bad-f4b9-4299-9ac2-4e870721984e",
+    "name": "denatran",
+    "state": "active",
+    "vocabulary_id": null
+   },
+   {
+    "display_name": "frota de veículos",
+    "id": "d4c12002-4a25-4750-a6cb-837fe33f243d",
+    "name": "frota de veículos",
+    "state": "active",
+    "vocabulary_id": null
+   },
+   {
+    "display_name": "renavam",
+    "id": "db395ae5-086a-41bf-a5be-b3d6669bcbe2",
+    "name": "renavam",
+    "state": "active",
+    "vocabulary_id": null
+   },
+   {
+    "display_name": "senatran",
+    "id": "8227a1c0-b0d5-42dd-bb3e-5934d0ca35c8",
+    "name": "senatran",
+    "state": "active",
+    "vocabulary_id": null
+   }
+  ],
+  "relationships_as_subject": [],
+  "relationships_as_object": []
+ }
+}

@@ -1,0 +1,219 @@
+# Source registry and usage rights.
+#
+# Every use of a source's data needs its own permission:
+#   collect, retain_history, embed, ai_processing, display_excerpts, publish_derived
+# Status values: allowed | conditional | pending | denied.
+#   conditional = allowed under the text in `conditions`
+#   pending     = not confirmed yet; treated as NOT allowed
+# Update a status only with written evidence (license text, contract, approval email)
+# and record it in `evidence`.
+
+sources:
+  bcb_sgs:
+    name: Banco Central do Brasil — SGS
+    url: https://api.bcb.gov.br
+    cadence: monthly
+    freshness_days: 70
+    license: Open data (dadosabertos.bcb.gov.br)
+    attribution: "Fonte: Banco Central do Brasil, SGS"
+    evidence: Public API and open data portal
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: allowed
+      publish_derived: allowed
+
+  ibge_ipca:
+    name: IBGE — IPCA (SIDRA table 1737)
+    url: https://apisidra.ibge.gov.br
+    cadence: monthly
+    freshness_days: 45
+    license: Public statistics
+    attribution: "Fonte: IBGE, IPCA"
+    evidence: Public SIDRA API
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: allowed
+      publish_derived: allowed
+
+  anp_weekly:
+    name: ANP — Levantamento de Preços de Combustíveis (weekly summary)
+    url: https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/levantamento-de-precos-de-combustiveis-ultimas-semanas-pesquisadas
+    cadence: weekly
+    freshness_days: 10
+    license: Open data
+    attribution: "Fonte: ANP, Levantamento de Preços de Combustíveis"
+    evidence: Published on gov.br open data pages
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: allowed
+      publish_derived: allowed
+
+  anfavea:
+    name: ANFAVEA — Estatísticas (Excel)
+    url: https://anfavea.com.br/site/edicoes-em-excel/
+    cadence: monthly
+    freshness_days: 40
+    license: Public statistics, no open license stated
+    attribution: "Fonte: ANFAVEA"
+    evidence: Spreadsheets published for download on anfavea.com.br
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: conditional
+      publish_derived: conditional
+    conditions:
+      display_excerpts: Credit ANFAVEA next to every figure.
+      publish_derived: Credit ANFAVEA; publish figures, not the spreadsheet.
+
+  senatran_fleet:
+    name: SENATRAN — Frota por UF, município, marca e modelo
+    url: https://dados.transportes.gov.br/dataset/registro-nacional-de-veiculos-automotores-renavam
+    cadence: monthly
+    freshness_days: 75
+    license: Public domain (dados.transportes.gov.br)
+    attribution: "Fonte: SENATRAN/RENAVAM"
+    evidence: CKAN dataset license "Other (Public Domain)"
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: allowed
+      publish_derived: allowed
+
+  fipe:
+    name: FIPE — Tabela de preços médios de veículos
+    url: https://veiculos.fipe.org.br
+    cadence: monthly
+    freshness_days: 35
+    license: Public lookups only; FIPE states it offers no API and no downloads
+    attribution: "Fonte: Fipe"
+    evidence: fipe.org.br/pt-br/indices/veiculos (checked 2026-09-27). Contract offer unconfirmed.
+    dev_sample_limit: 20
+    rights:
+      collect: pending
+      retain_history: pending
+      embed: pending
+      ai_processing: pending
+      display_excerpts: pending
+      publish_derived: pending
+    notes: >-
+      Blocked until FIPE confirms a contract. `--dev-sample` allows at most
+      `dev_sample_limit` lookups per day for parser development only.
+
+  # Registered but not yet implemented. Rights reflect the Blueprint review (2026-09-27).
+  youtube:
+    name: YouTube Data API
+    url: https://developers.google.com/youtube/v3
+    cadence: daily
+    freshness_days: 3
+    license: YouTube API Services Terms and Developer Policies
+    attribution: "Fonte: YouTube"
+    evidence: developers.google.com/youtube/terms/derived-metrics-policy (updated 2026-09-14)
+    retention_days:
+      text: 30
+      derived: 1095
+    rights:
+      collect: conditional
+      retain_history: conditional
+      embed: pending
+      ai_processing: pending
+      display_excerpts: pending
+      publish_derived: pending
+    conditions:
+      collect: Within quota and the YouTube API Services terms.
+      retain_history: Comment text at most 30 days; derived metrics up to 36 months after Analytics & Reporting approval.
+
+  reclame_aqui:
+    name: ReclameAqui
+    url: https://www.reclameaqui.com.br
+    cadence: daily
+    freshness_days: 3
+    license: Commercial API for companies; scope for competitor data unconfirmed
+    attribution: "Fonte: Reclame AQUI"
+    evidence: blog.reclameaqui.com.br API announcement
+    rights:
+      collect: pending
+      retain_history: pending
+      embed: pending
+      ai_processing: pending
+      display_excerpts: pending
+      publish_derived: pending
+
+  fenabrave:
+    name: Fenabrave — Emplacamentos
+    url: https://www.fenabrave.org.br/portalv2/Conteudo/emplacamentos
+    cadence: monthly
+    freshness_days: 40
+    license: Public PDFs, no open license stated
+    attribution: "Fonte: Fenabrave"
+    evidence: Monthly PDFs on fenabrave.org.br
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: conditional
+      publish_derived: conditional
+    conditions:
+      display_excerpts: Credit Fenabrave next to every figure.
+      publish_derived: Credit Fenabrave.
+
+  inmetro_pbev:
+    name: INMETRO — PBE Veicular
+    url: https://www.gov.br/inmetro/pt-br/assuntos/regulamentacao/avaliacao-da-conformidade/programa-brasileiro-de-etiquetagem/tabelas-de-eficiencia-energetica/veiculos-automotivos-pbe-veicular
+    cadence: event
+    freshness_days: 200
+    license: Public government data
+    attribution: "Fonte: INMETRO, PBE Veicular"
+    evidence: PDFs on gov.br
+    rights:
+      collect: allowed
+      retain_history: allowed
+      embed: allowed
+      ai_processing: allowed
+      display_excerpts: allowed
+      publish_derived: allowed
+
+  instagram:
+    name: Instagram Graph API
+    url: https://developers.facebook.com/docs/instagram-platform
+    cadence: daily
+    freshness_days: 3
+    license: Meta Platform Terms
+    attribution: "Fonte: Instagram"
+    evidence: Meta developer docs; public search limited to 30 hashtags per 7 days
+    rights:
+      collect: pending
+      retain_history: pending
+      embed: pending
+      ai_processing: pending
+      display_excerpts: pending
+      publish_derived: pending
+
+  carros_na_web:
+    name: Carros na Web
+    url: https://www.carrosnaweb.com.br
+    cadence: event
+    freshness_days: 365
+    license: Curated database; terms page unreachable when checked
+    attribution: "Fonte: Carros na Web"
+    evidence: none yet
+    rights:
+      collect: pending
+      retain_history: pending
+      embed: pending
+      ai_processing: pending
+      display_excerpts: pending
+      publish_derived: pending
