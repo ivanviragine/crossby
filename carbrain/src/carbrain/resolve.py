@@ -12,6 +12,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -40,6 +41,9 @@ class FamilySpec(BaseModel):
     patterns: list[str]
     #: Similar-looking labels that are NOT this family (e.g. 'ONIX PLUS' for Onix).
     lookalikes: list[str] = Field(default_factory=list)
+    #: Free-text guards for names that are also common words: `accent_sensitive`
+    #: ("terá" is not Tera) and `proper_noun` ("polo automotivo" is not a Polo).
+    text_rules: list[Literal["accent_sensitive", "proper_noun"]] = Field(default_factory=list)
     notes: str | None = None
 
 
@@ -158,9 +162,16 @@ class Resolver:
 
     # --- free text ----------------------------------------------------------------
 
-    def find(self, text: str, limit: int = 5) -> list[Match]:
-        """Families mentioned in free text, best first. Patterns first, then fuzzy."""
-        norm = normalize(text)
+    def find(self, text: str, limit: int = 5, *, editorial: bool = False) -> list[Match]:
+        """Families mentioned in free text, best first. Patterns first, then fuzzy.
+
+        `editorial=True` is for headlines and articles, where capitalization is reliable:
+        families marked `proper_noun` then need a capital letter or their brand nearby
+        ("polo automotivo" is an industrial hub, not a VW Polo). User questions are
+        matched leniently. Families marked `accent_sensitive` never match accented text
+        ("terá" is a verb, not the VW Tera). No fuzzy matching in editorial mode.
+        """
+        spaced, norm = _aligned_upper(text)
         mentioned_brands = {
             bid for label, bid in self._brand_labels.items() if _has_word(norm, label)
         }
@@ -168,7 +179,19 @@ class Resolver:
         for brand_id, fams in self._by_brand.items():
             for fam in fams:
                 for pattern in fam.free:
-                    m = pattern.search(norm)
+                    m = next(
+                        (
+                            hit
+                            for hit in pattern.finditer(norm)
+                            if _acceptable(
+                                fam.spec,
+                                spaced[hit.start() : hit.end()],
+                                editorial=editorial,
+                                brand_named=brand_id in mentioned_brands,
+                            )
+                        ),
+                        None,
+                    )
                     if not m:
                         continue
                     # A brand named elsewhere in the text makes the match more certain.
@@ -180,7 +203,7 @@ class Resolver:
                             fam.spec.id, brand_id, score, "text_pattern", m.group(0)
                         )
         results = _drop_contained(sorted(pattern_hits.values(), key=lambda m: -m.confidence))
-        if len(results) < limit:
+        if len(results) < limit and not editorial:
             fuzzy = process.extract(
                 norm, self._fuzzy_choices, scorer=fuzz.WRatio, limit=limit, score_cutoff=80
             )
@@ -228,6 +251,27 @@ def strip_model_prefix(model: str) -> str:
         if model.startswith(prefix):
             return model[len(prefix) :]
     return model
+
+
+def _fold_char(char: str) -> str:
+    base = "".join(c for c in unicodedata.normalize("NFKD", char) if not unicodedata.combining(c))
+    return base if len(base) == 1 else char
+
+
+def _aligned_upper(text: str) -> tuple[str, str]:
+    """(original with single spaces, upper-case accent-free copy) of equal length,
+    so a match position in the second points at the same characters in the first."""
+    spaced = re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
+    upper = "".join(c.upper() if len(c.upper()) == 1 else c for c in spaced)
+    return spaced, "".join(_fold_char(c) for c in upper)
+
+
+def _acceptable(fam: FamilySpec, raw: str, *, editorial: bool, brand_named: bool) -> bool:
+    if "accent_sensitive" in fam.text_rules and any(ord(c) > 127 for c in raw):
+        return False
+    return not (
+        editorial and "proper_noun" in fam.text_rules and not brand_named and not raw[:1].isupper()
+    )
 
 
 def _has_word(text: str, word: str) -> bool:

@@ -15,6 +15,7 @@ class Settings:
     sources_file: Path = PACKAGE_DATA / "sources.yaml"
     families_file: Path = PACKAGE_DATA / "families.yaml"
     events_file: Path = PACKAGE_DATA / "events.yaml"
+    publishers_file: Path = PACKAGE_DATA / "publishers.yaml"
 
     @property
     def db_path(self) -> Path:

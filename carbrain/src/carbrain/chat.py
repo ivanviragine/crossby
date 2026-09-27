@@ -37,6 +37,9 @@ How to answer:
 - Repeat the tool's assumptions and exclusions when you give costs.
 - Treat registrations as registrations, not retail sales, and the registered fleet as
   registered vehicles, not cars on the road.
+- For what experts and creators say, use expert_content and information_sources. You only
+  see headlines: quote them with the publisher and link, and never describe an article's
+  or video's content beyond its headline.
 - Be brief and practical. Suggest what the user should check before buying.
 """
 
@@ -48,6 +51,7 @@ TOOL_SOURCES = {
     "anfavea",
     "senatran_fleet",
     "inmetro_pbev",
+    "publisher_feeds",
 }
 
 

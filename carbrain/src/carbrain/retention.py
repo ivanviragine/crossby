@@ -55,14 +55,38 @@ def store_text(
     conn.commit()
 
 
-def purge_expired(conn: sqlite3.Connection, *, now: datetime | None = None) -> int:
-    """Delete text whose retention period has passed. Returns the number of rows deleted."""
-    cutoff = (now or datetime.now(UTC)).replace(microsecond=0).isoformat()
-    cur = conn.execute(
-        "DELETE FROM text_item WHERE expires_at IS NOT NULL AND expires_at <= ?", (cutoff,)
-    )
+def purge_expired(
+    conn: sqlite3.Connection, *, now: datetime | None = None, registry: Registry | None = None
+) -> int:
+    """Delete text and content metadata whose retention period has passed.
+
+    With a registry, also clears platform statistics (e.g. YouTube subscriber counts)
+    older than the platform's text retention. Returns the number of rows affected.
+    """
+    moment = now or datetime.now(UTC)
+    cutoff = moment.replace(microsecond=0).isoformat()
+    affected = 0
+    for table in ("text_item", "content_item"):
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= ?", (cutoff,)
+        )
+        affected += cur.rowcount
+    if registry is not None:
+        from carbrain.content.catalog import PLATFORM_SOURCE
+
+        for platform, source_id in PLATFORM_SOURCE.items():
+            days = registry.get(source_id).retention_days.get("text")
+            if days is None:
+                continue
+            stale = (moment - timedelta(days=days)).replace(microsecond=0).isoformat()
+            cur = conn.execute(
+                "UPDATE channel SET stats = NULL, stats_fetched_at = NULL "
+                "WHERE platform = ? AND stats_fetched_at IS NOT NULL AND stats_fetched_at <= ?",
+                (platform, stale),
+            )
+            affected += cur.rowcount
     conn.commit()
-    return cur.rowcount
+    return affected
 
 
 def assert_can_send_to_ai(registry: Registry, source_ids: set[str]) -> None:

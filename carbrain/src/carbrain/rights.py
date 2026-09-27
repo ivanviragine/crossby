@@ -37,9 +37,25 @@ class SourceRights(BaseModel):
         return status
 
 
+SourceType = Literal[
+    "official_statistics",
+    "vehicle_registry",
+    "industry_association",
+    "lab_testing",
+    "price_reference",
+    "specialist_media",
+    "specialist_database",
+    "social_platform",
+    "consumer_complaints",
+    "marketplace",
+    "commercial_data",
+]
+
+
 class SourceSpec(BaseModel):
     id: str
     name: str
+    type: SourceType
     url: str
     cadence: Literal["daily", "weekly", "monthly", "event"]
     freshness_days: int

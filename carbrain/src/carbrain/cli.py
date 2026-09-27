@@ -15,16 +15,29 @@ from carbrain.connectors import CONNECTORS
 from carbrain.connectors.base import Connector, RunResult, run_connector
 from carbrain.connectors.official import Anfavea, AnpWeekly
 from carbrain.connectors.vehicles import FipeDevSample, SenatranFleet
+from carbrain.content.base import NotConfiguredError
+from carbrain.content.catalog import load_publishers, sync_catalog
+from carbrain.content.runner import sync_content, verify_channels
 from carbrain.db import connect
 from carbrain.http import Http
+from carbrain.models import Use
 from carbrain.resolve import Resolver
 from carbrain.retention import purge_expired
 from carbrain.rights import Registry, RightsError
-from carbrain.tools import FreshnessInput, ToolContext, call_tool, data_freshness
+from carbrain.tools import (
+    FreshnessInput,
+    InformationSourcesInput,
+    ToolContext,
+    call_tool,
+    data_freshness,
+    information_sources,
+)
 
 app = typer.Typer(help="Brazilian car market evidence database.", no_args_is_help=True)
 review_app = typer.Typer(help="Review how source labels map to vehicle families.")
 app.add_typer(review_app, name="review")
+catalog_app = typer.Typer(help="Publishers (specialist media, creators) and their channels.")
+app.add_typer(catalog_app, name="catalog")
 
 
 class _Env:
@@ -48,8 +61,91 @@ def init() -> None:
     env = _Env()
     families = load_catalog(env.conn, env.resolver)
     events = load_events(env.conn, env.settings.events_file)
+    publishers = sync_catalog(env.conn, load_publishers(env.settings.publishers_file))
     typer.echo(f"Database: {env.settings.db_path}")
-    typer.echo(f"Loaded {families} vehicle families and {events} events.")
+    typer.echo(f"Loaded {families} vehicle families, {events} events, {publishers} publishers.")
+
+
+@app.command()
+def sources(source_type: Annotated[str | None, typer.Option("--type")] = None) -> None:
+    """Data sources grouped by type, with what their rights allow."""
+    env = _Env()
+    by_type: dict[str, list[Any]] = {}
+    for spec in env.registry:
+        if source_type is None or spec.type == source_type:
+            by_type.setdefault(spec.type, []).append(spec)
+    for kind, specs in sorted(by_type.items()):
+        typer.echo(f"\n{kind}")
+        for spec in specs:
+            allowed = [u.value for u in Use if env.registry.allows(spec.id, u)]
+            typer.echo(
+                f"  {spec.id:17} {spec.cadence:8} allows: {', '.join(allowed) or 'nothing yet'}"
+            )
+
+
+@catalog_app.command("list")
+def catalog_list(
+    kind: Annotated[str | None, typer.Option()] = None,
+    focus: Annotated[str | None, typer.Option()] = None,
+    platform: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Specialist media and creators, with their channels and verification status."""
+    env = _Env()
+    sync_catalog(env.conn, load_publishers(env.settings.publishers_file))
+    result = information_sources(
+        env.ctx(),
+        InformationSourcesInput.model_validate(
+            {"kind": kind, "focus": focus, "platform": platform}
+        ),
+    )
+    for pub in result.data or []:
+        typer.echo(f"{pub['name']} [{pub['kind']}] focus={','.join(pub['focus'])}")
+        for ch in pub["channels"]:
+            where = ch["handle"] or ch["url"] or f"channel id {ch['external_id']}"
+            typer.echo(f"    {ch['platform']:10} {where:55} {ch['status']}")
+
+
+@catalog_app.command("verify")
+def catalog_verify(platform: str = "rss") -> None:
+    """Confirm channels through official interfaces (feeds, YouTube Data API, Instagram Graph)."""
+    env = _Env()
+    sync_catalog(env.conn, load_publishers(env.settings.publishers_file))
+    http = Http()
+    try:
+        outcomes = verify_channels(env.conn, env.registry, http, platform)
+    except (RightsError, NotConfiguredError) as exc:
+        typer.echo(f"{platform}: cannot verify — {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        http.close()
+    for channel_id, outcome in outcomes:
+        typer.echo(f"{channel_id:60} {outcome}")
+
+
+@app.command("sync-content")
+def sync_content_cmd(
+    platform: Annotated[list[str] | None, typer.Option(help="rss, youtube, instagram")] = None,
+    limit: int = 50,
+) -> None:
+    """Fetch the latest headlines/videos from catalogued channels (metadata only)."""
+    env = _Env()
+    load_catalog(env.conn, env.resolver)
+    sync_catalog(env.conn, load_publishers(env.settings.publishers_file))
+    http = Http()
+    try:
+        results = sync_content(
+            env.conn, env.registry, env.resolver, http, platforms=platform, limit=limit
+        )
+    finally:
+        http.close()
+    for r in results:
+        line = (
+            f"{r.platform:10} {r.status:8} channels={r.channels} "
+            f"new={r.items_new} seen={r.items_seen}"
+        )
+        typer.echo(line + (f" ({r.reason})" if r.reason else ""))
+        for err in r.errors:
+            typer.echo(f"    {err}", err=True)
 
 
 @app.command()
@@ -138,7 +234,7 @@ def status() -> None:
 def purge() -> None:
     """Delete text whose retention period has ended (e.g. YouTube comments after 30 days)."""
     env = _Env()
-    typer.echo(f"Deleted {purge_expired(env.conn)} expired text items.")
+    typer.echo(f"Purged {purge_expired(env.conn, registry=env.registry)} expired items.")
 
 
 @review_app.command("list")

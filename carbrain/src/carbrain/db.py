@@ -94,6 +94,50 @@ CREATE TABLE IF NOT EXISTS source_vehicle (
     PRIMARY KEY (source_id, external_key, as_of)
 );
 
+-- Publishers of car information (specialist media, creators) and their channels
+CREATE TABLE IF NOT EXISTS publisher (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    focus TEXT NOT NULL DEFAULT '[]',
+    evidence_kind TEXT NOT NULL DEFAULT '[]',
+    notes TEXT
+);
+CREATE TABLE IF NOT EXISTS channel (
+    id TEXT PRIMARY KEY,
+    publisher_id TEXT NOT NULL REFERENCES publisher(id),
+    platform TEXT NOT NULL,
+    handle TEXT,
+    url TEXT,
+    external_id TEXT,
+    status TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    checked_on TEXT,
+    stats TEXT,
+    stats_fetched_at TEXT
+);
+-- One article, video or post, as metadata only (rights decide what is kept, and how long)
+CREATE TABLE IF NOT EXISTS content_item (
+    id INTEGER PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL REFERENCES channel(id),
+    external_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    url TEXT,
+    title TEXT NOT NULL,
+    published_at TEXT,
+    fetched_at TEXT NOT NULL,
+    expires_at TEXT,
+    UNIQUE (channel_id, external_id)
+);
+CREATE TABLE IF NOT EXISTS content_mention (
+    content_id INTEGER NOT NULL REFERENCES content_item(id) ON DELETE CASCADE,
+    family_id TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    matched_text TEXT,
+    PRIMARY KEY (content_id, family_id)
+);
+
 -- Raw archive: every fetched file, content-hashed
 CREATE TABLE IF NOT EXISTS snapshot (
     id INTEGER PRIMARY KEY,

@@ -15,6 +15,8 @@ Format: `- [area] lesson — why / evidence (date)`
 4. Every fact stored carries source, `as_of` (period it describes), `fetched_at`, and the vehicle it applies to.
 5. Check the rights registry before collecting, keeping, embedding, sending to an AI provider, showing or publishing any source's data.
 6. Never let the chatbot produce a number that no tool returned.
+7. Keep sources organized: every data source has a `type` in `sources.yaml`; every publisher (specialist media, creator) lives in `publishers.yaml` with dated evidence for each channel; new platforms get a `Fetcher`, new datasets a `Connector` — never a one-off script.
+8. After tests pass, use the product on real data (CLI + live run) before calling a step done.
 
 ## Research and sources
 
@@ -67,4 +69,10 @@ Format: `- [area] lesson — why / evidence (date)`
 - [coverage guard] Compare parsed rows with the document's own declared totals (976 rows; per-type counts on page 1). The guard caught my own regex bug on the first run (it read "5976" after I squashed spaces). Parsed 963/976; per-type counts match exactly for gasoline, diesel, hybrid and plug-in (2026-09-27).
 - [source gaps] The Aug 2026 PBEV table prints no km/l for the Polo Track (`\` and blanks), only 1.48 MJ/km. Keep gaps as gaps; the tool says "not published" (2026-09-27).
 - [pbev] INMETRO puts trim words in the version column (model `POLO`, version `TRACK 1.0 MPI`), so match on model + version. 27 rows repeat another row's exact label with different figures (e.g. two `TIGGO 7 PHEV`), so keys get a `#2` suffix instead of overwriting (2026-09-27).
+- [catalog] Creator handles come from third-party lists dated 2022–2023, so each channel stores its evidence URL and date and a status ladder (`web_evidence` → `feed_verified` → `api_verified`). Nothing is presented as verified until an official interface confirms it (2026-09-27).
+- [youtube] youtube.com pages are reachable from here, but YouTube's terms forbid automated access outside the API (and search engines). No page scraping: verification and uploads go through the Data API (`channels.list forHandle`, `playlistItems.list`, 1 quota unit each). With no key in this environment, the YouTube adapter is tested with fixtures shaped from the API reference — the one exception to rule 3. Replace them with captured responses on the first run with a key (2026-09-27).
+- [feeds] Autoesporte dates items with `-0000` ("zone unknown" in RFC 5322), which Python parses as a naive datetime; mixing naive and aware timestamps breaks string comparisons in SQL. All feed dates are normalized to UTC (2026-09-27).
+- [feeds] Quatro Rodas and AutoPapo put the full article in `content:encoded`. Only title, link, date and id are kept; a test dumps the whole database to prove body text never lands in it, and fixtures were stripped of article text. Untrusted XML goes through defusedxml (entity declarations refused, tested) (2026-09-27).
+- [mentions] First live run: 5 of 6 "Tera" mentions were the verb "terá" (accent stripped → TERA). Families that are also common words carry `text_rules`: `accent_sensitive` (never match accented text) and `proper_noun` (in editorial text, need a capital or the brand). Known limit: a capital at sentence start proves nothing ("Gol de placa: ..." still matches), but rejecting it would lose real headlines like "Compass cai a R$ 119.990". Mentions are recomputed on every fetch, and `relink_mentions` fixes history after a rules change (2026-09-27).
+- [cli] `catalog list` crashed on a channel known only by its YouTube channel ID. The CLI now has its own tests (`typer.testing.CliRunner`) (2026-09-27).
 

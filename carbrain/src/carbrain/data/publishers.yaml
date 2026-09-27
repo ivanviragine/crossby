@@ -1,0 +1,326 @@
+# Who publishes information about cars: specialist media and creators (influencers).
+#
+# A publisher is an organization or person; each has channels on platforms
+# (website, rss, youtube, instagram, tiktok). The platform decides which fetcher
+# and which rights entry (sources.yaml) apply:
+#   rss -> publisher_feeds    youtube -> youtube    instagram -> instagram
+#
+# Channel `status`, weakest to strongest:
+#   unverified     no evidence yet
+#   web_evidence   seen in a dated third-party source (see `evidence`); may be stale
+#   feed_verified  the feed was fetched and parsed successfully on `checked_on`
+#   api_verified   confirmed through the platform's official API (`carbrain catalog verify`)
+# Evidence dates matter: several handles come from a January 2023 ranking.
+#
+# `focus` vocabulary: reviews, comparisons, buying_advice, news, instrumented_tests,
+#   long_term_tests, used_cars, ev, mechanics, motorsport, entertainment, customization,
+#   auctions, classics, market
+# `evidence_kind` (how to weigh what they say): measured_tests, expert_opinion, news,
+#   owner_experience, entertainment
+
+evidence:
+  chaves_na_mao_2023: &cnm
+    url: https://www.chavesnamao.com.br/noticias-automotivas/top-50-influenciadores-do-mercado-automotivo-no-brasil/
+    dated: 2023-01-27
+  hypeauditor_2022: &hype
+    url: https://hypeauditor.com/top-youtube-autos-vehicles-brazil/
+    dated: 2022-09-01
+  doutor_multas: &dm
+    url: https://doutormultas.com.br/canais-youtube-carros/
+    dated: null
+  search_2026: &s26
+    url: web search results (2026-09-27)
+    dated: 2026-09-27
+
+publishers:
+  # --- specialist media ------------------------------------------------------------
+  - id: quatro-rodas
+    name: Quatro Rodas
+    kind: specialist_media
+    owner: Editora Abril
+    focus: [reviews, comparisons, instrumented_tests, long_term_tests, news, buying_advice]
+    evidence_kind: [measured_tests, expert_opinion, news]
+    channels:
+      - {platform: website, url: "https://quatrorodas.abril.com.br"}
+      - {platform: rss, url: "https://quatrorodas.abril.com.br/feed/", status: feed_verified, checked_on: 2026-09-27}
+      - {platform: youtube, handle: "@quatrorodas", status: web_evidence, evidence: [*s26]}
+
+  - id: autoesporte
+    name: Autoesporte
+    kind: specialist_media
+    owner: Editora Globo
+    focus: [reviews, comparisons, instrumented_tests, news, used_cars]
+    evidence_kind: [measured_tests, expert_opinion, news]
+    channels:
+      - {platform: website, url: "https://autoesporte.globo.com"}
+      - {platform: rss, url: "https://autoesporte.globo.com/rss/autoesporte/", status: feed_verified, checked_on: 2026-09-27}
+      - {platform: youtube, url: "https://www.youtube.com/Autoesporte", status: web_evidence, evidence: [*s26]}
+
+  - id: motor1-brasil
+    name: Motor1.com Brasil
+    kind: specialist_media
+    focus: [news, reviews, market]
+    evidence_kind: [expert_opinion, news]
+    channels:
+      - {platform: website, url: "https://motor1.uol.com.br"}
+      - {platform: rss, url: "https://motor1.uol.com.br/rss/news/all/", status: feed_verified, checked_on: 2026-09-27}
+
+  - id: autopapo
+    name: AutoPapo
+    kind: specialist_media
+    owner: Boris Feldman
+    focus: [reviews, news, mechanics, buying_advice]
+    evidence_kind: [expert_opinion, news]
+    channels:
+      - {platform: website, url: "https://autopapo.com.br"}
+      - {platform: rss, url: "https://autopapo.com.br/feed/", status: feed_verified, checked_on: 2026-09-27}
+      - {platform: youtube, external_id: UChUvS75BR7ziAr7WhrecVsA, status: web_evidence, evidence: [*s26]}
+
+  - id: garagem360
+    name: Garagem360
+    kind: specialist_media
+    focus: [news, market]
+    evidence_kind: [news]
+    channels:
+      - {platform: website, url: "https://garagem360.com.br"}
+      - {platform: rss, url: "https://garagem360.com.br/feed/", status: feed_verified, checked_on: 2026-09-27}
+
+  - id: autoentusiastas
+    name: Autoentusiastas
+    kind: specialist_media
+    focus: [reviews, news, classics]
+    evidence_kind: [expert_opinion, news]
+    channels:
+      - {platform: website, url: "https://autoentusiastas.com.br", status: web_evidence, evidence: [*dm]}
+
+  # --- creators: reviews and buying advice -----------------------------------------
+  - id: acelerados
+    name: Acelerados
+    kind: creator
+    people: [Rubens Barrichello, Cassio Cortes, Gerson Campos]
+    focus: [reviews, news, motorsport, entertainment]
+    evidence_kind: [expert_opinion, entertainment]
+    channels:
+      - {platform: youtube, external_id: UCGBIIPnw0AYM3BFsmTsjeAw, handle: "@acelerados", status: web_evidence, evidence: [*dm, *hype, *s26]}
+
+  - id: opiniao-sincera
+    name: Opinião Sincera
+    kind: creator
+    people: [Felipe Hill, Gustavo Dias]
+    focus: [reviews, buying_advice, used_cars]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, external_id: UCc0cU92Tf7rvd2gr-CpVO4Q, handle: "@OpiniãoSincera", status: web_evidence, evidence: [*s26, *hype]}
+      - {platform: instagram, handle: op.sincera, status: web_evidence, evidence: [*cnm]}
+
+  - id: carro-chefe
+    name: Carro Chefe
+    kind: creator
+    people: [Lucas Torres]
+    focus: [reviews, buying_advice]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@CarroChefe", status: web_evidence, evidence: [*cnm, *s26]}
+      - {platform: instagram, handle: proflucastorres, status: web_evidence, evidence: [*cnm]}
+
+  - id: garagem-do-bellote
+    name: Garagem do Bellote
+    kind: creator
+    people: [Renato Bellote]
+    focus: [reviews, classics, market]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@garagemdobellotetv", status: web_evidence, evidence: [*cnm, *dm]}
+      - {platform: instagram, handle: garagemdobellotetv, status: web_evidence, evidence: [*cnm, *dm]}
+
+  - id: auto-super
+    name: Auto Super
+    kind: creator
+    people: [Lucas Fontana, Filipe Bueno]
+    focus: [reviews, entertainment, motorsport]
+    evidence_kind: [expert_opinion, entertainment]
+    notes: Videos titled "O fim da Auto Super?" exist; check whether the channel is still active.
+    channels:
+      - {platform: youtube, handle: "@LucasFontanaAS", status: web_evidence, evidence: [*cnm, *s26]}
+      - {platform: instagram, handle: lucas_lmf, status: web_evidence, evidence: [*cnm]}
+
+  - id: filipe-bueno
+    name: Filipe Bueno
+    kind: creator
+    focus: [reviews, entertainment]
+    evidence_kind: [expert_opinion, entertainment]
+    channels:
+      - {platform: youtube, handle: "@FilipeBuenodeLima", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: filipebueno83, status: web_evidence, evidence: [*cnm]}
+
+  - id: cassio-cortes
+    name: Cassio Cortes
+    kind: creator
+    focus: [reviews, news]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@CassioCortes", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: cassiocortes, status: web_evidence, evidence: [*cnm]}
+
+  - id: falando-de-carro
+    name: Falando de Carro
+    kind: creator
+    people: [Renato Maia]
+    focus: [reviews, buying_advice]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@FalandodeCarro", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: falandodecarro, status: web_evidence, evidence: [*cnm]}
+
+  - id: percepcar
+    name: Percepcar
+    kind: creator
+    people: [Vagner Moleiro]
+    focus: [reviews]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@Percepcar", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: percepcar, status: web_evidence, evidence: [*cnm]}
+
+  - id: carros-do-xenao
+    name: Carros do Xenão
+    kind: creator
+    people: [Hugo Borges]
+    focus: [reviews, entertainment]
+    evidence_kind: [expert_opinion, entertainment]
+    channels:
+      - {platform: youtube, handle: "@CarrosdoXenao", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: xenao, status: web_evidence, evidence: [*cnm]}
+
+  - id: autoamigos
+    name: AutoAmigos
+    kind: creator
+    people: [Eduardo Valentim]
+    focus: [reviews, buying_advice]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@autoamigos", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: autoamigos.oficial, status: web_evidence, evidence: [*cnm]}
+
+  - id: macchina
+    name: Macchina
+    kind: creator
+    people: [Tiago Kfouri]
+    focus: [reviews]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@Macchina", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: tkfouri, status: web_evidence, evidence: [*cnm]}
+
+  - id: top-drive-brasil
+    name: Top Drive Brasil
+    kind: creator
+    people: [Victor Picolli]
+    focus: [reviews]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@topdrivebrasil", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: victorpicolli, status: web_evidence, evidence: [*cnm]}
+
+  - id: versao-limited
+    name: Versão Limited
+    kind: creator
+    people: [João Del Arco]
+    focus: [reviews]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, handle: "@VersaoLimited", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: joao_delarco, status: web_evidence, evidence: [*cnm]}
+
+  - id: carros-com-camanzi
+    name: Carros com Camanzi
+    kind: creator
+    people: [Camila Camanzi]
+    focus: [reviews]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: instagram, handle: carroscomcamanzioficial, status: web_evidence, evidence: [{url: "https://blog.engecass.com.br/influenciadoras-do-setor-automotivo/", dated: null}]}
+
+  # --- creators: electric vehicles --------------------------------------------------
+  - id: eletricar-br
+    name: Eletricar BR
+    kind: creator
+    people: [Mateus Afonso]
+    focus: [ev, reviews]
+    evidence_kind: [expert_opinion, owner_experience]
+    channels:
+      - {platform: youtube, handle: "@Eletricarbr", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: eletricarbr, status: web_evidence, evidence: [*cnm]}
+
+  # --- creators: mechanics and maintenance ------------------------------------------
+  - id: doutor-carro
+    name: Doutor Carro
+    kind: creator
+    focus: [mechanics]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: youtube, url: "https://www.youtube.com/user/DOUTORCARRO", status: web_evidence, evidence: [*dm]}
+
+  - id: niela-mecanica
+    name: Niela Mecânica
+    kind: creator
+    focus: [mechanics]
+    evidence_kind: [expert_opinion]
+    channels:
+      - {platform: instagram, handle: niela_mecanica, status: web_evidence, evidence: [{url: "https://blog.engecass.com.br/influenciadoras-do-setor-automotivo/", dated: null}]}
+
+  # --- creators: high reach, mostly entertainment (buzz, not evidence) ---------------
+  - id: renato-garcia
+    name: A Vida de Renato Garcia
+    kind: creator
+    focus: [entertainment, customization]
+    evidence_kind: [entertainment]
+    channels:
+      - {platform: youtube, handle: "@vidarenatogarcia", status: web_evidence, evidence: [*hype]}
+
+  - id: veneto-studio
+    name: Veneto Studio
+    kind: creator
+    people: [Tarcisio Vaglieri]
+    focus: [customization, entertainment]
+    evidence_kind: [entertainment]
+    channels:
+      - {platform: youtube, handle: "@VenetoStudio", status: web_evidence, evidence: [*cnm, *hype]}
+      - {platform: instagram, handle: venetostudio, status: web_evidence, evidence: [*cnm]}
+
+  - id: tarso-marques
+    name: Tarso Marques
+    kind: creator
+    focus: [customization, entertainment]
+    evidence_kind: [entertainment]
+    channels:
+      - {platform: youtube, handle: "@TarsoMarquesoficial", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: tarsomarquesoficial, status: web_evidence, evidence: [*cnm]}
+
+  - id: tcar
+    name: TCAR
+    kind: creator
+    people: [Tiago Fernandes]
+    focus: [market, entertainment]
+    evidence_kind: [entertainment]
+    channels:
+      - {platform: youtube, handle: "@TCARimports", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: tiagotcar, status: web_evidence, evidence: [*cnm]}
+
+  - id: tudo-leilao
+    name: Tudo Leilão
+    kind: creator
+    people: [Edu Campos]
+    focus: [auctions, used_cars]
+    evidence_kind: [expert_opinion, entertainment]
+    channels:
+      - {platform: youtube, handle: "@TudoLeilao", status: web_evidence, evidence: [*cnm]}
+      - {platform: instagram, handle: eduleilao, status: web_evidence, evidence: [*cnm]}
+
+  - id: meu-carro-lifestyle
+    name: Meu Carro LifeStyle
+    kind: creator
+    focus: [entertainment]
+    evidence_kind: [entertainment]
+    channels:
+      - {platform: youtube, handle: "@meucarrolifestyle", status: web_evidence, evidence: [*hype]}

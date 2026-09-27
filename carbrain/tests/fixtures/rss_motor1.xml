@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <language>pt-br</language>
+    <title>Motor1.com Brasil - Notícias</title>
+    <link>https://motor1.uol.com.br/news/</link>
+    <description>[removed]</description>
+    <lastBuildDate>Sun, 27 Sep 2026 16:49:29 +0000</lastBuildDate>
+    <image>
+      <url>https://motor1.uol.com.br/favicon.ico</url>
+      <title>Motor1.com Brasil</title>
+      <link>https://motor1.uol.com.br/</link>
+    </image>
+    <generator>Laminas_Feed_Writer 2 (https://getlaminas.org)</generator>
+    <item>
+      <title>Derretendo no Brasil, irmã da Fiat Titano cresce 222% no México</title>
+      <description>[removed]</description>
+      <pubDate>Sun, 27 Sep 2026 13:00:00 +0000</pubDate>
+      <link>https://motor1.uol.com.br/news/809611/vendas-mexico-agosto-carros-2026/</link>
+      <guid>https://motor1.uol.com.br/news/809611/vendas-mexico-agosto-carros-2026/</guid>
+      <enclosure type="image/jpeg" length="27439" url="https://cdn.motor1.com/images/mgl/G3YPLq/s3/ram-1200.jpg"/>
+    </item>
+<item>
+      <title>Senado dos EUA tenta banir definitivamente os carros chineses</title>
+      <description>[removed]</description>
+      <pubDate>Sun, 27 Sep 2026 12:00:00 +0000</pubDate>
+      <link>https://motor1.uol.com.br/news/809661/senado-eua-banir-carros-chineses/</link>
+      <guid>https://motor1.uol.com.br/news/809661/senado-eua-banir-carros-chineses/</guid>
+      <enclosure type="image/jpeg" length="31799" url="https://cdn.motor1.com/images/mgl/YAb3Jw/s3/byd-dolphin-surf-na-linha-de-producao.jpg"/>
+    </item>
+<item>
+      <title>BYD confirma marca de ultraluxo Yangwang no Brasil em 2027</title>
+      <description>[removed]</description>
+      <pubDate>Sat, 26 Sep 2026 15:00:00 +0000</pubDate>
+      <link>https://motor1.uol.com.br/news/809650/byd-confirma-yangwang-brasil-2027/</link>
+      <guid>https://motor1.uol.com.br/news/809650/byd-confirma-yangwang-brasil-2027/</guid>
+      <enclosure type="image/jpeg" length="23863" url="https://cdn.motor1.com/images/mgl/40m4oK/s3/byd-yangwang-u8-1.jpg"/>
+    </item>
+<item>
+      <title>Batmóvel de 1992 usado nas filmagens vai a leilão e pode ser vendido por US$ 7 milhões</title>
+      <description>[removed]</description>
+      <pubDate>Sat, 26 Sep 2026 12:00:00 +0000</pubDate>
+      <link>https://motor1.uol.com.br/news/809660/batmovel-original-filme-tim-burton-leilao/</link>
+      <guid>https://motor1.uol.com.br/news/809660/batmovel-original-filme-tim-burton-leilao/</guid>
+      <enclosure type="image/jpeg" length="15683" url="https://cdn.motor1.com/images/mgl/XBbYJ9/s3/batman-returns-batmobile-1992.jpg"/>
+    </item>
+  </channel>
+</rss>

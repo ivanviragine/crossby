@@ -29,6 +29,7 @@ families:
     segment: hatch compacto
     body: hatch
     status: discontinued
+    text_rules: [proper_noun]
     patterns: ['GOL(?![A-Z])']
     lookalikes: ['GOLF']
     notes: Largest car nameplate in the registered fleet (used-market favorite).
@@ -39,6 +40,7 @@ families:
     segment: hatch compacto
     body: hatch
     status: on_sale
+    text_rules: [proper_noun]
     patterns: ['POLO(?! ?TRACK)(?![A-Z])']
     notes: Registry labels include the older "POLO SEDAN"; split by generation pending.
 
@@ -64,6 +66,7 @@ families:
     segment: SUV compacto
     body: suv
     status: on_sale
+    text_rules: [accent_sensitive, proper_noun]
     patterns: ['TERA(?![A-Z])']
 
   - id: fiat-strada
@@ -88,6 +91,7 @@ families:
     segment: picape intermediária
     body: pickup
     status: unverified
+    text_rules: [proper_noun]
     patterns: ['TORO(?![A-Z])']
 
   - id: chevrolet-onix
@@ -133,6 +137,7 @@ families:
     segment: SUV médio
     body: suv
     status: unverified
+    text_rules: [proper_noun]
     patterns: ['COMPASS(?![A-Z])']
 
   - id: toyota-corolla-cross
@@ -168,6 +173,7 @@ families:
     segment: SUV compacto
     body: suv
     status: unverified
+    text_rules: [proper_noun]
     patterns: ['KICKS(?![A-Z])']
 
   - id: renault-kwid

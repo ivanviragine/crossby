@@ -3,6 +3,9 @@
 # Every use of a source's data needs its own permission:
 #   collect, retain_history, embed, ai_processing, display_excerpts, publish_derived
 # Status values: allowed | conditional | pending | denied.
+# `type` groups sources by what they are: official_statistics, vehicle_registry,
+# industry_association, lab_testing, price_reference, specialist_media,
+# specialist_database, social_platform, consumer_complaints, marketplace, commercial_data.
 #   conditional = allowed under the text in `conditions`
 #   pending     = not confirmed yet; treated as NOT allowed
 # Update a status only with written evidence (license text, contract, approval email)
@@ -11,6 +14,7 @@
 sources:
   bcb_sgs:
     name: Banco Central do Brasil — SGS
+    type: official_statistics
     url: https://api.bcb.gov.br
     cadence: monthly
     freshness_days: 70
@@ -27,6 +31,7 @@ sources:
 
   ibge_ipca:
     name: IBGE — IPCA (SIDRA table 1737)
+    type: official_statistics
     url: https://apisidra.ibge.gov.br
     cadence: monthly
     freshness_days: 45
@@ -43,6 +48,7 @@ sources:
 
   anp_weekly:
     name: ANP — Levantamento de Preços de Combustíveis (weekly summary)
+    type: official_statistics
     url: https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/levantamento-de-precos-de-combustiveis-ultimas-semanas-pesquisadas
     cadence: weekly
     freshness_days: 10
@@ -59,6 +65,7 @@ sources:
 
   anfavea:
     name: ANFAVEA — Estatísticas (Excel)
+    type: industry_association
     url: https://anfavea.com.br/site/edicoes-em-excel/
     cadence: monthly
     freshness_days: 40
@@ -78,6 +85,7 @@ sources:
 
   senatran_fleet:
     name: SENATRAN — Frota por UF, município, marca e modelo
+    type: vehicle_registry
     url: https://dados.transportes.gov.br/dataset/registro-nacional-de-veiculos-automotores-renavam
     cadence: monthly
     freshness_days: 75
@@ -94,6 +102,7 @@ sources:
 
   fipe:
     name: FIPE — Tabela de preços médios de veículos
+    type: price_reference
     url: https://veiculos.fipe.org.br
     cadence: monthly
     freshness_days: 35
@@ -112,9 +121,34 @@ sources:
       Blocked until FIPE confirms a contract. `--dev-sample` allows at most
       `dev_sample_limit` lookups per day for parser development only.
 
+  publisher_feeds:
+    name: Specialist media RSS/Atom feeds (see publishers.yaml)
+    type: specialist_media
+    url: https://quatrorodas.abril.com.br/feed/
+    cadence: daily
+    freshness_days: 3
+    license: Public syndication feeds; article text is copyrighted (Lei 9.610/98)
+    attribution: "Fonte: the publisher named on each item"
+    evidence: Feeds are published for syndication; only metadata is kept
+    rights:
+      collect: conditional
+      retain_history: conditional
+      embed: conditional
+      ai_processing: conditional
+      display_excerpts: conditional
+      publish_derived: conditional
+    conditions:
+      collect: Title, link, date and categories only; never store article text.
+      retain_history: Metadata only.
+      embed: Headlines only.
+      ai_processing: Headlines only.
+      display_excerpts: Headline, publisher and a link to the original only.
+      publish_derived: Link to the original; never reproduce article text.
+
   # Registered but not yet implemented. Rights reflect the Blueprint review (2026-09-27).
   youtube:
     name: YouTube Data API
+    type: social_platform
     url: https://developers.google.com/youtube/v3
     cadence: daily
     freshness_days: 3
@@ -137,6 +171,7 @@ sources:
 
   reclame_aqui:
     name: ReclameAqui
+    type: consumer_complaints
     url: https://www.reclameaqui.com.br
     cadence: daily
     freshness_days: 3
@@ -153,6 +188,7 @@ sources:
 
   fenabrave:
     name: Fenabrave — Emplacamentos
+    type: industry_association
     url: https://www.fenabrave.org.br/portalv2/Conteudo/emplacamentos
     cadence: monthly
     freshness_days: 40
@@ -172,6 +208,7 @@ sources:
 
   inmetro_pbev:
     name: INMETRO — PBE Veicular
+    type: lab_testing
     url: https://www.gov.br/inmetro/pt-br/assuntos/regulamentacao/avaliacao-da-conformidade/programa-brasileiro-de-etiquetagem/tabelas-de-eficiencia-energetica/veiculos-automotivos-pbe-veicular
     cadence: event
     freshness_days: 200
@@ -188,6 +225,7 @@ sources:
 
   instagram:
     name: Instagram Graph API
+    type: social_platform
     url: https://developers.facebook.com/docs/instagram-platform
     cadence: daily
     freshness_days: 3
@@ -204,6 +242,7 @@ sources:
 
   carros_na_web:
     name: Carros na Web
+    type: specialist_database
     url: https://www.carrosnaweb.com.br
     cadence: event
     freshness_days: 365

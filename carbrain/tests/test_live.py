@@ -79,3 +79,14 @@ def test_senatran(seeded, archive, registry, resolver) -> None:  # type: ignore[
     assert totals["volkswagen-gol"] > 1_000_000
     inventory = seeded.execute("SELECT COUNT(*) FROM label_inventory").fetchone()[0]
     assert inventory > 30_000
+
+
+def test_publisher_feeds(seeded, registry, resolver) -> None:  # type: ignore[no-untyped-def]
+    from carbrain.config import PACKAGE_DATA
+    from carbrain.content.catalog import load_publishers, sync_catalog
+    from carbrain.content.runner import sync_content
+
+    sync_catalog(seeded, load_publishers(PACKAGE_DATA / "publishers.yaml"))
+    (result,) = sync_content(seeded, registry, resolver, Http(min_interval=0.5), platforms=["rss"])
+    print(result)
+    assert result.status == "ok" and result.items_new >= 20

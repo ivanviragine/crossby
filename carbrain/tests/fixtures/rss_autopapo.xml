@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	 xmlns:media="http://search.yahoo.com/mrss/" >
+
+<channel>
+	<title>AutoPapo</title>
+	<atom:link href="https://autopapo.com.br/feed/" rel="self" type="application/rss+xml" />
+	<link>https://autopapo.com.br/</link>
+	<description>[removed]</description>
+	<lastBuildDate>Sun, 27 Sep 2026 20:00:02 +0000</lastBuildDate>
+	<language>pt-BR</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	
+
+<image>
+	<url>https://cdn.autopapo.com.br/box/uploads/2019/12/19032647/cropped-logo-1024x1024-black-150x150.png</url>
+	<title>AutoPapo</title>
+	<link>https://autopapo.com.br/</link>
+	<width>32</width>
+	<height>32</height>
+</image> 
+	<item>
+		<title>Semana Nacional do Trânsito tem bem pouco a comemorar</title>
+		<link>https://autopapo.com.br/noticia/semana-nacional-do-transito-pouco-comemorar/</link>
+					<comments>https://autopapo.com.br/noticia/semana-nacional-do-transito-pouco-comemorar/#respond</comments>
+		
+		<dc:creator><![CDATA[Fernando Calmon]]></dc:creator>
+		<pubDate>Sun, 27 Sep 2026 20:00:02 +0000</pubDate>
+				<guid isPermaLink="false">https://autopapo.com.br/?post_type=noticia&#038;p=535957</guid>
+
+					<description>[removed]</description>
+										
+					
+					<wfw:commentRss>https://autopapo.com.br/noticia/semana-nacional-do-transito-pouco-comemorar/feed/</wfw:commentRss>
+			<slash:comments>0</slash:comments>
+		
+		
+		
+		
+		
+		
+	</item>
+<item>
+		<title>Escort Sedan tinha seus méritos, mas estava aquém dos médios dos anos 1990</title>
+		<link>https://autopapo.com.br/noticia/escort-sedan-anos-90/</link>
+					<comments>https://autopapo.com.br/noticia/escort-sedan-anos-90/#respond</comments>
+		
+		<dc:creator><![CDATA[Douglas Mendonça]]></dc:creator>
+		<pubDate>Sun, 27 Sep 2026 18:00:13 +0000</pubDate>
+				<guid isPermaLink="false">https://autopapo.com.br/?post_type=noticia&#038;p=536125</guid>
+
+					<description>[removed]</description>
+										
+					
+					<wfw:commentRss>https://autopapo.com.br/noticia/escort-sedan-anos-90/feed/</wfw:commentRss>
+			<slash:comments>0</slash:comments>
+		
+		
+		
+		
+		
+		
+		
+		
+	</item>
+<item>
+		<title>Carro de R$ 5 mil é viável ou o barato pode sair (muito) caro?</title>
+		<link>https://autopapo.com.br/noticia/carro-de-5-000-reais-barato-sai-caro/</link>
+					<comments>https://autopapo.com.br/noticia/carro-de-5-000-reais-barato-sai-caro/#comments</comments>
+		
+		<dc:creator><![CDATA[Lucas Silvério]]></dc:creator>
+		<pubDate>Sun, 27 Sep 2026 16:00:36 +0000</pubDate>
+				<guid isPermaLink="false">https://autopapo.com.br/?post_type=noticia&#038;p=536119</guid>
+
+					<description>[removed]</description>
+										
+					
+					<wfw:commentRss>https://autopapo.com.br/noticia/carro-de-5-000-reais-barato-sai-caro/feed/</wfw:commentRss>
+			<slash:comments>1</slash:comments>
+		
+		
+		
+		
+		
+		
+		
+		
+		
+	</item>
+	</channel>
+</rss>

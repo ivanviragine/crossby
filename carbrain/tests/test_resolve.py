@@ -150,3 +150,40 @@ def test_review_suggestion_for_plausible_misses(
 ) -> None:
     suggestion = resolver.suggest_for_label(label)
     assert suggestion is not None and suggestion[0] == family
+
+
+# Real headlines from the specialist feeds (2026-09-27 live run) and a few traps.
+@pytest.mark.parametrize(
+    ("headline", "families"),
+    [
+        (
+            "Hyundai i20 terá três novas versões para ocupar de vez o lugar do HB20",
+            {"hyundai-hb20"},
+        ),
+        ("Toyota terá carros com motorização que virou ‘moda’ entre marcas chinesas", set()),  # noqa: RUF001
+        ("Flagra: Chevrolet Captiva a gasolina terá nova geração com base chinesa", set()),
+        (
+            "Strada abre 3.026 carros sobre Polo e alta de 11,6% amplia vantagem em setembro",
+            {"fiat-strada", "volkswagen-polo"},
+        ),
+        (
+            "Teste: BYD Atto 2 faz 22 km/l e quer tomar liderança de Creta e T-Cross",
+            {"hyundai-creta", "volkswagen-t-cross"},
+        ),
+        ("Novo polo automotivo de Goiana recebe investimento", set()),
+        ("Volkswagen Tera ganha versão mais barata", {"volkswagen-tera"}),
+        ("Montadora marca um gol de placa com a nova fábrica", set()),
+        # A capital at the start of a sentence proves nothing, but rejecting it would lose
+        # real mentions like this one (live headline); "Gol de placa: ..." is a known miss.
+        ("Compass cai a R$ 119.990 e diferença para Renegade encolhe", {"jeep-compass"}),
+        ("Vale a pena comprar um Gol usado?", {"volkswagen-gol"}),
+    ],
+)
+def test_editorial_mentions(resolver: Resolver, headline: str, families: set[str]) -> None:
+    found = {m.family_id for m in resolver.find(headline, editorial=True)}
+    assert found == families
+
+
+def test_user_questions_stay_lenient(resolver: Resolver) -> None:
+    assert resolver.find("quanto custa um polo 2024")[0].family_id == "volkswagen-polo"
+    assert all(m.family_id != "volkswagen-tera" for m in resolver.find("o carro terá garantia?"))

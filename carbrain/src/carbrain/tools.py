@@ -624,6 +624,117 @@ def consumption(ctx: ToolContext, inp: ConsumptionInput) -> ToolResult:
     return cite.result("ok", {"family_id": inp.family_id, "versions": versions}, notes=notes)
 
 
+class InformationSourcesInput(BaseModel):
+    kind: Literal["specialist_media", "creator"] | None = None
+    focus: str | None = Field(
+        default=None,
+        description="e.g. reviews, buying_advice, ev, mechanics, used_cars, instrumented_tests",
+    )
+    platform: Literal["website", "rss", "youtube", "instagram"] | None = None
+
+
+def information_sources(ctx: ToolContext, inp: InformationSourcesInput) -> ToolResult:
+    """Specialist media and creators worth following, filtered by kind, focus or platform."""
+    rows = ctx.conn.execute("SELECT * FROM publisher ORDER BY kind DESC, name").fetchall()
+    out = []
+    for pub in rows:
+        focus = json.loads(pub["focus"])
+        if (inp.kind and pub["kind"] != inp.kind) or (inp.focus and inp.focus not in focus):
+            continue
+        channels = [
+            {
+                "platform": ch["platform"],
+                "handle": ch["handle"],
+                "url": ch["url"],
+                "external_id": ch["external_id"],
+                "status": ch["status"],
+            }
+            for ch in ctx.conn.execute(
+                "SELECT platform, handle, url, external_id, status FROM channel "
+                "WHERE publisher_id = ? "
+                "ORDER BY platform",
+                (pub["id"],),
+            )
+            if not inp.platform or ch["platform"] == inp.platform
+        ]
+        if inp.platform and not channels:
+            continue
+        out.append(
+            {
+                "id": pub["id"],
+                "name": pub["name"],
+                "kind": pub["kind"],
+                "focus": focus,
+                "evidence_kind": json.loads(pub["evidence_kind"]),
+                "channels": channels,
+            }
+        )
+    if not out:
+        return ToolResult(status="no_data")
+    return ToolResult(
+        status="ok",
+        data=out,
+        notes=[
+            "Handles with status 'web_evidence' come from dated third-party lists and may "
+            "have changed; 'api_verified' ones were confirmed through the platform's API.",
+            "Weigh 'entertainment' sources as buzz, not as evidence about a car.",
+        ],
+    )
+
+
+class ExpertContentInput(BaseModel):
+    family_id: str = Field(description="Family ID from find_vehicle.")
+    days: int = Field(default=30, ge=1, le=365)
+    kind: Literal["specialist_media", "creator"] | None = None
+
+
+def expert_content(ctx: ToolContext, inp: ExpertContentInput) -> ToolResult:
+    """Recent headlines and videos from specialist media and creators about a vehicle."""
+    since = (ctx.today - timedelta(days=inp.days)).isoformat()
+    rows = ctx.conn.execute(
+        "SELECT c.source_id, c.title, c.url, c.published_at, c.kind AS item_kind, "
+        "p.name AS publisher, p.kind, p.evidence_kind FROM content_mention m "
+        "JOIN content_item c ON c.id = m.content_id JOIN channel ch ON ch.id = c.channel_id "
+        "JOIN publisher p ON p.id = ch.publisher_id "
+        "WHERE m.family_id = ? AND COALESCE(c.published_at, c.fetched_at) >= ? "
+        "ORDER BY COALESCE(c.published_at, c.fetched_at) DESC",
+        (inp.family_id, since),
+    ).fetchall()
+    cite = _Cite(ctx)
+    items, hidden = [], 0
+    for r in rows:
+        if inp.kind and r["kind"] != inp.kind:
+            continue
+        if not cite.allowed(r["source_id"]):
+            hidden += 1
+            continue
+        items.append(
+            {
+                "publisher": r["publisher"],
+                "kind": r["kind"],
+                "evidence_kind": json.loads(r["evidence_kind"]),
+                "title": r["title"],
+                "url": r["url"],
+                "published_at": r["published_at"],
+            }
+        )
+        key = (r["publisher"], r["url"] or r["title"])
+        cite.citations[key] = Citation(
+            source_id=r["source_id"],
+            source=r["publisher"],
+            attribution=f"Fonte: {r['publisher']}",
+            as_of=(r["published_at"] or "")[:10],
+            url=r["url"] or "",
+        )
+    notes = []
+    if hidden:
+        notes.append(f"{hidden} item(s) from sources without display rights were left out.")
+    if not items:
+        return cite.result("no_data", notes=notes)
+    notes.append("Headlines and links only; send the user to the original for the content.")
+    return cite.result("ok", items[:20], notes=notes)
+
+
 class FipePriceInput(BaseModel):
     fipe_code: str
     model_year: int | None = None
@@ -726,6 +837,15 @@ TOOLS: dict[str, ToolSpec] = {
         ToolSpec("consumption", consumption.__doc__ or "", ConsumptionInput, consumption),
         ToolSpec("fipe_price", fipe_price.__doc__ or "", FipePriceInput, fipe_price),
         ToolSpec("events", events.__doc__ or "", EventsInput, events),
+        ToolSpec(
+            "information_sources",
+            information_sources.__doc__ or "",
+            InformationSourcesInput,
+            information_sources,
+        ),
+        ToolSpec(
+            "expert_content", expert_content.__doc__ or "", ExpertContentInput, expert_content
+        ),
         ToolSpec("data_freshness", data_freshness.__doc__ or "", FreshnessInput, data_freshness),
     ]
 }
