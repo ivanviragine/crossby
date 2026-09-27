@@ -42,6 +42,9 @@ class Connector(ABC):
     #: Each URL always serves the same content (e.g. one file per month), so a URL
     #: already parsed by this parser version is not downloaded again.
     immutable_urls: ClassVar[bool] = False
+    #: Parsing maps source names to catalog families, so a catalog change (new family,
+    #: better pattern) re-parses the latest files, from the archive when they are there.
+    uses_catalog: ClassVar[bool] = False
 
     @abstractmethod
     def discover(self, http: Http) -> list[str]:
@@ -90,13 +93,18 @@ def run_connector(
     result = RunResult(source_id, "ok")
     requests_before = http.requests
     ctx = ParseContext(conn, resolver)
+    version = parser_version(connector, resolver)
     try:
         for url in connector.discover(http):
-            if connector.immutable_urls and not reparse and _parsed_before(conn, connector, url):
+            if (
+                connector.immutable_urls
+                and not reparse
+                and _parsed_before(conn, source_id, url, version)
+            ):
                 result.files_fetched += 1
                 continue
             try:
-                snapshot = _fetch(connector, http, archive, url)
+                snapshot = _fetch(connector, http, archive, url, version)
             except FetchError as exc:
                 if connector.missing_ok and exc.status_code == 404:
                     log.info("%s: %s not published yet", source_id, url)
@@ -112,7 +120,7 @@ def run_connector(
                 fetched_at=snapshot.fetched_at,
                 snapshot_id=snapshot.id,
             )
-            archive.mark_parsed(snapshot, connector.parser_version)
+            archive.mark_parsed(snapshot, version)
             result.inserted += stats.inserted
             result.revised += stats.revised
             result.unchanged += stats.unchanged
@@ -142,28 +150,40 @@ def run_connector(
     return result
 
 
-def _parsed_before(conn: sqlite3.Connection, connector: Connector, url: str) -> bool:
+def parser_version(connector: Connector, resolver: Resolver) -> str:
+    """The parser version recorded on parsed files, including the catalog when it matters."""
+    if connector.uses_catalog:
+        return f"{connector.parser_version}+catalog.{resolver.fingerprint}"
+    return connector.parser_version
+
+
+def _parsed_before(conn: sqlite3.Connection, source_id: str, url: str, version: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM snapshot WHERE source_id = ? AND url = ? AND parser_version = ? "
         "AND parsed_at IS NOT NULL LIMIT 1",
-        (connector.source_id, url, connector.parser_version),
+        (source_id, url, version),
     ).fetchone()
     return row is not None
 
 
-def _fetch(connector: Connector, http: Http, archive: RawArchive, url: str) -> Snapshot:
+def _fetch(
+    connector: Connector, http: Http, archive: RawArchive, url: str, version: str
+) -> Snapshot:
+    if connector.immutable_urls:
+        # The content can't have changed, so a file already in the archive is reused.
+        archived = archive.find(connector.source_id, url, version)
+        if archived is not None:
+            return archived
     if connector.large_files:
         archive.root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=archive.root) as tmp:
             path = http.download(url, Path(tmp) / "download")
-            return archive.store_file(
-                connector.source_id, url, path, None, connector.parser_version
-            )
+            return archive.store_file(connector.source_id, url, path, None, version)
     response = http.get(url)
     return archive.store_bytes(
         connector.source_id,
         url,
         response.content,
         response.headers.get("Content-Type"),
-        connector.parser_version,
+        version,
     )

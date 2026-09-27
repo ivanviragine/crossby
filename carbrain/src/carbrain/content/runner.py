@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from carbrain.content.base import ChannelRef, ContentItem, Fetcher, NotConfiguredError
 from carbrain.content.feeds import FeedFetcher
 from carbrain.content.social import InstagramFetcher, YouTubeFetcher
-from carbrain.db import utcnow
+from carbrain.db import get_meta, set_meta, utcnow
 from carbrain.http import Http
 from carbrain.models import Use
 from carbrain.resolve import Resolver
@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 
 #: Minimum confidence for linking an item to a vehicle family (pattern matches only).
 MENTION_MIN_CONFIDENCE = 0.92
+MENTIONS_CATALOG_KEY = "mentions_catalog"
 
 
 def default_fetchers() -> dict[str, Fetcher]:
@@ -69,6 +70,9 @@ def sync_content(
     now: datetime | None = None,
 ) -> list[PlatformResult]:
     fetchers = fetchers or default_fetchers()
+    if get_meta(conn, MENTIONS_CATALOG_KEY) != resolver.fingerprint:
+        # The catalog changed since mentions were linked (new family, better pattern).
+        relink_mentions(conn, resolver)
     results = []
     for platform in platforms or list(fetchers):
         fetcher = fetchers[platform]
@@ -216,6 +220,7 @@ def relink_mentions(conn: sqlite3.Connection, resolver: Resolver) -> int:
         item = ContentItem(r["external_id"], r["kind"], r["title"], r["url"], None)
         _link_mentions(conn, resolver, channel, item)
     conn.commit()
+    set_meta(conn, MENTIONS_CATALOG_KEY, resolver.fingerprint)
     return len(rows)
 
 

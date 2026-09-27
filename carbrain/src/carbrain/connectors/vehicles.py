@@ -65,6 +65,7 @@ class SenatranFleet(Connector):
     parser_version = "1"
     large_files = True
     immutable_urls = True
+    uses_catalog = True
     package_api = (
         "https://dados.transportes.gov.br/api/3/action/package_show"
         "?id=registro-nacional-de-veiculos-automotores-renavam"

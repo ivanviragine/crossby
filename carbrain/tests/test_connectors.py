@@ -350,3 +350,25 @@ def test_monthly_fleet_file_is_not_downloaded_twice(seeded, archive, registry, r
     second = run(SenatranFleet(), http, seeded, archive, registry, resolver)
     assert first.requests == 2  # package listing + file
     assert second.requests == 1 and second.status == "unchanged"  # listing only
+
+
+def test_catalog_change_rematches_from_the_archive(seeded, archive, registry, resolver) -> None:  # type: ignore[no-untyped-def]
+    """A family added to the catalog gets its fleet from the file already downloaded."""
+    http = http_with(
+        {
+            "package_show": fixture_bytes("ckan_renavam_package.json"),
+            "julho_2026.zip": fixture_bytes("senatran_fleet_sample.zip"),
+        }
+    )
+    families = [f for f in resolver.families.values() if f.id != "toyota-corolla-cross"]
+    before = Resolver(list(resolver.brands.values()), families)
+    run(SenatranFleet(), http, seeded, archive, registry, before)
+    assert not query_facts(seeded, "fleet_registered", subject_id="toyota-corolla-cross")
+
+    after = run(SenatranFleet(), http, seeded, archive, registry, resolver)
+    assert after.requests == 1 and after.files_new == 1  # listing only; file from the archive
+    facts = query_facts(seeded, "fleet_registered", subject_id="toyota-corolla-cross")
+    assert sum(f.value or 0 for f in facts) == 314 + 401 + 441 + 440 + 266 + 138
+
+    again = run(SenatranFleet(), http, seeded, archive, registry, resolver)
+    assert again.status == "unchanged" and again.requests == 1

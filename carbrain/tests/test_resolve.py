@@ -32,6 +32,12 @@ REGISTRY_CASES = [
     ("VW/NOVO GOL 1.0", "volkswagen-gol"),
     ("VW/NOVO GOL TL MCV", "volkswagen-gol"),
     ("HYUNDAI/HB2010TA LIMITE", "hyundai-hb20"),
+    # Corolla sedan (added after a user test on 2026-09-27; labels from the July 2026 file).
+    ("TOYOTA/COROLLA XEI20FLEX", "toyota-corolla"),
+    ("TOYOTA/COROLLA ALTIS HV", "toyota-corolla"),
+    ("TOYOTA/COROLLA GRS", "toyota-corolla"),
+    ("I/TOYOTA COROLLA LE", "toyota-corolla"),
+    ("I/TOYOTA COROLLA CROSS", "toyota-corolla-cross"),
 ]
 
 # Labels that look similar but are different vehicles we do not track.
@@ -46,6 +52,10 @@ NOT_TRACKED = [
     "VW/GOLF GTI",  # Golf, not Gol
     "HONDA/CG 160 FAN",  # motorcycle
     "GM/CORSA WIND",
+    "IMP/TOYOTA COROLLA WG",  # Corolla wagon
+    "I/TOYOTA COROLLA HB GR R",  # GR Corolla hatch
+    "I/TOYOTA COROLLA SPACIO",  # minivan
+    "TOYOTA/FIELDER XEI18FLEX",  # Corolla-based wagon, own label
 ]
 
 
@@ -72,6 +82,9 @@ def test_split_registry_label() -> None:
         ("VW - VolksWagen", "Polo Track 1.0 Flex 12V 5p", "volkswagen-polo-track"),
         ("VW - VolksWagen", "T-Cross Comfor. 200 TSI 1.0 Flex 5p Aut.", "volkswagen-t-cross"),
         ("Toyota", "COROLLA CROSS XRE 2.0 16V Flex Aut.", "toyota-corolla-cross"),
+        # Real FIPE names (dev sample, 2026-09-27).
+        ("Toyota", "Corolla Altis 1.8 16V Aut. (Híbrido)", "toyota-corolla"),
+        ("Toyota", "Corolla Altis Prem. 1.8 Aut. (Híbrido)", "toyota-corolla"),
         ("GM - Chevrolet", "ONIX HATCH LT 1.0 12V Flex 5p Mec.", "chevrolet-onix"),
         ("GM - Chevrolet", "ONIX PLUS LT 1.0 12V Flex 4p Mec.", None),
         ("GM - Chevrolet", "ONIX LT 1.0 12V Flex 5p Mec.", "chevrolet-onix"),
@@ -93,6 +106,43 @@ def test_fipe_names(resolver: Resolver, brand: str, model: str, family: str | No
 )
 def test_free_text(resolver: Resolver, text: str, family: str) -> None:
     assert resolver.find(text)[0].family_id == family
+
+
+@pytest.mark.parametrize(
+    ("text", "families"),
+    [
+        # Wrong before 2026-09-27: fuzzy matching compared "brand + name", so "Corolla"
+        # scored close to "Corolla Cross" and "Toyota ..." close to "Toyota Hilux".
+        ("Corolla 2026", ["toyota-corolla"]),
+        ("corolla sedan 2026", ["toyota-corolla"]),
+        ("Toyota Corolla GR-S 2026", ["toyota-corolla"]),
+        ("corolla cross 2026", ["toyota-corolla-cross"]),
+        ("Toyota Yaris 2026", []),
+        ("golf 2020", []),
+        ("corolla hb gr", []),
+        # Same words at another place are another mention (was dropped by text comparison).
+        ("Corolla ou Corolla Cross?", ["toyota-corolla-cross", "toyota-corolla"]),
+        ("Polo ou Polo Track?", ["volkswagen-polo-track", "volkswagen-polo"]),
+    ],
+)
+def test_free_text_exact_families(resolver: Resolver, text: str, families: list[str]) -> None:
+    assert [m.family_id for m in resolver.find(text)] == families
+
+
+def test_fuzzy_only_for_model_names(resolver: Resolver) -> None:
+    (match,) = resolver.find("corola altis hibrido")
+    assert match.family_id == "toyota-corolla" and match.method == "fuzzy"
+    assert not match.accepted  # the tool asks the user to confirm
+    # A typo that extends a matched name is offered as a second, approximate reading.
+    found = [(m.family_id, m.method) for m in resolver.find("corolla cros xre")]
+    assert found == [("toyota-corolla", "text_pattern"), ("toyota-corolla-cross", "fuzzy")]
+
+
+def test_fingerprint_changes_with_the_catalog(resolver: Resolver) -> None:
+    families = [f for f in resolver.families.values() if f.id != "toyota-corolla"]
+    smaller = Resolver(list(resolver.brands.values()), families)
+    same = Resolver(list(resolver.brands.values()), list(resolver.families.values()))
+    assert smaller.fingerprint != resolver.fingerprint == same.fingerprint
 
 
 def test_free_text_lists_every_mentioned_family(resolver: Resolver) -> None:

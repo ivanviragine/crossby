@@ -145,10 +145,14 @@ def find_vehicle(ctx: ToolContext, inp: FindVehicleInput) -> ToolResult:
     """Identify which vehicle families (and model year, if given) the user means."""
     matches = [m for m in ctx.resolver.find(inp.text) if m.family_id]
     if not matches:
-        return ToolResult(
-            status="no_data",
-            notes=["No covered vehicle family matches. The launch catalog has 20 families."],
-        )
+        notes = [
+            f"No covered vehicle family matches. The catalog has {len(ctx.resolver.families)}."
+        ]
+        for brand_id in sorted(ctx.resolver.brands_in(inp.text)):
+            names = sorted(f.name for f in ctx.resolver.families.values() if f.brand == brand_id)
+            brand = ctx.resolver.brands[brand_id].name
+            notes.append(f"{brand} models covered: {', '.join(names)}. Other models are not.")
+        return ToolResult(status="no_data", notes=notes)
     year = re.search(r"\b(19[89]\d|20[0-4]\d)\b", inp.text)
     rows = []
     for m in matches:
@@ -168,9 +172,15 @@ def find_vehicle(ctx: ToolContext, inp: FindVehicleInput) -> ToolResult:
                 "status": fam["status"],
                 "powertrains": json.loads(fam["powertrains"]),
                 "confidence": round(m.confidence, 2),
+                "match": "approximate" if m.method == "fuzzy" else "name",
             }
         )
     notes = []
+    if any(r["match"] == "approximate" for r in rows):
+        notes.append(
+            "An 'approximate' match comes from a similar spelling: confirm the vehicle with the "
+            "user before quoting its data."
+        )
     if len(rows) > 1 and rows[0]["confidence"] - rows[1]["confidence"] < 0.05:
         notes.append(
             "The text mentions several families: compare them, or ask which one the user means."
@@ -442,7 +452,10 @@ def flex_fuel_choice(ctx: ToolContext, inp: FlexChoiceInput) -> ToolResult:
                 "breakeven_ratio": round(choice.breakeven_ratio, 3),
                 "saving_per_1000_km": round(choice.saving_per_1000_km, 2),
             },
-            "assumptions": ["Consumption figures as given by the user."],
+            "assumptions": [
+                "Consumption figures as passed in (from the consumption tool or the user); "
+                "cite their source too."
+            ],
         }
     )
 
@@ -598,9 +611,7 @@ def consumption(ctx: ToolContext, inp: ConsumptionInput) -> ToolResult:
                 km.setdefault(f"{f.dims['fuel']} ({f.unit})", {})[str(f.dims["cycle"])] = f.value
         versions.append(
             {
-                "version": " ".join(
-                    attrs.get(k, "") for k in ("model", "version", "engine", "transmission")
-                ).strip(),
+                "version": _pbev_label(attrs),
                 "fuel_code": attrs.get("fuel"),
                 "consumption": km or None,
                 "energy_mj_per_km": next(
@@ -724,6 +735,7 @@ def expert_content(ctx: ToolContext, inp: ExpertContentInput) -> ToolResult:
             source=r["publisher"],
             attribution=f"Fonte: {r['publisher']}",
             as_of=(r["published_at"] or "")[:10],
+            checked_at=_last_success(ctx.conn, r["source_id"]),
             url=r["url"] or "",
         )
     notes = []
@@ -731,8 +743,17 @@ def expert_content(ctx: ToolContext, inp: ExpertContentInput) -> ToolResult:
         notes.append(f"{hidden} item(s) from sources without display rights were left out.")
     if not items:
         return cite.result("no_data", notes=notes)
-    notes.append("Headlines and links only; send the user to the original for the content.")
+    # What may be shown (headline and link only) comes from the rights registry's conditions.
     return cite.result("ok", items[:20], notes=notes)
+
+
+def _pbev_label(attrs: dict[str, str]) -> str:
+    """'COROLLA GRS 2.0-16V CVT'. INMETRO sometimes repeats the model in the version
+    column ('COROLLA' + 'COROLLA GRS'), so the model is not written twice."""
+    model, version = attrs.get("model", ""), attrs.get("version", "")
+    head = version if version == model or version.startswith(f"{model} ") else f"{model} {version}"
+    parts = (head, attrs.get("engine", ""), attrs.get("transmission", ""))
+    return " ".join(p for p in parts if p).strip()
 
 
 class FipePriceInput(BaseModel):

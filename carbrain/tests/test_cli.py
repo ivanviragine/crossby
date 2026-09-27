@@ -23,7 +23,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_init_loads_catalogs() -> None:
     result = runner.invoke(app, ["init"])
-    assert "20 vehicle families" in result.output and "publishers" in result.output
+    assert "21 vehicle families" in result.output and "publishers" in result.output
 
 
 def test_sources_grouped_by_type() -> None:

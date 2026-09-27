@@ -15,7 +15,7 @@ shown and published, per source.
 cd carbrain
 uv sync --all-extras
 export CARBRAIN_DATA_DIR=$PWD/var        # where the database and raw files live
-uv run carbrain init                      # schema, 20 vehicle families, events, 30 publishers
+uv run carbrain init                      # schema, 21 vehicle families, events, 30 publishers
 uv run carbrain sync                      # all dataset connectors (fleet file: ~3 min first time)
 uv run carbrain sync-content              # latest headlines from specialist media
 uv run carbrain status                    # freshness per source
@@ -23,7 +23,9 @@ uv run carbrain tool fuel_prices '{"place": "Curitiba, PR"}'
 ```
 
 Run `./scripts/daily.sh` once a day (cron or any scheduler). Unchanged sources cost almost
-nothing: files are content-hashed, and monthly files are never downloaded twice.
+nothing: files are content-hashed, and monthly files are never downloaded twice. After a
+catalog change (a new family in `data/families.yaml`, a better pattern), the next run
+re-matches the latest fleet and PBEV files from the archive and re-links stored headlines.
 
 ## Sources, by type
 
@@ -88,6 +90,8 @@ that no tool returned.
 ## Not done yet
 
 - Version-level catalog (trims, model years) and list prices from automaker sites.
+- More families: a coverage report that ranks unmatched registry labels by recent
+  manufacture years (raw totals are dominated by motorcycles and discontinued cars).
 - Fenabrave PDFs (registrations by model) and the retail vs direct-sales split.
 - Recalls (Senacon), Latin NCAP, Consumidor.gov.br: their open-data portal was unreachable
   from the build environment.

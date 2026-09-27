@@ -3,11 +3,14 @@
 Registry labels ("I/BYD DOLPHIN MINI GS5EV", "HYUNDAI/CRETA1TA PLTINUM") and FIPE model
 names ("Polo Track 1.0 Flex 12V 5p") are matched with per-family regular expressions:
 the longest match wins, and a tie is sent to review instead of guessed. Free text from
-users ("quero um hrv 2023") is matched the same way, with a fuzzy fallback.
+users ("quero um hrv 2023") is matched the same way, with a fuzzy fallback for typos in
+model names ("toyota hillux").
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -16,12 +19,16 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 IMPORT_PREFIXES = ("I/", "IMP/")
 #: Marketing words some labels put before the model ("NOVO GOL", "NOVA SAVEIRO").
 MODEL_PREFIXES = ("NOVO ", "NOVA ", "NEW ")
 AUTO_ACCEPT = 0.9
+#: Fuzzy matching only for model names at least this long: in a short name, one changed
+#: letter is often another car ("GOL" vs "GOLF").
+FUZZY_MIN_LENGTH = 5
+FUZZY_MIN_SCORE = 85
 
 
 class BrandSpec(BaseModel):
@@ -85,6 +92,7 @@ class Resolver:
             for label in [brand.name, *brand.labels]:
                 self._brand_labels[normalize(label)] = brand.id
         self._by_brand: dict[str, list[_CompiledFamily]] = {}
+        self._compiled: dict[str, _CompiledFamily] = {}
         for fam in families:
             if fam.brand not in self.brands:
                 raise ValueError(f"Family {fam.id} refers to unknown brand {fam.brand}")
@@ -95,9 +103,20 @@ class Resolver:
                 tuple(re.compile(rf"^(?:{p})") for p in fam.lookalikes),
             )
             self._by_brand.setdefault(fam.brand, []).append(compiled)
-        self._fuzzy_choices = {
-            fam.id: normalize(f"{self.brands[fam.brand].name} {fam.name}") for fam in families
+            self._compiled[fam.id] = compiled
+        self._fuzzy_keys = {
+            fam.id: key
+            for fam in families
+            if len(key := _squash(normalize(fam.name))) >= FUZZY_MIN_LENGTH
         }
+        #: Changes whenever brands, families or their patterns change. Data matched with
+        #: an older catalog is re-matched (see `Connector.uses_catalog`).
+        self.fingerprint = hashlib.sha256(
+            json.dumps(
+                [[b.model_dump() for b in brands], [f.model_dump() for f in families]],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()[:12]
 
     @classmethod
     def from_yaml(cls, path: Path) -> Resolver:
@@ -107,6 +126,11 @@ class Resolver:
         return cls(brands, families)
 
     # --- brands -----------------------------------------------------------------
+
+    def brands_in(self, text: str) -> set[str]:
+        """Brand IDs named anywhere in free text."""
+        _, norm = _aligned_upper(text)
+        return {bid for label, bid in self._brand_labels.items() if _has_word(norm, label)}
 
     def brand_for(self, label: str) -> str | None:
         norm = normalize(label)
@@ -172,10 +196,9 @@ class Resolver:
         ("terá" is a verb, not the VW Tera). No fuzzy matching in editorial mode.
         """
         spaced, norm = _aligned_upper(text)
-        mentioned_brands = {
-            bid for label, bid in self._brand_labels.items() if _has_word(norm, label)
-        }
-        pattern_hits: dict[str, Match] = {}
+        mentioned_brands = self.brands_in(text)
+        # family -> (match, span of the matched words in the text)
+        pattern_hits: dict[str, tuple[Match, tuple[int, int]]] = {}
         for brand_id, fams in self._by_brand.items():
             for fam in fams:
                 for pattern in fam.free:
@@ -198,24 +221,58 @@ class Resolver:
                     conf = 0.97 if brand_id in mentioned_brands else 0.92
                     score = conf + len(m.group(0)) / 1000
                     prev = pattern_hits.get(fam.spec.id)
-                    if prev is None or score > prev.confidence:
-                        pattern_hits[fam.spec.id] = Match(
-                            fam.spec.id, brand_id, score, "text_pattern", m.group(0)
+                    if prev is None or score > prev[0].confidence:
+                        pattern_hits[fam.spec.id] = (
+                            Match(fam.spec.id, brand_id, score, "text_pattern", m.group(0)),
+                            m.span(),
                         )
-        results = _drop_contained(sorted(pattern_hits.values(), key=lambda m: -m.confidence))
+        kept = _drop_contained(list(pattern_hits.values()))
+        results = [m for m, _ in sorted(kept, key=lambda h: -h[0].confidence)]
         if len(results) < limit and not editorial:
-            fuzzy = process.extract(
-                norm, self._fuzzy_choices, scorer=fuzz.WRatio, limit=limit, score_cutoff=80
-            )
-            for _choice, score, family_id in fuzzy:
+            claimed = [span for _, span in pattern_hits.values()]
+            for family_id, score, window in self._fuzzy(norm, claimed):
                 if family_id in pattern_hits:
                     continue
                 brand_id = self.families[family_id].brand
-                results.append(Match(family_id, brand_id, round(score / 100 * 0.85, 3), "fuzzy"))
+                conf = round(score / 100 * 0.85, 3)
+                results.append(Match(family_id, brand_id, conf, "fuzzy", window))
         return [
             Match(m.family_id, m.brand_id, min(m.confidence, 0.99), m.method, m.matched_text)
             for m in results[:limit]
         ]
+
+    def _fuzzy(self, norm: str, claimed: list[tuple[int, int]]) -> list[tuple[str, float, str]]:
+        """(family, score, words) for model names written with a typo, best first.
+
+        Compares runs of 1-3 words, squashed, with each family's own name. The brand is
+        left out on purpose: "Toyota Corolla" must not come close to "Toyota Hilux". Runs
+        inside a pattern match are skipped ("Corolla Cross" is not a misspelled T-Cross),
+        and so is a run followed by one of the family's lookalikes ("COROLLA HB").
+        """
+        spans = [(m.group(0), m.start(), m.end()) for m in re.finditer(r"[A-Z0-9]+", norm)]
+        words = [w for w, _, _ in spans]
+        windows = [
+            ("".join(words[i : i + n]), i)
+            for n in (1, 2, 3)
+            for i in range(len(words) - n + 1)
+            if not any(
+                start <= spans[i][1] and spans[i + n - 1][2] <= end for start, end in claimed
+            )
+        ]
+        hits: list[tuple[str, float, str]] = []
+        for family_id, key in self._fuzzy_keys.items():
+            lookalikes = self._compiled[family_id].lookalikes
+            best: tuple[float, str] | None = None
+            for window, i in windows:
+                score = fuzz.ratio(key, window)
+                if score < FUZZY_MIN_SCORE or (best is not None and score <= best[0]):
+                    continue
+                if any(p.match(" ".join(words[i:])) for p in lookalikes):
+                    continue
+                best = (score, window)
+            if best is not None:
+                hits.append((family_id, best[0], best[1]))
+        return sorted(hits, key=lambda h: -h[1])
 
     def suggest_for_label(self, label: str) -> tuple[str, float] | None:
         """A tracked family this unmatched label may belong to, for the review queue.
@@ -244,6 +301,10 @@ class Resolver:
             if best is None or score > best[1]:
                 best = (fam.spec.id, score)
         return best
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", text)
 
 
 def strip_model_prefix(model: str) -> str:
@@ -278,11 +339,15 @@ def _has_word(text: str, word: str) -> bool:
     return re.search(rf"(?<![A-Z0-9]){re.escape(word)}(?![A-Z0-9])", text) is not None
 
 
-def _drop_contained(matches: list[Match]) -> list[Match]:
-    """If 'POLO TRACK' matched, drop a weaker 'POLO' match found inside the same words."""
-    kept: list[Match] = []
-    for m in matches:
-        if any(m.matched_text and m.matched_text in k.matched_text for k in kept):
+def _drop_contained(
+    hits: list[tuple[Match, tuple[int, int]]],
+) -> list[tuple[Match, tuple[int, int]]]:
+    """Drop a match that lies inside a longer one at the same place ('POLO' inside
+    'POLO TRACK'). The same words elsewhere in the text are a separate mention."""
+    kept: list[tuple[Match, tuple[int, int]]] = []
+    for hit in sorted(hits, key=lambda h: (h[1][0] - h[1][1], -h[0].confidence)):
+        start, end = hit[1]
+        if any(k_start <= start and end <= k_end for _, (k_start, k_end) in kept):
             continue
-        kept.append(m)
+        kept.append(hit)
     return kept

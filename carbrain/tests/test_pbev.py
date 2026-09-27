@@ -103,7 +103,7 @@ def test_family_mapping(parsed: sqlite3.Connection) -> None:
         "SELECT target_id, external_key FROM external_mapping WHERE source_id = 'inmetro_pbev'"
     ).fetchall()
     families = {r["target_id"] for r in rows}
-    assert len(families) == 19 and "volkswagen-gol" not in families  # Gol is discontinued
+    assert len(families) == 20 and "volkswagen-gol" not in families  # Gol is discontinued
     track = {r["external_key"] for r in rows if r["target_id"] == "volkswagen-polo-track"}
     assert track == {
         "VW|POLO|TRACK 1.0 MPI|1.0-12V|M - 5|F",
@@ -160,3 +160,18 @@ def test_consumption_tool(parsed: sqlite3.Connection) -> None:
     track = call_tool(ctx, "consumption", {"family_id": "volkswagen-polo-track"})
     assert all(v["consumption"] is None for v in track.data["versions"])
     assert any("no km/l" in n for n in track.notes)
+
+
+def test_corolla_sedan_and_its_lookalikes(parsed: sqlite3.Connection) -> None:
+    rows = parsed.execute(
+        "SELECT external_key, target_id FROM external_mapping "
+        "WHERE source_id = 'inmetro_pbev' AND external_key LIKE 'TOYOTA|COROLLA%'"
+    ).fetchall()
+    by_family: dict[str, set[str]] = {}
+    for r in rows:
+        by_family.setdefault(r["target_id"], set()).add(r["external_key"])
+    assert len(by_family["toyota-corolla"]) == 8  # 2.0 flex and 1.8 hybrid versions
+    assert len(by_family["toyota-corolla-cross"]) == 6
+    assert "TOYOTA|COROLLA|COROLLA GRS|2.0-16V|CVT|F" in by_family["toyota-corolla"]
+    mapped = set().union(*by_family.values())
+    assert "TOYOTA|COROLLA HB|GR R|1.6-12V|M-6|G" not in mapped  # GR Corolla hatch

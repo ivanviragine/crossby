@@ -1,4 +1,4 @@
-# The first 20 vehicle families (launch catalog).
+# Vehicle families in the catalog (the 20 launch families, plus the Corolla sedan).
 #
 # Seed only verified facts. `patterns` are regular expressions applied to the
 # normalized model text (upper case, no accents) that follows the brand in a
@@ -139,6 +139,19 @@ families:
     status: unverified
     text_rules: [proper_noun]
     patterns: ['COMPASS(?![A-Z])']
+
+  - id: toyota-corolla
+    brand: toyota
+    name: Corolla
+    segment: sedã médio
+    body: sedan
+    status: unverified
+    # Sedan only. Same name, other bodies: CCROSS / COROLLA CROSS (the SUV, tracked below),
+    # COROLLA WG (wagon), COROLLA HB GR (GR hatch), COROLLA SPACIO (minivan). The Fielder
+    # wagon has its own label (TOYOTA/FIELDER).
+    patterns: ['COROLLA(?! ?(?:CROSS|WG|HB|SPACIO))(?![A-Z])']
+    lookalikes: ['COROLLA ?(?:CROSS|WG|HB|SPACIO)']
+    notes: Registry labels "COROLLA XEI20FLEX", "COROLLA ALTIS HV", "COROLLA GRS"; PBEV model "COROLLA".
 
   - id: toyota-corolla-cross
     brand: toyota

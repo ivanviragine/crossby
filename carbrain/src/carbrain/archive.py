@@ -63,6 +63,26 @@ class RawArchive:
             shutil.move(str(file), path)
         return self._register(source_id, url, digest, size, content_type, path, parser_version)
 
+    def find(self, source_id: str, url: str, parser_version: str) -> Snapshot | None:
+        """The latest archived file for a URL, if its bytes are still on disk."""
+        row = self.conn.execute(
+            "SELECT id, sha256, path, fetched_at, content_type FROM snapshot "
+            "WHERE source_id = ? AND url = ? ORDER BY fetched_at DESC, id DESC LIMIT 1",
+            (source_id, url),
+        ).fetchone()
+        if row is None or not Path(row["path"]).exists():
+            return None
+        return Snapshot(
+            row["id"],
+            source_id,
+            url,
+            row["sha256"],
+            Path(row["path"]),
+            row["fetched_at"],
+            row["content_type"],
+            not self._already_parsed(source_id, url, row["sha256"], parser_version),
+        )
+
     def mark_parsed(self, snapshot: Snapshot, parser_version: str) -> None:
         self.conn.execute(
             "UPDATE snapshot SET parsed_at = ?, parser_version = ? WHERE id = ?",

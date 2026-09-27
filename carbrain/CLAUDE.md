@@ -30,7 +30,8 @@ the "Brazil Car Data Blueprint" report (revision 2).
 - `src/carbrain/catalog.py`, `resolve.py`, `data/families.yaml` — internal vehicle IDs,
   registry/FIPE name matching, review queue
 - `src/carbrain/connectors/` — datasets: one `Connector` per source (discover → fetch → archive →
-  parse), registered in `connectors/__init__.py`
+  parse), registered in `connectors/__init__.py`. Set `uses_catalog = True` when parsing maps
+  names to families, so catalog changes re-match archived files
 - `src/carbrain/content/` + `data/publishers.yaml` — publishers (specialist media, creators) and
   their channels; one `Fetcher` per platform (RSS/Atom, YouTube Data API, Instagram Graph API),
   run by `content/runner.py`; metadata only, retention from the rights registry
@@ -42,6 +43,8 @@ the "Brazil Car Data Blueprint" report (revision 2).
 
 - Build parsers from real files; keep trimmed real copies in `tests/fixtures/`.
 - Never invent vehicle facts in seed data. Seed only what is verified; leave the rest empty.
+  New families get patterns from real registry labels (`label_inventory`), and a diff of
+  old vs new matching over all labels before committing.
 - Tools return `no_data` or `restricted` rather than guessing; the chat layer must not
   produce numbers no tool returned.
 - FIPE collection stays blocked in the rights registry until a contract exists.

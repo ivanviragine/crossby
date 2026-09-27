@@ -75,7 +75,7 @@ def test_senatran(seeded, archive, registry, resolver) -> None:  # type: ignore[
     ).fetchall()
     totals = {r["subject_id"]: r["n"] for r in rows}
     print(totals)
-    assert len(totals) == 20, set(resolver.families) - set(totals)
+    assert len(totals) == len(resolver.families), set(resolver.families) - set(totals)
     assert totals["volkswagen-gol"] > 1_000_000
     inventory = seeded.execute("SELECT COUNT(*) FROM label_inventory").fetchone()[0]
     assert inventory > 30_000

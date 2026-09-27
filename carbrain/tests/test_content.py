@@ -213,6 +213,19 @@ def test_mentions_link_items_to_families(
     assert row["family_id"] == "volkswagen-polo-track"
 
 
+def test_catalog_change_relinks_stored_items(
+    catalog: sqlite3.Connection, registry: Registry, resolver: Resolver
+) -> None:
+    families = [f for f in resolver.families.values() if f.id != "volkswagen-polo-track"]
+    older = Resolver(list(resolver.brands.values()), families)
+    sync_content(catalog, registry, older, mock_http(_feed_routes(True)), platforms=["rss"])
+    linked = "SELECT COUNT(*) FROM content_mention WHERE family_id = 'volkswagen-polo-track'"
+    assert catalog.execute(linked).fetchone()[0] == 0
+    # Nothing is fetched (Instagram is skipped): the catalog change alone relinks.
+    sync_content(catalog, registry, resolver, mock_http({}), platforms=["instagram"])
+    assert catalog.execute(linked).fetchone()[0] == 1
+
+
 def test_platforms_without_rights_or_keys_are_skipped(
     catalog: sqlite3.Connection,
     registry: Registry,

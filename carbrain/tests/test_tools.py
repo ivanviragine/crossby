@@ -10,7 +10,7 @@ from carbrain.models import Observation, PriceType
 from carbrain.observations import write_observations
 from carbrain.resolve import Resolver
 from carbrain.rights import Registry
-from carbrain.tools import ToolContext, call_tool, tool_definitions
+from carbrain.tools import ToolContext, _pbev_label, call_tool, tool_definitions
 
 TODAY = date(2026, 9, 28)
 
@@ -31,6 +31,41 @@ def test_find_vehicle(ctx: ToolContext) -> None:
 
 def test_find_vehicle_unknown(ctx: ToolContext) -> None:
     assert call_tool(ctx, "find_vehicle", {"text": "Ferrari Roma"}).status == "no_data"
+
+
+def test_find_vehicle_lists_covered_models_of_a_known_brand(ctx: ToolContext) -> None:
+    result = call_tool(ctx, "find_vehicle", {"text": "Toyota Yaris 2026"})
+    assert result.status == "no_data"
+    assert "Toyota models covered: Corolla, Corolla Cross, Hilux." in result.notes[1]
+
+
+def test_find_vehicle_flags_approximate_matches(ctx: ToolContext) -> None:
+    result = call_tool(ctx, "find_vehicle", {"text": "corola 2026"})
+    assert result.data["matches"][0]["match"] == "approximate"
+    assert any("confirm the vehicle" in n for n in result.notes)
+
+
+@pytest.mark.parametrize(
+    ("attrs", "label"),
+    [
+        (  # INMETRO repeats the model in the version column for some Corolla rows
+            {
+                "model": "COROLLA",
+                "version": "COROLLA GRS",
+                "engine": "2.0-16V",
+                "transmission": "CVT",
+            },
+            "COROLLA GRS 2.0-16V CVT",
+        ),
+        (
+            {"model": "COROLLA", "version": "ALTIS HV", "engine": "1.8 16V", "transmission": "CVT"},
+            "COROLLA ALTIS HV 1.8 16V CVT",
+        ),
+        ({"model": "POLO", "version": "TRACK 1.0 MPI"}, "POLO TRACK 1.0 MPI"),
+    ],
+)
+def test_pbev_version_label(attrs: dict[str, str], label: str) -> None:
+    assert _pbev_label(attrs) == label
 
 
 def test_fuel_prices_for_a_city(ctx: ToolContext) -> None:

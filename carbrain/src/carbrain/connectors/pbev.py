@@ -65,6 +65,7 @@ MONTHS_PT = {
 class InmetroPbev(Connector):
     source_id = "inmetro_pbev"
     parser_version = "1"
+    uses_catalog = True
     listing = (
         "https://www.gov.br/inmetro/pt-br/assuntos/regulamentacao/avaliacao-da-conformidade/"
         "programa-brasileiro-de-etiquetagem/tabelas-de-eficiencia-energetica/"
