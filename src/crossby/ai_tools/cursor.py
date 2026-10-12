@@ -866,6 +866,10 @@ class CursorAdapter(AbstractAITool):
                     raise ValueError("Cursor ACP prompt failed")
                 stop_reason = result.get("stopReason")
                 if stop_reason != "end_turn":
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
                     return context.complete(
                         HeadlessTerminalStatus.FAILED,
                         native_status=str(stop_reason or "unknown"),

@@ -644,6 +644,10 @@ class AntigravityCLIAdapter(AbstractAITool):
             conversation_id = emitted_id
             context.set_provenance(conversation_id=conversation_id)
             if output.returncode != 0:
+                context.emit(
+                    HeadlessEventKind.TERMINAL,
+                    terminal_status=HeadlessTerminalStatus.FAILED,
+                )
                 return context.complete(
                     HeadlessTerminalStatus.FAILED,
                     exit_code=output.returncode,

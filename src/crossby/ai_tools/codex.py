@@ -758,6 +758,10 @@ class CodexAdapter(AbstractAITool):
                 if not isinstance(completed, dict) or completed.get("id") != turn_id:
                     raise ValueError("Codex completed a different native turn")
                 if completed.get("status") != "completed":
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
                     return context.complete(
                         HeadlessTerminalStatus.FAILED,
                         native_status=str(completed.get("status") or "failed"),

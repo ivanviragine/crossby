@@ -169,7 +169,9 @@ class OpenCodeServer:
 
         def receive() -> None:
             parser = BoundedSSEParser()
-            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=0.2)
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", self.port, timeout=max(0.01, self.deadline - time.monotonic())
+            )
             self._event_connection = connection
             try:
                 if self._event_stop.is_set():
@@ -188,10 +190,7 @@ class OpenCodeServer:
                 ):
                     return
                 while not self._event_stop.is_set() and time.monotonic() < self.deadline:
-                    try:
-                        chunk = response.read1(_HTTP_BODY_CHUNK_SIZE)
-                    except TimeoutError:
-                        continue
+                    chunk = response.read1(_HTTP_BODY_CHUNK_SIZE)
                     if not chunk:
                         parser.finish()
                         return
@@ -472,7 +471,14 @@ def run_native_session(
     capability: PlanModeCapability,
 ) -> tuple[str, str, str, Any]:
     """Run an ordinary session through the verified loopback question APIs."""
-    prompt: dict[str, Any] = {"parts": [{"type": "text", "text": request.prompt}]}
+    # Match OpenCode's ascending message ID format so its native turn ordering
+    # remains valid even when the prompt and reply are created in one millisecond.
+    timestamp = (time.time_ns() // 1_000_000) & ((1 << 36) - 1)
+    prompt_id = f"msg_{timestamp << 12:012x}{secrets.token_hex(7)}"
+    prompt: dict[str, Any] = {
+        "messageID": prompt_id,
+        "parts": [{"type": "text", "text": request.prompt}],
+    }
     if request.model is not None:
         provider, separator, model = request.model.partition("/")
         if not separator or not provider.strip() or not model.strip():
@@ -525,11 +531,14 @@ def run_native_session(
             if message_id in existing_ids:
                 raise ValueError("OpenCode resumed duplicate native message IDs")
             existing_ids.add(message_id)
+    if prompt_id in existing_ids:
+        raise ValueError("OpenCode generated a duplicate native prompt ID")
     if hasattr(server, "open_events"):
         server.open_events()
     server.request("POST", session_path + "/prompt_async", prompt)
     context.emit(HeadlessEventKind.STARTED, message="OpenCode session started")
     observed: set[str] = set(existing_ids)
+    prompt_seen = False
     answered_requests: dict[str, str] = {}
     while True:
         context.checkpoint()
@@ -567,14 +576,23 @@ def run_native_session(
             if not isinstance(info, dict) or info.get("sessionID") != session_id:
                 raise ValueError("OpenCode returned a message for another session")
             message_id = _required_text(info, "id")
+            if message_id == prompt_id:
+                if info.get("role") != "user":
+                    raise ValueError("OpenCode prompt ID belongs to a non-user message")
+                prompt_seen = True
             if message_id not in observed:
                 observed.add(message_id)
-                if info.get("role") == "assistant":
+                if info.get("role") == "assistant" and info.get("parentID") == prompt_id:
                     context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message")
-        if messages:
-            last = messages[-1]
-            info = last["info"]
-            if info.get("role") == "assistant" and _required_text(info, "id") not in existing_ids:
+        if prompt_seen:
+            bound = [
+                message["info"]
+                for message in messages
+                if message["info"].get("role") == "assistant"
+                and message["info"].get("parentID") == prompt_id
+            ]
+            completed_bound = []
+            for info in bound:
                 if info.get("error") is not None:
                     raise ValueError("OpenCode assistant message failed")
                 finish = info.get("finish")
@@ -585,31 +603,36 @@ def run_native_session(
                         and isinstance(completed.get("completed"), (int, float))
                     ):
                         raise ValueError("OpenCode assistant message ended unsuccessfully")
-                    message_id = _required_text(info, "id")
-                    exact = server.request(
-                        "GET", session_path + "/message/" + quote(message_id, safe="")
-                    )
-                    exact_info = exact.get("info") if isinstance(exact, dict) else None
-                    if not isinstance(exact_info, dict) or (
-                        exact_info.get("sessionID") != session_id
-                        or exact_info.get("id") != message_id
-                        or exact_info.get("role") != "assistant"
-                    ):
-                        raise ValueError("OpenCode completed message binding changed")
-                    parts = exact.get("parts")
-                    if not isinstance(parts, list):
-                        raise ValueError("OpenCode completed message omitted parts")
-                    texts = [
-                        part["text"]
-                        for part in parts
-                        if isinstance(part, dict)
-                        and part.get("type") == "text"
-                        and isinstance(part.get("text"), str)
-                    ]
-                    text = "\n".join(texts)
-                    if not text.strip():
-                        raise ValueError("OpenCode completed message was blank")
-                    return session_id, message_id, text, exact_info.get("tokens")
+                    completed_bound.append(_required_text(info, "id"))
+            if len(completed_bound) > 1:
+                raise ValueError("OpenCode completed multiple messages for one prompt")
+            if completed_bound:
+                message_id = completed_bound[0]
+                exact = server.request(
+                    "GET", session_path + "/message/" + quote(message_id, safe="")
+                )
+                exact_info = exact.get("info") if isinstance(exact, dict) else None
+                if not isinstance(exact_info, dict) or (
+                    exact_info.get("sessionID") != session_id
+                    or exact_info.get("id") != message_id
+                    or exact_info.get("role") != "assistant"
+                    or exact_info.get("parentID") != prompt_id
+                ):
+                    raise ValueError("OpenCode completed message binding changed")
+                parts = exact.get("parts")
+                if not isinstance(parts, list):
+                    raise ValueError("OpenCode completed message omitted parts")
+                texts = [
+                    part["text"]
+                    for part in parts
+                    if isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                ]
+                text = "\n".join(texts)
+                if not text.strip():
+                    raise ValueError("OpenCode completed message was blank")
+                return session_id, message_id, text, exact_info.get("tokens")
         context.wait(0.1)
 
 

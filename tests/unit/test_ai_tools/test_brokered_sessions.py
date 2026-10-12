@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -236,6 +239,42 @@ def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
     ) in sent
 
 
+@pytest.mark.parametrize("tool_id", [AIToolID.CODEX, AIToolID.CURSOR])
+def test_brokered_native_failure_emits_failed_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_id: AIToolID
+) -> None:
+    frames = (
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "failed"},
+                },
+            },
+        ]
+        if tool_id is AIToolID.CODEX
+        else [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            {"id": 4, "result": {"stopReason": "error"}},
+        ]
+    )
+    _install_rpc(monkeypatch, frames)
+
+    result = AbstractAITool.get(tool_id).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.events[-1].kind is HeadlessEventKind.TERMINAL
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
+
+
 def test_opencode_ordinary_session_does_not_select_plan_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -245,6 +284,7 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
         def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
             self.calls: list[tuple[str, str, Any]] = []
             self.active_session_id: str | None = None
+            self.prompt_id: str | None = None
             self.instances.append(self)
 
         def start(self) -> None:
@@ -254,23 +294,33 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
             self.calls.append((method, path, payload))
             if method == "POST" and path == "/session":
                 return {"id": "ses-exact"}
+            if path == "/session/ses-exact/prompt_async":
+                self.prompt_id = payload["messageID"]
+                return None
             if path in {"/question", "/permission"}:
                 return []
             if path == "/session/ses-exact/message":
                 return [
+                    {"info": {"id": self.prompt_id, "sessionID": "ses-exact", "role": "user"}},
                     {
                         "info": {
                             "id": "msg-exact",
                             "sessionID": "ses-exact",
                             "role": "assistant",
+                            "parentID": self.prompt_id,
                             "finish": "stop",
                             "time": {"completed": 1},
                         }
-                    }
+                    },
                 ]
             if path == "/session/ses-exact/message/msg-exact":
                 return {
-                    "info": {"id": "msg-exact", "sessionID": "ses-exact", "role": "assistant"},
+                    "info": {
+                        "id": "msg-exact",
+                        "sessionID": "ses-exact",
+                        "role": "assistant",
+                        "parentID": self.prompt_id,
+                    },
                     "parts": [{"type": "text", "text": "Completed."}],
                 }
             return None
@@ -643,8 +693,6 @@ def test_opencode_sse_parser_handles_fragmentation_and_rejects_bad_frames() -> N
 
 
 def test_opencode_sse_progress_uses_exact_session_binding() -> None:
-    import queue
-
     from crossby.ai_tools.opencode_server import OpenCodeServer
 
     server = OpenCodeServer.__new__(OpenCodeServer)
@@ -690,6 +738,66 @@ def test_opencode_sse_progress_uses_exact_session_binding() -> None:
     assert context.events == [(HeadlessEventKind.TOOL_COMPLETED, {"tool_call_id": "tool-exact"})]
 
 
+def test_opencode_sse_survives_quiet_period_longer_than_200ms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    connections: list[Any] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def getheader(self, _name: str, _default: str = "") -> str:
+            return "text/event-stream"
+
+        def read1(self, _amount: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                time.sleep(0.25)
+                if connections[0].timeout < 0.25:
+                    raise TimeoutError("socket expired during quiet period")
+                return b'data: {"type":"session.status","properties":{}}\n\n'
+            return b""
+
+    class FakeConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            self.timeout = timeout
+            connections.append(self)
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> FakeResponse:
+            return response
+
+        def close(self) -> None:
+            pass
+
+    response = FakeResponse()
+    monkeypatch.setattr(
+        "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
+    )
+    server = OpenCodeServer.__new__(OpenCodeServer)
+    server.port = 1234
+    server.directory = tmp_path
+    server.authorization = "Basic fixture"
+    server.deadline = time.monotonic() + 2
+    server._event_stop = threading.Event()
+    server._event_error = None
+    server._event_connection = None
+    server._events = queue.Queue()
+    server.open_events()
+    assert server._event_thread is not None
+    server._event_thread.join(timeout=1)
+    assert not server._event_thread.is_alive()
+    assert server._event_error is None
+    assert server._events.get_nowait()["type"] == "session.status"
+
+
 def test_antigravity_brokered_continuation_stops_after_nine_invocations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -729,6 +837,33 @@ def test_antigravity_brokered_continuation_stops_after_nine_invocations(
     assert result.conversation_id == "conv-exact"
     assert len(calls) == 9
     assert "nine native continuation" in " ".join(result.warnings)
+
+
+def test_antigravity_nonzero_exit_emits_failed_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools import headless_cli
+
+    class FakeOwner:
+        def __init__(self, _context: Any) -> None:
+            pass
+
+    monkeypatch.setattr(headless_cli, "ResumableManagedCLIController", FakeOwner)
+    monkeypatch.setattr(
+        headless_cli,
+        "run_managed_command",
+        lambda *_args, **_kwargs: HeadlessCommandOutput(
+            1,
+            json.dumps({"status": "FAILED", "conversation_id": "conv-exact"}),
+            "",
+        ),
+    )
+    result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
 
 
 def test_codex_resume_starts_normal_turn_on_exact_thread(
@@ -835,6 +970,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
             self.calls: list[tuple[str, str, Any]] = []
             self.active_session_id: str | None = None
             self.prompted = False
+            self.prompt_id: str | None = None
             self.instances.append(self)
 
         def start(self) -> None:
@@ -848,6 +984,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
                 return []
             if path == "/session/ses-existing/prompt_async":
                 self.prompted = True
+                self.prompt_id = payload["messageID"]
                 return None
             if path == "/session/ses-existing/message":
                 old = {
@@ -859,17 +996,39 @@ def test_opencode_resume_ignores_historical_assistant_message(
                         "time": {"completed": 1},
                     }
                 }
+                pending = {
+                    "info": {"id": "msg-pending", "sessionID": "ses-existing", "role": "user"}
+                }
                 if not self.prompted:
-                    return [old]
+                    return [old, pending]
                 return [
                     old,
+                    pending,
+                    {
+                        "info": {
+                            "id": self.prompt_id,
+                            "sessionID": "ses-existing",
+                            "role": "user",
+                        }
+                    },
                     {
                         "info": {
                             "id": "msg-new",
                             "sessionID": "ses-existing",
                             "role": "assistant",
+                            "parentID": self.prompt_id,
                             "finish": "stop",
                             "time": {"completed": 2},
+                        }
+                    },
+                    {
+                        "info": {
+                            "id": "msg-foreign",
+                            "sessionID": "ses-existing",
+                            "role": "assistant",
+                            "parentID": "msg-pending",
+                            "finish": "stop",
+                            "time": {"completed": 3},
                         }
                     },
                 ]
@@ -879,6 +1038,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
                         "id": "msg-new",
                         "sessionID": "ses-existing",
                         "role": "assistant",
+                        "parentID": self.prompt_id,
                     },
                     "parts": [{"type": "text", "text": "New answer."}],
                 }
@@ -891,6 +1051,13 @@ def test_opencode_resume_ignores_historical_assistant_message(
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "New answer."
+    prompt = next(
+        payload
+        for method, path, payload in FakeServer.instances[0].calls
+        if method == "POST" and path.endswith("/prompt_async")
+    )
+    assert prompt["messageID"].startswith("msg_")
+    assert len(prompt["messageID"]) == 30
     assert not any(
         method == "POST" and path == "/session"
         for method, path, _payload in FakeServer.instances[0].calls

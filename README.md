@@ -455,8 +455,9 @@ only when `interaction_mode=BROKERED` and an interaction handler is supplied:
 
 Brokered requests reject unsupported output, schema, resume, approval, sandbox,
 and command policy combinations during preflight. Codex and Cursor preserve
-native request and option IDs; OpenCode binds replies to the fresh session and
-pending request; Antigravity permits at most nine invocations under one deadline.
+native request and option IDs; OpenCode binds assistant completion to the
+submitted user message ID and pending interactions to their native request IDs;
+Antigravity permits at most nine invocations under one deadline.
 Antigravity exposes no authoritative permission channel, so it never advertises
 permission brokering. Codex, Cursor, and OpenCode accept only text in brokered
 mode; Antigravity accepts JSON or JSONL, including schema-constrained output.

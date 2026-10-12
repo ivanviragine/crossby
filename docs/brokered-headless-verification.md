@@ -10,7 +10,7 @@ runtime terminal checks, and cleanup.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` for the active session, then process cleanup |
-| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, pending question/permission ID, new completed assistant message ID | `POST /session/{id}/abort`, then process cleanup |
+| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID`, pending question/permission ID | `POST /session/{id}/abort`, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
 
 Codex's 0.162.1 app-server schema was generated with
@@ -47,15 +47,17 @@ fixtures cover the exact load request, replay binding, and new prompt result.
 
 OpenCode keeps its random Basic Auth credential inside the owned loopback
 client. It polls only the bound session's pending question and permission APIs
-and accepts a final assistant message only when the exact session and message
-IDs match and the native finish reason is `stop`. A bounded incremental SSE
+and accepts a final assistant message only when its native `parentID` matches
+the submitted user message ID, the exact session and message IDs match, and
+the native finish reason is `stop`. A bounded incremental SSE
 reader normalizes matching assistant, tool, and usage progress when the server
 delivers it. Polling remains the terminal authority because [some 1.18.x builds](https://github.com/anomalyco/opencode/issues/46733)
 have an `/event` endpoint that stays quiet during a live session. The current
 ordinary driver does not expose response schemas or command-policy changes on
 resume. It records historical message IDs before prompting a resumed session
-so an old assistant answer cannot become the new result. The HTTP request and
-body read are bounded by the shared deadline and fixed size
+so an old assistant answer cannot become the new result; a concurrent reply
+to another prompt cannot satisfy this binding. The SSE read and HTTP request
+share the session deadline, and HTTP bodies have a fixed size
 limit. Permission reply IDs use the native pending request ID; no command is
 inferred from display patterns.
 On the installed OpenCode 1.19.0 build, a loopback smoke probe created a
