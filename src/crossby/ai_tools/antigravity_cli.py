@@ -557,6 +557,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         """Continue exact native questions under one runtime and nine invocations."""
         from crossby.ai_tools.headless_cli import (
             MISSING,
+            BoundedProgress,
             ResumableManagedCLIController,
             capture_failure_warnings,
             complete_session,
@@ -574,6 +575,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         answer: str | None = None
         warnings_seen: list[str] = []
         streaming = request.native_output is HeadlessNativeOutput.JSONL
+        progress = BoundedProgress(context)
         for _invocation in range(9):
             output = run_managed_command(
                 context,
@@ -596,6 +598,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                         provenance_of=lambda frame: {
                             "conversation_id": _agy_conversation_id(frame)
                         },
+                        progress=progress,
                     )
                     if streaming
                     else None

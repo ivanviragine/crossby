@@ -565,6 +565,14 @@ class HeadlessRuntimeContext:
                 HeadlessTerminalStatus.FAILED,
                 "The native permission requires one explicit option ID.",
             )
+        if response.outcome not in {
+            PlanInteractionOutcome.APPROVED,
+            PlanInteractionOutcome.ANSWERED,
+        }:
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.FAILED,
+                "The native permission option requires explicit approval or an answer.",
+            )
         # The native helper uses the exact selected ID. Its historical
         # approve/deny convenience branches are bypassed in brokered mode.
         return SessionInteractionResponse(

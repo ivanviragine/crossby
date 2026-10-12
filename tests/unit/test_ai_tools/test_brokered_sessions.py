@@ -239,6 +239,41 @@ def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
     ) in sent
 
 
+def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chunks = [
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "ses-exact",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "msg-exact",
+                    "content": {"type": "text", "text": "x"},
+                },
+            },
+        }
+        for _ in range(4200)
+    ]
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            *chunks,
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "x" * 4200
+    assert sum(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events) == 512
+
+
 @pytest.mark.parametrize("tool_id", [AIToolID.CODEX, AIToolID.CURSOR])
 def test_brokered_native_failure_emits_failed_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_id: AIToolID
@@ -338,6 +373,7 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
         if method == "POST" and path.endswith("/prompt_async")
     ]
     assert len(prompts) == 1 and "agent" not in prompts[0]
+    assert FakeServer.instances[0].active_session_id == "ses-exact"
 
 
 def test_antigravity_continuation_reuses_exact_conversation_without_plan_mode(
@@ -874,6 +910,53 @@ def test_antigravity_brokered_continuation_stops_after_nine_invocations(
     assert "nine native continuation" in " ".join(result.warnings)
 
 
+def test_antigravity_stream_progress_is_bounded_across_continuations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeOwner:
+        def __init__(self, _context: Any) -> None:
+            pass
+
+    invocations = 0
+
+    def run(_context: Any, *, on_stdout_lines: Any, **_kwargs: Any) -> HeadlessCommandOutput:
+        nonlocal invocations
+        invocations += 1
+        envelope: dict[str, Any] = {
+            "status": "WAITING_FOR_INPUT" if invocations < 9 else "SUCCESS",
+            "conversation_id": "conv-exact",
+        }
+        if invocations < 9:
+            envelope["question"] = {
+                "id": "choice",
+                "prompt": "Continue?",
+                "options": [{"id": "yes", "label": "Yes"}],
+            }
+        else:
+            envelope["response"] = "Done."
+        lines = [json.dumps({"event": "step_update", "conversation_id": "conv-exact"})] * 520
+        lines.append(json.dumps({"event": "result", "result": envelope}))
+        on_stdout_lines(lines)
+        return HeadlessCommandOutput(0, "\n".join(lines), "")
+
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.ResumableManagedCLIController", FakeOwner)
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.run_managed_command", run)
+    result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSONL),
+        lambda _interaction: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED, option_id="yes"
+        ),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_json == {
+        "status": "SUCCESS",
+        "conversation_id": "conv-exact",
+        "response": "Done.",
+    }
+    assert invocations == 9
+    assert sum(event.kind is HeadlessEventKind.PROGRESS for event in result.events) == 512
+
+
 def test_antigravity_nonzero_exit_emits_failed_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1086,6 +1169,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "New answer."
+    assert FakeServer.instances[0].active_session_id is None
     prompt = next(
         payload
         for method, path, payload in FakeServer.instances[0].calls

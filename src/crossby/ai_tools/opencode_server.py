@@ -517,6 +517,8 @@ def run_native_session(
     if request.resume_id is None:
         session = server.request("POST", "/session", session_request)
         session_id = _required_text(session, "id")
+        # Only a session created for this run is safe to abort as a whole.
+        server.active_session_id = session_id
     else:
         session_id = request.resume_id
         context.validate_provenance(session_id=session_id)
@@ -526,7 +528,6 @@ def run_native_session(
         native_directory = session.get("directory")
         if native_directory is not None and native_directory != str(request.working_dir):
             raise ValueError("OpenCode resumed a session from a different working directory")
-    server.active_session_id = session_id
     context.set_provenance(session_id=session_id)
     session_path = "/session/" + quote(session_id, safe="")
     existing_ids: set[str] = set()

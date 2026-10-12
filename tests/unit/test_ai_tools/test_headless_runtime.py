@@ -40,6 +40,9 @@ from crossby.models.ai import (
     PlanInteractionKind,
     PlanInteractionOutcome,
     PlanInteractionResponse,
+    PlanQuestionOption,
+    SessionInteraction,
+    SessionInteractionResponse,
     TokenUsage,
 )
 from crossby.utils.versioning import BinaryVersion
@@ -132,6 +135,30 @@ def _request(tmp_path: Path, **updates: Any) -> HeadlessSessionRequest:
     values: dict[str, Any] = {"prompt": "private session prompt", "working_dir": tmp_path}
     values.update(updates)
     return HeadlessSessionRequest(**values)
+
+
+@pytest.mark.parametrize("outcome", [PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED])
+def test_denied_permission_cannot_forward_selected_native_option(
+    tmp_path: Path, outcome: PlanInteractionOutcome
+) -> None:
+    interaction = SessionInteraction(
+        kind=PlanInteractionKind.PERMISSION,
+        question_id="permission-1",
+        prompt="Allow operation?",
+        options=(PlanQuestionOption(option_id="accept", label="Accept"),),
+        session_id="session-1",
+    )
+
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.native_interaction_response(interaction)
+        pytest.fail("A denied native option was forwarded")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED),
+        lambda _interaction: SessionInteractionResponse(outcome=outcome, option_id="accept"),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.denials
 
 
 def test_success_dispatches_ordered_events_and_one_terminal(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ runtime terminal checks, and cleanup.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` for the active session, then process cleanup |
-| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | `POST /session/{id}/abort`, then process cleanup |
+| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | session abort only for a newly created session, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
 
 Codex's 0.162.1 app-server schema was generated with
@@ -36,7 +36,10 @@ versioned native request shape is captured.
 Cursor ACP frames carry assistant message chunks, tool updates, usage updates,
 and a `session/prompt` stop reason. The ordinary driver requires `end_turn`
 and a clean process exit. It populates executable operation fields only from
-`rawInput`; a tool's display title cannot authorize a command. Cursor's
+`rawInput`; a tool's display title cannot authorize a command. The first 512
+message chunks produce visible events; later chunks still assemble the final
+response and refresh the idle deadline. A denied permission response cannot
+forward a selected native option, even if the handler supplies one. Cursor's
 brokered profile does not offer command policy or response schemas. It checks
 `agentCapabilities.loadSession` before loading a saved session, validates
 replayed session IDs, and rejects model or effort overrides on load.
@@ -60,7 +63,9 @@ so an old assistant answer cannot become the new result; a concurrent reply
 to another prompt cannot satisfy this binding. The SSE read and HTTP request
 share the session deadline, and HTTP bodies have a fixed size
 limit. Permission reply IDs use the native pending request ID; no command is
-inferred from display patterns.
+inferred from display patterns. A resumed session may also be in use by another
+client, so cleanup does not send its session-wide abort; it terminates this
+run's loopback server instead.
 On the installed OpenCode 1.19.0 build, a loopback smoke probe created a
 session, fetched that exact session by ID, and observed empty initial history;
 deterministic fixtures cover the resumed prompt and new-message binding.
@@ -71,7 +76,9 @@ conversation and the handler's selected native option, mapped to the native
 label required by the CLI. JSON schema output is accepted only when the native
 result echoes the requested schema and the final structured output validates.
 Antigravity does not expose an authoritative permission request or native
-abort, so its brokered profile advertises questions only.
+abort, so its brokered profile advertises questions only. Streaming progress
+uses one 512-event limit across all continuations while still refreshing the
+idle deadline for later frames.
 
 The deterministic wire tests are in
 `tests/unit/test_ai_tools/test_brokered_sessions.py`; existing collected-plan

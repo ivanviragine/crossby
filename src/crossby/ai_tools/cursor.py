@@ -855,6 +855,9 @@ class CursorAdapter(AbstractAITool):
             _cursor_acp_prompt_params(session_id, request.prompt),
         )
         context.emit(HeadlessEventKind.STARTED, message="Cursor ACP prompt started")
+        from crossby.ai_tools.headless_cli import BoundedProgress
+
+        chunk_progress = BoundedProgress(context)
         messages: dict[str, list[str]] = {}
         last_message_id: str | None = None
         usage_tokens: int | None = None
@@ -897,7 +900,7 @@ class CursorAdapter(AbstractAITool):
                         raise ValueError("Cursor message chunk lacked exact ID or text")
                     messages.setdefault(message_id, []).append(text)
                     last_message_id = message_id
-                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="chunk")
+                    chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="chunk")
                 elif kind in {"tool_call", "tool_call_update"}:
                     tool_id = update.get("toolCallId")
                     if not isinstance(tool_id, str) or not tool_id.strip():

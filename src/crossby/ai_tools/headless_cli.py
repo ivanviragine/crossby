@@ -87,13 +87,18 @@ class BoundedProgress:
         self._limit = limit
         self._emitted = 0
 
-    def note(self) -> None:
+    def note(
+        self,
+        kind: HeadlessEventKind = HeadlessEventKind.PROGRESS,
+        *,
+        message: str | None = None,
+    ) -> None:
         """Record one fixed progress milestone without exposing native frame data."""
         if self._emitted >= self._limit:
             self._context.mark_progress()
             return
         self._emitted += 1
-        self._context.emit(HeadlessEventKind.PROGRESS)
+        self._context.emit(kind, message=message)
 
 
 class ResumableManagedCLIController:
@@ -383,6 +388,7 @@ def frame_streamer(
     *,
     kind_of: Callable[[dict[str, Any]], str | None],
     provenance_of: Callable[[dict[str, Any]], dict[str, str | None]],
+    progress: BoundedProgress | None = None,
 ) -> StdoutLineHandler:
     """Turn live native JSONL frames into provenance and bounded progress.
 
@@ -391,7 +397,7 @@ def frame_streamer(
     soon as the transport emits it, which is what a timed-out session keeps in
     its safe partial result.
     """
-    progress = BoundedProgress(context)
+    progress = progress or BoundedProgress(context)
 
     def consume(lines: Sequence[str]) -> None:
         for line in lines:
