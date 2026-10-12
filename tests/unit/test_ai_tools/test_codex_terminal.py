@@ -186,29 +186,20 @@ def test_public_command_activates_plan_and_preserves_policy_effort() -> None:
     assert adapter.capabilities().plan_mode.supports_ready_event
 
 
-@pytest.mark.parametrize("version", [None, (0, 153, 4), (0, 155, 0), (1, 0, 0)])
-def test_unverified_terminal_versions_rejected(version: tuple[int, int, int] | None) -> None:
+@pytest.mark.parametrize("version", [None, (0, 153, 4)])
+def test_terminal_versions_below_floor_rejected(version: tuple[int, int, int] | None) -> None:
     with (
         patch("crossby.utils.versioning.detect_binary_version", return_value=version),
-        pytest.raises(PlanModeUnsupportedError),
+        pytest.raises(PlanModeUnsupportedError, match=r"0\.154\.0 or newer"),
     ):
         CodexAdapter().build_launch_command(plan_mode=True)
 
 
-def test_codex_0157_terminal_startup_is_allowed() -> None:
-    with patch("crossby.utils.versioning.detect_binary_version", return_value=(0, 157, 0)):
+@pytest.mark.parametrize("version", [(0, 154, 0), (0, 155, 0), (0, 157, 0), (0, 162, 1), (1, 0, 0)])
+def test_terminal_startup_allowed_at_or_above_floor(version: tuple[int, int, int]) -> None:
+    with patch("crossby.utils.versioning.detect_binary_version", return_value=version):
         command = CodexAdapter().build_launch_command(plan_mode=True)
     assert command[:3] == [sys.executable, "-m", "crossby.ai_tools.codex_terminal"]
-
-
-def test_unverified_codex_version_names_supported_families() -> None:
-    with (
-        patch("crossby.utils.versioning.detect_binary_version", return_value=(0, 156, 0)),
-        pytest.raises(PlanModeUnsupportedError) as error,
-    ):
-        CodexAdapter().build_launch_command(plan_mode=True)
-    assert "0.154.x or 0.157.x" in str(error.value)
-    assert "upgrade Codex CLI to 0.154.0 or newer" not in str(error.value)
 
 
 def test_headless_and_non_posix_terminal_plan_rejected() -> None:
