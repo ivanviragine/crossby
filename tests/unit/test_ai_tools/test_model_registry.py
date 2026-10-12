@@ -79,6 +79,30 @@ class TestModelRegistry:
             if model.startswith("claude-opus-5-5-")
         } == expected
 
+    @pytest.mark.parametrize(
+        ("family", "suffixes"),
+        [
+            # Sonnet 5.5 ships every effort, with no -fast or -thinking twin.
+            ("claude-sonnet-5-5", {"low", "medium", "high", "xhigh", "max"}),
+            # Haiku 5.5 ships every effort both with and without thinking.
+            (
+                "claude-haiku-5-5",
+                {
+                    *("low", "medium", "high", "xhigh", "max"),
+                    *(f"thinking-{e}" for e in ("low", "medium", "high", "xhigh", "max")),
+                },
+            ),
+        ],
+    )
+    def test_cursor_registry_includes_all_claude_5_5_variants(
+        self, family: str, suffixes: set[str]
+    ) -> None:
+        assert {
+            model.removeprefix(f"{family}-")
+            for model in get_models_for_tool("cursor")
+            if model.startswith(f"{family}-")
+        } == suffixes
+
     def test_cursor_registry_includes_all_fable_5_1_variants(self) -> None:
         suffixes = {
             "high",

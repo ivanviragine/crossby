@@ -83,8 +83,11 @@ class TestCatalogEffortVariants:
             ("claude-opus-5-5-medium", EffortLevel.MAX, "claude-opus-5-5-max"),
             # -fast is kept.
             ("claude-opus-5-5-medium-fast", EffortLevel.XHIGH, "claude-opus-5-5-xhigh-fast"),
+            ("claude-sonnet-5-5-medium", EffortLevel.MAX, "claude-sonnet-5-5-max"),
+            ("claude-haiku-5-5-low", EffortLevel.HIGH, "claude-haiku-5-5-high"),
             # <family>-thinking-<effort>: thinking is kept.
             ("claude-opus-4-8-thinking-low", EffortLevel.MAX, "claude-opus-4-8-thinking-max"),
+            ("claude-haiku-5-5-thinking-low", EffortLevel.XHIGH, "claude-haiku-5-5-thinking-xhigh"),
             (
                 "claude-opus-4-8-thinking-high-fast",
                 EffortLevel.MEDIUM,
