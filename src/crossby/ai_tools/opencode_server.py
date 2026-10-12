@@ -121,6 +121,7 @@ class OpenCodeServer:
         self._event_thread: threading.Thread | None = None
         self._events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_SSE_QUEUE_LIMIT)
         self._event_error: ValueError | None = None
+        self._bound_message_ids: set[str] = set()
         self._tool_states: dict[str, str] = {}
         password = secrets.token_urlsafe(32)
         self.authorization = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
@@ -214,8 +215,10 @@ class OpenCodeServer:
         )
         self._event_thread.start()
 
-    def drain_events(self, context: HeadlessRuntimeContext, session_id: str) -> None:
-        """Normalize only bounded events for the active native session."""
+    def drain_events(
+        self, context: HeadlessRuntimeContext, session_id: str, prompt_id: str
+    ) -> None:
+        """Normalize only bounded events for the active native prompt."""
         if self._event_error is not None:
             raise self._event_error
         for _ in range(_SSE_QUEUE_LIMIT):
@@ -231,15 +234,23 @@ class OpenCodeServer:
                 info = properties.get("info")
                 if not isinstance(info, dict):
                     raise ValueError("OpenCode SSE message update omitted info")
-                if info.get("sessionID") == session_id and info.get("role") == "assistant":
-                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
-                    if isinstance(info.get("tokens"), dict):
-                        context.emit(HeadlessEventKind.USAGE, message="usage updated")
+                if (
+                    info.get("sessionID") != session_id
+                    or info.get("role") != "assistant"
+                    or info.get("parentID") != prompt_id
+                ):
+                    continue
+                self._bound_message_ids.add(_required_text(info, "id"))
+                context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
+                if isinstance(info.get("tokens"), dict):
+                    context.emit(HeadlessEventKind.USAGE, message="usage updated")
             elif kind == "message.part.updated":
                 part = properties.get("part")
                 if not isinstance(part, dict):
                     raise ValueError("OpenCode SSE part update omitted its part")
                 if part.get("sessionID") != session_id or part.get("type") != "tool":
+                    continue
+                if part.get("messageID") not in self._bound_message_ids:
                     continue
                 part_id = _required_text(part, "id")
                 state = part.get("state")
@@ -543,7 +554,7 @@ def run_native_session(
     while True:
         context.checkpoint()
         if hasattr(server, "drain_events"):
-            server.drain_events(context, session_id)
+            server.drain_events(context, session_id, prompt_id)
         for question in _prompt_bound_requests(
             server, server.request("GET", "/question"), session_id, prompt_id
         ):

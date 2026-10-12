@@ -692,22 +692,52 @@ def test_opencode_sse_parser_handles_fragmentation_and_rejects_bad_frames() -> N
         BoundedSSEParser().feed(b"data: " + b"x" * (1024 * 1024 + 1))
 
 
-def test_opencode_sse_progress_uses_exact_session_binding() -> None:
+def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
     from crossby.ai_tools.opencode_server import OpenCodeServer
 
     server = OpenCodeServer.__new__(OpenCodeServer)
     server._event_error = None
     server._events = queue.Queue()
+    server._bound_message_ids = set()
     server._tool_states = {}
+    server._events.put(
+        {
+            "type": "message.updated",
+            "properties": {
+                "info": {
+                    "id": "msg-foreign",
+                    "sessionID": "ses-exact",
+                    "role": "assistant",
+                    "parentID": "prompt-foreign",
+                    "tokens": {},
+                }
+            },
+        }
+    )
     server._events.put(
         {
             "type": "message.part.updated",
             "properties": {
                 "part": {
-                    "id": "tool-other",
-                    "sessionID": "ses-other",
+                    "id": "tool-foreign",
+                    "sessionID": "ses-exact",
+                    "messageID": "msg-foreign",
                     "type": "tool",
                     "state": {"status": "running"},
+                }
+            },
+        }
+    )
+    server._events.put(
+        {
+            "type": "message.updated",
+            "properties": {
+                "info": {
+                    "id": "msg-current",
+                    "sessionID": "ses-exact",
+                    "role": "assistant",
+                    "parentID": "prompt-exact",
+                    "tokens": {},
                 }
             },
         }
@@ -719,6 +749,7 @@ def test_opencode_sse_progress_uses_exact_session_binding() -> None:
                 "part": {
                     "id": "tool-exact",
                     "sessionID": "ses-exact",
+                    "messageID": "msg-current",
                     "type": "tool",
                     "state": {"status": "completed"},
                 }
@@ -728,14 +759,18 @@ def test_opencode_sse_progress_uses_exact_session_binding() -> None:
 
     class FakeContext:
         def __init__(self) -> None:
-            self.events: list[tuple[HeadlessEventKind, Any]] = []
+            self.events: list[tuple[HeadlessEventKind, str | None, Any]] = []
 
         def emit(self, kind: HeadlessEventKind, **fields: Any) -> None:
-            self.events.append((kind, fields.get("payload")))
+            self.events.append((kind, fields.get("message"), fields.get("payload")))
 
     context = FakeContext()
-    server.drain_events(context, "ses-exact")
-    assert context.events == [(HeadlessEventKind.TOOL_COMPLETED, {"tool_call_id": "tool-exact"})]
+    server.drain_events(context, "ses-exact", "prompt-exact")
+    assert context.events == [
+        (HeadlessEventKind.ASSISTANT_MESSAGE, "message update", None),
+        (HeadlessEventKind.USAGE, "usage updated", None),
+        (HeadlessEventKind.TOOL_COMPLETED, None, {"tool_call_id": "tool-exact"}),
+    ]
 
 
 def test_opencode_sse_survives_quiet_period_longer_than_200ms(
