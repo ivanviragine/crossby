@@ -231,10 +231,12 @@ class TestAntigravityModelParsing:
             ("gemini-3.7-flash-high", "gemini-3.7-flash"),
             ("gemini-3.7-flash-minimal", "gemini-3.7-flash-minimal"),
             ("claude-opus-4-6-thinking", "claude-opus-4-6-thinking"),
+            ("claude-opus-5-5-low", "claude-opus-5-5"),
+            ("claude-sonnet-5-5-high", "claude-sonnet-5-5"),
             ("gpt-oss-120b-medium", "gpt-oss-120b-medium"),
         ],
     )
-    def test_normalizes_only_known_gemini_effort_suffixes(self, model: str, expected: str) -> None:
+    def test_normalizes_only_known_effort_suffixes(self, model: str, expected: str) -> None:
         assert PROBE_MODULE.normalize_antigravity_model_id(model) == expected
 
     def test_extracts_models_without_hard_coded_family_prefix(self) -> None:

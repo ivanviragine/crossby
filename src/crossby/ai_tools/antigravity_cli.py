@@ -60,16 +60,20 @@ if TYPE_CHECKING:
 # Only these base families require/encode effort (verified via `agy models` + live
 # probing); every other catalog model launches bare and ignores effort. Per-model
 # tiers differ: the flash families accept low/medium/high, gemini-3.1-pro only low/high.
+# From the Claude 5.5 generation on, agy lists Claude models effort-expanded too
+# (claude-opus-5-5-low/-medium/-high); the older claude-*-4-6 IDs stay bare.
 _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
     "gemini-3.8-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.7-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.6-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.5-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.1-pro": (EffortLevel.LOW, EffortLevel.HIGH),
+    "claude-opus-5-5": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
+    "claude-sonnet-5-5": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
 }
 
 # These suffixes are part of the exact provider model ID, not a reasoning
-# effort that Crossby may rewrite. Keep this separate from the Gemini effort
+# effort that Crossby may rewrite. Keep this separate from the effort
 # table so a caller-supplied effort remains irrelevant for these fixed IDs.
 _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS = frozenset({"gpt-oss-120b-medium"})
 
@@ -270,7 +274,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             if request.effort is not None and (tiers is None or request.effort not in tiers):
                 raise HeadlessRequestError(
                     "Antigravity CLI cannot preserve the requested reasoning effort for "
-                    f"model {request.model!r}. Choose a Gemini model with a matching native "
+                    f"model {request.model!r}. Choose a model with a matching native "
                     "effort tier, or omit effort.",
                     tool_id=self.TOOL_ID,
                     capability=self.capabilities().headless,
@@ -737,7 +741,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         if not _agy_model_encodes_effort(request.model, request.effort):
             raise PlanSessionUnsupportedError(
                 f"Antigravity CLI cannot preserve effort={request.effort.value!r} with "
-                f"{request.model!r}. Supply a compatible Gemini model/tier.",
+                f"{request.model!r}. Supply a compatible model/tier.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
@@ -1018,12 +1022,12 @@ class AntigravityCLIAdapter(AbstractAITool):
         """Bake reasoning effort into the model ID — the single form ``agy`` accepts.
 
         ``agy`` rejects a separate ``--effort`` on a suffixed model and *requires*
-        an effort on a bare Gemini model, so effort is encoded in the ID (the
+        an effort on a bare Gemini or Claude 5.5 model, so effort is encoded in the ID (the
         Cursor ``-thinking`` pattern) and no ``--effort`` flag is ever emitted.
 
         Covers, in one pass:
 
-        - **Fixed/bare models** (``claude-*``, ``gpt-oss-120b*``): returned
+        - **Fixed/bare models** (``claude-*-4-6*``, ``gpt-oss-120b*``): returned
           unchanged — effort does not apply. ``gpt-oss-120b-medium`` is an
           exact provider ID whose suffix is part of its name, not an effort.
         - **Precedence**: interactive launches keep an effort already baked
@@ -1059,7 +1063,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                     stacklevel=2,
                 )
                 return base
-            # Bare model (claude-*, gpt-oss-120b): agy launches it with no effort.
+            # Bare model (claude-*-4-6, gpt-oss-120b): agy launches it with no effort.
             return model
 
         # A suffix on the model ID wins over a separately supplied effort.

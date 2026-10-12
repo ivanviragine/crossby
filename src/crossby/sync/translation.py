@@ -142,6 +142,7 @@ MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
 CODEX_TO_CLAUDE_DEFAULTS: dict[str, str] = {
     "gpt-6-astra": "claude-fable-5.1",
     "gpt-6-sol": "claude-opus-5.5",
+    "gpt-6.1-sol": "claude-opus-5.5",
     "gpt-6-luna": "claude-sonnet-5",
     "gpt-5.6-sol": "claude-opus-5.5",
     "gpt-5.6-terra": "claude-sonnet-5",
