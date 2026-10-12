@@ -10,7 +10,7 @@ runtime terminal checks, and cleanup.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` for the active session, then process cleanup |
-| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID`, pending question/permission ID | `POST /session/{id}/abort`, then process cleanup |
+| OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | `POST /session/{id}/abort`, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
 
 Codex's 0.162.1 app-server schema was generated with
@@ -46,8 +46,9 @@ initialize probe; the local CLI required a Cursor login before a live
 fixtures cover the exact load request, replay binding, and new prompt result.
 
 OpenCode keeps its random Basic Auth credential inside the owned loopback
-client. It polls only the bound session's pending question and permission APIs
-and accepts a final assistant message only when its native `parentID` matches
+client. It polls the bound session's pending question and permission APIs,
+answering only requests whose tool message belongs to the submitted prompt.
+It accepts a final assistant message only when its native `parentID` matches
 the submitted user message ID, the exact session and message IDs match, and
 the native finish reason is `stop`. A bounded incremental SSE
 reader normalizes matching assistant, tool, and usage progress when the server

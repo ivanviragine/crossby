@@ -544,7 +544,9 @@ def run_native_session(
         context.checkpoint()
         if hasattr(server, "drain_events"):
             server.drain_events(context, session_id)
-        for question in _bound_requests(server.request("GET", "/question"), session_id):
+        for question in _prompt_bound_requests(
+            server, server.request("GET", "/question"), session_id, prompt_id
+        ):
             request_id = _required_text(question, "id")
             if request_id in answered_requests:
                 if answered_requests[request_id] != "question":
@@ -554,7 +556,9 @@ def run_native_session(
                 server, question, session_id, context.native_interaction_response, capability
             )
             answered_requests[request_id] = "question"
-        for permission in _bound_requests(server.request("GET", "/permission"), session_id):
+        for permission in _prompt_bound_requests(
+            server, server.request("GET", "/permission"), session_id, prompt_id
+        ):
             request_id = _required_text(permission, "id")
             if request_id in answered_requests:
                 if answered_requests[request_id] != "permission":
@@ -728,6 +732,41 @@ def _bound_requests(value: Any, session_id: str) -> list[dict[str, Any]]:
     request_ids = [_required_text(item, "id") for item in bound]
     if len(request_ids) != len(set(request_ids)):
         raise ValueError("OpenCode returned duplicate pending request IDs")
+    return bound
+
+
+def _prompt_bound_requests(
+    server: OpenCodeServer, value: Any, session_id: str, prompt_id: str
+) -> list[dict[str, Any]]:
+    """Select pending tool calls whose assistant message belongs to this prompt."""
+    bound = []
+    for request in _bound_requests(value, session_id):
+        tool = request.get("tool")
+        message_id = _required_text(tool, "messageID")
+        call_id = _required_text(tool, "callID")
+        message = server.request(
+            "GET", f"/session/{quote(session_id, safe='')}/message/{quote(message_id, safe='')}"
+        )
+        info = message.get("info") if isinstance(message, dict) else None
+        if not isinstance(info, dict) or (
+            info.get("id") != message_id or info.get("sessionID") != session_id
+        ):
+            raise ValueError("OpenCode pending request has an unbound tool message")
+        if info.get("role") != "assistant" or info.get("parentID") != prompt_id:
+            continue
+        parts = message.get("parts")
+        if (
+            not isinstance(parts, list)
+            or sum(
+                isinstance(part, dict)
+                and part.get("type") == "tool"
+                and part.get("callID") == call_id
+                for part in parts
+            )
+            != 1
+        ):
+            raise ValueError("OpenCode pending request has no matching tool call")
+        bound.append(request)
     return bound
 
 

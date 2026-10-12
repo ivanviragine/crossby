@@ -1062,3 +1062,111 @@ def test_opencode_resume_ignores_historical_assistant_message(
         method == "POST" and path == "/session"
         for method, path, _payload in FakeServer.instances[0].calls
     )
+
+
+@pytest.mark.parametrize("kind", ["question", "permission"])
+def test_opencode_resume_answers_only_current_prompts_requests(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeServer:
+        instance: ClassVar[FakeServer]
+
+        def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
+            self.calls: list[tuple[str, str, Any]] = []
+            self.active_session_id: str | None = None
+            self.prompt_id: str | None = None
+            FakeServer.instance = self
+
+        def start(self) -> None:
+            return None
+
+        def request(self, method: str, path: str, payload: Any = None) -> Any:
+            self.calls.append((method, path, payload))
+            if path == "/session/ses-existing" and method == "GET":
+                return {"id": "ses-existing", "directory": str(tmp_path)}
+            if path == "/session/ses-existing/prompt_async":
+                self.prompt_id = payload["messageID"]
+                return None
+            if path == f"/{kind}":
+                requests = []
+                for owner in ("foreign", "current"):
+                    pending = {
+                        "id": f"{kind}-{owner}",
+                        "sessionID": "ses-existing",
+                        "tool": {"messageID": f"msg-{owner}", "callID": f"call-{owner}"},
+                    }
+                    if kind == "question":
+                        pending["questions"] = [
+                            {"question": "Continue?", "options": [{"label": "Yes"}]}
+                        ]
+                    else:
+                        pending.update(permission="bash", patterns=["git status"])
+                    requests.append(pending)
+                return requests
+            if path == f"/{'permission' if kind == 'question' else 'question'}":
+                return []
+            if path in {
+                "/session/ses-existing/message/msg-foreign",
+                "/session/ses-existing/message/msg-current",
+            }:
+                owner = path.rsplit("-", 1)[-1]
+                return {
+                    "info": {
+                        "id": f"msg-{owner}",
+                        "sessionID": "ses-existing",
+                        "role": "assistant",
+                        "parentID": "msg-old" if owner == "foreign" else self.prompt_id,
+                    },
+                    "parts": [{"type": "tool", "callID": f"call-{owner}", "tool": "question"}],
+                }
+            if path == "/session/ses-existing/message":
+                history = [{"info": {"id": "msg-old", "sessionID": "ses-existing"}}]
+                if self.prompt_id is None:
+                    return history
+                return [
+                    *history,
+                    {"info": {"id": self.prompt_id, "sessionID": "ses-existing", "role": "user"}},
+                    {
+                        "info": {
+                            "id": "msg-done",
+                            "sessionID": "ses-existing",
+                            "role": "assistant",
+                            "parentID": self.prompt_id,
+                            "finish": "stop",
+                            "time": {"completed": 1},
+                        }
+                    },
+                ]
+            if path == "/session/ses-existing/message/msg-done":
+                return {
+                    "info": {
+                        "id": "msg-done",
+                        "sessionID": "ses-existing",
+                        "role": "assistant",
+                        "parentID": self.prompt_id,
+                    },
+                    "parts": [{"type": "text", "text": "Current answer."}],
+                }
+            if path == f"/{kind}/{kind}-current/reply":
+                return True
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.OpenCodeServer", FakeServer)
+    seen: list[SessionInteraction] = []
+
+    def answer(interaction: SessionInteraction) -> SessionInteractionResponse:
+        seen.append(interaction)
+        return SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id="Yes" if kind == "question" else "once",
+        )
+
+    result = AbstractAITool.get(AIToolID.OPENCODE).run_headless_session(
+        _request(tmp_path, resume_id="ses-existing"), answer
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Current answer."
+    assert [interaction.request_id for interaction in seen] == [f"{kind}-current"]
+    replies = [path for method, path, _ in FakeServer.instance.calls if method == "POST"]
+    assert f"/{kind}/{kind}-current/reply" in replies
+    assert f"/{kind}/{kind}-foreign/reply" not in replies
