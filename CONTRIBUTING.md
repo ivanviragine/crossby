@@ -313,6 +313,20 @@ direct child, and bound worker joins. Terminal-event evidence, native status,
 exit status, and caller schema validation are reconciled before exactly one
 terminal event is delivered.
 
+Brokered profiles live in `HeadlessCapability.brokered`; the legacy flat fields
+remain the unattended contract. Preflight and runtime use the selected profile,
+including its version floor and interaction kinds. Protocol adapters use
+`ProtocolSessionController` to register one cleanup chain, track live JSON-RPC
+request IDs, and block late or duplicate replies. Antigravity uses
+`ResumableManagedCLIController` to rotate continuation processes under the same
+deadline and cleanup registration. Preserve exact native session, turn,
+conversation, request, and option IDs. Derive executable command fields only
+from native raw input; display text is never authority for command policy.
+Collected-plan entry points retain their artifact checks and native plan-mode
+selection. Keep the ordinary brokered path free of plan mode and plan artifacts.
+The checked behavior and version floors are documented in
+`docs/brokered-headless-verification.md`.
+
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget
 for blocking work and exit when cancelled; the runtime continues hard process

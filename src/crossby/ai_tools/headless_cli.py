@@ -96,6 +96,74 @@ class BoundedProgress:
         self._context.emit(HeadlessEventKind.PROGRESS)
 
 
+class ResumableManagedCLIController:
+    """Keep one runtime cleanup registration across continuation processes."""
+
+    def __init__(self, context: HeadlessRuntimeContext) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[bytes] | None = None
+        self._input_stream: IO[bytes] | None = None
+        self._workers: tuple[threading.Thread, ...] = ()
+        self.cleanup_requested = threading.Event()
+        context.register_cleanup(
+            HeadlessCleanupHooks(
+                close_input=self._close_input,
+                terminate=self._terminate,
+                force_kill=self._kill,
+                reap=self._reap,
+                join_workers=self._join,
+            )
+        )
+
+    def rotate(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("cannot rotate a live managed CLI process")
+            self._process = process
+            self._input_stream = process.stdin
+            self._workers = ()
+
+    def set_workers(self, workers: list[threading.Thread]) -> None:
+        with self._lock:
+            self._workers = tuple(workers)
+
+    def current(self) -> subprocess.Popen[bytes] | None:
+        with self._lock:
+            return self._process
+
+    def _close_input(self, _cleanup: HeadlessCleanupContext) -> None:
+        self.cleanup_requested.set()
+        with self._lock:
+            stream = self._input_stream
+        if stream is not None and not stream.closed:
+            with suppress(OSError, ValueError):
+                stream.close()
+
+    def _terminate(self, _cleanup: HeadlessCleanupContext) -> None:
+        child = self.current()
+        if child is not None and child.poll() is None:
+            with suppress(OSError):
+                child.terminate()
+
+    def _kill(self, _cleanup: HeadlessCleanupContext) -> None:
+        child = self.current()
+        if child is not None:
+            kill_process_group(child)
+
+    def _reap(self, cleanup: HeadlessCleanupContext) -> None:
+        child = self.current()
+        if child is not None and cleanup.remaining_seconds() > 0:
+            with suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=cleanup.remaining_seconds())
+
+    def _join(self, cleanup: HeadlessCleanupContext) -> None:
+        with self._lock:
+            workers = self._workers
+        join_threads_until(
+            tuple(thread for thread in workers if thread.ident is not None), cleanup.deadline
+        )
+
+
 def run_managed_command(
     context: HeadlessRuntimeContext,
     *,
@@ -104,6 +172,7 @@ def run_managed_command(
     env: dict[str, str] | None = None,
     stdin_text: str | None = None,
     on_stdout_lines: StdoutLineHandler | None = None,
+    controller: ResumableManagedCLIController | None = None,
 ) -> HeadlessCommandOutput:
     """Run one owned native CLI process under the managed headless boundary.
 
@@ -122,55 +191,10 @@ def run_managed_command(
     context.checkpoint()
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     proc: subprocess.Popen[bytes] | None = None
-    proc_lock = threading.Lock()
     workers: list[threading.Thread] = []
     input_stream: IO[bytes] | None = None
-    cleanup_requested = threading.Event()
-
-    def current_process() -> subprocess.Popen[bytes] | None:
-        with proc_lock:
-            return proc
-
-    def close_input(_cleanup: HeadlessCleanupContext) -> None:
-        # This is the first cleanup hook. Remember the state so a child that
-        # finishes spawning after cleanup has begun is synchronously torn down.
-        cleanup_requested.set()
-        if input_stream is not None and not input_stream.closed:
-            with suppress(OSError):
-                input_stream.close()
-
-    def terminate(_cleanup: HeadlessCleanupContext) -> None:
-        child = current_process()
-        if child is not None and child.poll() is None:
-            with suppress(OSError):
-                child.terminate()
-
-    def force_kill(_cleanup: HeadlessCleanupContext) -> None:
-        owned_process = current_process()
-        if owned_process is not None:
-            kill_process_group(owned_process)
-
-    def reap(cleanup: HeadlessCleanupContext) -> None:
-        child = current_process()
-        remaining = cleanup.remaining_seconds()
-        if child is not None and remaining > 0:
-            with suppress(subprocess.TimeoutExpired):
-                child.wait(timeout=remaining)
-
-    def join_workers(cleanup: HeadlessCleanupContext) -> None:
-        join_threads_until(tuple(workers), cleanup.deadline)
-
-    # Popen itself can block. Register hooks first so a deadline or cancellation
-    # that fires in that window cannot strand a child once Popen returns.
-    context.register_cleanup(
-        HeadlessCleanupHooks(
-            close_input=close_input,
-            terminate=terminate,
-            force_kill=force_kill,
-            reap=reap,
-            join_workers=join_workers,
-        )
-    )
+    # Register before Popen. A continuation reuses this same hook chain.
+    owner = controller or ResumableManagedCLIController(context)
     try:
         child = subprocess.Popen(
             argv,
@@ -181,18 +205,18 @@ def run_managed_command(
             stderr=subprocess.PIPE,
             **process_tree_popen_kwargs(),
         )
-        with proc_lock:
-            proc = child
+        proc = child
+        owner.rotate(child)
         own_process_tree(child)
     except (OSError, ValueError):
-        owned_process = current_process()
+        owned_process = owner.current()
         if owned_process is not None:
             kill_process_group(owned_process)
         raise context.transport_error(
             "The managed headless transport could not start the native CLI."
         ) from None
     assert proc is not None
-    if cleanup_requested.is_set():
+    if owner.cleanup_requested.is_set():
         kill_process_group(proc)
     # Cleanup may have run while Popen blocked. This checkpoint either lets the
     # normal launch continue or returns the already-published runtime outcome;
@@ -284,6 +308,7 @@ def run_managed_command(
             )
         )
 
+    owner.set_workers(workers)
     for worker in workers:
         worker.start()
     context.emit(HeadlessEventKind.STARTED)

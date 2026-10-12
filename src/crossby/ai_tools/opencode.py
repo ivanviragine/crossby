@@ -19,7 +19,9 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HeadlessCapability,
+    HeadlessEventKind,
     HeadlessInteractionMode,
+    HeadlessModeCapability,
     HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessPromptTransport,
@@ -29,6 +31,7 @@ from crossby.models.ai import (
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
+    PlanInteractionKind,
     PlanInteractionSupport,
     PlanLaunchApprovalMode,
     PlanModeActivation,
@@ -83,7 +86,32 @@ class OpenCodeAdapter(AbstractAITool):
                 # Every managed run uses the --format json event wire; TEXT
                 # returns the joined assistant text parts from those events.
                 native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.HTTP_SERVER,
+                    prompt_transport=HeadlessPromptTransport.API,
+                    native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_native_abort=True,
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    successful_native_statuses=("stop",),
+                    sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    command_policy_support=PlanCommandPolicySupport.NATIVE,
+                    supported_interaction_kinds=(
+                        PlanInteractionKind.QUESTION,
+                        PlanInteractionKind.PERMISSION,
+                    ),
+                    version_requirement="OpenCode with verified authenticated loopback APIs.",
+                    verified_version="1.18.29",
+                    limitation=(
+                        "Only text and fresh native sessions are verified; structured response "
+                        "schemas and native resumption are unavailable."
+                    ),
+                ),
                 supports_response_schema=False,
                 successful_native_statuses=("stop",),
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
@@ -178,10 +206,32 @@ class OpenCodeAdapter(AbstractAITool):
         """
         return ["--auto"]
 
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        if request.interaction_mode is not HeadlessInteractionMode.BROKERED:
+            return
+        from crossby.ai_tools.headless import HeadlessRequestError
+
+        if request.effort is not None and request.model is None:
+            raise HeadlessRequestError(
+                "OpenCode brokered effort requires an explicit provider/model ID.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if request.model is not None:
+            provider, separator, model = request.model.partition("/")
+            if not separator or not provider.strip() or not model.strip():
+                raise HeadlessRequestError(
+                    "OpenCode brokered sessions require a provider/model ID.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
         """Return OpenCode's complete command, including model and effort arguments."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"]
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
@@ -204,6 +254,29 @@ class OpenCodeAdapter(AbstractAITool):
         version: str,
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.headless_cli import usage_from
+            from crossby.ai_tools.opencode_server import run_native_session
+
+            brokered_session_id, _message_id, brokered_text, tokens = run_native_session(
+                request, context, self.capabilities().plan_mode
+            )
+            context.emit(
+                HeadlessEventKind.TERMINAL,
+                terminal_status=HeadlessTerminalStatus.SUCCEEDED,
+            )
+            return context.complete(
+                final_text=brokered_text,
+                native_status="stop",
+                session_id=brokered_session_id,
+                usage=usage_from(
+                    tokens,
+                    input_tokens="input",
+                    output_tokens="output",
+                    cached="cache_read",
+                    session_id=brokered_session_id,
+                ),
+            )
         """Run one unattended ``opencode run`` turn and normalize its raw events."""
         from crossby.ai_tools.headless_cli import (
             MISSING,

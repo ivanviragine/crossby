@@ -412,7 +412,9 @@ class AbstractAITool(ABC):
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
+            mode=normalized.interaction_mode,
         )
+        self._validate_headless_mode_version(normalized, detected)
         context = HeadlessRuntimeContext(
             tool_id=self.TOOL_ID,
             version=detected.text,
@@ -546,12 +548,15 @@ class AbstractAITool(ABC):
         detected = self._detect_headless_version_bounded(
             deadline=deadline,
             cancel_event=cancel_event,
+            mode=normalized.interaction_mode,
         )
+        self._validate_headless_mode_version(normalized, detected)
         return HeadlessSessionPreflight(
             tool=self.TOOL_ID,
             detected_version=detected.text,
             normalized_version=detected.normalized,
             capability=self.capabilities().headless,
+            mode_capability=self.capabilities().headless.profile_for(normalized.interaction_mode),
             working_dir=normalized.working_dir,
             trusted_dirs=normalized.trusted_dirs,
             checked=(
@@ -595,7 +600,15 @@ class AbstractAITool(ABC):
                 display_name=caps.display_name,
                 capability=capability,
             )
-        if capability.prompt_transport is HeadlessPromptTransport.ARGUMENT:
+        if request.interaction_mode not in capability.interaction_modes:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot preserve interaction_mode="
+                f"{request.interaction_mode.value!r} for managed headless sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        mode = capability.profile_for(request.interaction_mode)
+        if mode.prompt_transport is HeadlessPromptTransport.ARGUMENT:
             prompt_length = _argument_prompt_length(request.prompt)
             if prompt_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
                 raise HeadlessRequestError(
@@ -606,13 +619,6 @@ class AbstractAITool(ABC):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-        if request.interaction_mode not in capability.interaction_modes:
-            raise HeadlessUnsupportedError(
-                f"{caps.display_name} cannot preserve interaction_mode="
-                f"{request.interaction_mode.value!r} for managed headless sessions.",
-                tool_id=self.TOOL_ID,
-                capability=capability,
-            )
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             if interaction_handler is None:
                 raise HeadlessRequestError(
@@ -626,7 +632,7 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        if request.native_output not in capability.native_outputs:
+        if request.native_output not in mode.native_outputs:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} does not support native_output="
                 f"{request.native_output.value!r} for managed sessions.",
@@ -635,7 +641,7 @@ class AbstractAITool(ABC):
             )
         response_schema = request.response_schema
         if response_schema is not None:
-            if not capability.supports_response_schema:
+            if not mode.supports_response_schema:
                 raise HeadlessUnsupportedError(
                     f"{caps.display_name} does not support caller response schemas.",
                     tool_id=self.TOOL_ID,
@@ -649,7 +655,7 @@ class AbstractAITool(ABC):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 ) from None
-        if request.resume_id is not None and not capability.supports_resume:
+        if request.resume_id is not None and not mode.supports_resume:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} does not support managed session resumption.",
                 tool_id=self.TOOL_ID,
@@ -683,13 +689,13 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        if not request.sandbox and capability.sandbox_behavior is not PlanRequestBehavior.PRESERVED:
+        if not request.sandbox and mode.sandbox_behavior is not PlanRequestBehavior.PRESERVED:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve sandbox=False.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        if request.approval_policy not in capability.supported_approval_policies:
+        if request.approval_policy not in mode.supported_approval_policies:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve approval_policy="
                 f"{request.approval_policy.value!r}.",
@@ -698,7 +704,7 @@ class AbstractAITool(ABC):
             )
         if (
             request.command_policy is not None
-            and capability.command_policy_support is PlanCommandPolicySupport.UNSUPPORTED
+            and mode.command_policy_support is PlanCommandPolicySupport.UNSUPPORTED
         ):
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve command_policy for managed sessions.",
@@ -719,11 +725,36 @@ class AbstractAITool(ABC):
         )
         return normalized
 
+    def _validate_headless_mode_version(
+        self, request: HeadlessSessionRequest, detected: BinaryVersion
+    ) -> None:
+        """Apply the selected mode's verified floor after the shared CLI probe."""
+        from crossby.ai_tools.headless import HeadlessAdapterContractError, HeadlessUnsupportedError
+        from crossby.utils.versioning import parse_semver
+
+        capability = self.capabilities().headless
+        profile = capability.profile_for(request.interaction_mode)
+        floor = parse_semver(profile.verified_version)
+        if floor is None:
+            raise HeadlessAdapterContractError(
+                "The selected managed mode has no parseable verified version.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if detected.normalized < floor:
+            raise HeadlessUnsupportedError(
+                f"{self.capabilities().display_name} requires {profile.version_requirement} "
+                f"The oldest verified release is {profile.verified_version}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+
     def _detect_headless_version_bounded(
         self,
         *,
         deadline: float,
         cancel_event: threading.Event | None,
+        mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
     ) -> BinaryVersion:
         """Probe within the existing absolute deadline and cancellation budget."""
         from crossby.ai_tools.headless import HeadlessPreflightError
@@ -735,6 +766,7 @@ class AbstractAITool(ABC):
                 value: BinaryVersion | BaseException = self._detect_headless_version(
                     timeout_seconds=max(0.0, deadline - monotonic()),
                     deadline=deadline,
+                    mode=mode,
                 )
             except BaseException as exc:
                 value = exc
@@ -769,6 +801,7 @@ class AbstractAITool(ABC):
         *,
         timeout_seconds: float,
         deadline: float | None = None,
+        mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
     ) -> BinaryVersion:
         """Probe the CLI version against the managed capability declaration."""
         from crossby.ai_tools.headless import (
@@ -780,10 +813,11 @@ class AbstractAITool(ABC):
 
         caps = self.capabilities()
         capability = caps.headless
-        floor = parse_semver(capability.verified_version or "")
+        profile = capability.profile_for(mode)
+        floor = parse_semver(profile.verified_version)
         if floor is None:
             raise HeadlessAdapterContractError(
-                f"{caps.display_name} declares managed headless support without a parseable "
+                f"{caps.display_name} declares {mode.value} support without a parseable "
                 "verified_version.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
@@ -796,11 +830,13 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         if detected is None or detected.normalized < floor:
-            raise HeadlessUnsupportedError.for_installed_version(
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot provide {mode.value} headless sessions for "
+                f"installed version {detected.text if detected is not None else 'unknown'}. "
+                f"{profile.version_requirement} The oldest verified release is "
+                f"{profile.verified_version}.",
                 tool_id=self.TOOL_ID,
-                display_name=caps.display_name,
                 capability=capability,
-                installed_version=detected.text if detected is not None else None,
             )
         return detected
 

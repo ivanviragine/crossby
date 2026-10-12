@@ -107,6 +107,24 @@ def _capability(**updates: Any) -> HeadlessCapability:
         "verified_version": "1.0.0",
     }
     values.update(updates)
+    if HeadlessInteractionMode.BROKERED in values["interaction_modes"] and "brokered" not in values:
+        from crossby.models.ai import HeadlessModeCapability, PlanInteractionKind
+
+        values["brokered"] = HeadlessModeCapability(
+            transport=values["transport"],
+            prompt_transport=values["prompt_transport"],
+            native_outputs=values["native_outputs"],
+            supports_response_schema=values["supports_response_schema"],
+            supports_resume=values["supports_resume"],
+            supports_native_abort=values.get("supports_native_abort", False),
+            terminal_event_required=values.get("terminal_event_required", False),
+            terminal_event_authoritative=values.get("terminal_event_authoritative", False),
+            successful_native_statuses=values.get("successful_native_statuses", ()),
+            supported_interaction_kinds=tuple(PlanInteractionKind),
+            version_requirement="Test transport version 1.0.0.",
+            verified_version="1.0.0",
+            limitation="Deterministic test transport only.",
+        )
     return HeadlessCapability(**values)
 
 

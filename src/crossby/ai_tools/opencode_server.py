@@ -8,7 +8,9 @@ import json
 import os
 import re
 import secrets
+import signal
 import socket
+import subprocess
 import threading
 import time
 from contextlib import suppress
@@ -16,6 +18,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from crossby.ai_tools.headless import (
+    HeadlessCleanupContext,
+    HeadlessCleanupHooks,
+    HeadlessRuntimeContext,
+)
 from crossby.ai_tools.plan_mode import (
     PlanArtifactMalformedError,
     PlanBindingMismatchError,
@@ -28,9 +35,11 @@ from crossby.ai_tools.plan_mode import (
     validate_plan_option_selection,
 )
 from crossby.ai_tools.plan_policy import command_pattern_to_shell_pattern
-from crossby.ai_tools.plan_process import JsonRpcProcess
+from crossby.ai_tools.plan_process import JsonRpcProcess, kill_process_group
 from crossby.models.ai import (
     AIToolID,
+    HeadlessEventKind,
+    HeadlessSessionRequest,
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
@@ -51,10 +60,17 @@ _HTTP_BODY_CHUNK_SIZE = 64 * 1024
 class OpenCodeServer:
     """A run-owned, authenticated loopback server with a shared deadline."""
 
-    def __init__(self, request: PlanSessionRequest, deadline: float) -> None:
+    def __init__(
+        self,
+        request: PlanSessionRequest | HeadlessSessionRequest,
+        deadline: float,
+        runtime: HeadlessRuntimeContext | None = None,
+    ) -> None:
         self.deadline = deadline
+        self.runtime = runtime
         self.directory = request.working_dir
         self.port: int | None = None
+        self.active_session_id: str | None = None
         password = secrets.token_urlsafe(32)
         self.authorization = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
         # The CLI run command disables questions. The native server exposes
@@ -70,6 +86,50 @@ class OpenCodeServer:
                 "OPENCODE_ENABLE_QUESTION_TOOL": "true",
             },
         )
+        if runtime is not None:
+            runtime.register_cleanup(
+                HeadlessCleanupHooks(
+                    native_abort=self._abort_active_session,
+                    close_input=lambda _ctx: self.process.close_input(),
+                    terminate=self._terminate,
+                    force_kill=lambda _ctx: kill_process_group(self.process._proc),
+                    reap=self._reap,
+                    join_workers=lambda ctx: self.process.join_workers(
+                        timeout=ctx.remaining_seconds()
+                    ),
+                )
+            )
+
+    def _abort_active_session(self, _ctx: HeadlessCleanupContext) -> None:
+        session_id = self.active_session_id
+        if session_id is None or self.port is None:
+            return
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=0.2)
+        try:
+            connection.request(
+                "POST",
+                f"/session/{quote(session_id, safe='')}/abort?"
+                + urlencode({"directory": str(self.directory)}),
+                headers={"Authorization": self.authorization},
+            )
+            response = connection.getresponse()
+            response.read(1024)
+        finally:
+            connection.close()
+
+    def _terminate(self, _ctx: HeadlessCleanupContext) -> None:
+        proc = self.process._proc
+        if proc.poll() is not None:
+            return
+        if os.name == "posix":
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+
+    def _reap(self, ctx: HeadlessCleanupContext) -> None:
+        with suppress(subprocess.TimeoutExpired):
+            self.process._proc.wait(timeout=ctx.remaining_seconds())
 
     def remaining(self) -> float:
         remaining = self.deadline - time.monotonic()
@@ -89,6 +149,8 @@ class OpenCodeServer:
                 self.process.discard_stdout()
 
     def request(self, method: str, path: str, payload: Any = None) -> Any:
+        if self.runtime is not None:
+            self.runtime.checkpoint()
         if self.port is None:
             raise OSError("OpenCode server has not started")
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.remaining())
@@ -132,12 +194,14 @@ class OpenCodeServer:
                 content.extend(chunk)
                 if len(content) > _HTTP_BODY_LIMIT:
                     raise ValueError("OpenCode native API exceeded the response size limit")
+            if self.runtime is not None:
+                self.runtime.checkpoint()
             return json.loads(content) if content else None
         finally:
             connection.close()
 
-    def close(self) -> None:
-        self.process.close()
+    def close(self) -> int:
+        return self.process.close()
 
 
 def run_native_plan(
@@ -239,21 +303,147 @@ def run_native_plan(
             server.close()
 
 
+def run_native_session(
+    request: HeadlessSessionRequest,
+    context: HeadlessRuntimeContext,
+    capability: PlanModeCapability,
+) -> tuple[str, str, str, Any]:
+    """Run an ordinary session through the verified loopback question APIs."""
+    prompt: dict[str, Any] = {"parts": [{"type": "text", "text": request.prompt}]}
+    if request.model is not None:
+        provider, separator, model = request.model.partition("/")
+        if not separator or not provider.strip() or not model.strip():
+            raise ValueError("OpenCode requires a provider/model identifier")
+        prompt["model"] = {"providerID": provider, "modelID": model}
+    if request.effort is not None:
+        prompt["variant"] = request.effort.value
+    server = OpenCodeServer(request, context.deadline, runtime=context)
+    server.start()
+    if request.effort is not None:
+        prompt["model"] = _validated_effort_model(server, request, capability, plan_agent=False)
+    session_request: dict[str, Any] = {}
+    if request.command_policy is not None:
+        session_request["permission"] = [
+            {"permission": "bash", "pattern": "*", "action": "ask"},
+            *(
+                {
+                    "permission": "bash",
+                    "pattern": command_pattern_to_shell_pattern(pattern),
+                    "action": "allow",
+                }
+                for pattern in request.command_policy.allowed_commands
+            ),
+        ]
+    session = server.request("POST", "/session", session_request)
+    session_id = _required_text(session, "id")
+    server.active_session_id = session_id
+    context.set_provenance(session_id=session_id)
+    session_path = "/session/" + quote(session_id, safe="")
+    server.request("POST", session_path + "/prompt_async", prompt)
+    context.emit(HeadlessEventKind.STARTED, message="OpenCode session started")
+    observed: set[str] = set()
+    answered_requests: dict[str, str] = {}
+    while True:
+        context.checkpoint()
+        for question in _bound_requests(server.request("GET", "/question"), session_id):
+            request_id = _required_text(question, "id")
+            if request_id in answered_requests:
+                if answered_requests[request_id] != "question":
+                    raise ValueError("OpenCode reused a native request ID across interaction kinds")
+                continue
+            _answer_question(
+                server, question, session_id, context.native_interaction_response, capability
+            )
+            answered_requests[request_id] = "question"
+        for permission in _bound_requests(server.request("GET", "/permission"), session_id):
+            request_id = _required_text(permission, "id")
+            if request_id in answered_requests:
+                if answered_requests[request_id] != "permission":
+                    raise ValueError("OpenCode reused a native request ID across interaction kinds")
+                continue
+            _answer_permission(
+                server,
+                permission,
+                session_id,
+                context.native_interaction_response,
+                capability,
+            )
+            answered_requests[request_id] = "permission"
+        messages = server.request("GET", session_path + "/message")
+        if not isinstance(messages, list):
+            raise ValueError("OpenCode returned malformed session messages")
+        for message in messages:
+            info = message.get("info") if isinstance(message, dict) else None
+            if not isinstance(info, dict) or info.get("sessionID") != session_id:
+                raise ValueError("OpenCode returned a message for another session")
+            message_id = _required_text(info, "id")
+            if message_id not in observed:
+                observed.add(message_id)
+                if info.get("role") == "assistant":
+                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message")
+        if messages:
+            last = messages[-1]
+            info = last["info"]
+            if info.get("role") == "assistant":
+                if info.get("error") is not None:
+                    raise ValueError("OpenCode assistant message failed")
+                finish = info.get("finish")
+                completed = info.get("time")
+                if finish is not None and finish != "tool-calls":
+                    if finish != "stop" or not (
+                        isinstance(completed, dict)
+                        and isinstance(completed.get("completed"), (int, float))
+                    ):
+                        raise ValueError("OpenCode assistant message ended unsuccessfully")
+                    message_id = _required_text(info, "id")
+                    exact = server.request(
+                        "GET", session_path + "/message/" + quote(message_id, safe="")
+                    )
+                    exact_info = exact.get("info") if isinstance(exact, dict) else None
+                    if not isinstance(exact_info, dict) or (
+                        exact_info.get("sessionID") != session_id
+                        or exact_info.get("id") != message_id
+                        or exact_info.get("role") != "assistant"
+                    ):
+                        raise ValueError("OpenCode completed message binding changed")
+                    parts = exact.get("parts")
+                    if not isinstance(parts, list):
+                        raise ValueError("OpenCode completed message omitted parts")
+                    texts = [
+                        part["text"]
+                        for part in parts
+                        if isinstance(part, dict)
+                        and part.get("type") == "text"
+                        and isinstance(part.get("text"), str)
+                    ]
+                    text = "\n".join(texts)
+                    if not text.strip():
+                        raise ValueError("OpenCode completed message was blank")
+                    return session_id, message_id, text, exact_info.get("tokens")
+        context.wait(0.1)
+
+
 def _validated_effort_model(
-    server: OpenCodeServer, request: PlanSessionRequest, capability: PlanModeCapability
+    server: OpenCodeServer,
+    request: PlanSessionRequest | HeadlessSessionRequest,
+    capability: PlanModeCapability,
+    *,
+    plan_agent: bool = True,
 ) -> dict[str, str]:
     """Pin the native selected model and require its advertised effort variant."""
     assert request.effort is not None
     selected: dict[str, str] | None = None
     model_name = request.model
     if model_name is None:
-        agents = server.request("GET", "/agent")
-        if not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents):
-            raise ValueError("OpenCode returned malformed native agents")
-        planning = [agent for agent in agents if agent.get("name") == "plan"]
-        if len(planning) != 1:
-            raise ValueError("OpenCode did not advertise one native plan agent")
-        agent_model = planning[0].get("model")
+        agent_model = None
+        if plan_agent:
+            agents = server.request("GET", "/agent")
+            if not isinstance(agents, list) or any(not isinstance(agent, dict) for agent in agents):
+                raise ValueError("OpenCode returned malformed native agents")
+            planning = [agent for agent in agents if agent.get("name") == "plan"]
+            if len(planning) != 1:
+                raise ValueError("OpenCode did not advertise one native plan agent")
+            agent_model = planning[0].get("model")
         if agent_model is not None:
             selected = {
                 "providerID": _required_text(agent_model, "providerID"),
@@ -265,7 +455,7 @@ def _validated_effort_model(
             if not isinstance(model_name, str) or not model_name.strip():
                 raise PlanSessionUnsupportedError(
                     "OpenCode effort validation requires an explicit model or a configured "
-                    "native plan/default model. Supply model='provider/model'; Crossby will "
+                    "native default model. Supply model='provider/model'; Crossby will "
                     "not guess from private recent-model state.",
                     tool_id=AIToolID.OPENCODE,
                     capability=capability,
@@ -400,6 +590,7 @@ def _answer_question(
             allow_other=custom if not final_approval else False,
             session_id=session_id,
             artifact_id=artifact_id,
+            request_id=request_id,
         )
         if handler is None:
             raise _interaction_required(interaction, capability)
@@ -485,6 +676,7 @@ def _answer_permission(
             PlanQuestionOption(option_id="reject", label="Deny"),
         ),
         session_id=session_id,
+        request_id=request_id,
         operation=PlanOperation(
             kind=operation_kind,
             execution_dir=execution_dir.resolve() if execution_dir is not None else None,

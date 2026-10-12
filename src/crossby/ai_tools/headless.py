@@ -247,6 +247,7 @@ class HeadlessRuntimeContext:
         self.version = version
         self.capability = capability
         self.request = request
+        self.mode_capability = capability.profile_for(request.interaction_mode)
         self.started_at = started_at
         self.deadline = deadline
         self._interaction_handler = interaction_handler
@@ -418,6 +419,12 @@ class HeadlessRuntimeContext:
             HeadlessEventKind.STARTED,
             HeadlessEventKind.PROGRESS,
             HeadlessEventKind.OUTPUT,
+            HeadlessEventKind.ASSISTANT_MESSAGE,
+            HeadlessEventKind.TOOL_STARTED,
+            HeadlessEventKind.TOOL_COMPLETED,
+            HeadlessEventKind.USAGE,
+            HeadlessEventKind.CLARIFICATION,
+            HeadlessEventKind.PERMISSION,
             HeadlessEventKind.INTERACTION,
             HeadlessEventKind.TERMINAL,
         }:
@@ -473,6 +480,17 @@ class HeadlessRuntimeContext:
             raise self.adapter_contract_error(
                 "A brokered headless session reached the adapter without an interaction handler."
             )
+        if interaction.kind not in self.mode_capability.supported_interaction_kinds:
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.FAILED,
+                f"The selected brokered transport does not support {interaction.kind.value}.",
+            )
+        self.emit(
+            HeadlessEventKind.CLARIFICATION
+            if interaction.kind is PlanInteractionKind.QUESTION
+            else HeadlessEventKind.PERMISSION,
+            message=interaction.kind.value,
+        )
         interaction_deadline = min(
             self.deadline,
             time.monotonic() + self.request.interaction_timeout_seconds,
@@ -512,6 +530,48 @@ class HeadlessRuntimeContext:
 
     # Short compatibility spelling used by some adapter prototypes.
     request_interaction = interact
+
+    def native_interaction_response(
+        self, interaction: SessionInteraction
+    ) -> SessionInteractionResponse:
+        """Require an explicit live native choice before protocol helpers reply."""
+        response = self.interact(interaction)
+        if interaction.kind is PlanInteractionKind.QUESTION:
+            if response.outcome is not PlanInteractionOutcome.ANSWERED:
+                raise _HeadlessStopError(
+                    HeadlessTerminalStatus.FAILED,
+                    "The native clarification was left unanswered.",
+                )
+            return response
+        if not interaction.options:
+            if (
+                response.outcome is not PlanInteractionOutcome.APPROVED
+                or response.answer is not None
+                or response.option_id is not None
+                or response.option_ids
+                or response.content is not None
+            ):
+                raise _HeadlessStopError(
+                    HeadlessTerminalStatus.FAILED,
+                    "The native permission requires explicit approval.",
+                )
+            return response
+        selected = (
+            *((response.option_id,) if response.option_id else ()),
+            *response.option_ids,
+        )
+        if len(selected) != 1 or response.answer is not None:
+            raise _HeadlessStopError(
+                HeadlessTerminalStatus.FAILED,
+                "The native permission requires one explicit option ID.",
+            )
+        # The native helper uses the exact selected ID. Its historical
+        # approve/deny convenience branches are bypassed in brokered mode.
+        return SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id=selected[0],
+            content=response.content,
+        )
 
     def _invoke_callback(
         self,
@@ -656,7 +716,7 @@ class HeadlessRuntimeContext:
     def register_cleanup(self, hooks: HeadlessCleanupHooks | None = None, **kwargs: Any) -> None:
         """Register exactly one adapter cleanup sequence before blocking I/O."""
         candidate = hooks or HeadlessCleanupHooks(**kwargs)
-        if candidate.native_abort is not None and not self.capability.supports_native_abort:
+        if candidate.native_abort is not None and not self.mode_capability.supports_native_abort:
             raise self.adapter_contract_error(
                 "The adapter registered native abort without declaring support."
             )
@@ -774,13 +834,13 @@ class HeadlessRuntimeContext:
                 if native_terminal is not self._events[-1]:
                     status = HeadlessTerminalStatus.INVALID_OUTPUT
                     self.add_warning("The native terminal event was not final.")
-                elif self.capability.terminal_event_authoritative:
+                elif self.mode_capability.terminal_event_authoritative:
                     assert native_terminal.terminal_status is not None
                     status = native_terminal.terminal_status
                 elif native_terminal.terminal_status is not status:
                     status = HeadlessTerminalStatus.INVALID_OUTPUT
                     self.add_warning("The native terminal event conflicted with adapter status.")
-            elif self.capability.terminal_event_required:
+            elif self.mode_capability.terminal_event_required:
                 status = HeadlessTerminalStatus.INVALID_OUTPUT
                 self.add_warning("The native transport omitted its required terminal event.")
 
@@ -790,7 +850,7 @@ class HeadlessRuntimeContext:
             ):
                 status = HeadlessTerminalStatus.FAILED
                 self.add_warning("The native process exited unsuccessfully.")
-            successful_native_statuses = self.capability.successful_native_statuses
+            successful_native_statuses = self.mode_capability.successful_native_statuses
             if status is HeadlessTerminalStatus.SUCCEEDED and successful_native_statuses:
                 native = self._provenance["native_status"]
                 if native is None:

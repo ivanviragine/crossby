@@ -443,9 +443,44 @@ require JSON or streaming-JSON output for a schema, because that is the only
 wire on which each exposes structured output. With a schema, `final_json` is
 the validated structured output; otherwise `TEXT` returns the final response
 text and `JSON`/`JSONL` return the native object that carried it, exactly as
-the CLI emitted it. `BROKERED` sessions are not offered by any terminal
-adapter yet — none of these CLIs exposes a verified live question channel in
-its non-interactive mode. Cursor and Antigravity CLI encode `effort` in the
+the CLI emitted it. Brokered sessions use separate native transports, selected
+only when `interaction_mode=BROKERED` and an interaction handler is supplied:
+
+| Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | no | exact `turn/interrupt` |
+| Cursor | ACP | 2026.09.02-c22c1a3 | text | questions and permissions | no | exact `session/cancel` |
+| OpenCode | authenticated loopback server | 1.18.29 | text | session questions and permissions | no | exact session abort |
+| Antigravity CLI | JSON/stream-JSON continuation | 1.2.6 | JSON, JSONL | questions only | exact conversation ID | no native abort |
+
+Brokered requests reject unsupported output, schema, resume, approval, sandbox,
+and command policy combinations during preflight. Codex and Cursor preserve
+native request and option IDs; OpenCode binds replies to the fresh session and
+pending request; Antigravity permits at most nine invocations under one deadline.
+Antigravity exposes no authoritative permission channel, so it never advertises
+permission brokering. Codex, Cursor, and OpenCode accept only text in brokered
+mode; Antigravity accepts JSON or JSONL, including schema-constrained output.
+See [brokered verification](docs/brokered-headless-verification.md) for terminal
+bindings and limitations.
+
+```python
+from crossby.ai_tools import AbstractAITool
+from crossby.models.ai import AIToolID, HeadlessInteractionMode, HeadlessSessionRequest
+
+tool = AbstractAITool.get(AIToolID.CODEX)
+request = HeadlessSessionRequest(
+    prompt="Review this module and summarize the changes",
+    working_dir=project_dir,
+    interaction_mode=HeadlessInteractionMode.BROKERED,
+)
+result = tool.run_headless_session(request, interaction_handler=answer_native_request)
+```
+
+The handler receives a `SessionInteraction` with native IDs and returns a
+`SessionInteractionResponse`. It should choose an offered option ID or provide
+an allowed free-form answer. Permission decisions require an explicit native
+option or approval of a structured built-in request; a missing, late, or invalid
+answer never becomes a native approval. Cursor and Antigravity CLI encode `effort` in the
 model argument, so a headless request that specifies `effort` must also specify
 `model`. Cursor accepts the request only when the model encodes the requested
 tier exactly: matching `[effort=…]` overrides and registered bare-medium

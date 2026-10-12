@@ -591,6 +591,7 @@ class JsonRpcProcess:
         )
         self._cancel_event = cancel_event
         self._write_thread: threading.Thread | None = None
+        self._send_lock = threading.Lock()
         self._proc = subprocess.Popen(
             command,
             cwd=cwd,
@@ -690,6 +691,10 @@ class JsonRpcProcess:
                 raise
 
     def send(self, payload: dict[str, Any]) -> None:
+        with self._send_lock:
+            self._send_locked(payload)
+
+    def _send_locked(self, payload: dict[str, Any]) -> None:
         cancel_event = getattr(self, "_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             raise SessionProcessCancelledError("JSON-RPC child was cancelled")
@@ -727,6 +732,40 @@ class JsonRpcProcess:
             raise TimeoutError("timed out writing a JSON-RPC message")
         if errors:
             raise errors[0]
+
+    def send_cleanup(self, payload: dict[str, Any]) -> None:
+        """Best-effort native abort after the ordinary work deadline expires."""
+        if self._proc.poll() is not None:
+            return
+        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
+        encoded = (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(encoded) > _JSON_RPC_FRAME_LIMIT:
+            raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
+        # The runtime bounds this hook. A stalled prior writer cannot be
+        # overtaken by an abort that would corrupt the native JSONL stream.
+        if not self._send_lock.acquire(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS):
+            return
+        try:
+            if self._proc.poll() is None and not self._stdin.closed:
+                os.write(self._stdin.fileno(), encoded)
+        finally:
+            self._send_lock.release()
+
+    def close_input(self) -> None:
+        """Close stdin only after the bounded writer has relinquished it."""
+        if (
+            self._write_thread is None or not self._write_thread.is_alive()
+        ) and not self._stdin.closed:
+            with suppress(OSError, ValueError):
+                self._stdin.close()
+
+    def join_workers(self, *, timeout: float) -> None:
+        """Join owned reader and writer workers within a cleanup stage."""
+        self._closing.set()
+        threads = [self._stdout_thread, self._stderr_thread]
+        if self._write_thread is not None:
+            threads.append(self._write_thread)
+        _join_until(tuple(threads), time.monotonic() + max(0.0, timeout))
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"method": method}

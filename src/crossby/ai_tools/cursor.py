@@ -25,7 +25,9 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HeadlessCapability,
+    HeadlessEventKind,
     HeadlessInteractionMode,
+    HeadlessModeCapability,
     HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessPromptTransport,
@@ -56,6 +58,7 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    TokenUsage,
 )
 
 if TYPE_CHECKING:
@@ -289,7 +292,29 @@ class CursorAdapter(AbstractAITool):
                 # plain-text output carries no terminal status, so only the two
                 # execution-output formats are offered.
                 native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.ACP,
+                    prompt_transport=HeadlessPromptTransport.PROTOCOL,
+                    native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_native_abort=True,
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    successful_native_statuses=("end_turn",),
+                    supported_interaction_kinds=(
+                        PlanInteractionKind.QUESTION,
+                        PlanInteractionKind.PERMISSION,
+                    ),
+                    version_requirement="Cursor Agent with the verified ACP v1 protocol.",
+                    verified_version="2026.09.02-c22c1a3",
+                    limitation=(
+                        "Only text and fresh ACP sessions are verified. Command policy is "
+                        "unavailable when permissions contain display prose only."
+                    ),
+                ),
                 supports_response_schema=False,
                 successful_native_statuses=("success",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
@@ -498,6 +523,8 @@ class CursorAdapter(AbstractAITool):
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
         """Return Cursor's complete command, including its argument-delivered prompt."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"]
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
@@ -528,6 +555,8 @@ class CursorAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended Cursor print turn and normalize its result envelope."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return self._run_brokered_session(request, context)
         from crossby.ai_tools.headless_cli import (
             capture_failure_warnings,
             complete_session,
@@ -657,6 +686,196 @@ class CursorAdapter(AbstractAITool):
                 session_id=session_id,
             ),
             warnings=warnings,
+        )
+
+    def _run_brokered_session(
+        self,
+        request: HeadlessSessionRequest,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run an ordinary ACP prompt without entering native plan mode."""
+        from crossby.ai_tools.session_protocol import ProtocolSessionController
+
+        rpc = ProtocolSessionController(
+            context,
+            ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"],
+            cwd=request.working_dir,
+        )
+
+        def response(request_id: int) -> dict[str, Any]:
+            while True:
+                message = rpc.read()
+                if message.get("id") != request_id:
+                    if "method" in message and "id" in message:
+                        raise ValueError("Cursor requested an interaction before session setup")
+                    continue
+                result = message.get("result")
+                if "error" in message or not isinstance(result, dict):
+                    raise ValueError(f"Cursor ACP rejected request {request_id}")
+                return result
+
+        rpc.request(
+            1,
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
+                "clientInfo": {"name": "crossby", "version": "session-v1"},
+            },
+        )
+        initialized = response(1)
+        auth_methods = initialized.get("authMethods")
+        if isinstance(auth_methods, list) and auth_methods:
+            first = auth_methods[0]
+            method_id = first.get("id") if isinstance(first, dict) else first
+            if not isinstance(method_id, str) or not method_id.strip():
+                raise ValueError("Cursor advertised a malformed authentication method")
+            rpc.request(2, "authenticate", {"methodId": method_id})
+            response(2)
+        rpc.request(3, "session/new", {"cwd": str(request.working_dir), "mcpServers": []})
+        state = response(3)
+        session_id = state.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("Cursor session/new omitted its native session ID")
+        context.set_provenance(session_id=session_id)
+        rpc.set_abort("session/cancel", {"sessionId": session_id})
+
+        next_id = 4
+        if request.model is not None:
+            model_base = _cursor_model_base(request.model)
+            offered = _cursor_config_option(state, option_id="model")
+            if model_base not in {option["value"] for option in offered["options"]}:
+                raise ValueError("Cursor did not advertise the requested model")
+            rpc.request(
+                next_id,
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": "model", "value": model_base},
+            )
+            state = response(next_id)
+            if _cursor_config_option(state, option_id="model")["currentValue"] != model_base:
+                raise ValueError("Cursor did not preserve the requested model")
+            next_id += 1
+        if request.effort is not None:
+            configured = _cursor_effort_option(state, request.effort)
+            if configured is None:
+                raise ValueError("Cursor did not advertise the requested effort")
+            option, value = configured
+            rpc.request(
+                next_id,
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": option["id"], "value": value},
+            )
+            state = response(next_id)
+            confirmed = _cursor_effort_option(state, request.effort)
+            if confirmed is None or confirmed[0]["currentValue"] != value:
+                raise ValueError("Cursor did not preserve the requested effort")
+            next_id += 1
+        prompt_id = next_id
+        rpc.request(
+            prompt_id,
+            "session/prompt",
+            {"sessionId": session_id, "prompt": [{"type": "text", "text": request.prompt}]},
+        )
+        context.emit(HeadlessEventKind.STARTED, message="Cursor ACP prompt started")
+        messages: dict[str, list[str]] = {}
+        last_message_id: str | None = None
+        usage_tokens: int | None = None
+        while True:
+            message = rpc.read()
+            if message.get("id") == prompt_id and "method" not in message:
+                result = message.get("result")
+                if "error" in message or not isinstance(result, dict):
+                    raise ValueError("Cursor ACP prompt failed")
+                stop_reason = result.get("stopReason")
+                if stop_reason != "end_turn":
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        native_status=str(stop_reason or "unknown"),
+                        session_id=session_id,
+                    )
+                break
+            method = message.get("method")
+            params = message.get("params")
+            if method == "session/update":
+                if not isinstance(params, dict) or params.get("sessionId") != session_id:
+                    raise ValueError("Cursor emitted an update for another session")
+                update = params.get("update")
+                if not isinstance(update, dict):
+                    raise ValueError("Cursor emitted a malformed session update")
+                kind = update.get("sessionUpdate")
+                if kind == "agent_message_chunk":
+                    message_id = update.get("messageId")
+                    content = update.get("content")
+                    text = content.get("text") if isinstance(content, dict) else None
+                    if (
+                        not isinstance(message_id, str)
+                        or not message_id.strip()
+                        or not isinstance(text, str)
+                    ):
+                        raise ValueError("Cursor message chunk lacked exact ID or text")
+                    messages.setdefault(message_id, []).append(text)
+                    last_message_id = message_id
+                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="chunk")
+                elif kind in {"tool_call", "tool_call_update"}:
+                    tool_id = update.get("toolCallId")
+                    if not isinstance(tool_id, str) or not tool_id.strip():
+                        raise ValueError("Cursor tool update omitted its native ID")
+                    context.emit(
+                        HeadlessEventKind.TOOL_COMPLETED
+                        if update.get("status") in {"completed", "failed"}
+                        else HeadlessEventKind.TOOL_STARTED,
+                        payload={"tool_call_id": tool_id},
+                    )
+                elif kind == "usage_update":
+                    used = update.get("used")
+                    if isinstance(used, int) and used >= 0:
+                        usage_tokens = used
+                    context.emit(HeadlessEventKind.USAGE, message="usage updated")
+                else:
+                    context.emit(HeadlessEventKind.PROGRESS, message="session updated")
+                continue
+            if method == "cursor/ask_question" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_cursor_question(
+                    rpc,
+                    message,
+                    session_id=session_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                )
+                continue
+            if method == "session/request_permission" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_cursor_permission(
+                    rpc,
+                    message,
+                    session_id=session_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                    deny_automatically=False,
+                )
+                continue
+            if isinstance(method, str) and "id" in message:
+                raise ValueError(f"Cursor requested unsupported ACP method {method!r}")
+        final_text = "".join(messages[last_message_id]) if last_message_id is not None else None
+        exit_code = rpc.close_cleanly()
+        terminal = (
+            HeadlessTerminalStatus.SUCCEEDED if exit_code == 0 else HeadlessTerminalStatus.FAILED
+        )
+        context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
+        return context.complete(
+            terminal,
+            final_text=final_text,
+            native_status="end_turn",
+            exit_code=exit_code,
+            session_id=session_id,
+            usage=(
+                TokenUsage(total_tokens=usage_tokens, session_id=session_id)
+                if usage_tokens is not None
+                else None
+            ),
         )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
@@ -1437,6 +1656,7 @@ def _answer_cursor_question(
                 allow_multiple=allow_multiple,
                 session_id=session_id,
                 artifact_id=tool_call_id,
+                request_id=str(message["id"]),
             )
         )
 
@@ -1640,6 +1860,7 @@ def _answer_cursor_permission(
         options=options,
         session_id=session_id,
         artifact_id=binding_value,
+        request_id=request_id,
         operation=PlanOperation(
             kind=operation_kind,
             argv=argv,
