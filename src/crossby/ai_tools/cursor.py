@@ -93,6 +93,22 @@ _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
 
 
+def _cursor_acp_initialize_params(client_version: str) -> dict[str, Any]:
+    return {
+        "protocolVersion": 1,
+        "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
+        "clientInfo": {"name": "crossby", "version": client_version},
+    }
+
+
+def _cursor_acp_session_params(working_dir: Path) -> dict[str, Any]:
+    return {"cwd": str(working_dir.resolve()), "mcpServers": []}
+
+
+def _cursor_acp_prompt_params(session_id: str, prompt: str) -> dict[str, Any]:
+    return {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}
+
+
 def _effort_template(model: str) -> tuple[str, EffortLevel | None, bool]:
     """Split a Cursor model ID into an effort template and its effort.
 
@@ -300,6 +316,7 @@ class CursorAdapter(AbstractAITool):
                     transport=HeadlessNativeTransport.ACP,
                     prompt_transport=HeadlessPromptTransport.PROTOCOL,
                     native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
                     supports_native_abort=True,
                     terminal_event_required=True,
                     terminal_event_authoritative=True,
@@ -309,10 +326,10 @@ class CursorAdapter(AbstractAITool):
                         PlanInteractionKind.PERMISSION,
                     ),
                     version_requirement="Cursor Agent with the verified ACP v1 protocol.",
-                    verified_version="2026.09.02-c22c1a3",
+                    verified_version="2026.09.10-fd3934a",
                     limitation=(
-                        "Only text and fresh ACP sessions are verified. Command policy is "
-                        "unavailable when permissions contain display prose only."
+                        "Only text and exact ACP loadSession resumption are verified. Loaded "
+                        "sessions cannot override model or effort; command policy is unavailable."
                     ),
                 ),
                 supports_response_schema=False,
@@ -441,7 +458,18 @@ class CursorAdapter(AbstractAITool):
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Reject effort requests whose selected model cannot encode the exact tier."""
-        from crossby.ai_tools.headless import HeadlessRequestError
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+
+        if (
+            request.interaction_mode is HeadlessInteractionMode.BROKERED
+            and request.resume_id is not None
+            and (request.model is not None or request.effort is not None)
+        ):
+            raise HeadlessUnsupportedError(
+                "Cursor ACP loadSession cannot verify model or effort overrides before prompting.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
 
         if request.effort is None:
             return
@@ -702,14 +730,22 @@ class CursorAdapter(AbstractAITool):
             cwd=request.working_dir,
         )
 
-        def response(request_id: int) -> dict[str, Any]:
+        def response(request_id: int, *, replay_session_id: str | None = None) -> dict[str, Any]:
             while True:
                 message = rpc.read()
                 if message.get("id") != request_id:
                     if "method" in message and "id" in message:
                         raise ValueError("Cursor requested an interaction before session setup")
+                    if replay_session_id is not None and message.get("method") == "session/update":
+                        params = message.get("params")
+                        if not isinstance(params, dict) or params.get("sessionId") != (
+                            replay_session_id
+                        ):
+                            raise ValueError("Cursor replayed a different native session")
                     continue
                 result = message.get("result")
+                if replay_session_id is not None and result is None and "error" not in message:
+                    return {}
                 if "error" in message or not isinstance(result, dict):
                     raise ValueError(f"Cursor ACP rejected request {request_id}")
                 return result
@@ -717,11 +753,7 @@ class CursorAdapter(AbstractAITool):
         rpc.request(
             1,
             "initialize",
-            {
-                "protocolVersion": 1,
-                "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
-                "clientInfo": {"name": "crossby", "version": "session-v1"},
-            },
+            _cursor_acp_initialize_params("session-v1"),
         )
         initialized = response(1)
         auth_methods = initialized.get("authMethods")
@@ -732,9 +764,27 @@ class CursorAdapter(AbstractAITool):
                 raise ValueError("Cursor advertised a malformed authentication method")
             rpc.request(2, "authenticate", {"methodId": method_id})
             response(2)
-        rpc.request(3, "session/new", {"cwd": str(request.working_dir), "mcpServers": []})
-        state = response(3)
-        session_id = state.get("sessionId")
+        if request.resume_id is None:
+            rpc.request(3, "session/new", _cursor_acp_session_params(request.working_dir))
+            state = response(3)
+            session_id = state.get("sessionId")
+        else:
+            agent_capabilities = initialized.get("agentCapabilities")
+            if (
+                not isinstance(agent_capabilities, dict)
+                or agent_capabilities.get("loadSession") is not True
+            ):
+                raise ValueError("Cursor ACP did not advertise loadSession")
+            rpc.request(
+                3,
+                "session/load",
+                {
+                    **_cursor_acp_session_params(request.working_dir),
+                    "sessionId": request.resume_id,
+                },
+            )
+            state = response(3, replay_session_id=request.resume_id)
+            session_id = request.resume_id
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("Cursor session/new omitted its native session ID")
         context.set_provenance(session_id=session_id)
@@ -770,11 +820,39 @@ class CursorAdapter(AbstractAITool):
             if confirmed is None or confirmed[0]["currentValue"] != value:
                 raise ValueError("Cursor did not preserve the requested effort")
             next_id += 1
+        if request.model is not None:
+            model_name = request.model.split("[", 1)[0]
+            for variant_id, variant_value in (
+                ("thinking", "true" if "-thinking" in model_name else "false"),
+                ("fast", "true" if model_name.endswith("-fast") else "false"),
+            ):
+                variant_option = _cursor_optional_config_option(state, option_id=variant_id)
+                if variant_option is None:
+                    if variant_value == "true":
+                        raise ValueError(f"Cursor cannot preserve the requested {variant_id} model")
+                    continue
+                if variant_value not in {item["value"] for item in variant_option["options"]}:
+                    raise ValueError(f"Cursor cannot preserve the requested {variant_id} model")
+                rpc.request(
+                    next_id,
+                    "session/set_config_option",
+                    {
+                        "sessionId": session_id,
+                        "configId": variant_option["id"],
+                        "value": variant_value,
+                    },
+                )
+                state = response(next_id)
+                if _cursor_config_option(state, option_id=variant_id)["currentValue"] != (
+                    variant_value
+                ):
+                    raise ValueError(f"Cursor did not preserve the requested {variant_id} model")
+                next_id += 1
         prompt_id = next_id
         rpc.request(
             prompt_id,
             "session/prompt",
-            {"sessionId": session_id, "prompt": [{"type": "text", "text": request.prompt}]},
+            _cursor_acp_prompt_params(session_id, request.prompt),
         )
         context.emit(HeadlessEventKind.STARTED, message="Cursor ACP prompt started")
         messages: dict[str, list[str]] = {}
@@ -995,11 +1073,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 1,
                 "initialize",
-                {
-                    "protocolVersion": 1,
-                    "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
-                    "clientInfo": {"name": "crossby", "version": "plan-session-v1"},
-                },
+                _cursor_acp_initialize_params("plan-session-v1"),
             )
             initialized = wait_response(1)
             auth_methods = initialized.get("authMethods")
@@ -1018,7 +1092,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 3,
                 "session/new",
-                {"cwd": str(request.working_dir.resolve()), "mcpServers": []},
+                _cursor_acp_session_params(request.working_dir),
             )
             session_result = wait_response(3)
             session_id = session_result.get("sessionId")
@@ -1189,10 +1263,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 prompt_request_id,
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": request.prompt}],
-                },
+                _cursor_acp_prompt_params(session_id, request.prompt),
             )
 
             plans: list[tuple[str, str]] = []

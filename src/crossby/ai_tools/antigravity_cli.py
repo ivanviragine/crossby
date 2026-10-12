@@ -39,6 +39,7 @@ from crossby.models.ai import (
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
+    PlanInteractionResponse,
     PlanInteractionSupport,
     PlanLaunchApprovalMode,
     PlanModeActivation,
@@ -660,23 +661,13 @@ class AntigravityCLIAdapter(AbstractAITool):
                         warnings=(*warnings_seen, "Antigravity emitted malformed question data."),
                     )
                 response = context.native_interaction_response(interaction)
-                if response.answer and not interaction.allow_other:
-                    return context.complete(
-                        HeadlessTerminalStatus.INVALID_OUTPUT,
-                        conversation_id=conversation_id,
-                        warnings=(
-                            *warnings_seen,
-                            "Antigravity question disallowed free-form input.",
-                        ),
-                    )
-                selected = validate_plan_option_selection(interaction, response)
-                labels = {option.option_id: option.label for option in interaction.options}
-                answer = response.answer or ", ".join(labels[option_id] for option_id in selected)
-                if not answer:
+                try:
+                    answer = _agy_native_answer(interaction, response)
+                except ValueError:
                     return context.complete(
                         HeadlessTerminalStatus.FAILED,
                         conversation_id=conversation_id,
-                        warnings=(*warnings_seen, "Antigravity question was left unanswered."),
+                        warnings=(*warnings_seen, "Antigravity question was not answered."),
                     )
                 continue
             schema_echo = envelope.get("json_schema", envelope.get("schema"))
@@ -717,6 +708,10 @@ class AntigravityCLIAdapter(AbstractAITool):
                 ),
                 warnings=tuple(warnings_seen),
             )
+        context.emit(
+            HeadlessEventKind.TERMINAL,
+            terminal_status=HeadlessTerminalStatus.FAILED,
+        )
         return context.complete(
             HeadlessTerminalStatus.FAILED,
             conversation_id=conversation_id,
@@ -893,35 +888,15 @@ class AntigravityCLIAdapter(AbstractAITool):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            if answer_response.answer and not interaction.allow_other:
-                raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question does not allow a free-form answer.",
-                    interaction=interaction,
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
             try:
-                selected_ids = validate_plan_option_selection(interaction, answer_response)
+                answer = _agy_native_answer(interaction, answer_response)
             except ValueError as exc:
                 raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question requires valid native option IDs.",
+                    f"Antigravity CLI planning question {exc}.",
                     interaction=interaction,
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 ) from exc
-            option_labels = {option.option_id: option.label for option in interaction.options}
-            answer = (
-                answer_response.answer
-                or ", ".join(option_labels[option_id] for option_id in selected_ids)
-                or None
-            )
-            if not answer:
-                raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question was left unanswered.",
-                    interaction=interaction,
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
             command = [
                 "agy",
                 "--conversation",
@@ -1173,6 +1148,20 @@ def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInter
         session_id=conversation_id,
         request_id=question_id,
     )
+
+
+def _agy_native_answer(interaction: PlanInteraction, response: PlanInteractionResponse) -> str:
+    """Map exact option IDs to the label required by agy's continuation CLI."""
+    if response.outcome is not PlanInteractionOutcome.ANSWERED:
+        raise ValueError("the native question was left unanswered")
+    if response.answer and not interaction.allow_other:
+        raise ValueError("the native question disallows free-form input")
+    selected_ids = validate_plan_option_selection(interaction, response)
+    labels = {option.option_id: option.label for option in interaction.options}
+    answer = response.answer or ", ".join(labels[option_id] for option_id in selected_ids)
+    if not answer:
+        raise ValueError("the native question was left unanswered")
+    return answer
 
 
 def _agy_required_question_field(question: dict[str, Any], *names: str) -> str:

@@ -448,9 +448,9 @@ only when `interaction_mode=BROKERED` and an interaction handler is supplied:
 
 | Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
 | --- | --- | --- | --- | --- | --- | --- |
-| Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | no | exact `turn/interrupt` |
-| Cursor | ACP | 2026.09.02-c22c1a3 | text | questions and permissions | no | exact `session/cancel` |
-| OpenCode | authenticated loopback server | 1.18.29 | text | session questions and permissions | no | exact session abort |
+| Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | exact thread | exact `turn/interrupt` |
+| Cursor | ACP | 2026.09.10-fd3934a | text | questions and permissions | exact session via `session/load` | exact `session/cancel` |
+| OpenCode | authenticated loopback server | 1.19.0 | text | session questions and permissions | exact session | exact session abort |
 | Antigravity CLI | JSON/stream-JSON continuation | 1.2.6 | JSON, JSONL | questions only | exact conversation ID | no native abort |
 
 Brokered requests reject unsupported output, schema, resume, approval, sandbox,
@@ -460,6 +460,8 @@ pending request; Antigravity permits at most nine invocations under one deadline
 Antigravity exposes no authoritative permission channel, so it never advertises
 permission brokering. Codex, Cursor, and OpenCode accept only text in brokered
 mode; Antigravity accepts JSON or JSONL, including schema-constrained output.
+Cursor rejects model or effort overrides on a loaded session, and OpenCode
+rejects new command rules on a resumed session.
 See [brokered verification](docs/brokered-headless-verification.md) for terminal
 bindings and limitations.
 

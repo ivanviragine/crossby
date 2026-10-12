@@ -167,6 +167,7 @@ def test_codex_question_uses_exact_thread_turn_request_and_normal_mode(
     assert seen[0].request_id == "71"
     assert seen[0].kind is PlanInteractionKind.QUESTION
     sent = _FakeRpc.instances[0].sent
+    assert any(method == "thread/start" and params["ephemeral"] is False for method, params in sent)
     assert ("respond", {"id": 71, "result": {"answers": {"scope": {"answers": ["API"]}}}}) in sent
     assert not any("collaborationMode" in params for _, params in sent)
     assert any(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events)
@@ -393,6 +394,16 @@ def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_appro
             ),
         )
     assert rpc.sent == []
+    with pytest.raises(ValueError, match="approval_policy=never"):
+        _answer_codex_builtin_permission(
+            rpc,
+            message,
+            thread_id="thr-exact",
+            turn_id="turn-exact",
+            handler=approve,
+            deny_automatically=True,
+        )
+    assert rpc.sent == []
 
 
 def test_codex_mcp_form_requires_exact_schema_content(tmp_path: Path) -> None:
@@ -447,6 +458,41 @@ def test_codex_mcp_form_requires_exact_schema_content(tmp_path: Path) -> None:
             ),
         )
     assert rpc.sent == []
+
+
+def test_codex_mcp_url_preserves_elicitation_id(tmp_path: Path) -> None:
+    from crossby.ai_tools.codex import _answer_codex_mcp_elicitation
+
+    rpc = _FakeRpc([], cwd=tmp_path)
+    seen: list[SessionInteraction] = []
+    message = {
+        "id": 93,
+        "params": {
+            "threadId": "thr-exact",
+            "turnId": "turn-exact",
+            "serverName": "fixture-server",
+            "mode": "url",
+            "message": "Open the authorization URL",
+            "elicitationId": "elicit-exact",
+            "url": "https://example.test/authorize",
+        },
+    }
+
+    def accept(interaction: SessionInteraction) -> SessionInteractionResponse:
+        seen.append(interaction)
+        return SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED, option_id="accept"
+        )
+
+    _answer_codex_mcp_elicitation(
+        rpc, message, thread_id="thr-exact", turn_id="turn-exact", handler=accept
+    )
+    assert seen[0].url == "https://example.test/authorize"
+    assert any(
+        binding.name == "elicitation_id" and binding.value == "elicit-exact"
+        for binding in seen[0].operation.native_binding_ids
+    )
+    assert rpc.sent == [("respond", {"id": 93, "result": {"action": "accept"}})]
 
 
 def test_opencode_ordinary_effort_uses_default_model_without_plan_agent(
@@ -578,3 +624,274 @@ def test_codex_brokered_preflight_uses_its_own_verified_version_floor(
                 outcome=PlanInteractionOutcome.CANCELLED
             ),
         )
+
+
+def test_opencode_sse_parser_handles_fragmentation_and_rejects_bad_frames() -> None:
+    from crossby.ai_tools.opencode_server import BoundedSSEParser
+
+    parser = BoundedSSEParser()
+    assert parser.feed(b': heartbeat\n\ndata: {"type":"message.') == []
+    assert parser.feed(b'updated","properties":{}}\n\n') == [
+        {"type": "message.updated", "properties": {}}
+    ]
+    parser.finish()
+
+    with pytest.raises(ValueError, match="malformed JSON"):
+        BoundedSSEParser().feed(b"data: {broken}\n\n")
+    with pytest.raises(ValueError, match="size limit"):
+        BoundedSSEParser().feed(b"data: " + b"x" * (1024 * 1024 + 1))
+
+
+def test_opencode_sse_progress_uses_exact_session_binding() -> None:
+    import queue
+
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    server = OpenCodeServer.__new__(OpenCodeServer)
+    server._event_error = None
+    server._events = queue.Queue()
+    server._tool_states = {}
+    server._events.put(
+        {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": "tool-other",
+                    "sessionID": "ses-other",
+                    "type": "tool",
+                    "state": {"status": "running"},
+                }
+            },
+        }
+    )
+    server._events.put(
+        {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": "tool-exact",
+                    "sessionID": "ses-exact",
+                    "type": "tool",
+                    "state": {"status": "completed"},
+                }
+            },
+        }
+    )
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.events: list[tuple[HeadlessEventKind, Any]] = []
+
+        def emit(self, kind: HeadlessEventKind, **fields: Any) -> None:
+            self.events.append((kind, fields.get("payload")))
+
+    context = FakeContext()
+    server.drain_events(context, "ses-exact")
+    assert context.events == [(HeadlessEventKind.TOOL_COMPLETED, {"tool_call_id": "tool-exact"})]
+
+
+def test_antigravity_brokered_continuation_stops_after_nine_invocations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeOwner:
+        def __init__(self, _context: Any) -> None:
+            return None
+
+    calls: list[list[str]] = []
+
+    def run(_context: Any, *, argv: list[str], **_kwargs: Any) -> HeadlessCommandOutput:
+        calls.append(argv)
+        return HeadlessCommandOutput(
+            0,
+            json.dumps(
+                {
+                    "status": "WAITING_FOR_INPUT",
+                    "conversation_id": "conv-exact",
+                    "question": {
+                        "id": "choice",
+                        "prompt": "Continue?",
+                        "options": [{"id": "yes", "label": "Yes"}],
+                    },
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.ResumableManagedCLIController", FakeOwner)
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.run_managed_command", run)
+    result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON),
+        lambda _interaction: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED, option_id="yes"
+        ),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.conversation_id == "conv-exact"
+    assert len(calls) == 9
+    assert "nine native continuation" in " ".join(result.warnings)
+
+
+def test_codex_resume_starts_normal_turn_on_exact_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-existing"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-new"}}},
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-existing",
+                    "turnId": "turn-new",
+                    "item": {"id": "msg-new", "type": "agentMessage", "text": "New answer."},
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-existing",
+                    "turn": {"id": "turn-new", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path, resume_id="thr-existing"),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert (result.thread_id, result.turn_id, result.final_text) == (
+        "thr-existing",
+        "turn-new",
+        "New answer.",
+    )
+    sent = _FakeRpc.instances[0].sent
+    assert any(
+        method == "thread/resume" and params["threadId"] == "thr-existing"
+        for method, params in sent
+    )
+    assert not any(method == "thread/start" for method, _params in sent)
+
+
+def test_cursor_load_validates_replay_and_prompts_exact_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {
+                "id": 1,
+                "result": {
+                    "authMethods": [],
+                    "agentCapabilities": {"loadSession": True},
+                },
+            },
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-existing",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-old",
+                        "content": {"type": "text", "text": "Old answer."},
+                    },
+                },
+            },
+            {"id": 3, "result": {}},
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-existing",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-new",
+                        "content": {"type": "text", "text": "New answer."},
+                    },
+                },
+            },
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path, resume_id="ses-existing"),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.session_id == "ses-existing"
+    assert result.final_text == "New answer."
+    assert any(method == "session/load" for method, _params in _FakeRpc.instances[0].sent)
+
+
+def test_opencode_resume_ignores_historical_assistant_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeServer:
+        instances: ClassVar[list[FakeServer]] = []
+
+        def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
+            self.calls: list[tuple[str, str, Any]] = []
+            self.active_session_id: str | None = None
+            self.prompted = False
+            self.instances.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def request(self, method: str, path: str, payload: Any = None) -> Any:
+            self.calls.append((method, path, payload))
+            if path == "/session/ses-existing" and method == "GET":
+                return {"id": "ses-existing", "directory": str(tmp_path)}
+            if path in {"/question", "/permission"}:
+                return []
+            if path == "/session/ses-existing/prompt_async":
+                self.prompted = True
+                return None
+            if path == "/session/ses-existing/message":
+                old = {
+                    "info": {
+                        "id": "msg-old",
+                        "sessionID": "ses-existing",
+                        "role": "assistant",
+                        "finish": "stop",
+                        "time": {"completed": 1},
+                    }
+                }
+                if not self.prompted:
+                    return [old]
+                return [
+                    old,
+                    {
+                        "info": {
+                            "id": "msg-new",
+                            "sessionID": "ses-existing",
+                            "role": "assistant",
+                            "finish": "stop",
+                            "time": {"completed": 2},
+                        }
+                    },
+                ]
+            if path == "/session/ses-existing/message/msg-new":
+                return {
+                    "info": {
+                        "id": "msg-new",
+                        "sessionID": "ses-existing",
+                        "role": "assistant",
+                    },
+                    "parts": [{"type": "text", "text": "New answer."}],
+                }
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.OpenCodeServer", FakeServer)
+    result = AbstractAITool.get(AIToolID.OPENCODE).run_headless_session(
+        _request(tmp_path, resume_id="ses-existing"),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "New answer."
+    assert not any(
+        method == "POST" and path == "/session"
+        for method, path, _payload in FakeServer.instances[0].calls
+    )

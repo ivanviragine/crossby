@@ -95,6 +95,67 @@ def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
     return f"item.completed/{item_kind or 'item'}"
 
 
+def _codex_initialize_params(client_version: str) -> dict[str, Any]:
+    return {
+        "clientInfo": {"name": "crossby", "title": "Crossby", "version": client_version},
+        "capabilities": {"experimentalApi": True},
+    }
+
+
+def _codex_thread_params(
+    request: HeadlessSessionRequest | PlanSessionRequest,
+    *,
+    ephemeral: bool = True,
+) -> dict[str, Any]:
+    """Use the same policy-preserving app-server thread setup in both modes."""
+    params: dict[str, Any] = {
+        "cwd": str(request.working_dir.resolve()),
+        "model": request.model,
+        "sandbox": "workspace-write" if request.sandbox else "danger-full-access",
+        "approvalPolicy": request.approval_policy.value,
+        "ephemeral": ephemeral,
+    }
+    if request.sandbox:
+        params["config"] = {
+            "sandbox_workspace_write": {
+                "network_access": request.network_access,
+                "writable_roots": [str(path) for path in request.trusted_dirs],
+            }
+        }
+    return params
+
+
+def _codex_turn_params(
+    request: HeadlessSessionRequest | PlanSessionRequest,
+    thread_id: str,
+    *,
+    plan_model: str | None = None,
+) -> dict[str, Any]:
+    """Start an ordinary turn unless the plan collector supplies a plan model."""
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": request.prompt}],
+    }
+    effort = (
+        _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
+        if request.effort is not None
+        else None
+    )
+    if plan_model is None:
+        if effort is not None:
+            params["effort"] = effort
+    else:
+        params["collaborationMode"] = {
+            "mode": "plan",
+            "settings": {
+                "model": plan_model,
+                "reasoning_effort": effort,
+                "developer_instructions": None,
+            },
+        }
+    return params
+
+
 class CodexAdapter(AbstractAITool):
     """Adapter for OpenAI Codex CLI."""
 
@@ -132,6 +193,7 @@ class CodexAdapter(AbstractAITool):
                     transport=HeadlessNativeTransport.APP_SERVER,
                     prompt_transport=HeadlessPromptTransport.PROTOCOL,
                     native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
                     supports_native_abort=True,
                     terminal_event_required=True,
                     terminal_event_authoritative=True,
@@ -148,8 +210,8 @@ class CodexAdapter(AbstractAITool):
                     version_requirement="Codex CLI with the verified app-server protocol.",
                     verified_version="0.162.1",
                     limitation=(
-                        "Only text and fresh threads are supported. Native question, permission, "
-                        "and MCP form/URL requests are bound to one live turn."
+                        "Only text and exact app-server thread resumption are supported. Native "
+                        "question, permission, and MCP requests are bound to one live turn."
                     ),
                 ),
                 supports_response_schema=True,
@@ -655,42 +717,26 @@ class CodexAdapter(AbstractAITool):
         rpc.request(
             1,
             "initialize",
-            {
-                "clientInfo": {"name": "crossby", "title": "Crossby", "version": "session-v1"},
-                "capabilities": {"experimentalApi": True},
-            },
+            _codex_initialize_params("session-v1"),
         )
         response(1)
         rpc.notify("initialized", {})
-        config: dict[str, Any] = {}
-        if request.sandbox:
-            config["sandbox_workspace_write"] = {
-                "network_access": request.network_access,
-                "writable_roots": [str(path) for path in request.trusted_dirs],
-            }
-        thread_params: dict[str, Any] = {
-            "cwd": str(request.working_dir),
-            "model": request.model,
-            "sandbox": "workspace-write" if request.sandbox else "danger-full-access",
-            "approvalPolicy": request.approval_policy.value,
-            "ephemeral": True,
-        }
-        if config:
-            thread_params["config"] = config
-        rpc.request(2, "thread/start", thread_params)
+        if request.resume_id is None:
+            rpc.request(2, "thread/start", _codex_thread_params(request, ephemeral=False))
+        else:
+            resume_params = _codex_thread_params(request)
+            resume_params.pop("ephemeral")
+            resume_params["threadId"] = request.resume_id
+            rpc.request(2, "thread/resume", resume_params)
         thread_result = response(2)
         thread = thread_result.get("thread")
         thread_id = thread.get("id") if isinstance(thread, dict) else None
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise ValueError("Codex thread/start omitted its native thread ID")
+        if request.resume_id is not None and thread_id != request.resume_id:
+            raise ValueError("Codex resumed a different native thread")
         context.set_provenance(session_id=thread_id, thread_id=thread_id)
-        turn_params: dict[str, Any] = {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": request.prompt}],
-        }
-        if request.effort is not None:
-            turn_params["effort"] = _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
-        rpc.request(3, "turn/start", turn_params)
+        rpc.request(3, "turn/start", _codex_turn_params(request, thread_id))
         turn_result = response(3)
         turn = turn_result.get("turn")
         turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -795,6 +841,7 @@ class CodexAdapter(AbstractAITool):
                     thread_id=thread_id,
                     turn_id=turn_id,
                     handler=context.native_interaction_response,
+                    deny_automatically=request.approval_policy is PlanApprovalPolicy.NEVER,
                 )
                 continue
             if method == "mcpServer/elicitation/request" and "id" in message:
@@ -902,14 +949,7 @@ class CodexAdapter(AbstractAITool):
             rpc.request(
                 1,
                 "initialize",
-                {
-                    "clientInfo": {
-                        "name": "crossby",
-                        "title": "Crossby",
-                        "version": "plan-session-v1",
-                    },
-                    "capabilities": {"experimentalApi": True},
-                },
+                _codex_initialize_params("plan-session-v1"),
             )
             wait_response(1)
             rpc.notify("initialized", {})
@@ -925,25 +965,7 @@ class CodexAdapter(AbstractAITool):
                     capability=capability,
                 )
 
-            config: dict[str, Any] = {}
-            if request.sandbox:
-                sandbox_config: dict[str, Any] = {
-                    # Pin both values so ambient config cannot silently widen a
-                    # Crossby-managed planning thread.
-                    "network_access": request.network_access,
-                    "writable_roots": [str(path) for path in request.trusted_dirs],
-                }
-                config["sandbox_workspace_write"] = sandbox_config
-            thread_params: dict[str, Any] = {
-                "cwd": str(request.working_dir.resolve()),
-                "model": request.model,
-                "sandbox": "workspace-write" if request.sandbox else "danger-full-access",
-                "approvalPolicy": request.approval_policy.value,
-                "ephemeral": True,
-            }
-            if config:
-                thread_params["config"] = config
-            rpc.request(3, "thread/start", thread_params)
+            rpc.request(3, "thread/start", _codex_thread_params(request))
             thread_result = wait_response(3)
             thread = thread_result.get("thread")
             thread_id = thread.get("id") if isinstance(thread, dict) else None
@@ -957,22 +979,7 @@ class CodexAdapter(AbstractAITool):
             rpc.request(
                 4,
                 "turn/start",
-                {
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": request.prompt}],
-                    "collaborationMode": {
-                        "mode": "plan",
-                        "settings": {
-                            "model": effective_model,
-                            "reasoning_effort": (
-                                _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
-                                if request.effort is not None
-                                else None
-                            ),
-                            "developer_instructions": None,
-                        },
-                    },
-                },
+                _codex_turn_params(request, thread_id, plan_model=effective_model),
             )
             turn_result = wait_response(4)
             turn = turn_result.get("turn")
@@ -1604,6 +1611,7 @@ def _answer_codex_builtin_permission(
     thread_id: str,
     turn_id: str,
     handler: PlanInteractionHandler,
+    deny_automatically: bool = False,
 ) -> None:
     """Grant only the exact structured permission profile explicitly approved."""
     params = message.get("params")
@@ -1624,6 +1632,8 @@ def _answer_codex_builtin_permission(
         or not item_id.strip()
     ):
         raise ValueError("Codex built-in permission omitted authoritative fields")
+    if deny_automatically:
+        raise ValueError("Codex built-in permission is forbidden by approval_policy=never")
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
         question_id=str(message["id"]),
@@ -1675,9 +1685,15 @@ def _answer_codex_mcp_elicitation(
         raise ValueError("Codex emitted an unsupported MCP elicitation")
     schema = params.get("requestedSchema") if mode != "url" else None
     url = params.get("url") if mode == "url" else None
+    elicitation_id = params.get("elicitationId") if mode == "url" else None
     if mode == "url":
-        if not isinstance(url, str) or not url.strip():
-            raise ValueError("Codex MCP URL elicitation omitted its URL")
+        if (
+            not isinstance(url, str)
+            or not url.strip()
+            or not isinstance(elicitation_id, str)
+            or not elicitation_id.strip()
+        ):
+            raise ValueError("Codex MCP URL elicitation omitted its URL or native ID")
     elif not isinstance(schema, dict):
         raise ValueError("Codex MCP form elicitation omitted its schema")
     interaction = PlanInteraction(
@@ -1693,7 +1709,14 @@ def _answer_codex_mcp_elicitation(
         url=url,
         operation=PlanOperation(
             kind=PlanOperationKind.OTHER,
-            native_binding_ids=(PlanNativeBindingID(name="mcp_server", value=server_name),),
+            native_binding_ids=(
+                PlanNativeBindingID(name="mcp_server", value=server_name),
+                *(
+                    (PlanNativeBindingID(name="elicitation_id", value=elicitation_id),)
+                    if isinstance(elicitation_id, str)
+                    else ()
+                ),
+            ),
         ),
     )
     response = handler(interaction)

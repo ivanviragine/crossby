@@ -323,7 +323,9 @@ deadline and cleanup registration. Preserve exact native session, turn,
 conversation, request, and option IDs. Derive executable command fields only
 from native raw input; display text is never authority for command policy.
 Collected-plan entry points retain their artifact checks and native plan-mode
-selection. Keep the ordinary brokered path free of plan mode and plan artifacts.
+selection. Codex and Cursor share app-server/ACP setup payload builders across
+the two paths; Antigravity shares native question-to-continuation mapping.
+Keep the ordinary brokered path free of plan mode and plan artifacts.
 The checked behavior and version floors are documented in
 `docs/brokered-headless-verification.md`.
 

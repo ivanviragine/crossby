@@ -6,6 +6,7 @@ import base64
 import http.client
 import json
 import os
+import queue
 import re
 import secrets
 import signal
@@ -55,6 +56,50 @@ from crossby.models.ai import (
 
 _HTTP_BODY_LIMIT = 8 * 1024 * 1024
 _HTTP_BODY_CHUNK_SIZE = 64 * 1024
+_SSE_EVENT_LIMIT = 1024 * 1024
+_SSE_QUEUE_LIMIT = 256
+
+
+class BoundedSSEParser:
+    """Decode fragmented SSE data records without retaining an unbounded line."""
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+        self._data: list[bytes] = []
+        self._data_size = 0
+
+    def feed(self, chunk: bytes) -> list[dict[str, Any]]:
+        self._pending.extend(chunk)
+        if len(self._pending) > _SSE_EVENT_LIMIT:
+            raise ValueError("OpenCode SSE line exceeded its size limit")
+        events: list[dict[str, Any]] = []
+        while (newline := self._pending.find(b"\n")) >= 0:
+            line = bytes(self._pending[:newline]).removesuffix(b"\r")
+            del self._pending[: newline + 1]
+            if not line:
+                if self._data:
+                    encoded = b"\n".join(self._data)
+                    try:
+                        value = json.loads(encoded.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        raise ValueError("OpenCode SSE contained malformed JSON") from exc
+                    if not isinstance(value, dict):
+                        raise ValueError("OpenCode SSE event was not an object")
+                    events.append(value)
+                    self._data.clear()
+                    self._data_size = 0
+                continue
+            if line.startswith(b"data:"):
+                data = line[5:].removeprefix(b" ")
+                self._data_size += len(data)
+                if self._data_size > _SSE_EVENT_LIMIT:
+                    raise ValueError("OpenCode SSE event exceeded its size limit")
+                self._data.append(data)
+        return events
+
+    def finish(self) -> None:
+        if self._pending or self._data:
+            raise ValueError("OpenCode SSE ended with an incomplete event")
 
 
 class OpenCodeServer:
@@ -71,6 +116,12 @@ class OpenCodeServer:
         self.directory = request.working_dir
         self.port: int | None = None
         self.active_session_id: str | None = None
+        self._event_stop = threading.Event()
+        self._event_connection: http.client.HTTPConnection | None = None
+        self._event_thread: threading.Thread | None = None
+        self._events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_SSE_QUEUE_LIMIT)
+        self._event_error: ValueError | None = None
+        self._tool_states: dict[str, str] = {}
         password = secrets.token_urlsafe(32)
         self.authorization = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
         # The CLI run command disables questions. The native server exposes
@@ -90,15 +141,121 @@ class OpenCodeServer:
             runtime.register_cleanup(
                 HeadlessCleanupHooks(
                     native_abort=self._abort_active_session,
-                    close_input=lambda _ctx: self.process.close_input(),
+                    close_input=self._close_input,
                     terminate=self._terminate,
                     force_kill=lambda _ctx: kill_process_group(self.process._proc),
                     reap=self._reap,
-                    join_workers=lambda ctx: self.process.join_workers(
-                        timeout=ctx.remaining_seconds()
-                    ),
+                    join_workers=self._join_workers,
                 )
             )
+
+    def _close_input(self, _ctx: HeadlessCleanupContext) -> None:
+        self._event_stop.set()
+        if self._event_connection is not None:
+            with suppress(OSError):
+                self._event_connection.close()
+        self.process.close_input()
+
+    def _join_workers(self, ctx: HeadlessCleanupContext) -> None:
+        self.process.join_workers(timeout=ctx.remaining_seconds())
+        thread = self._event_thread
+        if thread is not None and thread.ident is not None:
+            thread.join(timeout=ctx.remaining_seconds())
+
+    def open_events(self) -> None:
+        """Subscribe before prompting; polling remains terminal authority."""
+        if self.port is None:
+            raise OSError("OpenCode event stream requires a started server")
+
+        def receive() -> None:
+            parser = BoundedSSEParser()
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=0.2)
+            self._event_connection = connection
+            try:
+                if self._event_stop.is_set():
+                    return
+                connection.request(
+                    "GET",
+                    "/event?" + urlencode({"directory": str(self.directory)}),
+                    headers={
+                        "Authorization": self.authorization,
+                        "Accept": "text/event-stream",
+                    },
+                )
+                response = connection.getresponse()
+                if response.status != 200 or "text/event-stream" not in response.getheader(
+                    "Content-Type", ""
+                ):
+                    return
+                while not self._event_stop.is_set() and time.monotonic() < self.deadline:
+                    try:
+                        chunk = response.read1(_HTTP_BODY_CHUNK_SIZE)
+                    except TimeoutError:
+                        continue
+                    if not chunk:
+                        parser.finish()
+                        return
+                    for event in parser.feed(chunk):
+                        try:
+                            self._events.put_nowait(event)
+                        except queue.Full as exc:
+                            raise ValueError("OpenCode SSE event queue exceeded its limit") from exc
+            except ValueError as exc:
+                self._event_error = exc
+            except (OSError, http.client.HTTPException):
+                # Some verified 1.18.x builds expose the endpoint but do not
+                # deliver live events. Bound HTTP polling still proves terminal
+                # state and exact message binding.
+                return
+            finally:
+                connection.close()
+
+        self._event_thread = threading.Thread(
+            target=receive, daemon=True, name="crossby-opencode-sse"
+        )
+        self._event_thread.start()
+
+    def drain_events(self, context: HeadlessRuntimeContext, session_id: str) -> None:
+        """Normalize only bounded events for the active native session."""
+        if self._event_error is not None:
+            raise self._event_error
+        for _ in range(_SSE_QUEUE_LIMIT):
+            try:
+                event = self._events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event.get("type")
+            properties = event.get("properties")
+            if not isinstance(kind, str) or not isinstance(properties, dict):
+                raise ValueError("OpenCode SSE event had malformed native fields")
+            if kind == "message.updated":
+                info = properties.get("info")
+                if not isinstance(info, dict):
+                    raise ValueError("OpenCode SSE message update omitted info")
+                if info.get("sessionID") == session_id and info.get("role") == "assistant":
+                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
+                    if isinstance(info.get("tokens"), dict):
+                        context.emit(HeadlessEventKind.USAGE, message="usage updated")
+            elif kind == "message.part.updated":
+                part = properties.get("part")
+                if not isinstance(part, dict):
+                    raise ValueError("OpenCode SSE part update omitted its part")
+                if part.get("sessionID") != session_id or part.get("type") != "tool":
+                    continue
+                part_id = _required_text(part, "id")
+                state = part.get("state")
+                status = state.get("status") if isinstance(state, dict) else None
+                if not isinstance(status, str) or not status.strip():
+                    raise ValueError("OpenCode SSE tool update omitted its status")
+                if self._tool_states.get(part_id) == status:
+                    continue
+                self._tool_states[part_id] = status
+                context.emit(
+                    HeadlessEventKind.TOOL_COMPLETED
+                    if status in {"completed", "error"}
+                    else HeadlessEventKind.TOOL_STARTED,
+                    payload={"tool_call_id": part_id},
+                )
 
     def _abort_active_session(self, _ctx: HeadlessCleanupContext) -> None:
         session_id = self.active_session_id
@@ -201,6 +358,12 @@ class OpenCodeServer:
             connection.close()
 
     def close(self) -> int:
+        self._event_stop.set()
+        if self._event_connection is not None:
+            with suppress(OSError):
+                self._event_connection.close()
+        if self._event_thread is not None and self._event_thread.ident is not None:
+            self._event_thread.join(timeout=min(0.2, max(0.0, self.deadline - time.monotonic())))
         return self.process.close()
 
 
@@ -334,17 +497,44 @@ def run_native_session(
                 for pattern in request.command_policy.allowed_commands
             ),
         ]
-    session = server.request("POST", "/session", session_request)
-    session_id = _required_text(session, "id")
+    if request.resume_id is None:
+        session = server.request("POST", "/session", session_request)
+        session_id = _required_text(session, "id")
+    else:
+        session_id = request.resume_id
+        context.validate_provenance(session_id=session_id)
+        session = server.request("GET", "/session/" + quote(session_id, safe=""))
+        if _required_text(session, "id") != session_id:
+            raise ValueError("OpenCode resumed a different native session")
+        native_directory = session.get("directory")
+        if native_directory is not None and native_directory != str(request.working_dir):
+            raise ValueError("OpenCode resumed a session from a different working directory")
     server.active_session_id = session_id
     context.set_provenance(session_id=session_id)
     session_path = "/session/" + quote(session_id, safe="")
+    existing_ids: set[str] = set()
+    if request.resume_id is not None:
+        history = server.request("GET", session_path + "/message")
+        if not isinstance(history, list):
+            raise ValueError("OpenCode returned malformed resumed session history")
+        for message in history:
+            info = message.get("info") if isinstance(message, dict) else None
+            if not isinstance(info, dict) or info.get("sessionID") != session_id:
+                raise ValueError("OpenCode resumed history from a different session")
+            message_id = _required_text(info, "id")
+            if message_id in existing_ids:
+                raise ValueError("OpenCode resumed duplicate native message IDs")
+            existing_ids.add(message_id)
+    if hasattr(server, "open_events"):
+        server.open_events()
     server.request("POST", session_path + "/prompt_async", prompt)
     context.emit(HeadlessEventKind.STARTED, message="OpenCode session started")
-    observed: set[str] = set()
+    observed: set[str] = set(existing_ids)
     answered_requests: dict[str, str] = {}
     while True:
         context.checkpoint()
+        if hasattr(server, "drain_events"):
+            server.drain_events(context, session_id)
         for question in _bound_requests(server.request("GET", "/question"), session_id):
             request_id = _required_text(question, "id")
             if request_id in answered_requests:
@@ -384,7 +574,7 @@ def run_native_session(
         if messages:
             last = messages[-1]
             info = last["info"]
-            if info.get("role") == "assistant":
+            if info.get("role") == "assistant" and _required_text(info, "id") not in existing_ids:
                 if info.get("error") is not None:
                     raise ValueError("OpenCode assistant message failed")
                 finish = info.get("finish")

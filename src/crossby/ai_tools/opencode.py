@@ -94,6 +94,7 @@ class OpenCodeAdapter(AbstractAITool):
                     transport=HeadlessNativeTransport.HTTP_SERVER,
                     prompt_transport=HeadlessPromptTransport.API,
                     native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
                     supports_native_abort=True,
                     terminal_event_required=True,
                     terminal_event_authoritative=True,
@@ -106,10 +107,10 @@ class OpenCodeAdapter(AbstractAITool):
                         PlanInteractionKind.PERMISSION,
                     ),
                     version_requirement="OpenCode with verified authenticated loopback APIs.",
-                    verified_version="1.18.29",
+                    verified_version="1.19.0",
                     limitation=(
-                        "Only text and fresh native sessions are verified; structured response "
-                        "schemas and native resumption are unavailable."
+                        "Only text and exact session resumption are verified; structured "
+                        "response schemas and command-policy changes on resume are unavailable."
                     ),
                 ),
                 supports_response_schema=False,
@@ -209,7 +210,14 @@ class OpenCodeAdapter(AbstractAITool):
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         if request.interaction_mode is not HeadlessInteractionMode.BROKERED:
             return
-        from crossby.ai_tools.headless import HeadlessRequestError
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+
+        if request.resume_id is not None and request.command_policy is not None:
+            raise HeadlessUnsupportedError(
+                "OpenCode cannot replace native command rules on a resumed session.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
 
         if request.effort is not None and request.model is None:
             raise HeadlessRequestError(
