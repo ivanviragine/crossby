@@ -81,8 +81,9 @@ _CLAUDE_DATED_ALIAS_RE = re.compile(
 # family), as long as it looks like a multi-segment identifier (e.g.
 # "foo-1.2-bar") rather than a plain word from the description column.
 _ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[./-][a-z0-9._-]+)+$")
-_ANTIGRAVITY_GEMINI_EFFORT_RE = re.compile(
-    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro))-(?:low|medium|high)$"
+_ANTIGRAVITY_EFFORT_RE = re.compile(
+    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro)|claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*)"
+    r"-(?:low|medium|high)$"
 )
 
 # Per-tool expected CLI flag patterns, keyed by capability name.
@@ -452,14 +453,14 @@ def probe_cursor() -> set[str]:
 
 
 def normalize_antigravity_model_id(model: str) -> str:
-    """Collapse only agy's known Gemini effort-expanded IDs to base IDs.
+    """Collapse only agy's known Gemini and Claude effort-expanded IDs to base IDs.
 
-    Non-Gemini suffixes such as ``claude-opus-4-6-thinking`` and
+    Other suffixes such as ``claude-opus-4-6-thinking`` and
     ``gpt-oss-120b-medium`` are part of those tools' model names and must stay
-    intact. Gemini suffixes other than low/medium/high are also preserved so a
-    newly introduced variant is reported rather than silently rewritten.
+    intact. Suffixes other than low/medium/high are also preserved so a newly
+    introduced variant is reported rather than silently rewritten.
     """
-    match = _ANTIGRAVITY_GEMINI_EFFORT_RE.fullmatch(model)
+    match = _ANTIGRAVITY_EFFORT_RE.fullmatch(model)
     return match.group(1) if match else model
 
 
