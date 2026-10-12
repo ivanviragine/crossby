@@ -1084,7 +1084,8 @@ class HeadlessCapability(BaseModel):
             return self.brokered
         if not self.managed_supported:
             raise ValueError("unattended mode has no managed transport")
-        assert self.prompt_transport is not None and self.verified_version is not None
+        if self.prompt_transport is None or self.verified_version is None:
+            raise ValueError("unattended mode has no verified managed version")
         return HeadlessModeCapability(
             transport=self.transport,
             prompt_transport=self.prompt_transport,

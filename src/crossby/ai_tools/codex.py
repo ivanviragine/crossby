@@ -745,6 +745,9 @@ class CodexAdapter(AbstractAITool):
         context.set_provenance(turn_id=turn_id)
         rpc.set_abort("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
         context.emit(HeadlessEventKind.STARTED, message="Codex turn started")
+        from crossby.ai_tools.headless_cli import BoundedProgress
+
+        delta_progress = BoundedProgress(context)
         final_text: str | None = None
         usage: Any = None
         while True:
@@ -790,7 +793,7 @@ class CodexAdapter(AbstractAITool):
                         or not message_id.strip()
                     ):
                         raise ValueError("Codex completed an empty agent message")
-                    final_text = text
+                    final_text = text if final_text is None else f"{final_text}\n{text}"
                     context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="completed")
                 elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
                     context.emit(
@@ -801,6 +804,13 @@ class CodexAdapter(AbstractAITool):
                     )
                 else:
                     context.emit(HeadlessEventKind.PROGRESS, message="item updated")
+                continue
+            if method == "item/agentMessage/delta":
+                if not isinstance(params, dict) or (
+                    params.get("threadId") != thread_id or params.get("turnId") != turn_id
+                ):
+                    raise ValueError("Codex emitted a message delta for another turn")
+                delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="delta")
                 continue
             if method == "item/tool/requestUserInput" and "id" in message:
                 rpc.track_native_request(message)

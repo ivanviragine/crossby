@@ -743,11 +743,33 @@ class JsonRpcProcess:
             raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
         # The runtime bounds this hook. A stalled prior writer cannot be
         # overtaken by an abort that would corrupt the native JSONL stream.
+        cleanup_deadline = time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS
         if not self._send_lock.acquire(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS):
             return
         try:
             if self._proc.poll() is None and not self._stdin.closed:
-                os.write(self._stdin.fileno(), encoded)
+                fd = self._stdin.fileno()
+                view = memoryview(encoded)
+                try:
+                    was_blocking = os.get_blocking(fd)
+                    os.set_blocking(fd, False)
+                except OSError:
+                    return
+                try:
+                    while view and time.monotonic() < cleanup_deadline:
+                        try:
+                            written = os.write(fd, view)
+                        except BlockingIOError:
+                            time.sleep(min(0.01, max(0.0, cleanup_deadline - time.monotonic())))
+                            continue
+                        except OSError:
+                            break
+                        if written == 0:
+                            break
+                        view = view[written:]
+                finally:
+                    with suppress(OSError):
+                        os.set_blocking(fd, was_blocking)
         finally:
             self._send_lock.release()
 

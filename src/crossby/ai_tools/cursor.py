@@ -791,6 +791,13 @@ class CursorAdapter(AbstractAITool):
         rpc.set_abort("session/cancel", {"sessionId": session_id})
 
         next_id = 4
+        requested_effort = request.effort
+        if request.model is not None and requested_effort is None:
+            requested_effort = _parameterized_effort(request.model) or _encoded_effort(
+                request.model
+            )
+        configured_variants: dict[str, str] = {}
+        configured_effort: tuple[str, str] | None = None
         if request.model is not None:
             model_base = _cursor_model_base(request.model)
             offered = _cursor_config_option(state, option_id="model")
@@ -805,8 +812,8 @@ class CursorAdapter(AbstractAITool):
             if _cursor_config_option(state, option_id="model")["currentValue"] != model_base:
                 raise ValueError("Cursor did not preserve the requested model")
             next_id += 1
-        if request.effort is not None:
-            configured = _cursor_effort_option(state, request.effort)
+        if requested_effort is not None:
+            configured = _cursor_effort_option(state, requested_effort)
             if configured is None:
                 raise ValueError("Cursor did not advertise the requested effort")
             option, value = configured
@@ -816,9 +823,10 @@ class CursorAdapter(AbstractAITool):
                 {"sessionId": session_id, "configId": option["id"], "value": value},
             )
             state = response(next_id)
-            confirmed = _cursor_effort_option(state, request.effort)
+            confirmed = _cursor_effort_option(state, requested_effort)
             if confirmed is None or confirmed[0]["currentValue"] != value:
                 raise ValueError("Cursor did not preserve the requested effort")
+            configured_effort = (option["id"], value)
             next_id += 1
         if request.model is not None:
             model_name = request.model.split("[", 1)[0]
@@ -847,7 +855,25 @@ class CursorAdapter(AbstractAITool):
                     variant_value
                 ):
                     raise ValueError(f"Cursor did not preserve the requested {variant_id} model")
+                configured_variants[variant_id] = variant_value
                 next_id += 1
+        if (
+            request.model is not None
+            and _cursor_config_option(state, option_id="model")["currentValue"] != model_base
+        ):
+            raise ValueError("Cursor reset the requested model while configuring the session")
+        if requested_effort is not None:
+            final_effort = _cursor_effort_option(state, requested_effort)
+            if (
+                final_effort is None
+                or configured_effort is None
+                or final_effort[0]["id"] != configured_effort[0]
+                or final_effort[0]["currentValue"] != configured_effort[1]
+            ):
+                raise ValueError("Cursor reset the requested effort while configuring the session")
+        for variant_id, variant_value in configured_variants.items():
+            if _cursor_config_option(state, option_id=variant_id)["currentValue"] != variant_value:
+                raise ValueError(f"Cursor reset the requested {variant_id} model")
         prompt_id = next_id
         rpc.request(
             prompt_id,
@@ -858,6 +884,7 @@ class CursorAdapter(AbstractAITool):
         from crossby.ai_tools.headless_cli import BoundedProgress
 
         chunk_progress = BoundedProgress(context)
+        tool_events = 0
         messages: dict[str, list[str]] = {}
         last_message_id: str | None = None
         usage_tokens: int | None = None
@@ -905,19 +932,23 @@ class CursorAdapter(AbstractAITool):
                     tool_id = update.get("toolCallId")
                     if not isinstance(tool_id, str) or not tool_id.strip():
                         raise ValueError("Cursor tool update omitted its native ID")
-                    context.emit(
-                        HeadlessEventKind.TOOL_COMPLETED
-                        if update.get("status") in {"completed", "failed"}
-                        else HeadlessEventKind.TOOL_STARTED,
-                        payload={"tool_call_id": tool_id},
-                    )
+                    if tool_events < 512:
+                        tool_events += 1
+                        context.emit(
+                            HeadlessEventKind.TOOL_COMPLETED
+                            if update.get("status") in {"completed", "failed"}
+                            else HeadlessEventKind.TOOL_STARTED,
+                            payload={"tool_call_id": tool_id},
+                        )
+                    else:
+                        context.mark_progress()
                 elif kind == "usage_update":
                     used = update.get("used")
                     if isinstance(used, int) and used >= 0:
                         usage_tokens = used
-                    context.emit(HeadlessEventKind.USAGE, message="usage updated")
+                    chunk_progress.note(HeadlessEventKind.USAGE, message="usage updated")
                 else:
-                    context.emit(HeadlessEventKind.PROGRESS, message="session updated")
+                    chunk_progress.note(HeadlessEventKind.PROGRESS, message="session updated")
                 continue
             if method == "cursor/ask_question" and "id" in message:
                 rpc.track_native_request(message)
@@ -930,7 +961,9 @@ class CursorAdapter(AbstractAITool):
                     capability=self.capabilities().plan_mode,
                 )
                 continue
-            if method == "session/request_permission" and "id" in message:
+            if method in {"session/request_permission", "cursor/request_permission"} and (
+                "id" in message
+            ):
                 rpc.track_native_request(message)
                 _answer_cursor_permission(
                     rpc,

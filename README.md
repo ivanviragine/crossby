@@ -470,13 +470,28 @@ See [brokered verification](docs/brokered-headless-verification.md) for terminal
 bindings and limitations.
 
 ```python
+from pathlib import Path
+
 from crossby.ai_tools import AbstractAITool
-from crossby.models.ai import AIToolID, HeadlessInteractionMode, HeadlessSessionRequest
+from crossby.models.ai import (
+    AIToolID,
+    HeadlessInteractionMode,
+    HeadlessSessionRequest,
+    PlanInteractionOutcome,
+    SessionInteractionResponse,
+)
+
+
+def answer_native_request(interaction):
+    # Replace this with your application's question and permission decisions.
+    return SessionInteractionResponse(
+        outcome=PlanInteractionOutcome.CANCELLED,
+    )
 
 tool = AbstractAITool.get(AIToolID.CODEX)
 request = HeadlessSessionRequest(
     prompt="Review this module and summarize the changes",
-    working_dir=project_dir,
+    working_dir=Path.cwd(),
     interaction_mode=HeadlessInteractionMode.BROKERED,
 )
 result = tool.run_headless_session(request, interaction_handler=answer_native_request)

@@ -198,8 +198,9 @@ class OpenCodeServer:
                     for event in parser.feed(chunk):
                         try:
                             self._events.put_nowait(event)
-                        except queue.Full as exc:
-                            raise ValueError("OpenCode SSE event queue exceeded its limit") from exc
+                        except queue.Full:
+                            # Polling remains the terminal authority when progress is dropped.
+                            continue
             except ValueError as exc:
                 self._event_error = exc
             except (OSError, http.client.HTTPException):

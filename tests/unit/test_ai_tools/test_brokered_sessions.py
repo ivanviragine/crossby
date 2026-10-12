@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 import pytest
 
 from crossby.ai_tools import AbstractAITool
+from crossby.ai_tools.headless import HeadlessTransportError
 from crossby.ai_tools.headless_cli import HeadlessCommandOutput
 from crossby.models.ai import (
     AIToolID,
@@ -176,6 +177,185 @@ def test_codex_question_uses_exact_thread_turn_request_and_normal_mode(
     assert any(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events)
 
 
+def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            *[
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"threadId": "thr-exact", "turnId": "turn-exact", "delta": "x"},
+                }
+                for _ in range(4200)
+            ],
+            *[
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thr-exact",
+                        "turnId": "turn-exact",
+                        "item": {"type": "agentMessage", "id": f"msg-{i}", "text": value},
+                    },
+                }
+                for i, value in enumerate(("First.", "Second."))
+            ],
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "First.\nSecond."
+    assert sum(event.message == "delta" for event in result.events) == 512
+
+
+def _cursor_state(
+    model: str, effort: str, *, thinking: str | None = None, fast: str | None = None
+) -> dict[str, Any]:
+    options: list[dict[str, Any]] = [
+        {
+            "id": "model",
+            "currentValue": model,
+            "options": [{"value": "other"}, {"value": "claude-opus-5-5"}],
+        },
+        {
+            "id": "effort",
+            "category": "thought_level",
+            "currentValue": effort,
+            "options": [{"value": "low"}, {"value": "high"}],
+        },
+    ]
+    if thinking is not None:
+        options.append(
+            {
+                "id": "thinking",
+                "currentValue": thinking,
+                "options": [{"value": "false"}, {"value": "true"}],
+            }
+        )
+    if fast is not None:
+        options.append(
+            {
+                "id": "fast",
+                "currentValue": fast,
+                "options": [{"value": "false"}, {"value": "true"}],
+            }
+        )
+    return {"sessionId": "ses-exact", "configOptions": options}
+
+
+def test_cursor_brokered_model_encoded_effort_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": _cursor_state("other", "low")},
+            {"id": 4, "result": _cursor_state("claude-opus-5-5", "low")},
+            {"id": 5, "result": _cursor_state("claude-opus-5-5", "high")},
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": "Completed."},
+                    },
+                },
+            },
+            {"id": 6, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path, model="claude-opus-5-5-high"),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert (
+        "session/set_config_option",
+        {"sessionId": "ses-exact", "configId": "effort", "value": "high"},
+    ) in _FakeRpc.instances[0].sent
+
+
+@pytest.mark.parametrize(
+    ("final_model", "final_effort"),
+    [("other", "high"), ("claude-opus-5-5", "low")],
+)
+def test_cursor_brokered_rejects_model_or_effort_reset_by_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_model: str, final_effort: str
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": _cursor_state("other", "low", thinking="true")},
+            {"id": 4, "result": _cursor_state("claude-opus-5-5", "low", thinking="true")},
+            {"id": 5, "result": _cursor_state("claude-opus-5-5", "high", thinking="true")},
+            {"id": 6, "result": _cursor_state(final_model, final_effort, thinking="false")},
+        ],
+    )
+    with pytest.raises(HeadlessTransportError):
+        AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+            _request(tmp_path, model="claude-opus-5-5-high"),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+    assert not any(method == "session/prompt" for method, _ in _FakeRpc.instances[0].sent)
+
+
+def test_cursor_brokered_rejects_earlier_variant_reset_by_later_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": _cursor_state("other", "low", thinking="true", fast="true")},
+            {
+                "id": 4,
+                "result": _cursor_state("claude-opus-5-5", "low", thinking="true", fast="true"),
+            },
+            {
+                "id": 5,
+                "result": _cursor_state("claude-opus-5-5", "high", thinking="true", fast="true"),
+            },
+            {
+                "id": 6,
+                "result": _cursor_state("claude-opus-5-5", "high", thinking="false", fast="true"),
+            },
+            {
+                "id": 7,
+                "result": _cursor_state("claude-opus-5-5", "high", thinking="true", fast="false"),
+            },
+        ],
+    )
+    with pytest.raises(HeadlessTransportError):
+        AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+            _request(tmp_path, model="claude-opus-5-5-high"),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+    assert not any(method == "session/prompt" for method, _ in _FakeRpc.instances[0].sent)
+
+
 def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,6 +452,100 @@ def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "x" * 4200
     assert sum(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events) == 512
+
+
+def test_cursor_many_non_text_updates_and_tools_remain_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updates = [
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "ses-exact",
+                "update": (
+                    {"sessionUpdate": "tool_call_update", "toolCallId": f"tool-{i}"}
+                    if i % 2
+                    else {"sessionUpdate": "agent_thought_chunk"}
+                ),
+            },
+        }
+        for i in range(4400)
+    ]
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            *updates,
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": "Completed."},
+                    },
+                },
+            },
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Completed."
+    assert sum(event.kind is HeadlessEventKind.TOOL_STARTED for event in result.events) == 512
+    assert len(result.events) < 1100
+
+
+def test_cursor_brokered_accepts_cursor_permission_method(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            {
+                "id": 90,
+                "method": "cursor/request_permission",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "toolCall": {"toolCallId": "tool-exact", "title": "Run a command?"},
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once"},
+                        {"optionId": "deny-once", "name": "Deny once"},
+                    ],
+                },
+            },
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": "Completed."},
+                    },
+                },
+            },
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.APPROVED, option_id="allow-once"
+        ),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert (
+        "respond",
+        {"id": 90, "result": {"outcome": {"outcome": "selected", "optionId": "allow-once"}}},
+    ) in _FakeRpc.instances[0].sent
 
 
 @pytest.mark.parametrize("tool_id", [AIToolID.CODEX, AIToolID.CURSOR])
@@ -867,6 +1141,104 @@ def test_opencode_sse_survives_quiet_period_longer_than_200ms(
     assert not server._event_thread.is_alive()
     assert server._event_error is None
     assert server._events.get_nowait()["type"] == "session.status"
+
+
+def test_opencode_sse_full_queue_does_not_fail_polling_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def getheader(self, _name: str, _default: str = "") -> str:
+            return "text/event-stream"
+
+        def read1(self, _amount: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return b'data: {"type":"session.status","properties":{}}\n\n' * 3
+            return b""
+
+    class FakeConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            pass
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def getresponse(self) -> FakeResponse:
+            return response
+
+        def close(self) -> None:
+            pass
+
+    response = FakeResponse()
+    monkeypatch.setattr(
+        "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
+    )
+    server = OpenCodeServer.__new__(OpenCodeServer)
+    server.port = 1234
+    server.directory = tmp_path
+    server.authorization = "Basic fixture"
+    server.deadline = time.monotonic() + 2
+    server._event_stop = threading.Event()
+    server._event_error = None
+    server._event_connection = None
+    server._events = queue.Queue(maxsize=1)
+    server.open_events()
+    assert server._event_thread is not None
+    server._event_thread.join(timeout=1)
+    assert not server._event_thread.is_alive()
+    assert server._event_error is None
+    assert server._events.qsize() == 1
+
+
+def test_json_rpc_cleanup_retries_short_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    from crossby.ai_tools.plan_process import JsonRpcProcess
+
+    class RunningProcess:
+        def poll(self) -> None:
+            return None
+
+    class OpenInput:
+        closed = False
+
+        def fileno(self) -> int:
+            return 10
+
+    rpc = JsonRpcProcess.__new__(JsonRpcProcess)
+    rpc._proc = RunningProcess()  # type: ignore[assignment]
+    rpc._stdin = OpenInput()  # type: ignore[assignment]
+    rpc._include_jsonrpc_version = True
+    rpc._send_lock = threading.Lock()
+    chunks: list[bytes] = []
+
+    def short_write(_fd: int, data: bytes | memoryview) -> int:
+        chunk = bytes(data[:3])
+        chunks.append(chunk)
+        return len(chunk)
+
+    monkeypatch.setattr("crossby.ai_tools.plan_process.os.write", short_write)
+    monkeypatch.setattr("crossby.ai_tools.plan_process.os.get_blocking", lambda _fd: True)
+    monkeypatch.setattr("crossby.ai_tools.plan_process.os.set_blocking", lambda _fd, _mode: None)
+    rpc.send_cleanup({"method": "session/cancel", "params": {"sessionId": "ses-exact"}})
+    assert b"".join(chunks) == (
+        b'{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"ses-exact"}}\n'
+    )
+
+
+def test_unattended_profile_requires_verified_version() -> None:
+    capability = (
+        AbstractAITool.get(AIToolID.CODEX)
+        .capabilities()
+        .headless.model_copy(update={"verified_version": None})
+    )
+    with pytest.raises(ValueError, match="verified managed version"):
+        capability.profile_for(HeadlessInteractionMode.UNATTENDED)
 
 
 def test_antigravity_brokered_continuation_stops_after_nine_invocations(

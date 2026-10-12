@@ -27,6 +27,8 @@ against the request schema before a response is sent. A missing or invalid
 selection cannot become a native response.
 Ordinary Codex threads are persisted so their returned thread IDs can be
 resumed; collected-plan threads keep their prior ephemeral behavior.
+Bounded `item/agentMessage/delta` progress refreshes the idle deadline while
+completed agent messages supply the final text in native order.
 A Codex 0.162.1 loopback probe completed one minimal turn in a temporary
 directory, reopened the app-server process, and resumed the exact thread ID.
 The generated server-request union does not identify a connector-specific
@@ -36,12 +38,16 @@ versioned native request shape is captured.
 Cursor ACP frames carry assistant message chunks, tool updates, usage updates,
 and a `session/prompt` stop reason. The ordinary driver requires `end_turn`
 and a clean process exit. It populates executable operation fields only from
-`rawInput`; a tool's display title cannot authorize a command. The first 512
-message chunks produce visible events; later chunks still assemble the final
-response and refresh the idle deadline. A denied permission response cannot
-forward a selected native option, even if the handler supplies one. Cursor's
-brokered profile does not offer command policy or response schemas. It checks
-`agentCapabilities.loadSession` before loading a saved session, validates
+`rawInput`; a tool's display title cannot authorize a command. At most 512
+message chunk, usage, and fallback progress updates produce visible events;
+tool updates have a separate 512-event cap. Later updates still refresh the
+idle deadline, and all message chunks assemble the final response. A denied
+permission response cannot forward a selected native option, even if the
+handler supplies one. Cursor's
+brokered profile does not offer command policy or response schemas. It applies
+model-encoded effort and rechecks model, effort, and variants after all
+configuration updates. It checks `agentCapabilities.loadSession` before
+loading a saved session, validates
 replayed session IDs, and rejects model or effort overrides on load.
 The installed 2026.09.10 build advertised `loadSession` during an ACP
 initialize probe; the local CLI required a Cursor login before a live
@@ -55,7 +61,8 @@ It accepts a final assistant message only when its native `parentID` matches
 the submitted user message ID, the exact session and message IDs match, and
 the native finish reason is `stop`. A bounded incremental SSE
 reader normalizes matching assistant, tool, and usage progress when the server
-delivers it. Polling remains the terminal authority because [some 1.18.x builds](https://github.com/anomalyco/opencode/issues/46733)
+delivers it. SSE progress is dropped if its bounded queue fills; polling remains
+the terminal authority because [some 1.18.x builds](https://github.com/anomalyco/opencode/issues/46733)
 have an `/event` endpoint that stays quiet during a live session. The current
 ordinary driver does not expose response schemas or command-policy changes on
 resume. It records historical message IDs before prompting a resumed session
