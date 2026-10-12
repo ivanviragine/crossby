@@ -28,7 +28,9 @@ class TestModelRegistry:
         """The Claude catalog tracks the current generation (WADE #309 port)."""
         claude_models = get_models_for_tool("claude")
         for model in (
+            "claude-haiku-5.5",
             "claude-sonnet-5",
+            "claude-sonnet-5.5",
             "claude-opus-4.8",
             "claude-opus-5",
             "claude-opus-5.5",
@@ -133,6 +135,19 @@ class TestModelRegistry:
             "openai/gpt-6-luna-fast",
             "openai/gpt-6-sol-fast",
             "openai/gpt-6-sol",
+            "github-copilot/gpt-6.1-sol",
+            "openai/gpt-6.1-sol",
+            "openai/gpt-6.1-sol-fast",
+            "openai/gpt-6.1-sol-ultrafast",
+            "openai/gpt-6-astra-ultrafast",
+            "openai/gpt-5.4-mini-flex",
+            "github-copilot/claude-haiku-5.5",
+            "github-copilot/claude-sonnet-5.5",
+            "opencode/exo-free",
+            "opencode/ling-3.1-flash-free",
+            "opencode/longcat-2.5-preview-free",
+            "opencode/space-bunny-free",
+            "opencode/step-5-preview-free",
         ],
     )
     def test_opencode_registry_includes_live_cli_models(self, model: str) -> None:
@@ -150,13 +165,31 @@ class TestModelRegistry:
         assert codex_5_6 == {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
 
     def test_codex_gpt_6_subset_is_exactly_astra_luna_sol(self) -> None:
-        """GPT-6 ships as Astra, Sol, and Luna — there is no gpt-6-terra."""
+        """GPT-6 ships as Astra, Sol, and Luna — there is no gpt-6-terra —
+        and GPT-6.1 so far only as Sol."""
         codex_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-6")}
-        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol"}
+        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"}
 
-    @pytest.mark.parametrize("model", ["claude-opus-5.5", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-haiku-5.5",
+            "claude-sonnet-5.5",
+            "claude-opus-5.5",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+        ],
+    )
     def test_copilot_registry_includes_new_generation(self, model: str) -> None:
         assert model in get_models_for_tool("copilot")
+
+    @pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+    def test_antigravity_registry_includes_claude_5_5_bases(self, model: str) -> None:
+        """`agy models` lists these only effort-expanded; the catalog keeps the
+        base, as it does for Gemini, and the adapter bakes the effort back in."""
+        assert model in get_models_for_tool("antigravity-cli")
 
     @pytest.mark.parametrize(
         ("tool", "model"),

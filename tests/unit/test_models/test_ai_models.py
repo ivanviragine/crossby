@@ -185,7 +185,15 @@ class TestModelCompatibility:
 
     @pytest.mark.parametrize(
         "model",
-        ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"],
+        [
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+        ],
     )
     def test_codex_accepts_gpt_5_6(self, model: str) -> None:
         """The gpt-5.6 family (luna/sol/terra) is codex-native — Issue #112."""
@@ -398,6 +406,8 @@ class TestClassifyTierUniversal:
             ("gpt-6-sol", ModelTier.POWERFUL),
             ("gpt-6-astra", ModelTier.POWERFUL),
             ("openai/gpt-6-astra", ModelTier.POWERFUL),
+            ("gpt-6.1-sol", ModelTier.POWERFUL),
+            ("openai/gpt-6.1-sol-ultrafast", ModelTier.POWERFUL),
         ],
     )
     def test_codex_gpt_6_uses_documented_family_roles(

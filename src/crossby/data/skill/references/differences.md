@@ -109,7 +109,7 @@ track its own "already nudged" state rather than rely on the payload.
 | Source family | Codex default | Effort bias | Notes |
 | --- | --- | --- | --- |
 | `claude-fable-*` | `gpt-6-astra` | 1:1 (`max → xhigh`) | Reverse: `gpt-6-astra` → `claude-fable-5.1`. |
-| `claude-opus-*` | `gpt-6-sol` | 1:1 (`max → xhigh`) | Reverse: `gpt-6-sol` and `gpt-5.6-sol` (plus the retired `gpt-5.4`/`gpt-5.5`) → `claude-opus-5.5`. |
+| `claude-opus-*` | `gpt-6-sol` | 1:1 (`max → xhigh`) | Reverse: `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-5.6-sol` (plus the retired `gpt-5.4`/`gpt-5.5`) → `claude-opus-5.5`. |
 | `claude-sonnet-*` | `gpt-6-luna` | shift up one tier | Coding-agent bias; reverse picks the lowest source tier that maps to the given Codex tier (`xhigh → high`). |
 | `claude-haiku-*` | `gpt-6-luna` | 1:1 (`max → xhigh`) | Reverse: `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.6-terra` (plus the retired `gpt-5.4-mini`) → `claude-sonnet-5` by default. |
 
