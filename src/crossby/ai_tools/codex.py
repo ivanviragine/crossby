@@ -247,9 +247,9 @@ class CodexAdapter(AbstractAITool):
                     "This temporary terminal adapter uses observed UI state, not a native flag."
                 ),
                 version_requirement=(
-                    "Codex CLI 0.154.x or 0.157.x on a POSIX interactive terminal. "
-                    "Other versions fail closed until their startup UI or a native selector is "
-                    "verified."
+                    "Codex CLI 0.154.0 or newer on a POSIX interactive terminal. "
+                    "Startup fails closed if the native UI is not recognized before the "
+                    "startup deadline."
                 ),
                 verified_version="0.154.0",
                 collector_verified_version="0.153.4",
@@ -266,7 +266,7 @@ class CodexAdapter(AbstractAITool):
                     "is promised. Collected sessions retain exact app-server thread/turn binding."
                 ),
                 remediation=(
-                    "Use an interactive terminal with Codex 0.154.x or 0.157.x, or use "
+                    "Use an interactive terminal with Codex 0.154.0 or newer, or use "
                     "run_plan_session() for structured collection without the terminal startup "
                     "adapter."
                 ),
@@ -324,15 +324,10 @@ class CodexAdapter(AbstractAITool):
             validate_message(initial_message)
 
     def _validate_terminal_plan_version(self, version: tuple[int, int, int]) -> None:
-        from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
-
-        if version[:2] not in {(0, 154), (0, 157)}:
-            raise PlanModeUnsupportedError.for_installed_version(
-                tool_id=self.TOOL_ID,
-                display_name=self.capabilities().display_name,
-                capability=self.capabilities().plan_mode,
-                installed_version=version,
-            )
+        # The base check already enforces the verified_version floor. No upper bound:
+        # the startup state machine fails closed on screens it does not recognize, so
+        # an exact-version allowlist only breaks on every Codex release.
+        del version
 
     def plan_mode_args(self) -> list[str]:
         """The selector is terminal input; keep its observed screen in inline mode."""
