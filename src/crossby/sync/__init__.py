@@ -265,6 +265,18 @@ def run_sync(
                 skills_writers_ran = True
             continue
 
+        if data.source_errors.get(writer.concern):
+            results.append(
+                SyncResult(
+                    tool_id=writer.tool_id,
+                    concern=writer.concern,
+                    action="error",
+                    message="Invalid source input; target and ownership preserved: "
+                    + "; ".join(data.source_errors[writer.concern]),
+                )
+            )
+            continue
+
         writer_data = data
         hooks_owned: frozenset[tuple[str, str]] = frozenset()
         perms_owned: frozenset[str] = frozenset()

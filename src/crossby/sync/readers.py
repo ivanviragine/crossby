@@ -7,7 +7,6 @@ MCP, permissions, hooks) and returns what it found.  The results feed into
 
 from __future__ import annotations
 
-import contextlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -221,42 +220,31 @@ def discover_mcp(
 # ---------------------------------------------------------------------------
 
 
+class SourceReadError(ValueError):
+    """A present source cannot be read; it is not an empty configuration."""
+
+
+def _read_allowlist(path: Path, prefix: str) -> list[str]:
+    data = _read_json(path)
+    if data is None:
+        return []
+    perms = data.get("permissions", {})
+    if not isinstance(perms, dict):
+        raise SourceReadError(f"{path}: permissions must be an object")
+    allow = perms.get("allow", [])
+    if not isinstance(allow, list) or any(not isinstance(p, str) for p in allow):
+        raise SourceReadError(f"{path}: permissions.allow must be a list of strings")
+    return [p[len(prefix) : -1] for p in allow if p.startswith(prefix) and p.endswith(")")]
+
+
 def _read_claude_allowlist(project_root: Path) -> list[str]:
     """Read Claude allowlist → canonical patterns."""
-    settings_path = project_root / ".claude" / "settings.json"
-    if not settings_path.is_file():
-        return []
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        raw = json.loads(settings_path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            perms = raw.get("permissions")
-            allow = perms.get("allow", []) if isinstance(perms, dict) else []
-            if isinstance(allow, list):
-                return [
-                    p[5:-1]
-                    for p in allow
-                    if isinstance(p, str) and p.startswith("Bash(") and p.endswith(")")
-                ]
-    return []
+    return _read_allowlist(project_root / ".claude" / "settings.json", "Bash(")
 
 
 def _read_cursor_allowlist(project_root: Path) -> list[str]:
     """Read Cursor allowlist → canonical patterns."""
-    config_file = project_root / ".cursor" / "cli.json"
-    if not config_file.is_file():
-        return []
-    with contextlib.suppress(json.JSONDecodeError, OSError):
-        raw = json.loads(config_file.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            perms = raw.get("permissions")
-            allow = perms.get("allow", []) if isinstance(perms, dict) else []
-            if isinstance(allow, list):
-                return [
-                    p[6:-1]
-                    for p in allow
-                    if isinstance(p, str) and p.startswith("Shell(") and p.endswith(")")
-                ]
-    return []
+    return _read_allowlist(project_root / ".cursor" / "cli.json", "Shell(")
 
 
 _PERMISSION_READERS: dict[AIToolID, Any] = {
@@ -265,11 +253,18 @@ _PERMISSION_READERS: dict[AIToolID, Any] = {
 }
 
 
-def discover_permissions(project_root: Path, from_tool: AIToolID | None = None) -> list[str]:
+def discover_permissions(
+    project_root: Path,
+    from_tool: AIToolID | None = None,
+    *,
+    errors: list[str] | None = None,
+) -> list[str]:
     """Read allowlist patterns from tool configs.
 
     Scans Claude and Cursor configs for persistent allowlists.
-    Returns deduplicated canonical patterns.
+    Returns deduplicated canonical patterns. Invalid sources raise unless an
+    *errors* collector is provided; collected errors make the returned data
+    incomplete and must block writes and revocation for this concern.
     """
     if from_tool is not None and from_tool not in _PERMISSION_READERS:
         return []
@@ -280,8 +275,15 @@ def discover_permissions(project_root: Path, from_tool: AIToolID | None = None) 
         if from_tool and from_tool in _PERMISSION_READERS
         else _PERMISSION_READERS
     )
-    for reader_fn in readers.values():
-        for pattern in reader_fn(project_root):
+    for tool_id, reader_fn in readers.items():
+        try:
+            patterns = reader_fn(project_root)
+        except SourceReadError as exc:
+            if errors is None:
+                raise
+            errors.append(f"{tool_id}: {exc}")
+            continue
+        for pattern in patterns:
             if pattern not in seen:
                 seen.add(pattern)
                 result.append(pattern)
@@ -350,13 +352,22 @@ def _reverse_event_name(name: str) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    with contextlib.suppress(json.JSONDecodeError, OSError):
+    """Return valid data (including {}), None for absence, or an explicit error.
+
+    Read directly instead of probing is_file(): a directory, denied stat/read,
+    or a dangling symlink must never masquerade as an intentionally empty file.
+    """
+    try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            return raw
-    return None
+    except FileNotFoundError as exc:
+        if not any(p.is_symlink() and not p.exists() for p in (path, *path.parents)):
+            return None
+        raise SourceReadError(f"{path}: cannot read source: {exc}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SourceReadError(f"{path}: cannot read source: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise SourceReadError(f"{path}: source must be a JSON object")
+    return raw
 
 
 def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
@@ -382,9 +393,9 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     data = _read_json(path)
     if not data:
         return []
-    hooks_section = data.get("hooks")
+    hooks_section = data.get("hooks", {})
     if not isinstance(hooks_section, dict):
-        return []
+        raise SourceReadError(f"{path}: hooks must be an object")
     result: list[HookEntry] = []
     for event_name, entries in hooks_section.items():
         canonical_event = _reverse_event_name(event_name)
@@ -469,11 +480,14 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     ``HookEntry.tools`` means "all tools", so silently broadening a scoped guard
     to everything is worse than dropping it (see :func:`_cursor_entry_tools`).
     """
-    data = _read_json(project_root / ".cursor" / "hooks.json")
+    path = project_root / ".cursor" / "hooks.json"
+    data = _read_json(path)
     if not data:
         return []
     hooks_section = data.get("hooks")
     # Pre-0.13 crossby wrote event arrays at the top level with no wrapper.
+    if "hooks" in data and not isinstance(hooks_section, dict):
+        raise SourceReadError(f"{path}: hooks must be an object")
     source = hooks_section if isinstance(hooks_section, dict) else data
 
     merged: dict[tuple[str, str], HookEntry] = {}
@@ -660,12 +674,13 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
     coerced to ``""`` so a wrongly-typed sibling field can't crash the read. A
     Copilot hook has no per-tool scope, so ``tools`` is always ``[]``.
     """
-    data = _read_json(project_root / ".github" / "hooks" / "hooks.json")
+    path = project_root / ".github" / "hooks" / "hooks.json"
+    data = _read_json(path)
     if not data:
         return []
-    hooks_section = data.get("hooks")
+    hooks_section = data.get("hooks", {})
     if not isinstance(hooks_section, dict):
-        return []
+        raise SourceReadError(f"{path}: hooks must be an object")
     result: list[HookEntry] = []
     for event_name, entries in hooks_section.items():
         if not isinstance(entries, list):
@@ -847,8 +862,16 @@ def reader_available(tool: AIToolID, concern: SyncConcern) -> bool:
     return True if tools is None else tool in tools
 
 
-def discover_hooks(project_root: Path, from_tool: AIToolID | None = None) -> list[HookEntry]:
+def discover_hooks(
+    project_root: Path,
+    from_tool: AIToolID | None = None,
+    *,
+    errors: list[str] | None = None,
+) -> list[HookEntry]:
     """Read hooks from tool configs.
+
+    Invalid sources raise unless an *errors* collector is provided; collected
+    errors make the merged data incomplete and must block this concern's writes.
 
     When the same ``(event, command)`` is defined by multiple tools, tool
     scopes are unioned — an empty ``tools`` list means "all tools" and wins.
@@ -864,8 +887,15 @@ def discover_hooks(project_root: Path, from_tool: AIToolID | None = None) -> lis
         if from_tool and from_tool in _HOOK_READERS
         else _HOOK_READERS
     )
-    for reader_fn in readers.values():
-        for hook in reader_fn(project_root):
+    for tool_id, reader_fn in readers.items():
+        try:
+            hooks = reader_fn(project_root)
+        except SourceReadError as exc:
+            if errors is None:
+                raise
+            errors.append(f"{tool_id}: {exc}")
+            continue
+        for hook in hooks:
             key = (hook.event, hook.command)
             existing = merged.get(key)
             if existing is None:
@@ -896,6 +926,7 @@ class ConcernScan:
 
     found: dict[AIToolID, Any]  # tool → concern-specific data
     summary: str  # human-readable summary for wizard display
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -978,8 +1009,9 @@ def scan_project(
 
     # Permissions — scan per tool
     perm_by_tool: dict[AIToolID, list[str]] = {}
-    for tool_id, reader_fn in _PERMISSION_READERS.items():
-        patterns = reader_fn(project_root)
+    perm_errors: list[str] = []
+    for tool_id in _PERMISSION_READERS:
+        patterns = discover_permissions(project_root, tool_id, errors=perm_errors)
         if patterns:
             perm_by_tool[tool_id] = patterns
     total_perms = sum(len(v) for v in perm_by_tool.values())
@@ -991,8 +1023,9 @@ def scan_project(
 
     # Hooks — scan per tool
     hooks_by_tool: dict[AIToolID, list[HookEntry]] = {}
-    for tool_id, reader_fn in _HOOK_READERS.items():
-        hooks = reader_fn(project_root)
+    hook_errors: list[str] = []
+    for tool_id in _HOOK_READERS:
+        hooks = discover_hooks(project_root, tool_id, errors=hook_errors)
         if hooks:
             hooks_by_tool[tool_id] = hooks
     total_hooks = sum(len(v) for v in hooks_by_tool.values())
@@ -1023,8 +1056,8 @@ def scan_project(
         agents=ConcernScan(found=dict(agents_found), summary=agents_summary),
         skills=ConcernScan(found=dict(skills_found), summary=skills_summary),
         mcp=ConcernScan(found=dict(mcp_by_tool), summary=mcp_summary),
-        permissions=ConcernScan(found=dict(perm_by_tool), summary=perm_summary),
-        hooks=ConcernScan(found=dict(hooks_by_tool), summary=hooks_summary),
+        permissions=ConcernScan(found=dict(perm_by_tool), summary=perm_summary, errors=perm_errors),
+        hooks=ConcernScan(found=dict(hooks_by_tool), summary=hooks_summary, errors=hook_errors),
         plugins=ConcernScan(found=dict(plugins_found), summary=plugins_summary),
     )
 
@@ -1081,8 +1114,10 @@ def build_sync_data(
     mcp_servers = discover_mcp(
         project_root, from_tool=from_tool, include_user_scope=include_user_scope
     )
-    allowed_commands = discover_permissions(project_root, from_tool=from_tool)
-    hooks = discover_hooks(project_root, from_tool=from_tool)
+    perm_errors: list[str] = []
+    hook_errors: list[str] = []
+    allowed_commands = discover_permissions(project_root, from_tool=from_tool, errors=perm_errors)
+    hooks = discover_hooks(project_root, from_tool=from_tool, errors=hook_errors)
 
     return SyncData(
         rules_source=rules_source,
@@ -1091,4 +1126,12 @@ def build_sync_data(
         mcp_servers=mcp_servers,
         allowed_commands=allowed_commands,
         hooks=hooks,
+        source_errors={
+            c: errors
+            for c, errors in (
+                (SyncConcern.PERMISSIONS, perm_errors),
+                (SyncConcern.HOOKS, hook_errors),
+            )
+            if errors
+        },
     )
