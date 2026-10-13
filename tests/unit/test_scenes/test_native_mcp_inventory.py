@@ -101,3 +101,34 @@ def test_exclude_all_restricts_native_only_server(tmp_path: Path) -> None:
     assert not any(r.action == "error" for r in results)
     servers = tomllib.loads((tmp_path / ".codex/config.toml").read_text())["mcp_servers"]
     assert all(s["enabled"] is False for s in servers.values())
+
+
+@pytest.mark.parametrize("fields", [{"enabled": False}, {"enabled": False, "cwd": "/native-only"}])
+def test_native_disable_survives_scene_selection_and_strict_launch(
+    tmp_path: Path, fields: dict[str, Any]
+) -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+    from crossby.scenes.launch import mcp_json_config
+
+    source = _native(tmp_path, fields)
+    before = source.read_bytes()
+    context = _context(tmp_path, ["native", "portable"])
+    # Selecting a server is not a native enable operation.
+    assert context.selected("mcp") == {"native", "portable"}
+    assert context.deselected_mcp() == {"native"}
+    assert set(context.selected_mcp()) == {"portable"}
+    arguments = ClaudeAdapter().scene_launch_args(context)
+    assert "--strict-mcp-config" in arguments.args
+    import json
+
+    strict = tmp_path / ".crossby/scene/restricted/launch/mcp.json"
+    assert set(json.loads(strict.read_text())["mcpServers"]) == {"portable"}
+    assert set(json.loads(mcp_json_config(context.mcp_universe()))["mcpServers"]) == {"portable"}
+    assert source.read_bytes() == before
+
+
+def test_malformed_native_activation_refuses_strict_scene_configuration(tmp_path: Path) -> None:
+    _native(tmp_path, {"enabled": "false"})
+    context = _context(tmp_path, ["native"])
+    with pytest.raises(SceneLaunchFallbackError, match="Invalid native MCP activation"):
+        context.selected_mcp()

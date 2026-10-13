@@ -58,6 +58,9 @@ class SyncData:
     mcp_warnings: list[str] = field(default_factory=list)
     # Winning source per validated server, for target-specific fidelity checks.
     mcp_sources: dict[str, str] = field(default_factory=dict)
+    # Valid native disables survive portability filtering; run_sync still
+    # bounds every removal by target ownership.
+    mcp_disabled: set[str] = field(default_factory=set)
 
     # Permissions concern
     allowed_commands: list[str] = field(default_factory=list)
