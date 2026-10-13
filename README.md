@@ -119,6 +119,9 @@ crossby drives eight tools, but **not every tool does every job.** The tables be
 
 ### Direct sync targets
 
+The Agents checkmarks describe definition portability, independently of
+[runtime subagent readiness](#runtime-subagent-readiness).
+
 A sync **writer** exists for five tools. These are the only tools crossby writes configuration *into*:
 
 | Surface | Claude | Cursor | Copilot | Codex | Antigravity CLI |
@@ -167,8 +170,13 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 | Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` per tool — **Claude and Cursor only** (see [above](#direct-sync-targets)). Revocable: a pattern crossby wrote is removed when the source drops it (see [Revocable sync](#revocable-sync)). |
 | Hooks       | Write                | Per-tool native hook schema; a crossby-written hook's matcher narrows as well as widens on re-runs, and the hook is revoked when the source drops it. |
-| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars`. |
+| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars` and restored on reverse sync. Native Codex `url` entries imply HTTP. |
 | Plugins     | Detect (manual)      | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand. |
+
+Codex MCP sync preserves environment **references** without reading their values. Native `env_vars` names (including structured `source = "local"` entries) become `${NAME}` references; explicit literal `env` values take precedence. Native literal `http_headers` and `env` values containing `${...}`, overlapping authentication/header sources with conditional fallbacks, remote environment sources, and other fields Crossby cannot represent are reported as `Not Added` with a manual-fix note. The entire affected server is skipped, preserving any existing target entry; configure it directly in each target's native file.
+
+Restored Codex environment references can be written to Claude and Codex. The current Cursor, Copilot, and Antigravity CLI writers cannot faithfully render those references, so Codex-source servers using them are skipped for these targets with a manual-fix report, preserving existing entries. Literal-only Codex servers still sync. Cursor and the Copilot `.vscode/mcp.json` format require `${env:NAME}` syntax; Antigravity's MCP documentation does not establish an equivalent interpolation mechanism.
+Native Cursor reference rendering and normalization are tracked separately in [#213](https://github.com/ivanviragine/crossby/issues/213).
 
 ### Preview before you write
 
@@ -208,6 +216,8 @@ Re-running `crossby sync` replaces the block in lockstep with the source — no 
 crossby never *removes* configuration you own — it only ever *revokes an entry it recorded writing*, tracked in a per-machine, gitignored `.crossby/owned.json` ledger. A hand-authored entry that merely shares a name with a source entry is never revoked, though a normal same-named merge can still overwrite its contents — this guarantee bounds *removal*, not additive or update writes.
 
 Within that boundary, hooks and permissions are *additive by default but revocable*: syncing `--from A` then `--from B` leaves each target reflecting B, not the union of both — a hook or permission pattern crossby wrote for A is taken back once it's gone from the source. MCP servers are narrower: crossby removes a server only when it wrote that server *and* the source marks it disabled (`enabled: false`); a server merely dropped from the source is left in place, so for MCP the two syncs leave the union. A same-named MCP server you wrote by hand is never deleted, though a normal MCP merge can still overwrite its config — the ledger bounds *removal*, not additive or update writes. A fresh clone starts with an empty ledger, so it never revokes until it has recorded writes of its own.
+
+If a hook or permission source cannot be read or parsed as a JSON object, crossby reports an error and exits 1 for that concern, preserving its targets and ownership. The diagnostic also appears when the selected target has no writer for the concern or no target tools are installed. Invalid `hooks`, `permissions`, or `permissions.allow` sections also refuse the affected concern. For supported hook events, malformed event lists, entries, nested handlers, commands, or scope/protection fields likewise refuse sync; they cannot stand in for an explicit removal. Unknown events and explicit non-command native handler types remain outside command sync and do not fail validation. Multi-source discovery refuses that concern if any scanned source fails; other concerns can still sync. Valid empty or absent source configurations still revoke crossby-owned hooks and permissions. `--dry-run`, `--plan`, and `--doctor` report the same source errors without writing.
 
 ## Scenes
 
@@ -524,6 +534,37 @@ or drop rather than launch a different model.
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a
 documented contract was used instead.
+
+### Runtime subagent readiness
+
+Agent-definition sync and conversion do not establish that a tool can spawn an
+independent agent context. Library callers can check the exact ordinary launch:
+
+```python
+from crossby.ai_tools import AbstractAITool, HeadlessSessionRequest
+
+adapter = AbstractAITool.get(selected_tool)
+request = HeadlessSessionRequest(prompt="Review the change", working_dir=project_dir)
+status = adapter.subagent_spawning_status(request=request)
+manifest["subagent_spawning"] = status.model_dump(mode="json")
+if status.is_available:
+    # The caller may request delegation in this context.
+    result = adapter.run_headless_session(request)
+```
+
+Only `available` is truthy. `disabled`, `unsupported`, and `unknown` all fail
+closed; an audited family declaration alone never grants readiness. This is
+capability/readiness evidence, not proof that a particular run actually delegated.
+
+Codex checks native effective configuration, managed requirements, feature state,
+and the selected model's delegation metadata through bounded read methods. It
+creates no thread, starts no model turn, invokes no tool, and does not edit or
+enable user configuration. Native startup can contact the installed tool's usual
+service and refresh its catalog/cache. Claude reports `unknown` when its effective
+managed policy cannot be established, or `disabled` for an explicit native tool-pool
+exclusion. Other unaudited adapters report `unknown`. Brokered, resumed, planning,
+and unmodeled launch contexts fail closed. See the [developer API contract](
+CONTRIBUTING.md#runtime-subagent-readiness) for supported contexts and probe bounds.
 
 ### Native plan mode
 
