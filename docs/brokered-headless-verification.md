@@ -69,6 +69,11 @@ even after the parent exits. Successful results close stdin and drain stdout
 through EOF, accepting defined SDK lifecycle frames while rejecting
 trailing response content and nonzero process exit. An observed active lifecycle
 must reach idle before input closure; active state at EOF cannot become success.
+EOF ends the idle wait promptly and preserves a native error's status, exit code
+and usage. A reader-first startup stop completes the bounded SDK interruption
+attempt before SDK auto-disconnect can close its control channel; concurrent
+cleanup callers share that single attempt. Observed native terminal errors take
+the prompt failure path without waiting for an unnecessary interrupt response.
 Native result
 subtype/error state, exact session ID, token usage, cost and permission-denial
 presence are retained. JSON/JSONL without a schema preserve the final native

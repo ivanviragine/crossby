@@ -51,7 +51,7 @@ def result():
              'result': 'Completed', 'usage': {'input_tokens': 5, 'output_tokens': 7},
              'total_cost_usd': 0.25}
     frame.update(config.get('result', {}))
-    if mode == 'lifecycle_running':
+    if mode in {'lifecycle_running', 'lifecycle_running_exit'}:
         emit({'type':'system', 'subtype':'session_state_changed',
               'sdk_host_only':True, 'state':'running', 'session_id':session})
     emit(frame)
@@ -108,6 +108,8 @@ for line in sys.stdin:
                     {'type': 'tool_use', 'id': 'used', 'name': 'Read',
                      'input': {'file_path':'private'}}]}})
             result()
+            if mode == 'lifecycle_running_exit':
+                break
     elif frame['type'] == 'control_response':
         if mode == 'reuse':
             emit({'type': 'control_request', 'request_id': 'wire-exact',
@@ -790,3 +792,47 @@ def test_active_post_result_lifecycle_cannot_become_success(sdk_child: Any) -> N
         request_values={"idle_timeout_seconds": 0.15},
     )
     assert result.status is HeadlessTerminalStatus.TIMED_OUT
+
+
+def test_error_result_active_lifecycle_eof_preserves_failure_metadata(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    started = time.monotonic()
+    result = run(
+        {
+            "mode": "lifecycle_running_exit",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "exit": 1,
+        }
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == "error_during_execution"
+    assert result.exit_code == 1
+    assert result.session_id == "session-exact"
+    assert result.usage.input_tokens == 5
+    assert time.monotonic() - started < 2
+
+
+def test_reader_startup_stop_interrupts_before_sdk_auto_disconnect(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.headless import _HeadlessStopError
+
+    run, record = sdk_child
+
+    def stop_reader(_self: Any) -> Any:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if record.exists() and any(
+                f.get("request", {}).get("subtype") == "initialize" for f in _records(record)
+            ):
+                raise _HeadlessStopError(
+                    HeadlessTerminalStatus.TIMED_OUT, "Native startup operation expired"
+                )
+            time.sleep(0.005)
+        pytest.fail("SDK initialize did not reach the native child")
+
+    monkeypatch.setattr("crossby.ai_tools.claude_sdk.SDKTransport._read", stop_reader)
+    result = run({"mode": "startup_stall"})
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))

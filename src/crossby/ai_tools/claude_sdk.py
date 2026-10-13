@@ -170,22 +170,28 @@ class _SDKController(ProtocolSessionController):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._abort_lock = threading.Lock()
         self._aborted = False
+        self._abort_done = threading.Event()
         super().__init__(*args, **kwargs)
 
     def _abort(self, cleanup: HeadlessCleanupContext) -> None:
         with self._abort_lock:
-            if self._aborted:
-                return
+            already_started = self._aborted
             self._aborted = True
-        if self.bridge is not None:
-            self.bridge.revoke_replies()
-        if self.client is None or self.loop is None or not self.loop.is_running():
+        if already_started:
+            self._abort_done.wait(timeout=cleanup.remaining_seconds())
             return
-        future = asyncio.run_coroutine_threadsafe(self.client.interrupt(), self.loop)
         try:
-            future.result(timeout=cleanup.remaining_seconds())
-        except Exception:
-            future.cancel()
+            if self.bridge is not None:
+                self.bridge.revoke_replies()
+            if self.client is None or self.loop is None or not self.loop.is_running():
+                return
+            future = asyncio.run_coroutine_threadsafe(self.client.interrupt(), self.loop)
+            try:
+                future.result(timeout=cleanup.remaining_seconds())
+            except Exception:
+                future.cancel()
+        finally:
+            self._abort_done.set()
 
 
 class SDKTransport:
@@ -266,6 +272,24 @@ class SDKTransport:
         except BaseException as exc:
             if not self.closed and self.failure is None:
                 self.failure = exc
+            native_failed = self.terminal is not None and (
+                self.terminal.get("is_error") is True or self.terminal.get("subtype") != "success"
+            )
+            if (
+                not isinstance(exc, asyncio.CancelledError)
+                and self.controller is not None
+                and not native_failed
+            ):
+                # connect() automatically disconnects on reader failure. Finish
+                # the bounded native abort attempt before propagating that
+                # failure, while the SDK control channel is still alive.
+                await asyncio.to_thread(
+                    self.controller._abort,
+                    HeadlessCleanupContext(
+                        deadline=asyncio.get_running_loop().time() + 0.25,
+                        cancel_event=threading.Event(),
+                    ),
+                )
             raise
         finally:
             self.ended.set()
@@ -449,6 +473,8 @@ class SDKTransport:
             self.context.checkpoint()
             if self.failure is not None:
                 raise self.failure
+            if self.ended.is_set():
+                break
             await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
         await self.end_input()
         while not self.ended.is_set():
@@ -456,8 +482,6 @@ class SDKTransport:
             await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
         if self.failure is not None:
             raise self.failure
-        if self.session_state not in (None, "idle"):
-            raise ValueError("Claude SDK stream ended with an active native lifecycle")
         assert self.controller is not None
         return await asyncio.to_thread(
             self.controller.process._proc.wait, timeout=self.context.remaining_seconds()
@@ -727,6 +751,7 @@ def run_sdk_session(
         if native_status == "success"
         and frame.get("is_error") is False
         and not frame.get("deferred_tool_use")
+        and transport.session_state in (None, "idle")
         else HeadlessTerminalStatus.FAILED
     )
     usage = usage_from(
@@ -762,4 +787,9 @@ def run_sdk_session(
         native_status=native_status,
         session_id=transport.session_id,
         usage=usage,
+        warnings=(
+            ("Claude SDK exited before its active lifecycle became idle.",)
+            if transport.session_state not in (None, "idle")
+            else ()
+        ),
     )
