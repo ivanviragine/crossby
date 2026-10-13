@@ -54,6 +54,8 @@ class SyncData:
 
     # MCP servers concern
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+    # Scoped source diagnostics; unsupported servers are excluded from writes.
+    mcp_warnings: list[str] = field(default_factory=list)
 
     # Permissions concern
     allowed_commands: list[str] = field(default_factory=list)

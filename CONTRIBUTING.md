@@ -37,6 +37,8 @@ Run `./scripts/check-all.sh` before opening a PR.
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
+MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model validation. Keep the reader matched to the Codex writer in `sync/mcp.py`: environment references must remain references, never resolved secrets. Codex `env` and `http_headers` values are literal, so a `${...}` literal cannot safely enter Crossby's interpolation-shaped canonical maps. Unrepresentable entries are excluded as a whole, with field-name-only diagnostics carried through `SyncData.mcp_warnings` to reports, including explicit `--to`, dry-run, and wizard paths; retain source precedence and ledger ownership rules.
+
 ## Architecture
 
 ### Directory Layout

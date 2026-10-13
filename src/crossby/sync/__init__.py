@@ -448,6 +448,19 @@ def run_sync(
 
         results.extend(report_plugins(project_root))
 
+    if (concern is None or concern == SyncConcern.MCP) and (
+        not skip_concerns or SyncConcern.MCP not in skip_concerns
+    ):
+        results.extend(
+            SyncResult(
+                tool_id=None,
+                concern=SyncConcern.MCP,
+                action="skipped",
+                message=message,
+            )
+            for message in data.mcp_warnings
+        )
+
     # MCP oauth-config discovery — same detect-only shape as plugins above:
     # append manual-fix rows for source MCP servers with an `oauth` block
     # that no writer ports across tools.

@@ -176,6 +176,7 @@ def discover_mcp(
     from_tool: AIToolID | None = None,
     *,
     include_user_scope: bool = False,
+    diagnostics: list[str] | None = None,
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
@@ -188,6 +189,8 @@ def discover_mcp(
     ``~/.claude.json`` is only read when *include_user_scope* is set.
 
     Returns server name → MCPServerConfig (validated).
+    When *diagnostics* is supplied, append value-free manual-fix messages for
+    unsupported Codex entries there; direct discovery callers receive warnings.
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
@@ -209,6 +212,18 @@ def discover_mcp(
         )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
+        if discovered.unsupported_fields:
+            message = (
+                f"MCP server `{name}` (from {discovered.source_tool}) uses fields "
+                f"Crossby cannot faithfully port: {', '.join(discovered.unsupported_fields)}. "
+                "This server was not synced; existing target entries are preserved. "
+                "This is a manual-fix — configure it directly in each target's native config."
+            )
+            if diagnostics is not None:
+                diagnostics.append(message)
+            else:
+                logger.warning("mcp.unsupported", message=message)
+            continue
         try:
             servers[name] = MCPServerConfig(**discovered.data)
         except Exception:
@@ -1078,8 +1093,12 @@ def build_sync_data(
             skills_source = skills_found[source_tool]
 
     # MCP, permissions, hooks
+    mcp_warnings: list[str] = []
     mcp_servers = discover_mcp(
-        project_root, from_tool=from_tool, include_user_scope=include_user_scope
+        project_root,
+        from_tool=from_tool,
+        include_user_scope=include_user_scope,
+        diagnostics=mcp_warnings,
     )
     allowed_commands = discover_permissions(project_root, from_tool=from_tool)
     hooks = discover_hooks(project_root, from_tool=from_tool)
@@ -1089,6 +1108,7 @@ def build_sync_data(
         agents_source=agents_source,
         skills_source=skills_source,
         mcp_servers=mcp_servers,
+        mcp_warnings=mcp_warnings,
         allowed_commands=allowed_commands,
         hooks=hooks,
     )

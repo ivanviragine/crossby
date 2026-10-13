@@ -167,8 +167,10 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 | Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` per tool — **Claude and Cursor only** (see [above](#direct-sync-targets)). Revocable: a pattern crossby wrote is removed when the source drops it (see [Revocable sync](#revocable-sync)). |
 | Hooks       | Write                | Per-tool native hook schema; a crossby-written hook's matcher narrows as well as widens on re-runs, and the hook is revoked when the source drops it. |
-| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars`. |
+| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars` and restored on reverse sync. Native Codex `url` entries imply HTTP. |
 | Plugins     | Detect (manual)      | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand. |
+
+Codex MCP sync preserves environment **references** without reading their values. Native `env_vars` names (including structured `source = "local"` entries) become `${NAME}` references; explicit literal `env` values take precedence. Native literal `http_headers` and `env` values containing `${...}`, overlapping authentication/header sources with conditional fallbacks, remote environment sources, and other fields Crossby cannot represent are reported as `Not Added` with a manual-fix note. The entire affected server is skipped, preserving any existing target entry; configure it directly in each target's native file.
 
 ### Preview before you write
 

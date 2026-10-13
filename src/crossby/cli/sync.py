@@ -428,7 +428,9 @@ def sync(
         from crossby.sync.mcp_discovery import discover_mcp_servers
 
         scoped = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
-        servers = discover_mcp(project_root, include_user_scope=include_user_scope)
+        servers = discover_mcp(
+            project_root, include_user_scope=include_user_scope, diagnostics=data.mcp_warnings
+        )
         n_user = sum(
             1 for name, ds in scoped.servers.items() if ds.scope == "user" and name in servers
         )
@@ -461,6 +463,7 @@ def sync(
                 data.agents_source,
                 data.skills_source,
                 data.mcp_servers,
+                data.mcp_warnings,
                 data.allowed_commands,
                 data.hooks,
             ]
@@ -518,7 +521,9 @@ def sync(
             force=force,
             installed_tools=skills_targets,
         )
-    if (data.mcp_servers or owns_mcp) and (sync_concern is None or sync_concern == SyncConcern.MCP):
+    if (data.mcp_servers or data.mcp_warnings or owns_mcp) and (
+        sync_concern is None or sync_concern == SyncConcern.MCP
+    ):
         results += run_sync(
             data,
             project_root,
