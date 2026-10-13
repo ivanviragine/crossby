@@ -19,6 +19,8 @@ from contextlib import contextmanager, suppress
 from importlib import metadata
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from crossby.ai_tools.headless import (
     HeadlessCleanupContext,
     HeadlessRuntimeContext,
@@ -53,6 +55,7 @@ from crossby.models.ai import (
 SDK_VERSION = "0.2.165"
 SDK_REMEDIATION = 'Install the compatible optional SDK: pip install "crossby[claude-sdk]".'
 _MAX_IDS = 4096
+_USAGE_JSON = TypeAdapter(dict[str, Any])
 
 
 def load_sdk() -> tuple[Any, Any]:
@@ -498,7 +501,14 @@ class SDKTransport:
             if isinstance(cost, (int, float))
             and not isinstance(cost, bool)
             and math.isfinite(cost)
-            and self.context.request.prompt not in json.dumps({"cost_usd": cost})
+            and all(
+                self.context.request.prompt not in rendered
+                for rendered in (
+                    json.dumps({"cost_usd": cost}),
+                    json.dumps({"cost_usd": cost}, separators=(",", ":")),
+                    _USAGE_JSON.dump_json({"cost_usd": cost}).decode(),
+                )
+            )
             else None
         )
         if usage is not None or payload is not None:

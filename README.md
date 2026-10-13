@@ -507,7 +507,8 @@ contains detached authoritative tool arguments, including edit contents.
 Explicit command allowlists use native Bash rules and exclude ambient settings;
 Claude may execute pre-authorized tools without a permission callback.
 `AskUserQuestion` is always routed to the handler. Usage events retain native
-cost as `payload.cost_usd`; token counts and exact session ID are in the result.
+cost as `payload.cost_usd`; cost payloads that reproduce the protected prompt
+are omitted. Token counts and exact session ID are in the result.
 Claude's sandbox remains tool-managed; `sandbox=False` and
 `network_access=True` are unsupported. The shared headless request has no scene
 or arbitrary tool-list field, so those launch concerns cannot be forwarded here.

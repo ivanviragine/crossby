@@ -1179,3 +1179,24 @@ def test_numeric_cost_cannot_reproduce_protected_prompt(sdk_child: Any, prompt: 
     assert len(usage) == 1
     assert usage[0].payload is None
     assert result.usage.input_tokens == 5
+
+
+@pytest.mark.parametrize(
+    "prompt,cost",
+    [
+        ("1e-7", 1e-7),
+        ("1e-07", 1e-7),
+        ('"cost_usd":0.25', 0.25),
+        ('"cost_usd": 0.25', 0.25),
+    ],
+)
+def test_cost_redaction_matches_exported_json(sdk_child: Any, prompt: str, cost: float) -> None:
+    run, _ = sdk_child
+    result = run({"result": {"total_cost_usd": cost}}, request_values={"prompt": prompt})
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    usage = [event for event in result.events if event.kind is HeadlessEventKind.USAGE]
+    assert usage[0].payload is None
+    assert prompt not in usage[0].model_dump_json()
+    assert prompt not in json.dumps(usage[0].model_dump(mode="json"))
+    assert prompt not in json.dumps(usage[0].model_dump(mode="json"), separators=(",", ":"))
+    assert result.usage.input_tokens == 5

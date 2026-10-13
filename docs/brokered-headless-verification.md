@@ -88,8 +88,9 @@ An observer/dispatch exception takes precedence over native completion, even if
 the cleanup task finishes before the SDK message consumer receives the error.
 Error teardown reserves remaining work time to deliver the exception rather
 than allowing an unacknowledged interrupt wait to turn it into an idle timeout.
-Numeric cost payloads are suppressed when their serialized form contains the
-protected prompt, while native token accounting remains available.
+Numeric cost payloads are checked against Pydantic event-export JSON and
+standard/compact JSON serializations, including exponent notation. A matching
+protected prompt suppresses cost while native token accounting remains available.
 Prompt usage/cost is recorded immediately when its result arrives, so later
 background timeout/cancellation retains observed accounting. An absent result
 origin means human; a second such result is rejected rather than attributed to
