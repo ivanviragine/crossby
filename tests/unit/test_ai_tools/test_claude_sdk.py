@@ -44,17 +44,61 @@ def save(data):
 save({'type':'fixture_environment', 'entrypoint':os.environ.get('CLAUDE_CODE_ENTRYPOINT'),
       'version':os.environ.get('CLAUDE_AGENT_SDK_VERSION'), 'nested':os.environ.get('CLAUDECODE'),
       'pwd':os.environ.get('PWD')})
+background_stage = 0
 def result():
+    global background_stage
     frame = {'type': 'result', 'subtype': config.get('subtype', 'success'),
              'is_error': config.get('is_error', False), 'duration_ms': 1,
              'duration_api_ms': 1, 'num_turns': 1, 'session_id': session,
              'result': 'Completed', 'usage': {'input_tokens': 5, 'output_tokens': 7},
              'total_cost_usd': 0.25}
     frame.update(config.get('result', {}))
-    if mode in {'lifecycle_running', 'lifecycle_running_exit'}:
+    if mode == 'background_shell':
+        emit({'type':'system', 'subtype':'task_started', 'task_id':'shell-exact',
+              'task_type':config.get('task_type', 'local_bash'), 'description':'Long lived work',
+              'uuid':'shell-start', 'session_id':session})
+    if mode == 'background':
+        if background_stage == 0:
+            emit({'type':'system', 'subtype':'task_started', 'task_id':'bg-exact',
+                  'task_type':config.get('task_type', 'local_agent'),
+                  'description':'Background', 'uuid':'task-start', 'session_id':session})
+            if config.get('with_state', True):
+                emit({'type':'system', 'subtype':'session_state_changed',
+                      'sdk_host_only':True, 'state':'running', 'session_id':session})
+        else:
+            frame.update(config.get('background_result', {}))
+            frame.update({'origin':{'kind':'task-notification'}, 'result':'Background answer',
+                          'usage':{'input_tokens':100, 'output_tokens':200}})
+    if mode in {'lifecycle_running', 'lifecycle_running_exit',
+                'native_failure_wait', 'native_failure_stubborn'}:
         emit({'type':'system', 'subtype':'session_state_changed',
               'sdk_host_only':True, 'state':'running', 'session_id':session})
+    if mode == 'background' and background_stage and config.get('idle_before_result'):
+        emit({'type':'system', 'subtype':'session_state_changed', 'sdk_host_only':True,
+              'state':'idle', 'session_id':session})
     emit(frame)
+    if mode == 'background':
+        if background_stage == 0:
+            background_stage = 1
+            emit({'type':'system', 'subtype':'background_tasks_changed',
+                  'tasks':[], 'session_id':session})
+            time.sleep(0.03)
+            if config.get('completion', 'notification') == 'notification':
+                emit({'type':'system', 'subtype':'task_notification', 'task_id':'bg-exact',
+                      'status':'completed', 'output_file':'out', 'summary':'Done',
+                      'uuid':'task-end', 'session_id':session})
+            else:
+                emit({'type':'system', 'subtype':'task_updated', 'task_id':'bg-exact',
+                      'patch':{'status':'killed'}, 'uuid':'task-end', 'session_id':session})
+            emit({'type':'assistant', 'session_id':session,
+                  'message':{'model':'claude-opus',
+                             'content':[{'type':'text', 'text':'Follow-up'}]}})
+            emit({'type':'control_request', 'request_id':'background-wire',
+                  'request':{'subtype':'can_use_tool', 'tool_use_id':'background-tool',
+                             'tool_name':'Bash', 'input':{'command':'pwd'}}})
+        elif config.get('with_state', True):
+            emit({'type':'system', 'subtype':'session_state_changed', 'sdk_host_only':True,
+                  'state':'idle', 'session_id':session})
     if mode in {'lifecycle', 'lifecycle_running'}:
         time.sleep(config.get('lifecycle_delay', 0))
         emit({'type':'system', 'subtype':'session_state_changed',
@@ -71,6 +115,8 @@ for line in sys.stdin:
             result()
             break
         if subtype == 'initialize' and mode == 'startup_stall':
+            continue
+        if mode == 'native_failure_stubborn' and subtype == 'interrupt':
             continue
         emit({'type': 'control_response', 'response': {
               'subtype': 'success', 'request_id': frame['request_id'], 'response': {}}})
@@ -117,6 +163,9 @@ for line in sys.stdin:
                   'tool_use_id': 'tool-exact', 'input': config['request']}})
         else:
             result()
+if mode == 'native_failure_stubborn':
+    time.sleep(60)
+save({'type':'fixture_eof', 'background_stage':background_stage})
 sys.exit(config.get('exit', 0))
 """
 
@@ -835,4 +884,132 @@ def test_reader_startup_stop_interrupts_before_sdk_auto_disconnect(
     monkeypatch.setattr("crossby.ai_tools.claude_sdk.SDKTransport._read", stop_reader)
     result = run({"mode": "startup_stall"})
     assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))
+
+
+def test_native_response_cannot_override_validated_clarification(sdk_child: Any) -> None:
+    run, record = sdk_child
+    native = {
+        **_questions(),
+        "response": "Unapproved answer",
+        "answers": {"Native question?": "One, exact"},
+    }
+    result = run(
+        {"request": native},
+        lambda _i: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED, option_id="Two"
+        ),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    reply = next(
+        f["response"]["response"]["updatedInput"]
+        for f in _records(record)
+        if f["type"] == "control_response"
+    )
+    assert reply["answers"] == {"Native question?": "Two"}
+    assert "response" not in reply
+
+
+@pytest.mark.parametrize("with_state", [True, False])
+@pytest.mark.parametrize("completion", ["notification", "update"])
+def test_background_run_keeps_callbacks_and_original_prompt_result(
+    sdk_child: Any,
+    with_state: bool,
+    completion: str,
+) -> None:
+    run, record = sdk_child
+    seen = []
+
+    def handler(i: SessionInteraction) -> SessionInteractionResponse:
+        seen.append(i)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    result = run(
+        {"mode": "background", "with_state": with_state, "completion": completion}, handler
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Completed"
+    assert result.usage.input_tokens == 5
+    assert result.session_id == "session-exact"
+    assert seen[0].request_id == "background-wire"
+    assert seen[0].operation.shell_expression == "pwd"
+    replies = [f["response"] for f in _records(record) if f["type"] == "control_response"]
+    assert replies[0]["request_id"] == "background-wire"
+    assert replies[0]["response"]["behavior"] == "allow"
+    assert _records(record)[-1]["background_stage"] == 1
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {"subtype": "error_during_execution", "is_error": True},
+        {"subtype": "success", "is_error": False, "result": {"terminal_reason": "aborted_tools"}},
+    ],
+)
+def test_active_native_failure_without_eof_preserves_terminal(
+    sdk_child: Any, terminal: Any
+) -> None:
+    run, record = sdk_child
+    started = time.monotonic()
+    result = run(
+        {"mode": "native_failure_wait", **terminal, "exit": 1},
+        request_values={"idle_timeout_seconds": 0.3},
+    )
+    expected = (
+        HeadlessTerminalStatus.CANCELLED if "result" in terminal else HeadlessTerminalStatus.FAILED
+    )
+    assert result.status is expected
+    assert result.native_status == terminal["subtype"]
+    assert result.exit_code == 1
+    assert result.session_id == "session-exact"
+    assert result.usage.input_tokens == 5
+    assert time.monotonic() - started < 2
+    assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))
+
+
+def test_idle_before_background_result_retains_prompt_output(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {"mode": "background", "idle_before_result": True},
+        lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Completed"
+    assert result.usage.input_tokens == 5
+
+
+def test_background_error_fails_run_without_replacing_prompt_output(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {
+            "mode": "background",
+            "background_result": {"subtype": "error_during_execution", "is_error": True},
+        },
+        lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == "error_during_execution"
+    assert result.final_text is None  # shared failed-result output contract
+    assert result.usage.input_tokens == 5
+
+
+@pytest.mark.parametrize("task_type", ["local_bash", "monitor", "teammate", "remote_agent"])
+def test_indefinite_tasks_do_not_defer_input_closure(sdk_child: Any, task_type: str) -> None:
+    run, record = sdk_child
+    result = run({"mode": "background_shell", "task_type": task_type})
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert any(f["type"] == "fixture_eof" for f in _records(record))
+
+
+def test_native_failure_ignoring_interrupt_and_eof_is_bounded(sdk_child: Any) -> None:
+    run, record = sdk_child
+    result = run(
+        {"mode": "native_failure_stubborn", "subtype": "error_during_execution", "is_error": True},
+        request_values={"idle_timeout_seconds": 0.3},
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == "error_during_execution"
+    assert result.exit_code < 0
+    assert result.usage.input_tokens == 5
+    assert result.session_id == "session-exact"
     assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))

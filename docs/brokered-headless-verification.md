@@ -65,15 +65,30 @@ pipe write/flush so backpressure cannot block native interruption or withdrawal.
 
 Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
 SDK interruption once before process-group termination, killing descendants
-even after the parent exits. Successful results close stdin and drain stdout
-through EOF, accepting defined SDK lifecycle frames while rejecting
-trailing response content and nonzero process exit. An observed active lifecycle
-must reach idle before input closure; active state at EOF cannot become success.
-EOF ends the idle wait promptly and preserves a native error's status, exit code
-and usage. A reader-first startup stop completes the bounded SDK interruption
+even after the parent exits. The pinned SDK distinguishes a turn result from
+run completion. The bridge retains the submitted prompt's native result,
+including output/schema and usage, while consuming background turns and keeping
+their permission/question callbacks live. Only `local_agent` and
+`local_workflow` tasks defer input closure: `task_started` adds them;
+`task_notification` or terminal `task_updated` removes them. Background snapshots
+do not replace this ledger, and long-lived shells/monitors do not defer closure.
+
+A result or idle state settles the run only when tracked work has finished and
+no main-thread turn remains in progress. Native running/requires-action states
+reopen it. Defined task/state lifecycle frames remain valid after a result;
+response/control frames require an active continuation (interrupt replies are
+also valid during cleanup). Unbound trailing content, conflicting session IDs,
+and duplicate human results fail. Successful runs close stdin and drain stdout
+through EOF, checking process exit; active state at EOF cannot become success.
+
+Observed native failure/abort uses bounded interrupt and cleanup rather than
+waiting for idle, preserving terminal status, actual exit code and prompt usage.
+A background failure fails the run without replacing the submitted prompt's
+output/schema. A reader-first startup stop completes the bounded SDK interruption
 attempt before SDK auto-disconnect can close its control channel; concurrent
-cleanup callers share that single attempt. Observed native terminal errors take
-the prompt failure path without waiting for an unnecessary interrupt response.
+cleanup callers share that single attempt. Native-supplied AskUserQuestion
+`response` is removed before sending validated handler answers because Claude
+otherwise gives that field precedence over the answer map.
 Native result
 subtype/error state, exact session ID, token usage, cost and permission-denial
 presence are retained. JSON/JSONL without a schema preserve the final native

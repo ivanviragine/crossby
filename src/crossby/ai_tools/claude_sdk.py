@@ -12,6 +12,7 @@ import importlib
 import json
 import math
 import os
+import subprocess
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager, suppress
@@ -77,7 +78,7 @@ def load_sdk() -> tuple[Any, Any]:
         raise ImportError("incompatible Claude Agent SDK options")
     if not all(
         callable(getattr(sdk.ClaudeSDKClient, name, None))
-        for name in ("connect", "query", "receive_response", "interrupt", "disconnect")
+        for name in ("connect", "query", "receive_messages", "interrupt", "disconnect")
     ):
         raise ImportError("incompatible Claude Agent SDK client")
     if not callable(getattr(builder, "_build_command", None)):
@@ -212,7 +213,13 @@ class SDKTransport:
         self.pending_lock = threading.RLock()
         self.seen: set[str] = set()
         self.tool_ids: set[str] = set()
+        # Pinned SDK 0.2.165: a result ends a turn, not the run. Only
+        # local agents/workflows defer EOF; shells/monitors may never settle.
+        self.inflight_tasks: set[str] = set()
+        self.turn_in_progress = False
+        self.run_complete = False
         self.terminal: dict[str, Any] | None = None
+        self.failure_terminal: dict[str, Any] | None = None
         self.query_submitted = False
         self.failure: BaseException | None = None
         self.ended = asyncio.Event()
@@ -296,20 +303,28 @@ class SDKTransport:
 
     def _observe(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
+        subtype = frame.get("subtype")
         if self.terminal is not None:
-            if not (
-                kind == "system"
-                and frame.get("subtype") == "session_state_changed"
-                and frame.get("sdk_host_only") in (None, True, False)
-                and frame.get("state") in {"idle", "running", "requires_action"}
-            ):
-                raise ValueError("Claude SDK emitted response content after its terminal result")
-            native_session = frame.get("session_id")
-            if native_session is not None and native_session != self.session_id:
-                raise ValueError("Claude SDK lifecycle frame changed the session binding")
-            self.session_state = frame["state"]
-            self.context.mark_progress()
-            return
+            lifecycle = kind == "system" and subtype in {
+                "session_state_changed",
+                "task_started",
+                "task_progress",
+                "task_notification",
+                "task_updated",
+                "background_tasks_changed",
+            }
+            continuation = (not self.run_complete or self.turn_in_progress) and kind in {
+                "assistant",
+                "user",
+                "stream_event",
+                "control_request",
+                "control_response",
+                "control_cancel_request",
+                "result",
+            }
+            # Replies to our bounded interrupt remain valid after a turn ends.
+            if not (lifecycle or continuation or kind == "control_response"):
+                raise ValueError("Claude SDK emitted content outside its active run")
         if kind in {"system", "assistant", "user", "stream_event", "result"}:
             native_session = frame.get("session_id")
             if native_session is not None:
@@ -322,6 +337,8 @@ class SDKTransport:
                         HeadlessTerminalStatus.INVALID_OUTPUT,
                         "Claude SDK did not confirm the requested native resume session.",
                     )
+                if self.session_id is not None and native_session != self.session_id:
+                    raise ValueError("Claude SDK frame changed the session binding")
                 self.context.set_provenance(session_id=native_session)
                 self.session_id = native_session
         if kind == "system" and frame.get("subtype") == "init":
@@ -332,6 +349,28 @@ class SDKTransport:
             if frame.get("state") not in {"idle", "running", "requires_action"}:
                 raise ValueError("Claude SDK reported an invalid lifecycle state")
             self.session_state = frame["state"]
+            if self.session_state != "idle":
+                self.run_complete = False
+            elif self.terminal is not None and not self.inflight_tasks:
+                self.run_complete = True
+        if kind == "system" and subtype in {"task_started", "task_notification", "task_updated"}:
+            task_id = _identity(frame.get("task_id"))
+            if subtype == "task_started" and frame.get("task_type") in {
+                "local_agent",
+                "local_workflow",
+            }:
+                if len(self.inflight_tasks) >= _MAX_IDS:
+                    raise ValueError("Claude SDK exceeded the active task limit")
+                self.inflight_tasks.add(task_id)
+                self.run_complete = False
+            elif subtype == "task_notification" or (
+                subtype == "task_updated"
+                and isinstance(frame.get("patch"), dict)
+                and frame["patch"].get("status") in {"completed", "failed", "stopped", "killed"}
+            ):
+                self.inflight_tasks.discard(task_id)
+                # Completion can wake a continuation. Only its result/idle
+                # can settle the run, not the now-empty task ledger.
         if kind == "control_request":
             request = frame.get("request")
             if not isinstance(request, dict) or request.get("subtype") != "can_use_tool":
@@ -361,18 +400,62 @@ class SDKTransport:
         elif kind == "control_cancel_request":
             self.cancel_request(_identity(frame.get("request_id")))
         elif kind == "result":
-            if (
-                self.pending
-                or self.session_id is None
-                or frame.get("origin") not in (None, {"kind": "human"})
-            ):
+            if self.pending or self.session_id is None:
                 raise ValueError("Claude SDK result has unresolved requests or no session")
-            self.terminal = frame
+            origin = frame.get("origin")
+            if origin is not None and (
+                not isinstance(origin, dict)
+                or origin.get("kind")
+                not in {
+                    "human",
+                    "channel",
+                    "peer",
+                    "task-notification",
+                    "coordinator",
+                    "unclassified",
+                    "observer",
+                    "auto-continuation",
+                    "observer-activity",
+                }
+            ):
+                raise ValueError("Claude SDK reported an unsupported result origin")
+            human = origin is None or origin.get("kind") == "human"
+            if self.terminal is None and human:
+                self.terminal = frame
+            elif self.terminal is not None and origin is not None and human:
+                raise ValueError("Claude SDK returned a second submitted-prompt result")
+            self.turn_in_progress = False
+            self.context.mark_progress()
+            if self.failure_terminal is None and (
+                frame.get("is_error") is True
+                or frame.get("subtype") != "success"
+                or frame.get("terminal_reason") in {"aborted_streaming", "aborted_tools"}
+            ):
+                self.failure_terminal = frame
+                prompt_result = self.terminal or frame
+                self.context.set_provenance(
+                    native_status=_identity(frame.get("subtype")),
+                    usage=usage_from(
+                        prompt_result.get("usage"),
+                        input_tokens="input_tokens",
+                        output_tokens="output_tokens",
+                        cached="cache_read_input_tokens",
+                        session_id=self.session_id,
+                    ),
+                )
+            self.run_complete = (
+                self.terminal is not None
+                and not self.inflight_tasks
+                and self.session_state in (None, "idle")
+            )
             if not self.query_submitted:
                 # Wake the SDK's pending initialize request immediately. It
                 # otherwise waits its fixed minimum even after native refusal.
                 raise ValueError("Claude SDK returned a terminal result before query startup")
         elif kind in {"assistant", "user"}:
+            if kind == "assistant" and frame.get("parent_tool_use_id") is None:
+                self.turn_in_progress = True
+                self.run_complete = False
             message = frame.get("message", {})
             blocks = message.get("content", []) if isinstance(message, dict) else []
             if isinstance(blocks, list):
@@ -386,6 +469,9 @@ class SDKTransport:
             if kind == "assistant":
                 self.context.emit(HeadlessEventKind.ASSISTANT_MESSAGE)
         elif kind == "stream_event":
+            if frame.get("parent_tool_use_id") is None:
+                self.turn_in_progress = True
+                self.run_complete = False
             self.context.mark_progress()
         elif kind == "system":
             self.context.emit(HeadlessEventKind.PROGRESS)
@@ -468,21 +554,37 @@ class SDKTransport:
             self.controller.process.close_input()
 
     async def finish(self) -> int:
-        """Drain through EOF after the result, rejecting trailing native frames."""
-        while self.session_state not in (None, "idle"):
-            self.context.checkpoint()
+        """Keep callbacks alive through the run; drain EOF after settled input."""
+        while (not self.run_complete or self.turn_in_progress) and not self.ended.is_set():
+            if self.failure_terminal is not None:
+                break
             if self.failure is not None:
                 raise self.failure
-            if self.ended.is_set():
-                break
+            self.context.checkpoint()
             await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
+        assert self.controller is not None
+        if self.failure_terminal is not None:
+            # Native failure/abort is already authoritative. Idle and EOF are
+            # not success gates here; use cleanup time, never the work deadline.
+            budget = min(0.1, self.context.remaining_seconds() / 4)
+            await asyncio.to_thread(
+                self.controller._abort,
+                HeadlessCleanupContext(
+                    deadline=asyncio.get_running_loop().time() + budget,
+                    cancel_event=threading.Event(),
+                ),
+            )
+            await self.end_input()
+            try:
+                return await asyncio.to_thread(self.controller.process._proc.wait, timeout=budget)
+            except subprocess.TimeoutExpired:
+                return await asyncio.to_thread(self.controller.process.close, timeout=budget)
         await self.end_input()
         while not self.ended.is_set():
             self.context.checkpoint()
             await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
         if self.failure is not None:
             raise self.failure
-        assert self.controller is not None
         return await asyncio.to_thread(
             self.controller.process._proc.wait, timeout=self.context.remaining_seconds()
         )
@@ -615,7 +717,12 @@ class SDKTransport:
             ):
                 raise ValueError("Claude question requires explicit native labels or free text")
             answers[key] = (selected if multiple else selected[0]) if selected else response.answer
-        return {**native_input, "answers": answers}
+        # Native `response` takes precedence over answers in AskUserQuestion.
+        # Only the handler's validated answer map may authorize this reply.
+        return {
+            **{key: value for key, value in native_input.items() if key != "response"},
+            "answers": answers,
+        }
 
     def _operation(
         self, tool: str, raw: dict[str, Any], request_id: str, tool_id: str, permission: Any
@@ -685,25 +792,36 @@ def run_sdk_session(
             await client.connect()
             transport.query_submitted = True
             await client.query(request.prompt)
-            response = client.receive_response()
+            response = client.receive_messages()
             pending = asyncio.create_task(anext(response, None))
+            finishing: asyncio.Task[int] | None = None
             while True:
-                if transport.failure is not None:
-                    raise transport.failure
-                context.checkpoint()
-                await asyncio.wait({pending}, timeout=0.01)
-                if not pending.done():
-                    continue
-                if pending.result() is None:
+                if transport.failure_terminal is None:
+                    if transport.failure is not None:
+                        raise transport.failure
+                    context.checkpoint()
+                if finishing is None and (
+                    transport.terminal is not None or transport.failure_terminal
+                ):
+                    finishing = asyncio.create_task(transport.finish())
+                if finishing is not None and finishing.done():
+                    code = finishing.result()
                     break
-                pending = asyncio.create_task(anext(response, None))
-            if transport.failure is not None:
+                await asyncio.wait({pending}, timeout=0.01)
+                if pending.done():
+                    if pending.result() is None:
+                        if finishing is None:
+                            raise ValueError("Claude SDK omitted the submitted-prompt result")
+                        code = await finishing
+                        break
+                    pending = asyncio.create_task(anext(response, None))
+            if transport.failure_terminal is None and transport.failure is not None:
                 raise transport.failure
-            if transport.terminal is None:
+            frame = transport.terminal or transport.failure_terminal
+            if frame is None:
                 raise ValueError("Claude SDK omitted the native result")
-            code = await transport.finish()
             succeeded = True
-            return transport.terminal, code
+            return frame, code
         finally:
             # Same task owns SDK connect/disconnect (anyio task-group invariant).
             # Process operations are bounded even when SDK teardown is shielded.
@@ -713,6 +831,10 @@ def run_sdk_session(
                     cancel_event=threading.Event(),
                 )
                 await asyncio.to_thread(transport.controller._abort, cleanup)
+            if "finishing" in locals() and finishing is not None and not finishing.done():
+                finishing.cancel()
+                with suppress(BaseException):
+                    await finishing
             if "pending" in locals():
                 if not pending.done():
                     pending.cancel()
@@ -743,14 +865,17 @@ def run_sdk_session(
             raise context.transport_error(
                 "Claude SDK session failed during native dispatch."
             ) from None
-    native_status = _identity(frame.get("subtype"))
+    terminal_frame = transport.failure_terminal or frame
+    native_status = _identity(terminal_frame.get("subtype"))
     status = (
         HeadlessTerminalStatus.CANCELLED
-        if frame.get("terminal_reason") in {"aborted_streaming", "aborted_tools"}
+        if terminal_frame.get("terminal_reason") in {"aborted_streaming", "aborted_tools"}
         else HeadlessTerminalStatus.SUCCEEDED
         if native_status == "success"
-        and frame.get("is_error") is False
+        and terminal_frame.get("is_error") is False
         and not frame.get("deferred_tool_use")
+        and transport.run_complete
+        and not transport.turn_in_progress
         and transport.session_state in (None, "idle")
         else HeadlessTerminalStatus.FAILED
     )
