@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -39,7 +40,7 @@ class WorktreeError(RuntimeError):
     """An isolation request or owned cleanup cannot safely complete."""
 
 
-def _git(root: Path, *args: str) -> str:
+def _git(root: Path, *args: str, raw: bool = False) -> str:
     env = {
         k: v
         for k, v in os.environ.items()
@@ -58,7 +59,7 @@ def _git(root: Path, *args: str) -> str:
         raise WorktreeError(f"Git isolation operation failed: {exc}") from exc
     if result.returncode:
         raise WorktreeError(result.stderr.strip() or "Git isolation operation failed")
-    return result.stdout.strip()
+    return result.stdout if raw else result.stdout.strip()
 
 
 def isolation_requested(scene: SceneConfig | None, flag: str | None, keep: bool) -> bool:
@@ -86,7 +87,7 @@ class WorktreeRequest:
     cwd_relative: Path
     scene_relative: Path
     skills_relative: Path | None
-    bundles: dict[str, dict[Path, bytes]]
+    bundles: dict[str, dict[Path, tuple[bytes, int]]]
     canonical_skills_relative: Path | None = None
 
     @classmethod
@@ -98,6 +99,11 @@ class WorktreeRequest:
         commit = _git(cwd, "rev-parse", "--verify", "HEAD^{commit}")
         hook_path = Path(_git(repository, "rev-parse", "--git-path", "hooks/post-checkout"))
         if not hook_path.is_absolute():
+            committed_hook = _git(repository, "ls-tree", commit, "--", hook_path.as_posix())
+            if committed_hook.startswith(("100755 ", "120000 ")):
+                raise WorktreeError(
+                    "Isolated v1 launches require no executable post-checkout hook."
+                )
             hook_path = repository / hook_path
         if hook_path.is_file() and os.access(hook_path, os.X_OK):
             raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
@@ -112,7 +118,9 @@ class WorktreeRequest:
                 and _git(repository, "cat-file", "-t", f"{commit}:{relative.as_posix()}") != "tree"
             ):
                 raise WorktreeError("The launch directory must exist in committed HEAD.")
-        # Refuse external committed links and submodules before checkout allocation.
+        # Resolve HEAD symlink chains with filesystem semantics: a '..' after
+        # traversing a link applies to its destination, not its lexical basename.
+        links: dict[tuple[str, ...], str] = {}
         entries = _git(repository, "ls-tree", "-rz", commit).split("\0")
         for entry in filter(None, entries):
             header, name = entry.split("\t", 1)
@@ -120,15 +128,38 @@ class WorktreeRequest:
             if mode == "160000":
                 raise WorktreeError("Isolated v1 launches do not initialize Git submodules.")
             if mode == "120000":
-                link = _git(repository, "show", f"{commit}:{name}")
-                destination = Path(os.path.normpath(str(Path(name).parent / link)))
-                if Path(link).is_absolute() or destination.parts[:1] == ("..",):
-                    raise WorktreeError(f"Committed symlink escapes the isolated checkout: {name}")
+                links[tuple(name.split("/"))] = _git(
+                    repository, "show", f"{commit}:{name}", raw=True
+                )
+        for link_name in links:
+            pending = list(link_name)
+            resolved: list[str] = []
+            followed = 0
+            while pending:
+                component = pending.pop(0)
+                if component in ("", "."):
+                    continue
+                if component == "..":
+                    if not resolved:
+                        raise WorktreeError(
+                            f"Committed symlink escapes checkout: {'/'.join(link_name)}"
+                        )
+                    resolved.pop()
+                    continue
+                resolved.append(component)
+                if (target_link := links.get(tuple(resolved))) is not None:
+                    followed += 1
+                    if not target_link or Path(target_link).is_absolute() or followed > 40:
+                        raise WorktreeError(
+                            f"Unsafe committed symlink chain: {'/'.join(link_name)}"
+                        )
+                    resolved.pop()
+                    pending = target_link.split("/") + pending
         sources = scene.inject.skills if scene.inject is not None else {}
         target = SKILLS_DIR.get(tool)
         if sources and target is None:
             raise WorktreeError(f"{tool} has no supported skills directory.")
-        bundles: dict[str, dict[Path, bytes]] = {}
+        bundles: dict[str, dict[Path, tuple[bytes, int]]] = {}
         for name, source in sources.items():
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) is None:
                 raise WorktreeError(f"Unsafe injected skill name: {name!r}")
@@ -153,7 +184,7 @@ class WorktreeRequest:
                     bundle = scene_root / bundle
             if not source.strip() or bundle.is_symlink() or not bundle.is_dir():
                 raise WorktreeError(f"Skill source must be a real directory: {source!r}")
-            payload: dict[Path, bytes] = {}
+            payload: dict[Path, tuple[bytes, int]] = {}
             for path in sorted(bundle.rglob("*")):
                 if path.is_symlink() or not (path.is_file() or path.is_dir()):
                     raise WorktreeError(f"Skill source contains a symlink or special file: {path}")
@@ -161,7 +192,10 @@ class WorktreeRequest:
                 if ".git" in relative.parts:
                     raise WorktreeError("Skill bundles must not contain Git metadata.")
                 if path.is_file() and "__pycache__" not in relative.parts:
-                    payload[relative] = path.read_bytes()
+                    payload[relative] = (
+                        path.read_bytes(),
+                        stat.S_IMODE(path.stat().st_mode) & 0o777,
+                    )
             if Path("SKILL.md") not in payload:
                 raise WorktreeError(f"Skill source has no regular SKILL.md: {source!r}")
             bundles[name] = payload
@@ -273,10 +307,11 @@ class WorktreeRequest:
                         raise WorktreeError(
                             f"Injected skill destination already exists: {destination}"
                         )
-                    for relative, content in payload.items():
+                    for relative, (content, mode) in payload.items():
                         path = destination / relative
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_bytes(content)
+                        path.chmod(mode)
             try:
                 yielded = True
                 yield owned

@@ -287,7 +287,8 @@ scenes:
 ```
 
 Each source directory must contain `SKILL.md`; its regular files and resource
-subdirectories are copied only into the isolated workspace. Relative sources
+subdirectories are copied with file permissions only into the isolated workspace.
+Relative sources
 resolve from the scene configuration directory. The bundled catalog currently
 contains only `crossby-sync`; Crossby does not search your other installed skills
 or download bundles. Destination names use letters, digits, underscores and
@@ -311,7 +312,7 @@ native per-launch MCP overrides instead of a global scene profile.
 is an error. Injection requires effective worktree isolation. `--keep-worktree`
 requires isolation, and isolation requires `--scene`, a Git repository and a
 foreground CLI tool; it cannot resume an old session. V1 refuses submodules,
-committed symlinks escaping the checkout and executable Git `post-checkout`
+committed symlink chains escaping the checkout and executable Git `post-checkout`
 hooks, rather than executing setup hooks against your original checkout.
 `crossby scene use` retains its existing persistent semantics and does not
 allocate a worktree or inject bundles.
@@ -323,7 +324,8 @@ launch error or cancellation. Crossby never commits or pushes child changes.
 Relative transcript and plan-output paths follow the isolated cwd and disappear
 with a disposable checkout; choose an explicit absolute output path or retain
 the worktree when you need the artifacts. Isolated transcript capture uses an
-owned POSIX PTY. Owned cleanup refuses changed/missing ownership records,
+owned POSIX PTY; redirected stdin and its EOF are preserved. Owned cleanup
+refuses changed/missing ownership records,
 replaced Git bindings, symlinked ownership paths and nested repositories.
 Without `--discard-changes`, explicit cleanup also refuses dirty checkouts
 (including injected files) or a HEAD changed by child commits. Extra files outside the checkout in its container

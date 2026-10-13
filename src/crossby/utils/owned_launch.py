@@ -73,16 +73,18 @@ def run_owned(
             master, slave = pty.openpty()
 
             def controlling_terminal() -> None:
-                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+                fcntl.ioctl(1, termios.TIOCSCTTY, 0)
 
             options = {
                 "start_new_session": True,
                 "preexec_fn": controlling_terminal,
-                "stdin": slave,
+                # Keep redirected stdin as the actual inherited stream, including
+                # its EOF. Only interactive stdin needs the terminal relay.
+                "stdin": slave if sys.stdin.isatty() else None,
                 "stdout": slave,
                 "stderr": slave,
             }
-            if terminal is not None:
+            if terminal is not None and sys.stdin.isatty():
                 saved_tty = termios.tcgetattr(terminal)
                 size = os.get_terminal_size(terminal)
                 termios.tcsetwinsize(slave, (size.lines, size.columns))
@@ -121,9 +123,9 @@ def run_owned(
         if master is not None:
             while True:
                 readable, _, _ = select.select(
-                    [master, *([terminal] if terminal is not None else [])], [], [], 0.05
+                    [master, *([terminal] if saved_tty is not None else [])], [], [], 0.05
                 )
-                if terminal is not None and terminal in readable:
+                if saved_tty is not None and terminal is not None and terminal in readable:
                     data = os.read(terminal, 65536)
                     if data:
                         os.write(master, data)

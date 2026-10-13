@@ -624,3 +624,75 @@ def test_transcript_drains_final_output(project: dict[str, Path]) -> None:
         )
     assert code == 0
     assert output.read_bytes() == b"x" * 200000 + b"END"
+
+
+def test_chained_symlink_escape_refused_before_allocation(project: dict[str, Path]) -> None:
+    repo = project["repo"]
+    (repo / "alias").symlink_to(".", target_is_directory=True)
+    (repo / "up").symlink_to("alias/..", target_is_directory=True)
+    (repo / ".codex").symlink_to("up", target_is_directory=True)
+    git(repo, "add", "alias", "up", ".codex")
+    git(repo, "commit", "-qm", "chained escape fixture")
+    original = (repo / ".crossby.yml").read_bytes()
+    with pytest.raises(WorktreeError, match="escapes"):
+        request(project)
+    assert not list(project["owners"].iterdir())
+    assert (repo / ".crossby.yml").read_bytes() == original
+
+
+def test_internal_symlink_chain_is_supported(project: dict[str, Path]) -> None:
+    repo = project["repo"]
+    (repo / "alias").symlink_to("package", target_is_directory=True)
+    (repo / "same").symlink_to("alias/../package", target_is_directory=True)
+    git(repo, "add", "alias", "same")
+    git(repo, "commit", "-qm", "internal links fixture")
+    with request(project).create() as owned:
+        assert (owned.path / "same/app.py").read_text() == "committed\n"
+
+
+def test_injected_resource_retains_executable_mode(project: dict[str, Path]) -> None:
+    script = project["source"] / "resources" / "check"
+    script.write_text("#!/bin/sh\nprintf 'resource works'\n")
+    script.chmod(0o755)
+    with request(project).create() as owned:
+        target = owned.path / ".claude/skills/review/resources/check"
+        assert target.stat().st_mode & 0o777 == 0o755
+        assert subprocess.check_output([str(target)], cwd=owned.path) == b"resource works"
+
+
+def test_transcript_preserves_piped_input_and_eof(project: dict[str, Path]) -> None:
+    script = project["tmp"] / "pipe-launcher.py"
+    output = project["tmp"] / "pipe-transcript"
+    script.write_text("""import pathlib,sys
+from crossby.utils.process import run_with_transcript
+command=[sys.executable, '-c', "import sys; data=sys.stdin.read(); print(repr(data)); sys.exit(7)"]
+sys.exit(run_with_transcript(command, pathlib.Path(sys.argv[1]), cwd=sys.argv[2], owned=True))
+""")
+    result = subprocess.run(
+        [sys.executable, str(script), str(output), str(project["repo"])],
+        input="hello\n",
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 7, result.stderr
+    assert "'hello\\n'" in result.stdout
+    assert b"'hello\\n'" in output.read_bytes()
+
+
+def test_committed_relative_hook_refused_even_when_locally_deleted(
+    project: dict[str, Path],
+) -> None:
+    repo = project["repo"]
+    hooks = repo / ".hooks"
+    hooks.mkdir()
+    hook = hooks / "post-checkout"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    hook.chmod(0o755)
+    git(repo, "add", ".hooks")
+    git(repo, "commit", "-qm", "relative hook fixture")
+    git(repo, "config", "core.hooksPath", ".hooks")
+    hook.unlink()
+    with pytest.raises(WorktreeError, match="post-checkout"):
+        request(project)
+    assert not list(project["owners"].iterdir())
