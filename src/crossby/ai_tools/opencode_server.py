@@ -494,7 +494,7 @@ def run_native_session(
     request: HeadlessSessionRequest,
     context: HeadlessRuntimeContext,
     capability: PlanModeCapability,
-) -> tuple[str, str, str, Any]:
+) -> tuple[str, str, str | None, Any, str]:
     """Run an ordinary session through the verified loopback question APIs."""
     # Match OpenCode's ascending message ID format so its native turn ordering
     # remains valid even when the prompt and reply are created in one millisecond.
@@ -624,11 +624,31 @@ def run_native_session(
             completed_bound = []
             for info in bound:
                 if info.get("error") is not None:
-                    raise ValueError("OpenCode assistant message failed")
+                    error = info["error"]
+                    native_status = error.get("name") if isinstance(error, dict) else None
+                    if not isinstance(native_status, str) or not native_status.strip():
+                        native_status = "error"
+                    return (
+                        session_id,
+                        _required_text(info, "id"),
+                        None,
+                        info.get("tokens"),
+                        native_status,
+                    )
                 finish = info.get("finish")
                 completed = info.get("time")
                 if finish is not None and finish != "tool-calls":
-                    if finish != "stop" or not (
+                    if not isinstance(finish, str) or not finish.strip():
+                        raise ValueError("OpenCode assistant message had malformed finish status")
+                    if finish != "stop":
+                        return (
+                            session_id,
+                            _required_text(info, "id"),
+                            None,
+                            info.get("tokens"),
+                            finish,
+                        )
+                    if not (
                         isinstance(completed, dict)
                         and isinstance(completed.get("completed"), (int, float))
                     ):
@@ -662,7 +682,7 @@ def run_native_session(
                 text = "\n".join(texts)
                 if not text.strip():
                     raise ValueError("OpenCode completed message was blank")
-                return session_id, message_id, text, exact_info.get("tokens")
+                return session_id, message_id, text, exact_info.get("tokens"), "stop"
         context.wait(0.1)
 
 

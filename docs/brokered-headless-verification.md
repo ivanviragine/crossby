@@ -22,7 +22,10 @@ requests have no such field; the response schemas define the exact `accept`,
 `acceptForSession`, `decline`, and `cancel` decisions. The brokered adapter
 offers those native decisions when the request omits the list. Built-in
 permission requests carry a structured permission profile; an explicit
-approval grants that exact profile for the turn. MCP form content is checked
+approval grants that exact profile for the turn. With `approval_policy=never`,
+the adapter responds with an empty permission profile scoped to the turn, so
+the native turn can continue without granting the requested permissions. MCP
+form content is checked
 against the request schema before an accepted response is sent; denied or
 skipped elicitation sends `decline`, and cancellation sends `cancel`. A missing
 or invalid selection cannot become a native response.
@@ -63,7 +66,10 @@ client. It polls the bound session's pending question and permission APIs,
 answering only requests whose tool message belongs to the submitted prompt.
 It accepts a final assistant message only when its native `parentID` matches
 the submitted user message ID, the exact session and message IDs match, and
-the native finish reason is `stop`. A bounded incremental SSE
+the native finish reason is `stop`. A bound assistant error or non-`stop`
+terminal finish returns a failed session result with the native error name or
+finish reason (or `error` when no name exists); missing successful output does
+not turn that failure into a transport exception. A bounded incremental SSE
 reader normalizes matching assistant, tool, and usage progress when the server
 delivers it. Native part deltas from prompt-bound assistant messages refresh
 the idle deadline without adding an event for each streamed fragment. SSE

@@ -1658,7 +1658,8 @@ def _answer_codex_builtin_permission(
     ):
         raise ValueError("Codex built-in permission omitted authoritative fields")
     if deny_automatically:
-        raise ValueError("Codex built-in permission is forbidden by approval_policy=never")
+        rpc.respond(message["id"], {"permissions": {}, "scope": "turn"})
+        return
     interaction = PlanInteraction(
         kind=PlanInteractionKind.PERMISSION,
         question_id=str(message["id"]),

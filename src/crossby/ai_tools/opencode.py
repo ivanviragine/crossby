@@ -266,16 +266,22 @@ class OpenCodeAdapter(AbstractAITool):
             from crossby.ai_tools.headless_cli import usage_from
             from crossby.ai_tools.opencode_server import run_native_session
 
-            brokered_session_id, _message_id, brokered_text, tokens = run_native_session(
-                request, context, self.capabilities().plan_mode
+            brokered_session_id, _message_id, brokered_text, tokens, native_status = (
+                run_native_session(request, context, self.capabilities().plan_mode)
+            )
+            status = (
+                HeadlessTerminalStatus.SUCCEEDED
+                if native_status == "stop"
+                else HeadlessTerminalStatus.FAILED
             )
             context.emit(
                 HeadlessEventKind.TERMINAL,
-                terminal_status=HeadlessTerminalStatus.SUCCEEDED,
+                terminal_status=status,
             )
             return context.complete(
+                status,
                 final_text=brokered_text,
-                native_status="stop",
+                native_status=native_status,
                 session_id=brokered_session_id,
                 usage=usage_from(
                     tokens,

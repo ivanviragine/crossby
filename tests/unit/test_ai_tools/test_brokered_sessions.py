@@ -999,16 +999,130 @@ def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_appro
             ),
         )
     assert rpc.sent == []
-    with pytest.raises(ValueError, match="approval_policy=never"):
-        _answer_codex_builtin_permission(
-            rpc,
-            message,
-            thread_id="thr-exact",
-            turn_id="turn-exact",
-            handler=approve,
-            deny_automatically=True,
-        )
-    assert rpc.sent == []
+    _answer_codex_builtin_permission(
+        rpc,
+        message,
+        thread_id="thr-exact",
+        turn_id="turn-exact",
+        handler=approve,
+        deny_automatically=True,
+    )
+    assert len(seen) == 1
+    assert rpc.sent == [("respond", {"id": 91, "result": {"permissions": {}, "scope": "turn"}})]
+
+
+def test_codex_never_policy_denies_builtin_permission_and_completes_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            {
+                "id": 91,
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turnId": "turn-exact",
+                    "itemId": "item-exact",
+                    "cwd": str(tmp_path),
+                    "permissions": {"network": {"enabled": True}},
+                },
+            },
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turnId": "turn-exact",
+                    "item": {
+                        "type": "agentMessage",
+                        "id": "msg-exact",
+                        "text": "Permission denied.",
+                    },
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+    from crossby.models.ai import PlanApprovalPolicy
+
+    def unexpected_interaction(_interaction: SessionInteraction) -> SessionInteractionResponse:
+        pytest.fail("approval_policy=never must not ask for a permission decision")
+
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER), unexpected_interaction
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Permission denied."
+    assert (
+        "respond",
+        {"id": 91, "result": {"permissions": {}, "scope": "turn"}},
+    ) in _FakeRpc.instances[0].sent
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_native_status"),
+    [
+        ({"error": {"name": "ProviderAuthError"}}, "ProviderAuthError"),
+        ({"finish": "length"}, "length"),
+    ],
+)
+def test_opencode_assistant_failure_returns_failed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: dict[str, Any],
+    expected_native_status: str,
+) -> None:
+    class FakeServer:
+        def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
+            self.active_session_id: str | None = None
+            self.prompt_id: str | None = None
+
+        def start(self) -> None:
+            return None
+
+        def request(self, method: str, path: str, payload: Any = None) -> Any:
+            if method == "POST" and path == "/session":
+                return {"id": "ses-exact"}
+            if path == "/session/ses-exact/prompt_async":
+                self.prompt_id = payload["messageID"]
+                return None
+            if path in {"/question", "/permission"}:
+                return []
+            if path == "/session/ses-exact/message":
+                return [
+                    {"info": {"id": self.prompt_id, "sessionID": "ses-exact", "role": "user"}},
+                    {
+                        "info": {
+                            "id": "msg-failed",
+                            "sessionID": "ses-exact",
+                            "role": "assistant",
+                            "parentID": self.prompt_id,
+                            **failure,
+                        }
+                    },
+                ]
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.OpenCodeServer", FakeServer)
+    result = AbstractAITool.get(AIToolID.OPENCODE).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == expected_native_status
+    assert result.final_text is None
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
+    assert result.session_id == "ses-exact"
 
 
 def test_codex_mcp_form_requires_exact_schema_content(tmp_path: Path) -> None:
