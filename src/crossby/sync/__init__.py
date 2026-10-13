@@ -225,7 +225,28 @@ def run_sync(
     pending_mcp: dict[AIToolID, set[str]] = {}
     ownership_concerns = frozenset((SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP))
 
-    results: list[SyncResult] = []
+    def _source_error_result(affected_tool: AIToolID | None, affected: SyncConcern) -> SyncResult:
+        return SyncResult(
+            tool_id=affected_tool,
+            concern=affected,
+            action="error",
+            message="Invalid source input; target and ownership preserved: "
+            + "; ".join(data.source_errors[affected]),
+        )
+
+    # A failed source is still an error when the selected target has no writer
+    # (e.g. permissions to Codex), or installed-target filtering leaves none.
+    # Respect explicit concern exclusions without silently suppressing active
+    # failures in ordinary sync, --dry-run, --plan, or --doctor.
+    matched_concerns = {writer.concern for writer in writers}
+    results = [
+        _source_error_result(tool_id, affected)
+        for affected, errors in data.source_errors.items()
+        if errors
+        and (concern is None or concern == affected)
+        and affected not in (skip_concerns or ())
+        and affected not in matched_concerns
+    ]
     agents_writers_ran = False
     rules_writers_ran = False
     skills_writers_ran = False
@@ -263,6 +284,10 @@ def run_sync(
                 rules_writers_ran = True
             elif writer.concern == SyncConcern.SKILLS:
                 skills_writers_ran = True
+            continue
+
+        if data.source_errors.get(writer.concern):
+            results.append(_source_error_result(writer.tool_id, writer.concern))
             continue
 
         writer_data = data
