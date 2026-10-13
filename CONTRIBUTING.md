@@ -382,8 +382,10 @@ diagnostics. Forced runtime stops retain their timeout/cancellation status even
 when a profile requires a native terminal event for normal completion.
 Native transports can pass `request_cancel_event` to `interact()` or
 `native_interaction_response()` to stop the bridge's wait when a request is
-withdrawn without cancelling the session. The caller's handler remains isolated
-in its daemon worker; a late answer cannot re-enter dispatch. `JsonRpcProcess.send`
+withdrawn without cancelling the session. `interact()` carries that signal through
+its interaction-event observers as well as the interaction handler; `emit()`
+accepts the same optional signal for request-bound notifications. The caller's
+handler remains isolated in its daemon worker; a late answer cannot re-enter dispatch. `JsonRpcProcess.send`
 accepts an optional `write_guard` which commits response rights inside the actual
 writer, after send-lock/executor waits. Existing callers retain their prior
 behavior. Claude synchronizes that guard with native withdrawal and closure.

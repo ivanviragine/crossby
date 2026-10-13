@@ -154,6 +154,10 @@ for line in sys.stdin:
                 delay_drain()
             if mode == 'native_cancel':
                 time.sleep(config.get('cancel_delay', 0))
+                if config.get('cancel_barrier'):
+                    end = time.monotonic() + 2
+                    while not Path(config['cancel_barrier']).exists() and time.monotonic() < end:
+                        time.sleep(0.005)
                 emit({'type': 'control_cancel_request', 'request_id': 'wire-exact'})
                 result()
             if mode == 'duplicate':
@@ -1096,7 +1100,13 @@ def test_native_failure_provenance_precedes_usage_callback(
             raise RuntimeError("Private observer error")
 
     try:
-        values = {"subtype": "error_during_execution", "is_error": True}
+        values = {
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": {
+                "permission_denials": [{"tool_name": "Bash", "tool_use_id": "denied-exact"}]
+            },
+        }
         kwargs = {
             "event_handler": observe,
             "cancel_event": cancelled,
@@ -1114,6 +1124,7 @@ def test_native_failure_provenance_precedes_usage_callback(
                 else HeadlessTerminalStatus.TIMED_OUT
             )
         assert result.native_status == "error_during_execution"
+        assert result.denials == ("Claude reported native permission denials",)
         assert result.session_id == "session-exact"
         assert result.usage.input_tokens == 5
         assert any(
@@ -1243,7 +1254,7 @@ def test_sequential_questions_refresh_pending_read_idle_budget(
     monkeypatch.setattr(JsonRpcProcess, "read_line", read)
     result = run({"request": native}, handler, request_values={"idle_timeout_seconds": 0.25})
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
-    assert read_timeouts  # the old snapshot expires while current progress is valid
+    assert read_timeouts  # bounded read polls expire while current progress remains valid
     reply = next(
         f["response"]["response"] for f in _records(record) if f["type"] == "control_response"
     )
@@ -1380,3 +1391,89 @@ def test_backpressured_write_obeys_current_runtime_deadlines(
     assert not any(
         f["type"] == ("user" if path == "query" else "control_response") for f in _records(record)
     )
+
+
+@pytest.mark.parametrize("outcome", [PlanInteractionOutcome.SKIPPED, PlanInteractionOutcome.DENIED])
+def test_declined_question_teardown_does_not_require_queued_eof(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, outcome: PlanInteractionOutcome
+) -> None:
+    from crossby.ai_tools.plan_process import JsonRpcProcess
+
+    run, record = sdk_child
+    native_queue = JsonRpcProcess._queue_stdout
+    dropped = []
+
+    def queue(process: Any, line: Any) -> bool:
+        if line is None:
+            # Real close can set _closing before the reader queues its EOF.
+            assert process._closing.wait(2)
+            dropped.append(True)
+        return native_queue(process, line)
+
+    monkeypatch.setattr(JsonRpcProcess, "_queue_stdout", queue)
+    result = run(
+        {"request": _questions()},
+        lambda _i: SessionInteractionResponse(outcome=outcome),
+        request_values={"timeout_seconds": 2},
+    )
+    assert dropped
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.session_id == "session-exact"
+    assert not any(f["type"] == "control_response" for f in _records(record))
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [HeadlessEventKind.INTERACTION, HeadlessEventKind.CLARIFICATION, HeadlessEventKind.PERMISSION],
+)
+def test_native_withdrawal_unblocks_interaction_event_observer(
+    sdk_child: Any, tmp_path: Path, kind: HeadlessEventKind
+) -> None:
+    run, record = sdk_child
+    barrier = tmp_path / "observer-entered"
+    release = threading.Event()
+    called = []
+
+    def observe(event: Any) -> None:
+        if event.kind is kind:
+            barrier.touch()
+            release.wait(3)  # deliberately remains blocked until after run returns
+
+    def handler(_i: Any) -> SessionInteractionResponse:
+        called.append(True)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    values = {"mode": "native_cancel", "cancel_barrier": str(barrier), "request": _questions()}
+    if kind is HeadlessEventKind.PERMISSION:
+        values.update({"tool": "Bash", "request": {"command": "pwd"}})
+    try:
+        result = run(values, handler, event_handler=observe, request_values={"timeout_seconds": 1})
+        assert barrier.exists()
+        assert result.status is HeadlessTerminalStatus.SUCCEEDED
+        assert result.session_id == "session-exact"
+        assert not called
+        assert not any(f["type"] == "control_response" for f in _records(record))
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("source", ["submitted", "background"])
+def test_native_denials_retained_from_each_result(sdk_child: Any, source: str) -> None:
+    run, _ = sdk_child
+    denials = [
+        {
+            "tool_name": "Bash",
+            "tool_use_id": "denied-exact",
+            "tool_input": {"command": "private command"},
+        }
+    ]
+    values = {"result": {"permission_denials": denials}}
+    if source == "background":
+        values = {"mode": "background", "background_result": {"permission_denials": denials}}
+    result = run(
+        values, lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.denials == ("Claude reported native permission denials",)
+    assert result.usage.input_tokens == 5  # background accounting cannot replace prompt usage
+    assert "private command" not in result.model_dump_json()

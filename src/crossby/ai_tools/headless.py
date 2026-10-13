@@ -359,8 +359,11 @@ class HeadlessRuntimeContext:
         thread_id: str | None = None,
         turn_id: str | None = None,
         conversation_id: str | None = None,
+        request_cancel_event: threading.Event | None = None,
     ) -> HeadlessEvent:
-        """Append and synchronously dispatch one bounded normalized event."""
+        """Append and dispatch a bounded event, honoring native withdrawal."""
+        if request_cancel_event is not None and request_cancel_event.is_set():
+            raise _HeadlessInteractionCancelledError("The native interaction was withdrawn.")
         self._stop_if_needed()
         self.set_provenance(
             session_id=session_id,
@@ -439,6 +442,7 @@ class HeadlessRuntimeContext:
                 event,
                 timeout_seconds=self.remaining_seconds(),
                 label="event handler",
+                request_cancel_event=request_cancel_event,
             )
         return event
 
@@ -476,7 +480,7 @@ class HeadlessRuntimeContext:
             conversation_id=interaction.conversation_id,
         )
         # Prompts and answer content deliberately never enter normalized events.
-        self.emit(HeadlessEventKind.INTERACTION)
+        self.emit(HeadlessEventKind.INTERACTION, request_cancel_event=request_cancel_event)
         if self.request.interaction_mode is HeadlessInteractionMode.UNATTENDED:
             if interaction.kind is PlanInteractionKind.QUESTION:
                 raise _HeadlessStopError(
@@ -500,6 +504,7 @@ class HeadlessRuntimeContext:
             HeadlessEventKind.CLARIFICATION
             if interaction.kind is PlanInteractionKind.QUESTION
             else HeadlessEventKind.PERMISSION,
+            request_cancel_event=request_cancel_event,
         )
         interaction_deadline = min(
             self.deadline,

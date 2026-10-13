@@ -258,10 +258,14 @@ class SDKTransport:
 
     def _read(self) -> dict[str, Any] | None:
         assert self.controller is not None
-        while True:
+        while not self.closed:
             self.context.checkpoint()
             try:
-                line = self.controller.process.read_line(timeout=self.context.remaining_seconds())
+                # Cancellation of to_thread cannot cancel the physical reader.
+                # Poll closure too: process shutdown can suppress queued EOF.
+                line = self.controller.process.read_line(
+                    timeout=min(0.05, self.context.remaining_seconds())
+                )
             except TimeoutError:
                 # Sequential callbacks may have refreshed idle progress while
                 # this read waited on an older budget. Retry only if the current
@@ -273,6 +277,8 @@ class SDKTransport:
             finally:
                 self.context.checkpoint()
             break
+        else:
+            return None
         frame = json.loads(line)
         if not isinstance(frame, dict):
             raise ValueError("Claude SDK emitted a non-object frame")
@@ -461,6 +467,11 @@ class SDKTransport:
                 and not self.inflight_tasks
                 and self.session_state in (None, "idle")
             )
+            # Denials belong to the whole run, including background turns.
+            # Record them before observers can cancel, expire or raise.
+            denials = frame.get("permission_denials")
+            if isinstance(denials, list) and denials:
+                self.context.add_denial("Claude reported native permission denials")
             # All native state/provenance must precede user callbacks: an
             # observer may cancel, expire or raise while receiving accounting.
             if submitted_result:
@@ -521,9 +532,6 @@ class SDKTransport:
         )
         if usage is not None or payload is not None:
             self.context.emit(HeadlessEventKind.USAGE, payload=payload)
-        denials = frame.get("permission_denials")
-        if isinstance(denials, list) and denials:
-            self.context.add_denial("Claude reported native permission denials")
 
     async def write(self, data: str) -> None:
         assert self.controller is not None

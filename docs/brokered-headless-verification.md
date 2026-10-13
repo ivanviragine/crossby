@@ -56,8 +56,10 @@ denied permissions send native denial. Handler errors remain managed transport
 errors even though the SDK normally converts them into control errors.
 Execution directory remains unset: Claude's Bash working directory can persist
 across commands, and launch cwd is not authoritative execution evidence.
-Native cancellation signals the bounded callback wait so executor shutdown does
-not delay a successful result until its idle deadline. Withdrawal and closure
+Native cancellation signals the bounded interaction-handler and related
+event-observer waits so executor shutdown does not delay a successful result
+until its idle deadline. Observer callbacks remain isolated; their late return
+cannot revive withdrawn requests. Withdrawal and closure
 share a lock with response commitment inside the physical writer; a response
 queued behind a send lock or executor cannot revive a withdrawn request.
 After committing response rights, the writer releases the registry lock before
@@ -65,7 +67,9 @@ pipe write/flush so backpressure cannot block native interruption or withdrawal.
 
 Startup, callbacks, I/O and teardown share the Crossby deadline. Pending reads
 recheck the current idle budget when sequential question callbacks refresh
-semantic progress. Physical writes use the owned process's overall deadline,
+semantic progress, and poll transport closure so executor shutdown does not rely
+on an EOF record being queued after process closure begins. Physical writes use
+the owned process's overall deadline,
 while the reader and runtime monitor enforce the current idle deadline as native
 progress arrives. Partially written frames are never retried; neither read nor
 write progress extends the overall deadline. Cleanup attempts SDK interruption
@@ -91,6 +95,9 @@ waiting for idle, preserving terminal status, actual exit code and prompt usage.
 Native failure state and provenance are recorded before invoking usage observers.
 An observer/dispatch exception takes precedence over native completion, even if
 the cleanup task finishes before the SDK message consumer receives the error.
+Native permission denials from every result, including background turns, are
+recorded as safe generic diagnostics before any usage observer can stop dispatch;
+background accounting still cannot replace the submitted prompt's usage.
 Error teardown reserves remaining work time to deliver the exception rather
 than allowing an unacknowledged interrupt wait to turn it into an idle timeout.
 Numeric cost payloads are checked against Pydantic event-export JSON and
