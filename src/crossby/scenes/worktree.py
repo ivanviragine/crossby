@@ -34,6 +34,7 @@ _GIT_ENV = {
     "GIT_NAMESPACE",
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
+    "GIT_ATTR_SOURCE",
 }
 
 
@@ -70,12 +71,24 @@ def _git(
     return result.stdout if raw else result.stdout.strip()
 
 
-def _check_checkout_hook(repository: Path, commit: str) -> None:
+def _check_checkout_hook(
+    repository: Path, commit: str, resolve_committed: Callable[[Path], Path]
+) -> None:
     hook_path = Path(_git(repository, "rev-parse", "--git-path", "hooks/post-checkout"))
-    if not hook_path.is_absolute():
-        committed_hook = _git(repository, "ls-tree", commit, "--", hook_path.as_posix())
+    relative = (
+        hook_path.relative_to(repository)
+        if hook_path.is_absolute() and hook_path.is_relative_to(repository)
+        else hook_path
+        if not hook_path.is_absolute()
+        else None
+    )
+    if relative is not None:
+        committed_hook = _git(
+            repository, "ls-tree", commit, "--", resolve_committed(relative).as_posix()
+        )
         if committed_hook.startswith(("100755 ", "120000 ")):
             raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
+    if not hook_path.is_absolute():
         hook_path = repository / hook_path
     if hook_path.is_file() and os.access(hook_path, os.X_OK):
         raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
@@ -140,6 +153,7 @@ class WorktreeRequest:
     scene_relative: Path
     skills_relative: Path | None
     bundles: dict[str, dict[Path, tuple[bytes, int]]]
+    resolve_committed: Callable[[Path], Path]
     canonical_skills_relative: Path | None = None
     checkout_paths: tuple[str, ...] = ()
 
@@ -150,7 +164,6 @@ class WorktreeRequest:
         repository = Path(_git(cwd, "rev-parse", "--show-toplevel")).resolve()
         common = Path(_git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         commit = _git(cwd, "rev-parse", "--verify", "HEAD^{commit}")
-        _check_checkout_hook(repository, commit)
         try:
             cwd_relative = cwd.resolve().relative_to(repository)
             scene_relative = scene_root.resolve().relative_to(repository)
@@ -203,6 +216,7 @@ class WorktreeRequest:
 
         for link_name in links:
             resolve_committed(Path(*link_name))
+        _check_checkout_hook(repository, commit, resolve_committed)
         _check_checkout_filters(repository, commit, checkout_paths)
         sources = scene.inject.skills if scene.inject is not None else {}
         target = SKILLS_DIR.get(tool)
@@ -281,6 +295,7 @@ class WorktreeRequest:
             scene_relative,
             skills_relative,
             bundles,
+            resolve_committed,
             canonical,
             tuple(checkout_paths),
         )
@@ -337,10 +352,17 @@ class WorktreeRequest:
             # Conditional includes (gitdir/onbranch) can differ in this worktree.
             # Bind ownership and validate its actual configuration before Git
             # populates files or can execute a checkout filter/hook.
-            _check_checkout_hook(workspace, self.commit)
+            _check_checkout_hook(workspace, self.commit, self.resolve_committed)
             _check_checkout_filters(workspace, self.commit, self.checkout_paths)
             _git(
-                workspace, "checkout", "--force", "--detach", self.commit, timeout=_GIT_BULK_TIMEOUT
+                workspace,
+                "-c",
+                f"attr.tree={self.commit}",
+                "checkout",
+                "--force",
+                "--detach",
+                self.commit,
+                timeout=_GIT_BULK_TIMEOUT,
             )
             directories = list(
                 dict.fromkeys((self.canonical_skills_relative, self.skills_relative))

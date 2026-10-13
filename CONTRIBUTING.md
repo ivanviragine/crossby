@@ -149,8 +149,13 @@ info/global attributes, preserve the original index, and allow unused or locally
 disabled drivers. Allocate with `worktree add --no-checkout`, establish ownership,
 then recheck effective filters and hooks in that worktree before populating it.
 Conditional includes can change configuration by Git directory or branch; the
-original checkout alone cannot authorize population. Bulk Git operations have a
-finite 600-second deadline; metadata queries retain 30 seconds. Normalize reciprocal Gitlinks relative to their
+original checkout alone cannot authorize population. Strip `GIT_ATTR_SOURCE`
+from Git subprocesses and pin `attr.tree` during population to keep validation
+and checkout on the same frozen tree, including conditional configuration.
+Resolve hook paths through committed symlink components before checking their
+mode in the unpopulated target; a filesystem existence check cannot do this.
+Bulk Git operations have a finite 600-second deadline; metadata queries retain
+30 seconds. Normalize reciprocal Gitlinks relative to their
 containing directories, including after native relative-path repair.
 Frozen explicit payloads include executable file modes. Ownership
 lives outside the checkout in a private temporary

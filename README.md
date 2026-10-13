@@ -321,7 +321,11 @@ newer (`git check-attr --source`); older Git refuses that preflight. These check
 avoid running checkout setup commands before ownership is established. Crossby
 first registers an unpopulated worktree, records ownership, then rechecks its
 effective configuration before checkout, including conditional Git includes.
-A refused retained worktree may therefore contain only its Git binding.
+Hook paths are checked through committed symlink chains; relative hook paths
+resolving outside the checkout are refused. Git attribute-source environment
+and `attr.tree` configuration overrides cannot change the validated tree used
+for materialization. A refused retained worktree may therefore contain only its
+Git binding.
 `crossby scene use` retains its existing persistent semantics and does not
 allocate a worktree or inject bundles.
 

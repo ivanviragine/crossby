@@ -1227,3 +1227,71 @@ def test_new_worktree_conditional_post_checkout_hook_is_refused(
         pytest.fail("Conditional hook must not run")
     assert not sentinel.exists()
     assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize("override", ["environment", "config", "conditional-config"])
+def test_git_attr_source_cannot_change_materialized_head(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    import shlex
+
+    repo = project["repo"]
+    original_head = git(repo, "rev-parse", "HEAD")
+    (repo / ".gitattributes").write_text("* filter=poison\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "alternative attribute source fixture")
+    alternate_source = git(repo, "rev-parse", "HEAD")
+    git(repo, "reset", "--hard", original_head)
+    sentinel = project["tmp"] / "attribute-source-outside-write"
+    git(repo, "config", "filter.poison.smudge", "touch " + shlex.quote(str(sentinel)) + "; cat")
+    if override == "environment":
+        monkeypatch.setenv("GIT_ATTR_SOURCE", alternate_source)
+    elif override == "config":
+        git(repo, "config", "attr.tree", alternate_source)
+    else:
+        config = project["tmp"] / "conditional-attribute-config"
+        git(repo, "config", "--file", str(config), "attr.tree", alternate_source)
+        git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    original_index = (repo / ".git/index").read_bytes()
+    with request(project).create() as owned:
+        assert (owned.path / "package/app.py").read_text() == "committed\n"
+        assert not (owned.path / ".gitattributes").exists()
+        assert git(owned.path, "rev-parse", "HEAD") == original_head
+    assert not sentinel.exists()
+    assert (repo / ".git/index").read_bytes() == original_index
+    assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "chain"])
+def test_conditional_hook_symlinks_refused_before_population(
+    project: dict[str, Path], kind: str
+) -> None:
+    import shlex
+
+    repo = project["repo"]
+    sentinel = project["tmp"] / "symlink-hook-outside-write"
+    storage = repo / "hook-storage"
+    storage.mkdir()
+    executable = storage / "post-checkout"
+    executable.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
+    executable.chmod(0o755)
+    if kind == "directory":
+        (repo / ".hooks").symlink_to("hook-storage", target_is_directory=True)
+    elif kind == "file":
+        (repo / ".hooks").mkdir()
+        (repo / ".hooks/post-checkout").symlink_to("../hook-storage/post-checkout")
+    else:
+        (repo / "hook-alias").symlink_to("hook-storage", target_is_directory=True)
+        (repo / ".hooks").symlink_to("hook-alias/../hook-storage", target_is_directory=True)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "conditional symlink hook fixture")
+    config = project["tmp"] / "conditional-symlink-hook-config"
+    git(repo, "config", "--file", str(config), "core.hooksPath", ".hooks")
+    git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    initial_index = (repo / ".git/index").read_bytes()
+    prepared = request(project)
+    with pytest.raises(WorktreeError, match="post-checkout"), prepared.create():
+        pytest.fail("Committed hook symlinks must not evade target preflight")
+    assert not sentinel.exists()
+    assert (repo / ".git/index").read_bytes() == initial_index
+    assert not list(project["owners"].iterdir())
