@@ -37,6 +37,23 @@ Run `./scripts/check-all.sh` before opening a PR.
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
+## Wade execution defaults
+
+The repository's `.wade.yml` selects Codex with `gpt-6.1-sol` and `high`
+reasoning for every Wade AI phase and complexity tier. Explicit session flags
+can override these defaults; external GitHub review services keep their own
+model settings.
+
+For autonomous backlog work, stop review/fix cycles when reviewers find no
+impactful issues or only cosmetic nits. Allow up to 10 cycles across planning,
+implementation, and PR feedback; if impactful findings remain at cycle 10,
+allow at most 5 more, then report the remaining blockers. The configured
+`done.max_review_passes: 10` is Wade's local implementation-review ceiling,
+not an enforcement mechanism for the whole cross-phase budget. The session
+owner tracks the total and may raise that local ceiling to 15 only for the
+conditional extension. A timeout, missing review, or exhausted budget is not
+a clean result and must not authorize merging unresolved impactful findings.
+
 ## Architecture
 
 ### Directory Layout
