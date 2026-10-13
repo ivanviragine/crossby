@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from crossby.ai_tools.base import AbstractAITool
@@ -160,6 +161,67 @@ def test_handoff_no_launch_skips_target(fixtures_dir: Path, tmp_path: Path, monk
     assert "cmd" not in launched
     handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
     assert len(handoffs) == 1
+
+
+@pytest.mark.parametrize("output_kind", ["relative", "absolute", "default"])
+@pytest.mark.parametrize("no_launch", [False, True], ids=["launch", "no-launch"])
+def test_handoff_output_from_different_cwd(
+    fixtures_dir: Path, tmp_path: Path, monkeypatch, output_kind: str, no_launch: bool
+) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.chdir(caller)
+    _stage_claude_session(fixtures_dir, fake_home, project_root.resolve())
+
+    # A same-name project file must never replace the caller's new handoff.
+    stale_path = project_root / "handoff.md"
+    stale_path.write_text("stale context", encoding="utf-8")
+    args = ["handoff", "--from", "claude", "--to", "codex", "--path", "../proj"]
+    if output_kind == "relative":
+        args.extend(["--output", "handoff.md"])
+        expected_path = caller / "handoff.md"
+    elif output_kind == "absolute":
+        expected_path = tmp_path / "custom output" / "handoff.md"
+        args.extend(["--output", str(expected_path)])
+    if no_launch:
+        args.append("--no-launch")
+
+    launched: dict[str, object] = {}
+    with (
+        patch.object(
+            AbstractAITool,
+            "detect_installed",
+            return_value=[AIToolID.CLAUDE, AIToolID.CODEX],
+        ),
+        patch("subprocess.run", side_effect=_make_unified_subprocess_run(launched)),
+    ):
+        result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    if output_kind == "default":
+        handoffs = list((project_root / ".crossby" / "handoffs").glob("HANDOFF-*.md"))
+        assert len(handoffs) == 1
+        expected_path = handoffs[0]
+    assert "Refactor auth module" in expected_path.read_text(encoding="utf-8")
+    assert stale_path.read_text(encoding="utf-8") == "stale context"
+    if output_kind != "relative":
+        assert not (caller / "handoff.md").exists()
+
+    if no_launch:
+        assert "cmd" not in launched
+    else:
+        cmd = launched["cmd"]
+        assert isinstance(cmd, list)
+        assert cmd[0] == "codex"
+        assert cmd[1] == (
+            f"Read the handoff context at {expected_path.resolve()} "
+            "and continue the work described there."
+        )
+        assert launched["cwd"] == project_root.resolve()
 
 
 def test_handoff_rejects_unsupported_source() -> None:
