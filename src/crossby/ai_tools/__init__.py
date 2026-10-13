@@ -111,6 +111,11 @@ from crossby.models.ai import (
     SessionPermissionTargetKind,
     SessionQuestionOption,
     SessionTarget,
+    SubagentSpawnEvidence,
+    SubagentSpawnReason,
+    SubagentSpawnState,
+    SubagentSpawnStatus,
+    SubagentSpawnSupport,
 )
 
 
@@ -236,6 +241,11 @@ __all__ = [
     "SessionPermissionTargetKind",
     "SessionQuestionOption",
     "SessionTarget",
+    "SubagentSpawnEvidence",
+    "SubagentSpawnReason",
+    "SubagentSpawnState",
+    "SubagentSpawnStatus",
+    "SubagentSpawnSupport",
     "pick_best_model",
     "preflight_headless_session",
     "preflight_plan_session",
