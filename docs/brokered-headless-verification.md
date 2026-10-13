@@ -47,9 +47,11 @@ and a `session/prompt` stop reason. The ordinary driver requires `end_turn`
 and a clean process exit. It populates executable operation fields only from
 `rawInput`; a tool's display title cannot authorize a command. At most 512
 message chunk, usage, and fallback progress updates produce visible events;
-tool updates have a separate 512-event cap. Later updates still refresh the
-idle deadline, and assistant messages assemble in native order under an 8 MiB
-aggregate UTF-8 limit. An `end_turn` without non-blank assistant text yields
+tool updates have a separate 512-event cap. ACP `usage_update.used` describes
+current context occupancy, so the brokered Cursor result leaves turn token
+usage unset. Later updates still refresh the idle deadline, and assistant
+messages assemble in native order under an 8 MiB aggregate UTF-8 limit. An
+`end_turn` without non-blank assistant text yields
 `INVALID_OUTPUT`. A denied permission response cannot forward a selected
 native option, even if the handler supplies one. Cursor's brokered profile
 does not offer command policy or response schemas. It applies

@@ -643,6 +643,44 @@ def test_cursor_brokered_preserves_all_assistant_messages(
     assert result.final_text == "Before tool.\nAfter tool."
 
 
+def test_cursor_context_usage_does_not_become_turn_token_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {"sessionUpdate": "usage_update", "used": 53000, "size": 200000},
+                },
+            },
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": "Completed."},
+                    },
+                },
+            },
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.usage is None
+    assert any(event.kind is HeadlessEventKind.USAGE for event in result.events)
+
+
 def test_cursor_brokered_bounds_message_bytes_before_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

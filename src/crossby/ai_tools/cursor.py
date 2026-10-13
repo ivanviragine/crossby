@@ -58,7 +58,6 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
-    TokenUsage,
 )
 
 if TYPE_CHECKING:
@@ -893,7 +892,6 @@ class CursorAdapter(AbstractAITool):
         tool_events = 0
         messages: dict[str, list[str]] = {}
         message_bytes = 0
-        usage_tokens: int | None = None
         while True:
             message = rpc.read()
             if message.get("id") == prompt_id and "method" not in message:
@@ -956,9 +954,6 @@ class CursorAdapter(AbstractAITool):
                     else:
                         context.mark_progress()
                 elif kind == "usage_update":
-                    used = update.get("used")
-                    if isinstance(used, int) and used >= 0:
-                        usage_tokens = used
                     chunk_progress.note(HeadlessEventKind.USAGE, message="usage updated")
                 else:
                     chunk_progress.note(HeadlessEventKind.PROGRESS, message="session updated")
@@ -1007,11 +1002,6 @@ class CursorAdapter(AbstractAITool):
             native_status="end_turn",
             exit_code=exit_code,
             session_id=session_id,
-            usage=(
-                TokenUsage(total_tokens=usage_tokens, session_id=session_id)
-                if usage_tokens is not None
-                else None
-            ),
         )
 
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
