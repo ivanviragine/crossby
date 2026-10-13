@@ -303,7 +303,8 @@ secrets automatically. The current launch configuration selects the request;
 project inventory and scene artifacts are then compiled inside the isolated
 checkout. The launch's relative subdirectory must exist in HEAD. Injection goes
 to the selected tool's native skills directory and, when needed for existing
-scene projections, the checkout's canonical skills source. Original files,
+scene projections, the checkout's canonical skills source, resolving safe
+committed source symlinks. Original files,
 skills, scene state, and ordinary launches remain unchanged. Persistent-only
 scene mechanisms may write files inside the temporary checkout. Codex uses
 native per-launch MCP overrides instead of a global scene profile.

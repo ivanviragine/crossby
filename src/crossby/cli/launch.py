@@ -396,6 +396,11 @@ def launch(
         try:
             if caps.tool_type == AIToolType.GUI:
                 raise WorktreeError("Worktree isolation requires a foreground CLI tool.")
+            if transcript is not None:
+                import os
+
+                if os.name != "posix":
+                    raise WorktreeError("Isolated transcript capture currently requires POSIX.")
             assert scene_cfg is not None and scene is not None
             validate_scene_name(scene)
             request = WorktreeRequest.prepare(
@@ -423,7 +428,14 @@ def launch(
                 from crossby.scenes.worktree import cancellation_cleanup
 
                 lifecycle.enter_context(cancellation_cleanup())
-                owned = lifecycle.enter_context(request.create(keep=keep_worktree))
+
+                def remember_retained(path: Path) -> None:
+                    nonlocal retained
+                    retained = path
+
+                owned = lifecycle.enter_context(
+                    request.create(keep=keep_worktree, on_retained=remember_retained)
+                )
                 retained = owned.path
                 original_dir = work_dir
                 work_dir = owned.path / request.cwd_relative

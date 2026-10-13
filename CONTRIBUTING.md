@@ -150,7 +150,9 @@ This shares Git metadata and is not a security sandbox. Do not copy dirty or
 untracked project state, run setup hooks, commit, or push automatically.
 
 `cli/launch.py` maps the cwd and scene root into the checkout, injects explicit
-bundles, then reuses scene resolution and per-tool compilation. An isolated
+bundles into the same effective source used by projection (including safe
+committed source symlinks), then reuses scene resolution and per-tool compilation.
+Report recovered retained paths even when allocation never yields. An isolated
 `SceneLaunchContext` skips shared `info/exclude` writes and global pruning;
 Codex renders native `-c` overrides instead of a global profile. Concern-scoped
 persistent fallback is allowed only inside the owned checkout, and partial

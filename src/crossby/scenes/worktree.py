@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,8 +131,9 @@ class WorktreeRequest:
                 links[tuple(name.split("/"))] = _git(
                     repository, "show", f"{commit}:{name}", raw=True
                 )
-        for link_name in links:
-            pending = list(link_name)
+
+        def resolve_committed(path: Path) -> Path:
+            pending = list(path.parts)
             resolved: list[str] = []
             followed = 0
             while pending:
@@ -141,20 +142,20 @@ class WorktreeRequest:
                     continue
                 if component == "..":
                     if not resolved:
-                        raise WorktreeError(
-                            f"Committed symlink escapes checkout: {'/'.join(link_name)}"
-                        )
+                        raise WorktreeError(f"Committed symlink escapes checkout: {path}")
                     resolved.pop()
                     continue
                 resolved.append(component)
                 if (target_link := links.get(tuple(resolved))) is not None:
                     followed += 1
                     if not target_link or Path(target_link).is_absolute() or followed > 40:
-                        raise WorktreeError(
-                            f"Unsafe committed symlink chain: {'/'.join(link_name)}"
-                        )
+                        raise WorktreeError(f"Unsafe committed symlink chain: {path}")
                     resolved.pop()
                     pending = target_link.split("/") + pending
+            return Path(*resolved)
+
+        for link_name in links:
+            resolve_committed(Path(*link_name))
         sources = scene.inject.skills if scene.inject is not None else {}
         target = SKILLS_DIR.get(tool)
         if sources and target is None:
@@ -199,11 +200,11 @@ class WorktreeRequest:
             if Path("SKILL.md") not in payload:
                 raise WorktreeError(f"Skill source has no regular SKILL.md: {source!r}")
             bundles[name] = payload
-        skills_relative = scene_relative / target if target is not None else None
+        skills_relative = resolve_committed(scene_relative / target) if target is not None else None
         canonical = None
         if bundles:
             for skill_directory in dict.fromkeys(SKILLS_DIR[tool] for tool in _SCAN_ORDER):
-                candidate = scene_relative / skill_directory
+                candidate = resolve_committed(scene_relative / skill_directory)
                 found = _git(repository, "ls-tree", commit, "--", candidate.as_posix())
                 if found.startswith("040000 "):
                     canonical = candidate
@@ -236,7 +237,9 @@ class WorktreeRequest:
         )
 
     @contextmanager
-    def create(self, *, keep: bool = False) -> Iterator[OwnedWorktree]:
+    def create(
+        self, *, keep: bool = False, on_retained: Callable[[Path], None] | None = None
+    ) -> Iterator[OwnedWorktree]:
         token = uuid.uuid4().hex
         container = Path(tempfile.mkdtemp(prefix=f"crossby-scene-{token}-")).resolve()
         workspace = container / "checkout"
@@ -334,6 +337,8 @@ class WorktreeRequest:
                         f"Incomplete worktree retained for inspection: {workspace}: {exc}"
                     ) from exc
             if owned is not None:
+                if keep and on_retained is not None:
+                    on_retained(workspace)
                 if not keep:
                     owned.cleanup(discard_changes=True)
             else:
@@ -374,7 +379,7 @@ class OwnedWorktree:
                 or workspace.name != "checkout"
                 or record["container"] != str(container)
                 or record["workspace"] != str(workspace)
-                or container.stat().st_mode & 0o077
+                or (os.name == "posix" and container.stat().st_mode & 0o077)
                 or (hasattr(os, "getuid") and container.stat().st_uid != os.getuid())
             ):
                 raise ValueError("ownership identity mismatch")
@@ -384,7 +389,8 @@ class OwnedWorktree:
                 raise ValueError("private Git directory mismatch")
             if json.loads((gitdir / _MARKER).read_text()) != record:
                 raise ValueError("reciprocal ownership mismatch")
-            if (workspace / ".git").read_text().strip() != f"gitdir: {gitdir}":
+            gitlink = (workspace / ".git").read_text().strip()
+            if not gitlink.startswith("gitdir: ") or Path(gitlink[8:]).resolve() != gitdir:
                 raise ValueError("checkout Git binding mismatch")
             if Path((gitdir / "gitdir").read_text().strip()) != workspace / ".git":
                 raise ValueError("reciprocal Git binding mismatch")

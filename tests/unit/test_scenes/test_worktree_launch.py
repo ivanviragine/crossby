@@ -696,3 +696,70 @@ def test_committed_relative_hook_refused_even_when_locally_deleted(
     with pytest.raises(WorktreeError, match="post-checkout"):
         request(project)
     assert not list(project["owners"].iterdir())
+
+
+def test_injection_uses_symlinked_canonical_source_for_codex(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = project["repo"]
+    (repo / ".claude/skills").rename(repo / "custom-skills")
+    (repo / ".claude/skills").symlink_to("../custom-skills", target_is_directory=True)
+    (repo / ".agents/skills/other").mkdir(parents=True)
+    (repo / ".agents/skills/other/SKILL.md").write_text("other\n")
+    config = yaml.safe_load((repo / ".crossby.yml").read_text())
+    config["scenes"]["review"]["skills"] = {"include": ["review"]}
+    (repo / ".crossby.yml").write_text(yaml.safe_dump(config))
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "symlinked canonical source fixture")
+    codex = project["stub"].with_name("codex")
+    codex.write_text(
+        project["stub"]
+        .read_text()
+        .replace(".claude/skills/review/SKILL.md", ".agents/skills/review/SKILL.md")
+    )
+    codex.chmod(0o755)
+    home = project["tmp"] / "symlink-codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    result = runner.invoke(
+        app, ["launch", str(repo), "--scene", "review", "--tool", "codex", "--keep-worktree"]
+    )
+    assert result.exit_code == 0, result.output
+    workspace = Path(json.loads(project["evidence"].read_text())["root"])
+    assert (workspace / ".agents/skills/review/SKILL.md").is_file()
+    assert (workspace / "custom-skills/review/SKILL.md").is_file()
+    assert not (repo / "custom-skills/review").exists()
+    OwnedWorktree(workspace).cleanup(discard_changes=True)
+
+
+def test_interrupted_add_keep_reports_recovered_path(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import crossby.scenes.worktree as module
+
+    real_git = module._git
+
+    def interrupted(root: Path, *args: str) -> str:
+        result = real_git(root, *args)
+        if args[:2] == ("worktree", "add"):
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(module, "_git", interrupted)
+    result = invoke(project, "--keep-worktree")
+    assert result.exit_code == 130, result.output
+    workspace = next(project["owners"].iterdir()) / "checkout"
+    assert workspace.exists()
+    assert "Retained worktree" in result.output
+    assert "checkout" in result.output
+    OwnedWorktree(workspace).cleanup(discard_changes=True)
+
+
+def test_cleanup_matches_git_directory_identity(project: dict[str, Path]) -> None:
+    with request(project).create(keep=True) as owned:
+        record = json.loads((owned.path.parent / "crossby-scene-owner.json").read_text())
+        gitdir = Path(record["gitdir"])
+        (owned.path / ".git").write_text(f"gitdir: {gitdir.parent}/./{gitdir.name}\n")
+    assert Path(git(owned.path, "rev-parse", "--absolute-git-dir")).resolve() == gitdir
+    owned.cleanup(discard_changes=True)
+    assert not owned.path.exists()
