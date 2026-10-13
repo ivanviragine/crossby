@@ -413,6 +413,8 @@ class HandoffSummarizer:
 def render_turn(turn: ConversationTurn) -> str:
     """Render a transcript turn for inclusion in the summarizer prompt."""
     header = f"[{turn.role}]"
+    if turn.tool_call_id is not None:
+        header += f" call_id={turn.tool_call_id}"
     if turn.timestamp is not None:
         header += f" {turn.timestamp.isoformat()}"
     body = turn.content or ""
@@ -420,7 +422,8 @@ def render_turn(turn: ConversationTurn) -> str:
     if turn.tool_calls:
         call_lines = []
         for call in turn.tool_calls:
-            call_lines.append(f"  - tool_call: {call.name}({_short_args(call.arguments)})")
+            call_id = f" call_id={call.call_id}" if call.call_id is not None else ""
+            call_lines.append(f"  - tool_call: {call.name}({_short_args(call.arguments)}){call_id}")
         tool_calls = "\n" + "\n".join(call_lines)
     file_refs = ""
     if turn.file_refs:
@@ -539,7 +542,7 @@ def estimate_prompt_tokens(transcript: ConversationTranscript) -> int:
     """Rough token cost the truncation budget measures for ``transcript``.
 
     Sums :func:`turn_tokens` per turn — content **plus** tool-call names and
-    argument strings — so the estimate matches exactly what
+    argument strings and call IDs — so the estimate matches exactly what
     ``truncate_transcript`` counts when deciding whether to drop turns. This is
     deliberately *not* the assembled prompt's byte size: the prompt template,
     per-turn ``[role]`` headers, ISO timestamps, ``files:`` lines, and the
