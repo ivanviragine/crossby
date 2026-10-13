@@ -336,40 +336,56 @@ def run_sync(
                 if data.mcp_sources.get(name) != str(writer.tool_id)
             }
             writer_data = replace(data, mcp_remove=frozenset(mcp_revoke))
-            # Newly restored Codex refs use Claude syntax. The other current
-            # writers copy those strings verbatim: Cursor/VS Code need
-            # ${env:NAME}, and Antigravity does not document interpolation.
-            # Preserve winning-source provenance and skip only affected
-            # Codex entries; never guess, resolve secrets, or overwrite auth
-            # with a syntactically plausible but nonworking approximation.
-            if writer.tool_id not in {AIToolID.CLAUDE, AIToolID.CODEX}:
-                refused = {
-                    name
-                    for name, server in data.mcp_servers.items()
-                    if data.mcp_sources.get(name) == "codex"
-                    and server.enabled
-                    and any("${" in v for v in (*server.env.values(), *server.headers.values()))
-                }
-                for name in sorted(refused):
+            from crossby.sync.mcp_cursor import (
+                cursor_codex_unsupported,
+                cursor_target_unsupported,
+            )
+
+            refused: dict[str, tuple[str, ...]] = {}
+            for name, server in data.mcp_servers.items():
+                if not server.enabled:
+                    continue
+                source = data.mcp_sources.get(name)
+                fields: tuple[str, ...] = ()
+                if writer.tool_id == AIToolID.CURSOR:
+                    fields = cursor_target_unsupported(server)
+                    # Only audited source dialects may supply references.
+                    if source in {"copilot", "antigravity-cli"}:
+                        fields = tuple(
+                            key for key, value in server.model_dump().items() if "${" in str(value)
+                        )
+                elif source == "cursor" and writer.tool_id == AIToolID.CODEX:
+                    fields = cursor_codex_unsupported(server)
+                elif source in {"codex", "cursor"} and writer.tool_id not in {
+                    AIToolID.CLAUDE,
+                    AIToolID.CODEX,
+                }:
+                    # Keep unaudited target dialects conservative.
+                    fields = tuple(
+                        key for key, value in server.model_dump().items() if "${" in str(value)
+                    )
+                if fields:
+                    refused[name] = fields
                     results.append(
                         SyncResult(
                             tool_id=writer.tool_id,
                             concern=SyncConcern.MCP,
                             action="skipped",
                             message=(
-                                f"MCP server `{name}` (from codex) has environment references "
-                                f"the {writer.tool_id} MCP writer cannot faithfully render. "
+                                f"MCP server `{name}` (from {source or 'canonical config'}) "
+                                f"has interpolation in {', '.join(fields)} the "
+                                f"{writer.tool_id} MCP writer cannot faithfully render. "
                                 "The server was not synced; existing target entries are "
                                 "preserved. This is a manual-fix — configure environment "
                                 "references directly in the target's native config."
                             ),
                         )
                     )
-                if refused:
-                    writer_data = replace(
-                        writer_data,
-                        mcp_servers={k: v for k, v in data.mcp_servers.items() if k not in refused},
-                    )
+            if refused:
+                writer_data = replace(
+                    writer_data,
+                    mcp_servers={k: v for k, v in data.mcp_servers.items() if k not in refused},
+                )
 
         try:
             result = writer.safe_sync(writer_data, project_root, dry_run=dry_run, force=force)

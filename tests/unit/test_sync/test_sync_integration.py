@@ -133,7 +133,8 @@ class TestFullSyncMCP:
             (tmp_path / ".vscode" / "mcp.json", "servers", "github"),
         ]:
             data = json.loads(path.read_text())
-            assert data[key][entry_key]["env"]["TOKEN"] == "${GITHUB_TOKEN}", f"Failed for {path}"
+            expected = "${env:GITHUB_TOKEN}" if path.parent.name == ".cursor" else "${GITHUB_TOKEN}"
+            assert data[key][entry_key]["env"]["TOKEN"] == expected, f"Failed for {path}"
 
         toml_data = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
         assert toml_data["mcp_servers"]["github"]["env"]["TOKEN"] == "${GITHUB_TOKEN}"
