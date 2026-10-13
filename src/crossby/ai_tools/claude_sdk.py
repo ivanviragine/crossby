@@ -422,7 +422,8 @@ class SDKTransport:
             human = origin is None or origin.get("kind") == "human"
             if self.terminal is None and human:
                 self.terminal = frame
-            elif self.terminal is not None and origin is not None and human:
+                self._record_prompt_accounting(frame)
+            elif self.terminal is not None and human:
                 raise ValueError("Claude SDK returned a second submitted-prompt result")
             self.turn_in_progress = False
             self.context.mark_progress()
@@ -475,6 +476,31 @@ class SDKTransport:
             self.context.mark_progress()
         elif kind == "system":
             self.context.emit(HeadlessEventKind.PROGRESS)
+
+    def _record_prompt_accounting(self, frame: dict[str, Any]) -> None:
+        """Publish observed prompt accounting before background waits/cleanup."""
+        usage = usage_from(
+            frame.get("usage"),
+            input_tokens="input_tokens",
+            output_tokens="output_tokens",
+            cached="cache_read_input_tokens",
+            session_id=self.session_id,
+        )
+        self.context.set_provenance(usage=usage)
+        cost = frame.get("total_cost_usd")
+        payload = (
+            {"cost_usd": cost}
+            if isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and self.context.request.prompt not in "cost_usd"
+            else None
+        )
+        if usage is not None or payload is not None:
+            self.context.emit(HeadlessEventKind.USAGE, payload=payload)
+        denials = frame.get("permission_denials")
+        if isinstance(denials, list) and denials:
+            self.context.add_denial("Claude reported native permission denials")
 
     async def write(self, data: str) -> None:
         assert self.controller is not None
@@ -886,20 +912,8 @@ def run_sdk_session(
         cached="cache_read_input_tokens",
         session_id=transport.session_id,
     )
-    cost = frame.get("total_cost_usd")
-    payload = (
-        {"cost_usd": cost}
-        if isinstance(cost, (int, float))
-        and not isinstance(cost, bool)
-        and math.isfinite(cost)
-        and request.prompt not in "cost_usd"
-        else None
-    )
-    if usage is not None or payload is not None:
-        context.emit(HeadlessEventKind.USAGE, payload=payload)
-    denials = frame.get("permission_denials")
-    if isinstance(denials, list) and denials:
-        context.add_denial("Claude reported native permission denials")
+    if transport.terminal is None:
+        transport._record_prompt_accounting(frame)
     context.emit(HeadlessEventKind.TERMINAL, terminal_status=status)
     return complete_session(
         context,

@@ -83,9 +83,12 @@ through EOF, checking process exit; active state at EOF cannot become success.
 
 Observed native failure/abort uses bounded interrupt and cleanup rather than
 waiting for idle, preserving terminal status, actual exit code and prompt usage.
-A background failure fails the run without replacing the submitted prompt's
-output/schema. A reader-first startup stop completes the bounded SDK interruption
-attempt before SDK auto-disconnect can close its control channel; concurrent
+Prompt usage/cost is recorded immediately when its result arrives, so later
+background timeout/cancellation retains observed accounting. An absent result
+origin means human; a second such result is rejected rather than attributed to
+a background task. A background failure fails the run without replacing the
+submitted prompt's output/schema (failed results suppress output as usual).
+A reader-first startup stop completes the bounded SDK interruption attempt before SDK auto-disconnect can close its control channel; concurrent
 cleanup callers share that single attempt. Native-supplied AskUserQuestion
 `response` is removed before sending validated handler answers because Claude
 otherwise gives that field precedence over the answer map.

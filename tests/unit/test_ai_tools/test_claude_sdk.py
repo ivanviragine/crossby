@@ -67,7 +67,8 @@ def result():
                       'sdk_host_only':True, 'state':'running', 'session_id':session})
         else:
             frame.update(config.get('background_result', {}))
-            frame.update({'origin':{'kind':'task-notification'}, 'result':'Background answer',
+            frame.update({'origin':config.get('background_origin', {'kind':'task-notification'}),
+                          'result':'Background answer',
                           'usage':{'input_tokens':100, 'output_tokens':200}})
     if mode in {'lifecycle_running', 'lifecycle_running_exit',
                 'native_failure_wait', 'native_failure_stubborn'}:
@@ -76,6 +77,8 @@ def result():
     if mode == 'background' and background_stage and config.get('idle_before_result'):
         emit({'type':'system', 'subtype':'session_state_changed', 'sdk_host_only':True,
               'state':'idle', 'session_id':session})
+    if frame.get('origin') is None:
+        frame.pop('origin', None)
     emit(frame)
     if mode == 'background':
         if background_stage == 0:
@@ -1013,3 +1016,49 @@ def test_native_failure_ignoring_interrupt_and_eof_is_bounded(sdk_child: Any) ->
     assert result.usage.input_tokens == 5
     assert result.session_id == "session-exact"
     assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))
+
+
+@pytest.mark.parametrize("origin", [None, {"kind": "human"}])
+def test_second_human_result_is_rejected_even_without_origin(sdk_child: Any, origin: Any) -> None:
+    run, _ = sdk_child
+    with pytest.raises(HeadlessTransportError):
+        run(
+            {"mode": "background", "background_origin": origin},
+            lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+        )
+
+
+def test_prompt_accounting_survives_background_timeout(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {"mode": "lifecycle_running", "state": "running"},
+        request_values={"idle_timeout_seconds": 0.15},
+    )
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert result.usage.input_tokens == 5
+    assert result.usage.output_tokens == 7
+    assert result.session_id == "session-exact"
+    usage_events = [event for event in result.events if event.kind is HeadlessEventKind.USAGE]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload == {"cost_usd": 0.25}
+
+
+def test_prompt_accounting_survives_background_cancellation(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    cancelled = threading.Event()
+
+    def observe(event: Any) -> None:
+        if event.kind is HeadlessEventKind.USAGE:
+            cancelled.set()
+
+    result = run(
+        {"mode": "lifecycle_running", "state": "running"},
+        cancel_event=cancelled,
+        event_handler=observe,
+    )
+    assert result.status is HeadlessTerminalStatus.CANCELLED
+    assert result.usage.input_tokens == 5
+    assert result.session_id == "session-exact"
+    assert next(
+        event.payload for event in result.events if event.kind is HeadlessEventKind.USAGE
+    ) == {"cost_usd": 0.25}
