@@ -244,9 +244,9 @@ class OpenCodeServer:
                 if message_id is None:
                     continue
                 self._bound_message_ids.add(message_id)
-                progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
+                progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 if isinstance(info.get("tokens"), dict):
-                    progress.note(HeadlessEventKind.USAGE, message="usage updated")
+                    progress.note(HeadlessEventKind.USAGE)
             elif kind == "message.part.updated":
                 part = properties.get("part")
                 if not isinstance(part, dict):
@@ -564,7 +564,7 @@ def run_native_session(
     if hasattr(server, "open_events"):
         server.open_events()
     server.request("POST", session_path + "/prompt_async", prompt)
-    context.emit(HeadlessEventKind.STARTED, message="OpenCode session started")
+    context.emit(HeadlessEventKind.STARTED)
     progress = BoundedProgress(context)
     observed: set[str] = set(existing_ids)
     prompt_seen = False
@@ -620,7 +620,7 @@ def run_native_session(
             if message_id not in observed:
                 observed.add(message_id)
                 if bound_message_id is not None:
-                    progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="message")
+                    progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
         if prompt_seen:
             bound = [
                 message["info"]

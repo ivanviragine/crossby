@@ -885,7 +885,7 @@ class CursorAdapter(AbstractAITool):
             "session/prompt",
             _cursor_acp_prompt_params(session_id, request.prompt),
         )
-        context.emit(HeadlessEventKind.STARTED, message="Cursor ACP prompt started")
+        context.emit(HeadlessEventKind.STARTED)
         from crossby.ai_tools.headless_cli import BoundedProgress
 
         chunk_progress = BoundedProgress(context)
@@ -938,7 +938,7 @@ class CursorAdapter(AbstractAITool):
                         )
                     message_bytes += chunk_bytes
                     messages.setdefault(message_id, []).append(text)
-                    chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="chunk")
+                    chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 elif kind in {"tool_call", "tool_call_update"}:
                     tool_id = update.get("toolCallId")
                     if not isinstance(tool_id, str) or not tool_id.strip():
@@ -954,9 +954,9 @@ class CursorAdapter(AbstractAITool):
                     else:
                         context.mark_progress()
                 elif kind == "usage_update":
-                    chunk_progress.note(HeadlessEventKind.USAGE, message="usage updated")
+                    chunk_progress.note(HeadlessEventKind.USAGE)
                 else:
-                    chunk_progress.note(HeadlessEventKind.PROGRESS, message="session updated")
+                    chunk_progress.note(HeadlessEventKind.PROGRESS)
                 continue
             if method == "cursor/ask_question" and "id" in message:
                 rpc.track_native_request(message)

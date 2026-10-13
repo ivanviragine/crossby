@@ -112,8 +112,9 @@ def _install_rpc(monkeypatch: pytest.MonkeyPatch, frames: list[dict[str, Any]]) 
     monkeypatch.setattr("crossby.ai_tools.session_protocol.JsonRpcProcess", _FakeRpc)
 
 
+@pytest.mark.parametrize("prompt", ["Implement the ordinary task", "a", "Codex", "question"])
 def test_codex_question_uses_exact_thread_turn_request_and_normal_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     _install_rpc(
         monkeypatch,
@@ -161,7 +162,9 @@ def test_codex_question_uses_exact_thread_turn_request_and_normal_mode(
         seen.append(interaction)
         return SessionInteractionResponse(outcome=PlanInteractionOutcome.ANSWERED, option_id="api")
 
-    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(_request(tmp_path), answer)
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path, prompt=prompt), answer
+    )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert (result.thread_id, result.turn_id, result.final_text) == (
         "thr-exact",
@@ -177,8 +180,9 @@ def test_codex_question_uses_exact_thread_turn_request_and_normal_mode(
     assert any(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events)
 
 
+@pytest.mark.parametrize("prompt", ["a", "delta", "completed"])
 def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     _install_rpc(
         monkeypatch,
@@ -215,12 +219,12 @@ def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
         ],
     )
     result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
-        _request(tmp_path),
+        _request(tmp_path, prompt=prompt),
         lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "First.\nSecond."
-    assert sum(event.message == "delta" for event in result.events) == 512
+    assert sum(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events) == 512
 
 
 def test_codex_rejects_aggregate_assistant_text_before_retaining_it(
@@ -253,6 +257,72 @@ def test_codex_rejects_aggregate_assistant_text_before_retaining_it(
                 outcome=PlanInteractionOutcome.CANCELLED
             ),
         )
+
+
+@pytest.mark.parametrize("over_limit", [False, True])
+@pytest.mark.parametrize("method", ["item/agentMessage/delta", "unknown/notification"])
+def test_codex_pending_notifications_share_byte_budget_across_handshake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, over_limit: bool, method: str
+) -> None:
+    notifications = [
+        {
+            "method": method,
+            "params": {"threadId": "thr-exact", "turnId": "turn-exact", "delta": "é" * 100},
+        }
+        for _ in range(3)
+    ]
+    byte_count = sum(
+        len(json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        for frame in notifications
+    )
+    monkeypatch.setattr(
+        "crossby.ai_tools.codex._CODEX_NOTIFICATION_BYTES_LIMIT", byte_count - int(over_limit)
+    )
+    _install_rpc(
+        monkeypatch,
+        [
+            notifications[0],
+            {"id": 1, "result": {}},
+            notifications[1],
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            notifications[2],
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turnId": "turn-exact",
+                    "item": {"type": "agentMessage", "id": "msg-exact", "text": "Done."},
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+
+    def run() -> Any:
+        return AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+            _request(tmp_path),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+
+    if over_limit:
+        with pytest.raises(HeadlessTransportError, match="pending notifications exceeded"):
+            run()
+        # Reject while waiting for turn/start, before reading its response.
+        assert _FakeRpc.instances[0].messages[0]["id"] == 3
+    else:
+        result = run()
+        assert result.status is HeadlessTerminalStatus.SUCCEEDED
+        assert result.final_text == "Done."
 
 
 def test_codex_item_lifecycle_events_are_bounded(
@@ -349,10 +419,7 @@ def test_codex_bound_native_streams_refresh_progress(
         lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
-    assert any(
-        event.kind is HeadlessEventKind.PROGRESS and event.message == "delta"
-        for event in result.events
-    )
+    assert any(event.kind is HeadlessEventKind.PROGRESS for event in result.events)
 
 
 @pytest.mark.parametrize("binding", [{"threadId": "thr-foreign"}, {"turnId": "turn-foreign"}])
@@ -513,8 +580,11 @@ def test_cursor_brokered_rejects_earlier_variant_reset_by_later_variant(
     assert not any(method == "session/prompt" for method, _ in _FakeRpc.instances[0].sent)
 
 
+@pytest.mark.parametrize(
+    "prompt", ["Implement the ordinary task", "a", "Cursor", "chunk", "question"]
+)
 def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     _install_rpc(
         monkeypatch,
@@ -555,7 +625,9 @@ def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
         seen.append(interaction)
         return SessionInteractionResponse(outcome=PlanInteractionOutcome.ANSWERED, option_id="api")
 
-    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(_request(tmp_path), answer)
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path, prompt=prompt), answer
+    )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.session_id == "ses-exact"
     assert result.final_text == "Completed."
@@ -899,8 +971,9 @@ def test_brokered_native_failure_emits_failed_terminal(
     assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
 
 
+@pytest.mark.parametrize("prompt", ["Implement the ordinary task", "a", "OpenCode", "message"])
 def test_opencode_ordinary_session_does_not_select_plan_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     class FakeServer:
         instances: ClassVar[list[FakeServer]] = []
@@ -952,7 +1025,7 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
 
     monkeypatch.setattr("crossby.ai_tools.opencode_server.OpenCodeServer", FakeServer)
     result = AbstractAITool.get(AIToolID.OPENCODE).run_headless_session(
-        _request(tmp_path),
+        _request(tmp_path, prompt=prompt),
         lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
@@ -1724,8 +1797,8 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
     context = FakeContext()
     server.drain_events(context, "ses-exact", "prompt-exact", BoundedProgress(context))
     assert context.events == [
-        (HeadlessEventKind.ASSISTANT_MESSAGE, "message update", None),
-        (HeadlessEventKind.USAGE, "usage updated", None),
+        (HeadlessEventKind.ASSISTANT_MESSAGE, None, None),
+        (HeadlessEventKind.USAGE, None, None),
         (HeadlessEventKind.TOOL_COMPLETED, None, {"tool_call_id": "tool-exact"}),
     ]
     assert context.progress_count == 1

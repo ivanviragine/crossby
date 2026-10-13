@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -93,6 +94,7 @@ _CODEX_BROKERED_PROGRESS_METHODS = frozenset(
     }
 )
 _CODEX_MESSAGE_LIMIT = 8 * 1024 * 1024
+_CODEX_NOTIFICATION_BYTES_LIMIT = 8 * 1024 * 1024
 
 
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
@@ -704,8 +706,10 @@ class CodexAdapter(AbstractAITool):
             headerless=True,
         )
         pending_notifications: deque[dict[str, Any]] = deque()
+        pending_notification_bytes = 0
 
         def response(request_id: int, *, allow_notifications: bool = True) -> dict[str, Any]:
+            nonlocal pending_notification_bytes
             while True:
                 message = rpc.read()
                 if message.get("id") != request_id:
@@ -714,6 +718,21 @@ class CodexAdapter(AbstractAITool):
                     if isinstance(message.get("method"), str):
                         if not allow_notifications or len(pending_notifications) >= 4096:
                             raise ValueError("Codex emitted a late or excessive notification")
+                        # All handshake phases share one budget. Count UTF-8 bytes
+                        # before retaining decoded frames, including unknown methods.
+                        message_bytes = len(
+                            json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode(
+                                "utf-8"
+                            )
+                        )
+                        if (
+                            pending_notification_bytes + message_bytes
+                            > _CODEX_NOTIFICATION_BYTES_LIMIT
+                        ):
+                            raise context.transport_error(
+                                "Codex pending notifications exceeded the aggregate size limit."
+                            )
+                        pending_notification_bytes += message_bytes
                         pending_notifications.append(message)
                     continue
                 result = message.get("result")
@@ -751,7 +770,7 @@ class CodexAdapter(AbstractAITool):
             raise ValueError("Codex turn/start omitted its native turn ID")
         context.set_provenance(turn_id=turn_id)
         rpc.set_abort("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-        context.emit(HeadlessEventKind.STARTED, message="Codex turn started")
+        context.emit(HeadlessEventKind.STARTED)
         from crossby.ai_tools.headless_cli import BoundedProgress
 
         delta_progress = BoundedProgress(context)
@@ -808,16 +827,15 @@ class CodexAdapter(AbstractAITool):
                         )
                     final_bytes += next_bytes
                     final_parts.append(text)
-                    delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="completed")
+                    delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
                     delta_progress.note(
                         HeadlessEventKind.TOOL_COMPLETED
                         if method == "item/completed"
                         else HeadlessEventKind.TOOL_STARTED,
-                        message=str(item_kind),
                     )
                 else:
-                    delta_progress.note(HeadlessEventKind.PROGRESS, message="item updated")
+                    delta_progress.note(HeadlessEventKind.PROGRESS)
                 continue
             if method in _CODEX_BROKERED_PROGRESS_METHODS:
                 if not isinstance(params, dict) or (
@@ -828,7 +846,6 @@ class CodexAdapter(AbstractAITool):
                     HeadlessEventKind.ASSISTANT_MESSAGE
                     if method == "item/agentMessage/delta"
                     else HeadlessEventKind.PROGRESS,
-                    message="delta",
                 )
                 continue
             if method == "item/tool/requestUserInput" and "id" in message:

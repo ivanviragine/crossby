@@ -6,6 +6,11 @@ ordinary session. It requires an interaction handler. The flat
 `brokered` profile describes the alternate transport and controls preflight,
 runtime terminal checks, and cleanup.
 
+Brokered start, progress, and interaction events use their event kind without
+fixed diagnostic messages. This avoids treating generic labels as prompt leaks
+when a short prompt happens to match them; prompt-bearing event messages and
+payloads still fail the shared runtime guard.
+
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
@@ -36,6 +41,10 @@ Bounded agent-message, reasoning, plan, command, file-change, and MCP progress
 notifications refresh the idle deadline only for the active thread and turn;
 completed agent messages supply the final text in native order under an 8 MiB
 aggregate UTF-8 limit.
+Notifications buffered while awaiting initialize, thread, and turn responses
+share an 8 MiB aggregate serialized UTF-8 budget and a 4,096-frame cap. The
+driver checks both limits before retaining each notification, including unknown
+methods, and rejects an oversized queue through managed transport cleanup.
 A Codex 0.162.1 loopback probe completed one minimal turn in a temporary
 directory, reopened the app-server process, and resumed the exact thread ID.
 The generated server-request union does not identify a connector-specific

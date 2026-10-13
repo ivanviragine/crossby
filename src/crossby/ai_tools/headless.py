@@ -465,7 +465,7 @@ class HeadlessRuntimeContext:
             conversation_id=interaction.conversation_id,
         )
         # Prompts and answer content deliberately never enter normalized events.
-        self.emit(HeadlessEventKind.INTERACTION, message=interaction.kind.value)
+        self.emit(HeadlessEventKind.INTERACTION)
         if self.request.interaction_mode is HeadlessInteractionMode.UNATTENDED:
             if interaction.kind is PlanInteractionKind.QUESTION:
                 raise _HeadlessStopError(
@@ -489,7 +489,6 @@ class HeadlessRuntimeContext:
             HeadlessEventKind.CLARIFICATION
             if interaction.kind is PlanInteractionKind.QUESTION
             else HeadlessEventKind.PERMISSION,
-            message=interaction.kind.value,
         )
         interaction_deadline = min(
             self.deadline,
