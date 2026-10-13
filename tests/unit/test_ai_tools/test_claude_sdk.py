@@ -51,7 +51,15 @@ def result():
              'result': 'Completed', 'usage': {'input_tokens': 5, 'output_tokens': 7},
              'total_cost_usd': 0.25}
     frame.update(config.get('result', {}))
+    if mode == 'lifecycle_running':
+        emit({'type':'system', 'subtype':'session_state_changed',
+              'sdk_host_only':True, 'state':'running', 'session_id':session})
     emit(frame)
+    if mode in {'lifecycle', 'lifecycle_running'}:
+        time.sleep(config.get('lifecycle_delay', 0))
+        emit({'type':'system', 'subtype':'session_state_changed',
+              'sdk_host_only':config.get('host_only', True), 'state':config.get('state', 'idle'),
+              'session_id':config.get('lifecycle_session', session)})
     if mode == 'trailing':
         emit({'type': 'assistant', 'session_id': session, 'message': {'content': []}})
 for line in sys.stdin:
@@ -82,7 +90,7 @@ for line in sys.stdin:
                   'tool_name': config.get('tool', 'AskUserQuestion'),
                   'tool_use_id': config.get('tool_id', 'tool-exact'), 'input': request,
                   'title': 'Display is not executable', 'blocked_path': '/blocked',
-                  'agent_id': 'agent-exact'}})
+                  'agent_id': 'agent-exact', **config.get('native_context', {})}})
             if mode == 'native_cancel':
                 time.sleep(config.get('cancel_delay', 0))
                 emit({'type': 'control_cancel_request', 'request_id': 'wire-exact'})
@@ -701,3 +709,84 @@ def test_backpressured_reply_interrupts_before_process_teardown(tmp_path: Path) 
         assert not process._write_thread.is_alive()
 
     asyncio.run(run())
+
+
+def test_requested_resume_id_requires_native_initialization_before_handler(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    called = []
+
+    def handler(_i: Any) -> SessionInteractionResponse:
+        called.append(True)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    with pytest.raises(HeadlessTransportError) as error:
+        run(
+            {"mode": "no_session", "tool": "Bash", "request": {"command": "pwd"}},
+            handler,
+            request_values={"resume_id": "session-exact"},
+        )
+    assert called == []
+    assert error.value.partial.session_id is None
+
+
+def test_unconfirmed_resume_id_is_not_reported_on_startup_timeout(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {"mode": "startup_stall"},
+        request_values={"resume_id": "unconfirmed", "idle_timeout_seconds": 0.15},
+    )
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert result.session_id is None
+
+
+@pytest.mark.parametrize("host_only", [True, False, None])
+def test_post_result_sdk_idle_lifecycle_is_accepted(sdk_child: Any, host_only: Any) -> None:
+    run, _ = sdk_child
+    assert (
+        run({"mode": "lifecycle", "host_only": host_only}).status
+        is HeadlessTerminalStatus.SUCCEEDED
+    )
+
+
+@pytest.mark.parametrize("extra", [{"state": "malformed"}, {"lifecycle_session": "different"}])
+def test_invalid_post_result_lifecycle_is_rejected(sdk_child: Any, extra: Any) -> None:
+    run, _ = sdk_child
+    with pytest.raises(HeadlessTransportError):
+        run({"mode": "lifecycle", **extra})
+
+
+def test_sdk_dispatch_control_error_cannot_become_success(sdk_child: Any) -> None:
+    run, record = sdk_child
+    called = []
+
+    def handler(_i: Any) -> SessionInteractionResponse:
+        called.append(True)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    with pytest.raises(HeadlessTransportError) as error:
+        run(
+            {
+                "tool": "Bash",
+                "request": {"command": "pwd"},
+                "native_context": {"permission_suggestions": [{}]},
+            },
+            handler,
+        )
+    assert called == []
+    assert error.value.partial.session_id == "session-exact"
+    assert not any(f["type"] == "control_response" for f in _records(record))
+
+
+def test_native_lifecycle_waits_for_idle_before_closing_input(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run({"mode": "lifecycle_running", "lifecycle_delay": 0.03})
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+
+
+def test_active_post_result_lifecycle_cannot_become_success(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {"mode": "lifecycle_running", "state": "running"},
+        request_values={"idle_timeout_seconds": 0.15},
+    )
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT

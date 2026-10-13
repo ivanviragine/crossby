@@ -197,7 +197,10 @@ class SDKTransport:
         self.controller: _SDKController | None = None
         self.client: Any = None
         self.accept_replies = True
-        self.session_id: str | None = context.request.resume_id
+        self.requested_resume_id = context.request.resume_id
+        self.session_id: str | None = None
+        self.native_initialized = False
+        self.session_state: str | None = None
         self.pending: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self.request_cancellations: dict[str, threading.Event] = {}
         self.pending_lock = threading.RLock()
@@ -212,8 +215,6 @@ class SDKTransport:
 
     async def connect(self) -> None:
         self.context.checkpoint()
-        if self.session_id is not None:
-            self.context.set_provenance(session_id=self.session_id)
         self.controller = _SDKController(
             self.context,
             self.command,
@@ -226,6 +227,9 @@ class SDKTransport:
                 "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
                 "CLAUDE_AGENT_SDK_VERSION": SDK_VERSION,
                 "PWD": str(self.context.request.working_dir),
+                "CLAUDE_CODE_SDK_READS_SESSION_STATE": os.environ.get(
+                    "CLAUDE_CODE_SDK_READS_SESSION_STATE", "1"
+                ),
             },
         )
         self.controller.bridge = self
@@ -269,13 +273,41 @@ class SDKTransport:
     def _observe(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
         if self.terminal is not None:
-            raise ValueError("Claude SDK emitted a frame after its terminal result")
+            if not (
+                kind == "system"
+                and frame.get("subtype") == "session_state_changed"
+                and frame.get("sdk_host_only") in (None, True, False)
+                and frame.get("state") in {"idle", "running", "requires_action"}
+            ):
+                raise ValueError("Claude SDK emitted response content after its terminal result")
+            native_session = frame.get("session_id")
+            if native_session is not None and native_session != self.session_id:
+                raise ValueError("Claude SDK lifecycle frame changed the session binding")
+            self.session_state = frame["state"]
+            self.context.mark_progress()
+            return
         if kind in {"system", "assistant", "user", "stream_event", "result"}:
             native_session = frame.get("session_id")
             if native_session is not None:
                 native_session = _identity(native_session)
+                if (
+                    self.requested_resume_id is not None
+                    and native_session != self.requested_resume_id
+                ):
+                    raise _HeadlessStopError(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        "Claude SDK did not confirm the requested native resume session.",
+                    )
                 self.context.set_provenance(session_id=native_session)
                 self.session_id = native_session
+        if kind == "system" and frame.get("subtype") == "init":
+            if frame.get("session_id") is None:
+                raise ValueError("Claude SDK initialization omitted its session identity")
+            self.native_initialized = True
+        if kind == "system" and frame.get("subtype") == "session_state_changed":
+            if frame.get("state") not in {"idle", "running", "requires_action"}:
+                raise ValueError("Claude SDK reported an invalid lifecycle state")
+            self.session_state = frame["state"]
         if kind == "control_request":
             request = frame.get("request")
             if not isinstance(request, dict) or request.get("subtype") != "can_use_tool":
@@ -286,6 +318,7 @@ class SDKTransport:
             native_input = request.get("input")
             if (
                 self.session_id is None
+                or not self.native_initialized
                 or not isinstance(native_input, dict)
                 or request_id in self.seen
                 or tool_id in self.tool_ids
@@ -355,6 +388,13 @@ class SDKTransport:
                 request_id = frame.get("response", {}).get("request_id")
                 if request_id not in self.pending:
                     return
+                if frame.get("response", {}).get("subtype") == "error":
+                    if self.failure is None:
+                        self.failure = self.context.transport_error(
+                            "Claude SDK could not dispatch a live native request."
+                        )
+                    self.revoke_replies()
+                    return
                 # No await between checking liveness and the bounded write worker.
                 await asyncio.to_thread(self._reply, request_id, frame)
             else:
@@ -405,12 +445,19 @@ class SDKTransport:
 
     async def finish(self) -> int:
         """Drain through EOF after the result, rejecting trailing native frames."""
+        while self.session_state not in (None, "idle"):
+            self.context.checkpoint()
+            if self.failure is not None:
+                raise self.failure
+            await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
         await self.end_input()
         while not self.ended.is_set():
             self.context.checkpoint()
             await asyncio.sleep(min(0.01, self.context.remaining_seconds()))
         if self.failure is not None:
             raise self.failure
+        if self.session_state not in (None, "idle"):
+            raise ValueError("Claude SDK stream ended with an active native lifecycle")
         assert self.controller is not None
         return await asyncio.to_thread(
             self.controller.process._proc.wait, timeout=self.context.remaining_seconds()

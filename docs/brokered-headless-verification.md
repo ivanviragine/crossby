@@ -66,7 +66,10 @@ pipe write/flush so backpressure cannot block native interruption or withdrawal.
 Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
 SDK interruption once before process-group termination, killing descendants
 even after the parent exits. Successful results close stdin and drain stdout
-through EOF, rejecting trailing frames and nonzero process exit. Native result
+through EOF, accepting defined SDK lifecycle frames while rejecting
+trailing response content and nonzero process exit. An observed active lifecycle
+must reach idle before input closure; active state at EOF cannot become success.
+Native result
 subtype/error state, exact session ID, token usage, cost and permission-denial
 presence are retained. JSON/JSONL without a schema preserve the final native
 envelope (including native cost/metadata); schemas select `structured_output`
@@ -80,8 +83,9 @@ sandbox disabling and approval policies fail preflight. Shared requests have
 no scene context or arbitrary tool-list selector; these are API capability gaps,
 not advertised support. Existing interactive, plan and unattended paths remain
 independent. See `test_claude_sdk.py` for real SDK dispatch, dependency failures,
-resume identity, structured output, native cancellation, startup/callback
-timeouts, terminal failures and owned-process tests.
+native-confirmed resume identity (requested IDs alone never enter result
+provenance), SDK dispatch-error propagation, structured output, native
+cancellation, startup/callback timeouts, terminal failures and owned-process tests.
 
 Codex's 0.162.1 app-server schema was generated with
 `codex app-server generate-json-schema --experimental`. It defines
