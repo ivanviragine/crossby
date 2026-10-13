@@ -1586,3 +1586,23 @@ def _review_scene(
         profile=cast("str | None", result["profile"]),
         selectors=selectors,
     )
+
+
+@scene_app.command("cleanup-worktree")
+def cleanup_worktree(
+    path: Path = typer.Argument(..., help="Exact retained Crossby checkout path."),
+    discard_changes: bool = typer.Option(
+        False,
+        "--discard-changes",
+        help="Discard changes and injected files in this owned checkout.",
+    ),
+) -> None:
+    """Remove a retained or abandoned isolated checkout after strict ownership checks."""
+    from crossby.scenes.worktree import OwnedWorktree, WorktreeError
+
+    try:
+        OwnedWorktree(path).cleanup(discard_changes=discard_changes)
+    except WorktreeError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
+    console.success(f"Removed owned worktree: {path}")

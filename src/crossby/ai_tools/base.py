@@ -318,6 +318,7 @@ class AbstractAITool(ABC):
         *,
         sandbox: bool = True,
         on_event: InteractiveLaunchHandler | None = None,
+        owned_process: bool = False,
     ) -> int:
         """Launch the AI tool in the given directory.
 
@@ -366,6 +367,8 @@ class AbstractAITool(ABC):
             sandbox: Whether to launch with the tool's sandbox enabled. Only
                 adapters declaring ``supports_sandbox_toggle`` translate this
                 programmatic input into a sandbox-selection flag.
+            owned_process: Own the child process tree until teardown, for disposable
+                checkout lifecycles. Detached launches cannot use this mode.
             on_event: Optional startup handler for adapters whose plan capability
                 declares supports_ready_event. On PLAN_READY, call the supplied
                 session.send_message() once. Cannot be combined with prompt.
@@ -375,6 +378,8 @@ class AbstractAITool(ABC):
         """
         from crossby.utils.process import run_with_transcript
 
+        if detach and owned_process:
+            raise ValueError("Owned process launches cannot detach")
         if on_event is not None and (
             not plan_mode
             or not self.capabilities().plan_mode.supports_ready_event
@@ -432,8 +437,14 @@ class AbstractAITool(ABC):
             plan_mode
             and self.capabilities().plan_mode.activation is PlanModeActivation.TERMINAL_INPUT
         ):
+            # The terminal Plan transport already owns its PTY process group
+            # and completes group teardown before returning (including isolation).
             return self._run_terminal_plan_command(
                 cmd, working_dir, transcript_path, child_env, on_event
+            )
+        if owned_process:
+            return run_with_transcript(
+                cmd, transcript_path, cwd=working_dir, env=child_env, owned=True
             )
         return run_with_transcript(cmd, transcript_path, cwd=working_dir, env=child_env)
 

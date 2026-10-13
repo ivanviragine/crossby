@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.markup import escape
@@ -69,6 +70,13 @@ def launch(
             "tools without a launch lever)."
         ),
     ),
+    isolate: Annotated[
+        str | None, typer.Option("--isolate", help="Scene checkout isolation: worktree or none.")
+    ] = None,
+    keep_worktree: Annotated[
+        bool,
+        typer.Option("--keep-worktree", help="Retain the owned isolated checkout after launch."),
+    ] = False,
     resume: str | None = typer.Option(None, "--resume", help="Resume a previous session by ID."),
     trusted_dirs: list[str] | None = typer.Option(
         None, "--trusted-dir", help="Pre-authorize a directory (repeatable)."
@@ -137,6 +145,8 @@ def launch(
         console.error("--resume cannot be combined with --plan or --plan-output-dir.")
         raise typer.Exit(1)
 
+    plan_output_was_absolute = plan_output_dir is not None and plan_output_dir.is_absolute()
+    transcript_was_absolute = transcript is not None and transcript.is_absolute()
     if plan_output_dir is not None and not plan_output_dir.is_absolute():
         plan_output_dir = work_dir / plan_output_dir
 
@@ -171,6 +181,17 @@ def launch(
             raise typer.Exit(1)
         if profile_name is None and scene_cfg.profile:
             profile_name = scene_cfg.profile
+
+    from crossby.scenes.worktree import WorktreeError, isolation_requested
+    from crossby.utils.owned_launch import ProcessTreeCleanupError
+
+    try:
+        isolated = isolation_requested(scene_cfg, isolate, keep_worktree)
+        if isolated and resume is not None:
+            raise WorktreeError("Worktree isolation cannot be combined with --resume.")
+    except WorktreeError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
 
     profile_allow_tools: list[str] = []
     if profile_name:
@@ -363,124 +384,203 @@ def launch(
         )
         resolved_accept_edits = False
 
-    # Planning and approval are independent native dimensions. Show both;
-    # approval flags retain yolo > auto > accept-edits precedence.
-    console.kv("AI tool", caps.display_name)
-    if resolved_model:
-        console.kv("Model", _launched_model_label(adapter, resolved_model, resolved_effort))
-    if resolved_effort:
-        console.kv("Effort", resolved_effort.value)
-    if plan:
-        console.kv("Plan mode", "on")
-    autonomy_tiers = (
-        ("YOLO mode", resolved_yolo),
-        ("Auto mode", resolved_auto),
-        ("Accept-edits mode", resolved_accept_edits),
-    )
-    effective_shown = False
-    for label, requested in autonomy_tiers:
-        if not requested:
-            continue
-        console.kv(label, "on" if not effective_shown else "superseded")
-        effective_shown = True
-    console.empty()
-
-    # Resolve a session-scoped scene into a per-launch context (or apply the
-    # persistent fallback / warn for GUI tools) before dispatch.
-    scene_ctx = None
-    if scene is not None and scene_cfg is not None:
+    request = None
+    isolated_scene_root = None
+    retained = None
+    if isolated:
+        from crossby.models.ai import AIToolID, AIToolType
+        from crossby.scenes.launch import validate_scene_name
+        from crossby.scenes.worktree import WorktreeRequest
         from crossby.services.scene_resolution import scene_root as compute_scene_root
 
-        scene_ctx = _prepare_scene_launch(
-            scene_name=scene,
-            scene_cfg=scene_cfg,
-            resolved_tool=resolved_tool,
-            adapter=adapter,
-            caps=caps,
-            scene_root=compute_scene_root(work_dir),
-            config=config,
-        )
-
-    # Deliver prompt if tool doesn't support initial messages
-    if prompt:
-        deliver_prompt_if_needed(adapter, prompt)
-
-    # Ensure transcript parent directory exists
-    if transcript:
         try:
-            transcript.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            console.error(f"Cannot create transcript directory: {e}")
-            raise typer.Exit(1) from e
+            if caps.tool_type == AIToolType.GUI:
+                raise WorktreeError("Worktree isolation requires a foreground CLI tool.")
+            if transcript is not None:
+                import os
 
-    def _dispatch(scene_for_launch: SceneLaunchContext | None) -> int:
-        return adapter.launch(
-            working_dir=work_dir,
-            model=resolved_model,
-            prompt=prompt if caps.supports_initial_message else None,
-            transcript_path=transcript,
-            trusted_dirs=normalized_trusted_dirs,
-            effort=resolved_effort,
-            allow_tools=profile_allow_tools,
-            yolo=resolved_yolo,
-            plan_mode=plan,
-            accept_edits=resolved_accept_edits,
-            auto=resolved_auto,
-            scene=scene_for_launch,
-            network_access=network_effective,
-            plan_output_dir=plan_output_dir,
-        )
-
-    # Launch. A scene artefact write that would escape the project root raises
-    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
-    # cleanly here rather than let it become a persistent-write fallback (the
-    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
-    # containment error already propagates untouched).
-    from crossby.scenes.launch import SceneLaunchFallbackError, SceneLaunchInputError
+                if os.name != "posix":
+                    raise WorktreeError("Isolated transcript capture currently requires POSIX.")
+            assert scene_cfg is not None and scene is not None
+            validate_scene_name(scene)
+            request = WorktreeRequest.prepare(
+                work_dir, compute_scene_root(work_dir), scene_cfg, AIToolID(resolved_tool)
+            )
+            for output, absolute in (
+                (transcript, transcript_was_absolute),
+                (plan_output_dir, plan_output_was_absolute),
+            ):
+                if (
+                    output is not None
+                    and not absolute
+                    and not output.resolve().is_relative_to(request.repository)
+                ):
+                    raise WorktreeError(
+                        "Relative isolated output paths must stay inside the checkout."
+                    )
+        except (WorktreeError, OSError, ValueError) as exc:
+            console.error(str(exc))
+            raise typer.Exit(1) from exc
 
     try:
-        exit_code = _dispatch(scene_ctx)
-    except (PathContainmentError, SceneLaunchInputError) as exc:
-        console.error(f"Refusing to launch scene {scene!r}: {exc}")
-        raise typer.Exit(1) from exc
-    except SceneLaunchFallbackError as exc:
-        # The adapter signals before spawning.  Preserve the hand-written
-        # artefact, activate through the same recoverable lifecycle as every
-        # other fallback, then launch exactly once without the unusable profile.
-        if scene_ctx is None or scene_cfg is None or scene is None:
-            console.error(f"Could not prepare persistent scene fallback: {exc}")
-            raise typer.Exit(1) from exc
-        console.warn(
-            f"{exc} The hand-written profile was preserved; falling back to "
-            f"persistent activation for scene {scene!r}."
-        )
-        from crossby.models.ai import AIToolID
+        with ExitStack() as lifecycle:
+            if request is not None:
+                from crossby.scenes.worktree import cancellation_cleanup
 
-        _activate_persistent_scene(
-            scene_name=scene,
-            scene_cfg=scene_cfg,
-            context=scene_ctx,
-            tool_id=AIToolID(resolved_tool),
-            installed=AbstractAITool.detect_installed(),
-            display_name=caps.display_name,
-        )
-        exit_code = _dispatch(None)
-    except PlanModeLaunchError as exc:
+                lifecycle.enter_context(cancellation_cleanup())
+
+                def remember_retained(path: Path) -> None:
+                    nonlocal retained
+                    retained = path
+
+                owned = lifecycle.enter_context(
+                    request.create(keep=keep_worktree, on_retained=remember_retained)
+                )
+                retained = owned.path
+                original_dir = work_dir
+                work_dir = owned.path / request.cwd_relative
+                isolated_scene_root = owned.path / request.scene_relative
+                if transcript is not None and not transcript_was_absolute:
+                    transcript = work_dir / transcript.relative_to(original_dir)
+                if plan_output_dir is not None and not plan_output_was_absolute:
+                    plan_output_dir = work_dir / plan_output_dir.relative_to(original_dir)
+                if transcript is not None and not transcript_was_absolute:
+                    from crossby.config.json_utils import assert_within
+
+                    assert_within(owned.path, transcript)
+                console.kv("Isolated worktree", str(owned.path))
+            # Planning and approval are independent native dimensions. Show both;
+            # approval flags retain yolo > auto > accept-edits precedence.
+            console.kv("AI tool", caps.display_name)
+            if resolved_model:
+                console.kv("Model", _launched_model_label(adapter, resolved_model, resolved_effort))
+            if resolved_effort:
+                console.kv("Effort", resolved_effort.value)
+            if plan:
+                console.kv("Plan mode", "on")
+            autonomy_tiers = (
+                ("YOLO mode", resolved_yolo),
+                ("Auto mode", resolved_auto),
+                ("Accept-edits mode", resolved_accept_edits),
+            )
+            effective_shown = False
+            for label, requested in autonomy_tiers:
+                if not requested:
+                    continue
+                console.kv(label, "on" if not effective_shown else "superseded")
+                effective_shown = True
+            console.empty()
+
+            # Resolve a session-scoped scene into a per-launch context (or apply the
+            # persistent fallback / warn for GUI tools) before dispatch.
+            scene_ctx = None
+            if scene is not None and scene_cfg is not None:
+                from crossby.services.scene_resolution import scene_root as compute_scene_root
+
+                scene_ctx = _prepare_scene_launch(
+                    scene_name=scene,
+                    scene_cfg=scene_cfg,
+                    resolved_tool=resolved_tool,
+                    adapter=adapter,
+                    caps=caps,
+                    scene_root=isolated_scene_root or compute_scene_root(work_dir),
+                    config=config,
+                    isolated=isolated,
+                )
+
+            # Deliver prompt if tool doesn't support initial messages
+            if prompt:
+                deliver_prompt_if_needed(adapter, prompt)
+
+            # Ensure transcript parent directory exists
+            if transcript:
+                try:
+                    transcript.parent.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    console.error(f"Cannot create transcript directory: {e}")
+                    raise typer.Exit(1) from e
+
+            def _dispatch(scene_for_launch: SceneLaunchContext | None) -> int:
+                from typing import Any
+
+                ownership_kwargs: dict[str, Any] = {"owned_process": True} if isolated else {}
+                return adapter.launch(
+                    working_dir=work_dir,
+                    model=resolved_model,
+                    prompt=prompt if caps.supports_initial_message else None,
+                    transcript_path=transcript,
+                    trusted_dirs=normalized_trusted_dirs,
+                    effort=resolved_effort,
+                    allow_tools=profile_allow_tools,
+                    yolo=resolved_yolo,
+                    plan_mode=plan,
+                    accept_edits=resolved_accept_edits,
+                    auto=resolved_auto,
+                    scene=scene_for_launch,
+                    network_access=network_effective,
+                    plan_output_dir=plan_output_dir,
+                    **ownership_kwargs,
+                )
+
+            # Launch. A scene artefact write that would escape the project root raises
+            # PathContainmentError from inside adapter.launch → scene_launch_args; abort
+            # cleanly here rather than let it become a persistent-write fallback (the
+            # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
+            # containment error already propagates untouched).
+            from crossby.scenes.launch import SceneLaunchFallbackError, SceneLaunchInputError
+
+            try:
+                exit_code = _dispatch(scene_ctx)
+            except (PathContainmentError, SceneLaunchInputError) as exc:
+                console.error(f"Refusing to launch scene {scene!r}: {exc}")
+                raise typer.Exit(1) from exc
+            except SceneLaunchFallbackError as exc:
+                # The adapter signals before spawning.  Preserve the hand-written
+                # artefact, activate through the same recoverable lifecycle as every
+                # other fallback, then launch exactly once without the unusable profile.
+                if scene_ctx is None or scene_cfg is None or scene is None:
+                    console.error(f"Could not prepare persistent scene fallback: {exc}")
+                    raise typer.Exit(1) from exc
+                console.warn(
+                    f"{exc} The hand-written profile was preserved; falling back to "
+                    f"persistent activation for scene {scene!r}."
+                )
+                from crossby.models.ai import AIToolID
+
+                _activate_persistent_scene(
+                    scene_name=scene,
+                    scene_cfg=scene_cfg,
+                    context=scene_ctx,
+                    tool_id=AIToolID(resolved_tool),
+                    installed=AbstractAITool.detect_installed(),
+                    display_name=caps.display_name,
+                )
+                exit_code = _dispatch(None)
+            except PlanModeLaunchError as exc:
+                console.error(str(exc))
+                raise typer.Exit(1) from exc
+
+            if exit_code != 0:
+                console.warn(f"AI tool exited with code {exit_code}")
+
+            # Parse transcript if captured
+            if transcript and transcript.exists():
+                usage = adapter.parse_transcript(transcript)
+                if usage.total_tokens is not None:
+                    console.kv("Tokens", f"{usage.total_tokens:,}")
+                if usage.session_id:
+                    console.kv("Session ID", usage.session_id)
+
+            raise typer.Exit(exit_code)
+    except (WorktreeError, ProcessTreeCleanupError, OSError, PathContainmentError) as exc:
         console.error(str(exc))
         raise typer.Exit(1) from exc
-
-    if exit_code != 0:
-        console.warn(f"AI tool exited with code {exit_code}")
-
-    # Parse transcript if captured
-    if transcript and transcript.exists():
-        usage = adapter.parse_transcript(transcript)
-        if usage.total_tokens is not None:
-            console.kv("Tokens", f"{usage.total_tokens:,}")
-        if usage.session_id:
-            console.kv("Session ID", usage.session_id)
-
-    raise typer.Exit(exit_code)
+    except KeyboardInterrupt as exc:
+        console.warn("Isolated launch cancelled." if isolated else "Launch cancelled.")
+        raise typer.Exit(130) from exc
+    finally:
+        if retained is not None and retained.exists():
+            console.kv("Retained worktree", str(retained))
 
 
 def _resolve_network_access(requested: bool, caps: AIToolCapabilities) -> bool:
@@ -507,6 +607,7 @@ def _prepare_scene_launch(
     caps: AIToolCapabilities,
     scene_root: Path,
     config: CrossbyConfig,
+    isolated: bool = False,
 ) -> SceneLaunchContext | None:
     """Resolve *scene_cfg* for one launch and pick how it applies to the tool.
 
@@ -578,8 +679,9 @@ def _prepare_scene_launch(
         console.warn(warning)
 
     # Clean up artefacts left by scenes since renamed or deleted (best-effort).
-    for pruned in prune_stale_artifacts(scene_root, set(config.scenes)):
-        console.detail(f"pruned stale scene artefact: {pruned}")
+    if not isolated:
+        for pruned in prune_stale_artifacts(scene_root, set(config.scenes)):
+            console.detail(f"pruned stale scene artefact: {pruned}")
 
     if caps.tool_type == AIToolType.GUI:
         console.warn(
@@ -589,12 +691,35 @@ def _prepare_scene_launch(
         return None
 
     if adapter.scene_launch_ready():
-        _warn_unsupported_scene_concerns(scene_cfg, adapter, caps, scene_name)
+        if isolated:
+            from dataclasses import replace
+
+            persistent = (
+                resolved.configured_concerns or frozenset()
+            ) - adapter.scene_launch_concerns()
+            if persistent:
+                _activate_persistent_scene(
+                    scene_name=scene_name,
+                    scene_cfg=scene_cfg,
+                    context=SceneLaunchContext(
+                        name=scene_name,
+                        resolved=replace(resolved, configured_concerns=frozenset(persistent)),
+                        project_root=scene_root,
+                        sync_data=sync_data,
+                        isolated=True,
+                    ),
+                    tool_id=tool_id,
+                    installed=installed,
+                    display_name=caps.display_name,
+                )
+        else:
+            _warn_unsupported_scene_concerns(scene_cfg, adapter, caps, scene_name)
         return SceneLaunchContext(
             name=scene_name,
             resolved=resolved,
             project_root=scene_root,
             sync_data=sync_data,
+            isolated=isolated,
         )
 
     reason = (
@@ -618,6 +743,7 @@ def _prepare_scene_launch(
             resolved=resolved,
             project_root=scene_root,
             sync_data=sync_data,
+            isolated=isolated,
         ),
         tool_id=tool_id,
         installed=installed,
@@ -668,7 +794,8 @@ def _activate_persistent_scene(
             project_root=context.project_root,
             requested_tools=[tool_id],
             installed_candidates=installed,
-            force=False,
+            force=context.isolated,
+            concerns=context.resolved.configured_concerns if context.isolated else None,
         )
     except SceneActivationError as exc:
         for warning in exc.warnings:
@@ -694,6 +821,9 @@ def _activate_persistent_scene(
     for result in outcome.results:
         if (result.unsupported or result.action == "error") and result.message:
             console.warn(result.message)
+    if outcome.has_errors and context.isolated:
+        console.error("Isolated scene activation failed; the AI tool was not started.")
+        raise typer.Exit(1)
     if outcome.has_errors:
         console.warn(
             "Scene activation is partial; launching anyway. Run 'crossby scene clear' "

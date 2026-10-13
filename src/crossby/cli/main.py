@@ -128,6 +128,8 @@ def _interactive_main_menu(ctx: typer.Context) -> None:
             transcript=None,
             profile=None,
             scene=None,
+            isolate=None,
+            keep_worktree=False,
             resume=None,
             trusted_dirs=None,
             network=False,

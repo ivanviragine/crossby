@@ -116,6 +116,7 @@ class SceneLaunchContext:
     resolved: ResolvedScene
     project_root: Path
     sync_data: SyncData
+    isolated: bool = False
 
     # -- selections -------------------------------------------------------
     def selected(self, concern: str) -> set[str]:
@@ -225,7 +226,8 @@ class SceneLaunchContext:
                     )
         atomic_write_text(path, content, within=self.project_root)
         write_managed_marker(self.launch_dir, project_root=self.project_root)
-        ensure_launch_excluded(self.project_root)
+        if not self.isolated:
+            ensure_launch_excluded(self.project_root)
         return path
 
 
