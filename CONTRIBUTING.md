@@ -59,6 +59,10 @@ src/crossby/
 
 ### Subagent format translation
 
+Definition translation neither implies nor is implied by
+[runtime subagent readiness](#runtime-subagent-readiness). Keep these contracts
+independent when auditing a new adapter.
+
 `src/crossby/subagents/` translates a single subagent definition between
 Claude Code, Cursor, Copilot, and Codex.  The architecture is a
 canonical intermediate representation (`SubagentIR`) with one parser and one
@@ -1066,6 +1070,97 @@ Available on each adapter for programmatic use:
 | Sandbox toggle    | —                                        | —                   | —                | `workspace-write` / `danger-full-access` | — | `enabled` / `disabled` |
 
 The sandbox toggle is keyword-only on `launch()`, `build_launch_command()`, `build_resume_command()`, and `sandbox_config_args()`. It is a programmatic adapter contract, not a CLI/config option. Every resume override and GUI `launch()` override must accept the keyword even when it is inert, so polymorphic calls remain `TypeError`-free.
+
+### Runtime subagent readiness
+
+`adapter.subagent_spawning_status(working_dir=None, headless=True,
+launch_args=(), environment=None, request=None)` returns a frozen
+`SubagentSpawnStatus`. The five public types (`SubagentSpawnStatus`,
+`SubagentSpawnState`, `SubagentSpawnSupport`, `SubagentSpawnReason`, and
+`SubagentSpawnEvidence`) are exported from `crossby.ai_tools`.
+
+| State | Meaning | Consumer predicate |
+| --- | --- | --- |
+| `available` | Audited runtime and effective launch context permit spawning | `True` |
+| `disabled` | The selected launch's effective controls prevent spawning | `False` |
+| `unsupported` | Audited family or requested launch mode lacks support | `False` |
+| `unknown` | The adapter cannot safely establish effective readiness | `False` |
+
+Use `status.is_available` or `bool(status)`; never replace an unknown answer
+with a tool-name allowlist or `capabilities().subagent_spawning == "supported"`.
+The declaration defaults to `unaudited`. Even `supported` requires an effective
+runtime check. Serialize decisions with `status.model_dump(mode="json")` for
+prompt-free provenance: tool id, state, reason code/text, evidence, normalized
+cwd, headless mode, version and an opaque input-context fingerprint.
+
+A `HeadlessSessionRequest` supplies managed launch context. Do not mix it with
+extra native options, a different cwd or `headless=False`. For ordinary native
+CLI launches, `launch_args` is the exact option sequence excluding the binary,
+subcommand and prompt. `environment` replaces the entire child environment;
+when omitted it snapshots inheritance. Relative PATH entries resolve against
+the intended child cwd. Preserve scene/profile environment additions and native
+options if checking a manually assembled launch. The fingerprint omits the
+prompt and exposes no environment or credential values; it identifies inputs,
+not immutable files or binaries. There is no readiness cache. Recheck before
+launch when configuration, model metadata, environment or installation changes.
+
+Codex's audited native introspection floor is 0.162.1. One five-second shared
+subprocess deadline covers version detection and app-server initialization,
+`config/read` with the actual cwd, `configRequirements/read`,
+`experimentalFeature/list`, and `model/list`, including bounded pagination.
+Owned subprocess helpers bound output and clean up the process tree. Fixed
+cleanup grace may extend the subprocess budget slightly. These are read methods;
+no thread, model turn, tool invocation or config write/enablement request occurs.
+Startup may use existing native credentials, contact its usual service, and
+refresh native catalogs/caches. Do not copy a subset of config into a temporary
+CODEX_HOME: that would measure a different launch. Unit tests replace native
+processes; opt-in smoke tests use complete isolated fixture contexts and never
+perform paid model inference. Run the native read audit with
+`CROSSBY_SUBAGENT_READINESS_SMOKE=1 ./scripts/test.sh tests/unit/test_ai_tools/test_codex_subagent_readiness_smoke.py`;
+its fixture config bytes must remain unchanged.
+
+The resolver follows native precedence: an enabled `multi_agent_v2` selects v2;
+otherwise `agents.enabled=false` disables spawning; otherwise selected model
+metadata takes precedence over the legacy `multi_agent` flag. A model selected
+by name must have an unambiguous native catalog entry; no model-name guess is
+allowed. V1 depth zero or v2 concurrency with only the parent slot establishes
+disablement. Effective managed feature requirements must agree with feature
+metadata. Malformed, missing or incompatible evidence, unavailable binaries,
+unknown/older versions, failed reads and timeouts are `unknown`.
+
+`features list` alone is insufficient: it omits `agents.enabled` and model
+selection. The original #153 scaffold inferred that the key was ignored because
+its feature row stayed enabled; native runtime source and config introspection
+show that inference was wrong. With v2 off, effective `agents.enabled=false`
+correctly reports `disabled`. With v2 on, native v2 precedence applies. The
+[official subagent documentation](https://developers.openai.com/codex/subagents)
+and [app-server read contract](https://developers.openai.com/codex/app-server)
+describe the relevant controls and methods.
+
+Ordinary managed unattended requests preserve their model, effort, sandbox and
+network inputs. Fresh ordinary CLI checks audit a narrow option set; profiles,
+source-changing flags, local providers, cwd/worktree relocation, custom thread
+sources, brokered transports, resume and planning return `unknown`. Mixed feature
+toggles and config overrides return `unknown` because native precedence differs
+by launch mode; never translate toggles inline to fabricate an affirmative result.
+Contexts containing `CODEX_API_KEY` return `unknown`: native exec and standalone
+app-server select authentication differently, which can change catalog/default
+model selection. Credentials are never copied or translated to repair this.
+Explicit Code Mode routing controls or `multi_agent_v2.non_code_mode_only=false`
+also remain `unknown` when they can hide the spawning surface. A child's denied
+sandbox/approval operation does not establish lack of spawning.
+Readiness does not verify authentication, every future child operation, or that a
+model complied with an instruction to delegate; actual delegation requires
+separate observed execution evidence.
+
+Claude declares audited family support, with its ordinary headless version floor
+2.1.263. Direct `--disallowedTools` or `--tools` exclusions can establish
+`disabled`; per-agent exclusions cannot establish a blanket denial. Otherwise
+its effective managed/remote policy and unattended permission behavior remain
+`unknown`. Local settings scans are insufficient: managed policy can ignore
+non-managed permission rules. Other adapters remain `unaudited`/`unknown` until
+their actual runtime contracts are checked. Adding a declaration without a
+runtime resolver must never produce `available`.
 
 ## Commit Conventions
 

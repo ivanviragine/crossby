@@ -52,11 +52,14 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    SubagentSpawnStatus,
+    SubagentSpawnSupport,
     TokenUsage,
 )
 
 if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
+    from crossby.ai_tools.subagent_context import SubagentLaunchContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 logger = structlog.get_logger()
@@ -124,6 +127,7 @@ class ClaudeAdapter(AbstractAITool):
             supports_model_flag=True,
             headless_flag="--print",
             supports_headless=True,
+            subagent_spawning=SubagentSpawnSupport.SUPPORTED,
             supports_effort=True,
             supports_yolo=True,
             supports_resume=True,
@@ -201,6 +205,11 @@ class ClaudeAdapter(AbstractAITool):
             scene_mcp_strict_flag="--strict-mcp-config",
             scene_tool_denylist_flag="--disallowedTools",
         )
+
+    def _subagent_spawning_status(self, context: SubagentLaunchContext) -> SubagentSpawnStatus:
+        from crossby.ai_tools.claude_readiness import claude_readiness
+
+        return claude_readiness(self, context)
 
     def build_resume_command(
         self,

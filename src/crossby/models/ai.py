@@ -1278,6 +1278,84 @@ HeadlessSessionStatus = HeadlessTerminalStatus
 HeadlessTerminalState = HeadlessTerminalStatus
 
 
+class SubagentSpawnSupport(StrEnum):
+    """Audited family support, independent from agent-definition translation."""
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNAUDITED = "unaudited"
+
+
+class SubagentSpawnState(StrEnum):
+    """Only AVAILABLE permits a consumer to rely on runtime spawning."""
+
+    AVAILABLE = "available"
+    DISABLED = "disabled"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+
+
+class SubagentSpawnEvidence(StrEnum):
+    """Source of a readiness conclusion, rather than execution attestation."""
+
+    ADAPTER_DECLARATION = "adapter_declaration"
+    INSTALL_PROBE = "install_probe"
+    FEATURE_PROBE = "feature_probe"
+    EFFECTIVE_CONFIG = "effective_config"
+    VERSION_GATE = "version_gate"
+
+
+class SubagentSpawnReason(StrEnum):
+    """Stable, prompt-free reason codes for downstream manifests."""
+
+    ADAPTER_NOT_AUDITED = "adapter_not_audited"
+    ADAPTER_DECLARES_UNSUPPORTED = "adapter_declares_unsupported"
+    EFFECTIVE_CONTEXT_UNRESOLVED = "effective_context_unresolved"
+    TOOL_NOT_INSTALLED = "tool_not_installed"
+    NO_HEADLESS_MODE = "no_headless_mode"
+    CONTEXT_UNSUPPORTED = "context_unsupported"
+    VERSION_UNVERIFIED = "version_unverified"
+    FEATURE_ENABLED = "feature_enabled"
+    FEATURE_DISABLED = "feature_disabled"
+    MODEL_ENABLED = "model_enabled"
+    MODEL_DISABLED = "model_disabled"
+    FEATURE_REMOVED = "feature_removed"
+    CONFIG_DISABLED = "config_disabled"
+    CONFIG_UNREADABLE = "config_unreadable"
+    CONFIG_AMBIGUOUS = "config_ambiguous"
+    PROBE_FAILED = "probe_failed"
+    PROBE_TIMEOUT = "probe_timeout"
+    PROBE_UNPARSEABLE = "probe_unparseable"
+
+
+class SubagentSpawnStatus(BaseModel):
+    """Readiness for one launch context; never proof that a run delegated.
+
+    Serialize with ``model_dump(mode="json")``. The fingerprint identifies
+    inputs, not a frozen snapshot of files, credentials, or installed binaries;
+    repeat the check immediately before launch when those can change.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_id: AIToolID
+    state: SubagentSpawnState
+    reason_code: SubagentSpawnReason
+    reason: str
+    evidence: SubagentSpawnEvidence
+    working_dir: Path
+    headless: bool
+    context_fingerprint: str
+    tool_version: str | None = None
+
+    @property
+    def is_available(self) -> bool:
+        return self.state is SubagentSpawnState.AVAILABLE
+
+    def __bool__(self) -> bool:
+        return self.is_available
+
+
 class AIToolCapabilities(BaseModel):
     """What an AI tool can do — declared by each adapter."""
 
@@ -1299,6 +1377,9 @@ class AIToolCapabilities(BaseModel):
     model_flag: str = "--model"
     headless_flag: str | None = None
     supports_headless: bool = False
+    subagent_spawning: SubagentSpawnSupport = SubagentSpawnSupport.UNAUDITED
+    """Runtime spawning audit, independent from legacy/headless or translation
+    support. SUPPORTED still requires an effective launch-context check."""
     supports_initial_message: bool = True
     blocks_until_exit: bool = True
     supports_effort: bool = False

@@ -119,6 +119,9 @@ crossby drives eight tools, but **not every tool does every job.** The tables be
 
 ### Direct sync targets
 
+The Agents checkmarks describe definition portability, independently of
+[runtime subagent readiness](#runtime-subagent-readiness).
+
 A sync **writer** exists for five tools. These are the only tools crossby writes configuration *into*:
 
 | Surface | Claude | Cursor | Copilot | Codex | Antigravity CLI |
@@ -520,6 +523,37 @@ or drop rather than launch a different model.
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a
 documented contract was used instead.
+
+### Runtime subagent readiness
+
+Agent-definition sync and conversion do not establish that a tool can spawn an
+independent agent context. Library callers can check the exact ordinary launch:
+
+```python
+from crossby.ai_tools import AbstractAITool, HeadlessSessionRequest
+
+adapter = AbstractAITool.get(selected_tool)
+request = HeadlessSessionRequest(prompt="Review the change", working_dir=project_dir)
+status = adapter.subagent_spawning_status(request=request)
+manifest["subagent_spawning"] = status.model_dump(mode="json")
+if status.is_available:
+    # The caller may request delegation in this context.
+    result = adapter.run_headless_session(request)
+```
+
+Only `available` is truthy. `disabled`, `unsupported`, and `unknown` all fail
+closed; an audited family declaration alone never grants readiness. This is
+capability/readiness evidence, not proof that a particular run actually delegated.
+
+Codex checks native effective configuration, managed requirements, feature state,
+and the selected model's delegation metadata through bounded read methods. It
+creates no thread, starts no model turn, invokes no tool, and does not edit or
+enable user configuration. Native startup can contact the installed tool's usual
+service and refresh its catalog/cache. Claude reports `unknown` when its effective
+managed policy cannot be established, or `disabled` for an explicit native tool-pool
+exclusion. Other unaudited adapters report `unknown`. Brokered, resumed, planning,
+and unmodeled launch contexts fail closed. See the [developer API contract](
+CONTRIBUTING.md#runtime-subagent-readiness) for supported contexts and probe bounds.
 
 ### Native plan mode
 
