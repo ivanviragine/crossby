@@ -621,3 +621,20 @@ class TestRunSyncHooksRevocation:
         run_sync(data, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
         results = run_sync(data, tmp_path, tool_id=AIToolID.CLAUDE, registry=reg)
         assert all(r.action == "skipped" for r in results if r.concern.value == "hooks")
+
+
+def test_excluded_source_errors_do_not_fail_unrelated_empty_selection(tmp_path: Path) -> None:
+    data = SyncData(source_errors={SyncConcern.HOOKS: ["malformed hook source"]})
+    registry = SyncRegistry()
+    assert (
+        run_sync(
+            data, tmp_path, concern=SyncConcern.PERMISSIONS, registry=registry, installed_tools=[]
+        )
+        == []
+    )
+    assert (
+        run_sync(
+            data, tmp_path, registry=registry, installed_tools=[], skip_concerns={SyncConcern.HOOKS}
+        )
+        == []
+    )

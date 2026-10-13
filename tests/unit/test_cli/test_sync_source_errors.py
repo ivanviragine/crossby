@@ -475,3 +475,39 @@ def test_agy_stop_ignores_scope_metadata_but_refuses_bad_command(tmp_path: Path)
     assert result.exit_code == 1, result.output
     assert target.read_bytes() == before_target
     assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
+
+
+@pytest.mark.parametrize("mode", ["write", "dry-run", "plan", "doctor"])
+def test_source_error_is_reported_when_target_has_no_concern_writer(
+    tmp_path: Path, mode: str
+) -> None:
+    source = write_source(tmp_path)
+    assert sync(tmp_path, "permissions", "--from", "claude", "--to", "cursor").exit_code == 0
+    target = tmp_path / TARGETS["permissions"]
+    before_target = target.read_bytes()
+    before_ledger = (tmp_path / LEDGER_PATH).read_bytes()
+    source.write_text(json.dumps({"permissions": []}))
+    extra = () if mode == "write" else (f"--{mode}",)
+    result = sync(tmp_path, "permissions", "--from", "claude", "--to", "codex", *extra)
+    assert result.exit_code == 1, result.output
+    assert "Invalid source input" in result.output
+    assert "permissions must be an object" in result.output
+    if mode == "doctor":
+        assert "readiness: low" in result.output.lower()
+    assert target.read_bytes() == before_target
+    assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
+    assert not (tmp_path / ".codex/config.toml").exists()
+
+
+def test_source_error_is_reported_when_no_other_target_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_source(tmp_path)
+    source.write_text(json.dumps({"hooks": {"PreToolUse": {"hooks": [{"command": "./guard.sh"}]}}}))
+    monkeypatch.setattr(
+        "crossby.ai_tools.base.AbstractAITool.detect_installed", lambda: [AIToolID.CLAUDE]
+    )
+    result = sync(tmp_path, "hooks", "--from", "claude", "--plan")
+    assert result.exit_code == 1, result.output
+    assert "Invalid source input" in result.output
+    assert not (tmp_path / LEDGER_PATH).exists()
