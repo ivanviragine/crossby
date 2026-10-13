@@ -185,7 +185,7 @@ crossby is built to be inspected before it touches a file:
 
 - `crossby sync --plan` shows a stage-by-concern dry-run summary and writes nothing.
 - `--doctor` adds a readiness rating (`high` / `medium` / `low`) plus the target-validation checks that would run afterward.
-- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`).
+- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`). Cursor command checks temporarily look up supported `${env:NAME}` references once; unset references warn, and `$NAME` / `${NAME}` stay literal. Validation never executes commands or persists expanded values, and diagnostics retain the original references. See the [validation distinction](docs/mcp-environment-references.md#explicit-command-validation).
 - `--dry-run` runs a real sync in shadow mode.
 
 After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR. A row can be `Added`, `Removed` (a revocation), `Check before using` (a lossy translation), or `Not Added`. Pass `--no-persist-report` to skip it, or `--report-format markdown-table` to render the same shape on stdout.

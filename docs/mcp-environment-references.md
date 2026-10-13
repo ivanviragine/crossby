@@ -52,6 +52,22 @@ user-authored same-name entries are never claimed or revoked. Existing target
 native disables remain in place. Malformed source or activation files refuse
 MCP sync before writes. See [activation discovery](mcp-activation-discovery.md).
 
+## Explicit command validation
+
+Requested validation (`--validate-target`, or `--doctor`'s validation step) may
+look up environment values temporarily to check whether an MCP executable is
+available. Cursor command validation substitutes the supported `${env:NAME}`
+subset once, retaining surrounding text. It leaves `$NAME` and `${NAME}`
+literal and never recursively expands replacement values. An unset reference
+produces an unverifiable-command warning, without guessing an executable from
+the unresolved text.
+
+Validation does not execute commands or change native files, ownership, or sync
+reports. Both success and warning diagnostics use the original command text,
+not expanded environment values. Discovery, normalization, rendering, `--plan`
+and ordinary sync still preserve references without resolving values. Other
+targets retain their existing command-validation behavior.
+
 ## Native-format audit
 
 Audited on 2026-10-13:

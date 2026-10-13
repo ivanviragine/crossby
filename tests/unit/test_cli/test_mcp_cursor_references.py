@@ -344,3 +344,26 @@ def test_native_cursor_unsupported_fields_stay_in_inventory_and_preserve_targets
     assert _servers(target) == {"bad": {"command": "existing"}, "good": {"command": "portable"}}
     assert source.read_bytes() == source_before
     assert load_ledger(tmp_path).mcp(AIToolID.CLAUDE) == frozenset({"good"})
+
+
+def test_synced_cursor_command_validates_without_evaluating_persisted_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    monkeypatch.setenv("CROSSBY_TEST_EXE", sys.executable)
+    monkeypatch.setenv("COLUMNS", "240")
+    _write(tmp_path, "claude", {"local": {"command": "${CROSSBY_TEST_EXE}"}})
+    _sync(tmp_path, "claude", "cursor")
+    assert _servers(tmp_path / ".cursor/mcp.json")["local"]["command"] == "${env:CROSSBY_TEST_EXE}"
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = runner.invoke(app, ["sync", "--validate-target", "--path", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    cursor_row = next(
+        line for line in result.output.splitlines() if "cursor" in line and "MCP `local`" in line
+    )
+    assert "ok" in cursor_row and "${env:CROSSBY_TEST_EXE}" in cursor_row
+    assert "not on PATH" not in result.output
+    assert sys.executable not in result.output
+    after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert after == before

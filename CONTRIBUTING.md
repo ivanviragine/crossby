@@ -41,6 +41,8 @@ MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model
 
 `SyncData.mcp_sources` records each validated server's winning source. `sync/mcp_cursor.py` bridges the bounded Claude/Cursor environment-reference grammar; discovery normalizes Cursor before model validation and its writer renders native `${env:NAME}` syntax. `run_sync()` preflights per-target portability for explicit source and wizard paths: refuse unsupported Cursor rendering/reverse Codex shapes while retaining the conservative Codex/Cursor-source guard for Copilot and Antigravity CLI. Refused servers preserve target entries and ownership, without resolving values or changing Claude-to-Codex's existing fallback reports. Cursor's unrepresentable native fields remain in scene inventory. See the [reference audit and limits](docs/mcp-environment-references.md).
 
+Explicit command validation is the separate environment-lookup boundary: `sync/validate.py` expands only supported Cursor `${env:NAME}` references once for `shutil.which`, keeps literal dollar forms and original diagnostic text, and warns when a reference is unset. Never reuse that lookup in discovery or writers.
+
 Scenes use `discover_mcp_names()` to inventory native declarations independently of portable sync definitions. Unsupported Codex fields must never hide a server from launch or persistent scene restrictions. A strict launch config that would omit a selected native-only definition requests the existing persistent fallback instead of rendering a partial config.
 
 ## Wade execution defaults
