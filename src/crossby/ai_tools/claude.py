@@ -115,6 +115,9 @@ class ClaudeAdapter(AbstractAITool):
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CLAUDE
 
     def capabilities(self) -> AIToolCapabilities:
+        from crossby.ai_tools.claude_sdk import brokered_profile
+
+        brokered = brokered_profile()
         return AIToolCapabilities(
             tool_id=AIToolID.CLAUDE,
             display_name="Claude Code",
@@ -140,7 +143,12 @@ class ClaudeAdapter(AbstractAITool):
                     HeadlessNativeOutput.JSON,
                     HeadlessNativeOutput.JSONL,
                 ),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    (HeadlessInteractionMode.UNATTENDED, HeadlessInteractionMode.BROKERED)
+                    if brokered is not None
+                    else (HeadlessInteractionMode.UNATTENDED,)
+                ),
+                brokered=brokered,
                 supports_response_schema=True,
                 # Claude owns approvals itself; ``--print`` has no writable-root
                 # selector, so a sandbox=False request cannot be preserved.
@@ -268,6 +276,24 @@ class ClaudeAdapter(AbstractAITool):
         settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
         return ["--settings", settings]
 
+    def _validate_headless_request(
+        self, request: HeadlessSessionRequest, **kwargs: Any
+    ) -> HeadlessSessionRequest:
+        from crossby.ai_tools.claude_sdk import SDK_REMEDIATION, load_sdk
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            try:
+                load_sdk()
+            except Exception:
+                raise HeadlessUnsupportedError(
+                    "Claude brokered sessions require a compatible optional SDK. "
+                    f"{SDK_REMEDIATION}",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                ) from None
+        return super()._validate_headless_request(request, **kwargs)
+
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Reject schema requests Claude cannot answer with structured output."""
         from crossby.ai_tools.headless import HeadlessUnsupportedError
@@ -275,6 +301,7 @@ class ClaudeAdapter(AbstractAITool):
         if (
             request.response_schema is not None
             and request.native_output is HeadlessNativeOutput.TEXT
+            and request.interaction_mode is HeadlessInteractionMode.UNATTENDED
         ):
             raise HeadlessUnsupportedError(
                 "Claude Code exposes schema-constrained structured_output only through its JSON "
@@ -287,6 +314,10 @@ class ClaudeAdapter(AbstractAITool):
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
         """Return Claude's complete command, including any serialized schema."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.claude_sdk import sdk_command
+
+            return sdk_command(request)
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
@@ -335,6 +366,16 @@ class ClaudeAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended ``claude --print`` turn and normalize its result."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.claude_sdk import run_sdk_session
+
+            normalized = request.model_copy(
+                update={
+                    "model": self.normalize_model_format(request.model) if request.model else None
+                }
+            )
+            return run_sdk_session(normalized, context)
+
         from crossby.ai_tools.headless_cli import (
             MISSING,
             capture_failure_warnings,

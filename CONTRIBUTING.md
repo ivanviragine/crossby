@@ -437,6 +437,35 @@ display labels must never choose an implicit allow or deny decision.
 The checked behavior and version floors are documented in
 `docs/brokered-headless-verification.md`.
 
+Claude's alternate transport requires the optional `claude-sdk` extra. Run
+`uv run --extra claude-sdk pytest tests/unit/test_ai_tools/test_claude_sdk.py`
+to exercise the actual SDK dispatcher against deterministic child JSONL
+fixtures. Tests for missing/incompatible dependencies always run; SDK dispatch
+tests skip when the extra is absent. CI installs all extras. Keep the SDK pin,
+distribution/API gate, command builder and transport interface in agreement;
+the upstream custom transport API is explicitly unstable.
+The bridge captures native wire IDs before the SDK constructs callbacks,
+because `ToolPermissionContext` exposes only the tool-use ID. Use the shared
+optional `SessionOperation.native_input` for detached, bounded authoritative
+tool arguments; it is handler-only evidence and must never enter events or
+diagnostics. Forced runtime stops retain their timeout/cancellation status even
+when a profile requires a native terminal event for normal completion.
+Native transports can pass `request_cancel_event` to `interact()` or
+`native_interaction_response()` to stop the bridge's wait when a request is
+withdrawn without cancelling the session. `interact()` carries that signal through
+its interaction-event observers as well as the interaction handler; `emit()`
+accepts the same optional signal for request-bound notifications. The caller's
+handler remains isolated in its daemon worker; a late answer cannot re-enter dispatch. `JsonRpcProcess.send`
+accepts an optional `write_guard` which commits response rights inside the actual
+writer, after send-lock/executor waits. Existing callers retain their prior
+behavior. Claude synchronizes that guard with native withdrawal and closure.
+`send()` also accepts an optional `before_stop` hook for a bounded native abort
+attempt before cancellation or expiry forces a partial writer's process teardown.
+The transport must bound that hook; hard kill/join still run if it raises. Claude
+uses its existing once-owned interruption with a separate 0.2-second cleanup
+budget for both ordinary and approval writes. Other callers retain their prior
+stop behavior, and partial frames are never retried.
+
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget
 for blocking work and exit when cancelled; the runtime continues hard process
