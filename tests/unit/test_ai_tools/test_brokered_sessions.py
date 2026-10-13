@@ -1164,6 +1164,91 @@ def test_antigravity_continuation_reuses_exact_conversation_without_plan_mode(
     assert all("--mode" not in argv for argv in commands)
 
 
+@pytest.mark.parametrize("answer_source", ["free-form", "option-label"])
+@pytest.mark.parametrize("limit", ["posix-argument", "posix-total", "windows"])
+def test_antigravity_oversized_continuation_fails_before_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer_source: str,
+    limit: str,
+) -> None:
+    from crossby.ai_tools import base, headless_cli
+
+    class FakeOwner:
+        def __init__(self, _context: Any) -> None:
+            pass
+
+    adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+    request = _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
+    if limit == "windows":
+        monkeypatch.setattr(base.sys, "platform", "win32")
+        # Non-BMP characters occupy two UTF-16 units in CreateProcess argv.
+        answer = "\U0001f680" * 17_000
+    else:
+        monkeypatch.setattr(base.sys, "platform", "linux")
+        monkeypatch.setattr(base, "_MAX_HEADLESS_ARGUMENT_PROMPT", 120_000)
+        answer = "x" * (120_001 if limit == "posix-argument" else 80_000)
+        if limit == "posix-total":
+            request = request.model_copy(
+                update={"response_schema": {"type": "object", "description": "s" * 80_000}}
+            )
+            initial_argv = adapter._headless_argv_for_validation(request)
+            assert initial_argv is not None
+            monkeypatch.setattr(
+                base,
+                "_headless_posix_exec_limit",
+                lambda: (
+                    base._headless_posix_exec_size(initial_argv)
+                    + base._HEADLESS_POSIX_EXEC_SAFETY_MARGIN
+                    + 1_000
+                ),
+            )
+
+    commands: list[list[str]] = []
+
+    def run(_context: Any, *, argv: list[str], **_kwargs: Any) -> HeadlessCommandOutput:
+        commands.append(argv)
+        assert len(commands) == 1, "oversized continuation must not be launched"
+        return HeadlessCommandOutput(
+            0,
+            json.dumps(
+                {
+                    "status": "WAITING_FOR_INPUT",
+                    "conversation_id": "conv-exact",
+                    "question": {
+                        "id": "scope",
+                        "prompt": "Choose scope",
+                        "options": (
+                            [{"id": "api", "label": answer}]
+                            if answer_source == "option-label"
+                            else []
+                        ),
+                    },
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(headless_cli, "ResumableManagedCLIController", FakeOwner)
+    monkeypatch.setattr(headless_cli, "run_managed_command", run)
+    result = adapter.run_headless_session(
+        request,
+        lambda _interaction: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            **({"answer": answer} if answer_source == "free-form" else {"option_id": "api"}),
+        ),
+    )
+
+    assert len(commands) == 1
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.conversation_id == "conv-exact"
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
+    assert any(
+        "continuation exceeds native command limits" in warning for warning in result.warnings
+    )
+    assert answer not in str(result.model_dump())
+
+
 def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_approval(
     tmp_path: Path,
 ) -> None:

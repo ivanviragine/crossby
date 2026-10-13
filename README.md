@@ -459,6 +459,8 @@ native request and option IDs; OpenCode binds assistant completion and pending
 interactions to the submitted user message ID through each assistant's native
 `parentID`, and replies through the pending request ID;
 Antigravity permits at most nine invocations under one deadline.
+Each Antigravity continuation is checked against native command-size limits;
+an oversized answer or option label fails the session before another process starts.
 Antigravity exposes no authoritative permission channel, so it never advertises
 permission brokering. Codex, Cursor, and OpenCode accept only text in brokered
 mode; Antigravity accepts JSON or JSONL, including schema-constrained output.

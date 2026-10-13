@@ -141,6 +141,12 @@ abort, so its brokered profile advertises questions only. Streaming progress
 uses one 512-event limit across all continuations while still refreshing the
 idle deadline for later frames. A handler response that cannot map to an
 offered native answer ends with a failed terminal event.
+Before each continuation, the complete command is revalidated with its mapped
+answer and conversation ID. An answer or native option label that exceeds the
+POSIX argument/argv-and-environment limits or Windows UTF-16 command-line limit
+ends with a failed terminal event without starting another process or exposing
+the answer in diagnostics. Deterministic tests cover free-form answers and
+selected labels for all three limits.
 
 The deterministic wire tests are in
 `tests/unit/test_ai_tools/test_brokered_sessions.py`; existing collected-plan

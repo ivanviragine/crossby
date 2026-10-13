@@ -555,6 +555,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Continue exact native questions under one runtime and nine invocations."""
+        from crossby.ai_tools.headless import HeadlessRequestError
         from crossby.ai_tools.headless_cli import (
             MISSING,
             BoundedProgress,
@@ -577,6 +578,27 @@ class AntigravityCLIAdapter(AbstractAITool):
         streaming = request.native_output is HeadlessNativeOutput.JSONL
         progress = BoundedProgress(context)
         for _invocation in range(9):
+            if answer is not None:
+                # Callback answers and native labels replace the original prompt
+                # in argv; recheck the full continuation, including its binding.
+                try:
+                    self._validate_headless_argv(
+                        request.model_copy(update={"prompt": answer, "resume_id": conversation_id})
+                    )
+                except HeadlessRequestError:
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        conversation_id=conversation_id,
+                        warnings=(
+                            *warnings_seen,
+                            "Antigravity continuation exceeds native command limits. "
+                            "Shorten the answer or native option label.",
+                        ),
+                    )
             output = run_managed_command(
                 context,
                 argv=self._headless_command(

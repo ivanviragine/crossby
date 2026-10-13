@@ -319,7 +319,10 @@ including its version floor and interaction kinds. Protocol adapters use
 `ProtocolSessionController` to register one cleanup chain, track live JSON-RPC
 request IDs, and block late or duplicate replies. Antigravity uses
 `ResumableManagedCLIController` to rotate continuation processes under the same
-deadline and cleanup registration. Preserve exact native session, turn,
+deadline and cleanup registration. Revalidate complete continuation argv with
+the mapped answer and conversation ID before launching; callback text and native
+option labels must satisfy both per-argument and aggregate platform limits.
+Preserve exact native session, turn,
 conversation, request, and option IDs. Derive executable command fields only
 from native raw input; display text is never authority for command policy.
 Collected-plan entry points retain their artifact checks and native plan-mode
