@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
 
 logger = structlog.get_logger()
+_CURSOR_MESSAGE_LIMIT = 8 * 1024 * 1024
 
 # Cursor encodes reasoning effort in the model ID rather than a flag:
 # ``<family>[-thinking]-<effort>[-fast]`` (``claude-opus-5-5-high-fast``,
@@ -471,7 +472,10 @@ class CursorAdapter(AbstractAITool):
                 capability=self.capabilities().headless,
             )
 
-        if request.effort is None:
+        if request.effort is None and (
+            request.interaction_mode is not HeadlessInteractionMode.BROKERED
+            or request.model is None
+        ):
             return
         if not request.model:
             raise HeadlessRequestError(
@@ -500,6 +504,8 @@ class CursorAdapter(AbstractAITool):
                 tool_id=self.TOOL_ID,
                 capability=self.capabilities().headless,
             )
+        if request.effort is None:
+            return
         if model.split("[", 1)[0] == "auto":
             raise HeadlessRequestError(
                 f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
@@ -788,7 +794,7 @@ class CursorAdapter(AbstractAITool):
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("Cursor session/new omitted its native session ID")
         context.set_provenance(session_id=session_id)
-        rpc.set_abort("session/cancel", {"sessionId": session_id})
+        rpc.set_abort("session/cancel", {"sessionId": session_id}, notify=True)
 
         next_id = 4
         requested_effort = request.effort
@@ -886,7 +892,7 @@ class CursorAdapter(AbstractAITool):
         chunk_progress = BoundedProgress(context)
         tool_events = 0
         messages: dict[str, list[str]] = {}
-        last_message_id: str | None = None
+        message_bytes = 0
         usage_tokens: int | None = None
         while True:
             message = rpc.read()
@@ -925,8 +931,15 @@ class CursorAdapter(AbstractAITool):
                         or not isinstance(text, str)
                     ):
                         raise ValueError("Cursor message chunk lacked exact ID or text")
+                    chunk_bytes = len(text.encode("utf-8"))
+                    if message_id not in messages and messages:
+                        chunk_bytes += 1  # Separator between assistant messages.
+                    if message_bytes + chunk_bytes > _CURSOR_MESSAGE_LIMIT:
+                        raise context.transport_error(
+                            "Cursor assistant messages exceeded the final output size limit."
+                        )
+                    message_bytes += chunk_bytes
                     messages.setdefault(message_id, []).append(text)
-                    last_message_id = message_id
                     chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="chunk")
                 elif kind in {"tool_call", "tool_call_update"}:
                     tool_id = update.get("toolCallId")
@@ -977,11 +990,16 @@ class CursorAdapter(AbstractAITool):
                 continue
             if isinstance(method, str) and "id" in message:
                 raise ValueError(f"Cursor requested unsupported ACP method {method!r}")
-        final_text = "".join(messages[last_message_id]) if last_message_id is not None else None
+        joined = "\n".join("".join(chunks) for chunks in messages.values())
+        final_text = joined if joined.strip() else None
         exit_code = rpc.close_cleanly()
-        terminal = (
-            HeadlessTerminalStatus.SUCCEEDED if exit_code == 0 else HeadlessTerminalStatus.FAILED
-        )
+        if exit_code != 0:
+            terminal = HeadlessTerminalStatus.FAILED
+        elif final_text is None:
+            terminal = HeadlessTerminalStatus.INVALID_OUTPUT
+            context.add_warning("Cursor ended the turn without assistant text.")
+        else:
+            terminal = HeadlessTerminalStatus.SUCCEEDED
         context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
         return context.complete(
             terminal,

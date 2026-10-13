@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import pytest
 
 from crossby.ai_tools import AbstractAITool
-from crossby.ai_tools.headless import HeadlessTransportError
+from crossby.ai_tools.headless import HeadlessRequestError, HeadlessTransportError
 from crossby.ai_tools.headless_cli import HeadlessCommandOutput
 from crossby.models.ai import (
     AIToolID,
@@ -221,6 +221,53 @@ def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "First.\nSecond."
     assert sum(event.message == "delta" for event in result.events) == 512
+
+
+def test_codex_item_lifecycle_events_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            *[
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thr-exact",
+                        "turnId": "turn-exact",
+                        "item": {"type": "commandExecution"},
+                    },
+                }
+                for _ in range(4200)
+            ],
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turnId": "turn-exact",
+                    "item": {"type": "agentMessage", "id": "msg-exact", "text": "Done."},
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Done."
+    assert sum(event.kind is HeadlessEventKind.TOOL_STARTED for event in result.events) == 512
 
 
 @pytest.mark.parametrize(
@@ -530,6 +577,126 @@ def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "x" * 4200
     assert sum(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events) == 512
+
+
+def test_cursor_brokered_preserves_all_assistant_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            *[
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "ses-exact",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": message_id,
+                            "content": {"type": "text", "text": text},
+                        },
+                    },
+                }
+                for message_id, text in (("first", "Before tool."), ("second", "After tool."))
+            ],
+            {"id": 4, "result": {"stopReason": "end_turn"}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.final_text == "Before tool.\nAfter tool."
+
+
+def test_cursor_brokered_bounds_message_bytes_before_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("crossby.ai_tools.cursor._CURSOR_MESSAGE_LIMIT", 4)
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            *[
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "ses-exact",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "msg-exact",
+                            "content": {"type": "text", "text": "é"},
+                        },
+                    },
+                }
+                for _ in range(3)
+            ],
+        ],
+    )
+    with pytest.raises(HeadlessTransportError, match="size limit"):
+        AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+            _request(tmp_path),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+
+
+@pytest.mark.parametrize("text", [None, " \t "])
+def test_cursor_brokered_empty_end_turn_is_invalid_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
+) -> None:
+    frames: list[dict[str, Any]] = [
+        {"id": 1, "result": {"authMethods": []}},
+        {"id": 3, "result": {"sessionId": "ses-exact"}},
+    ]
+    if text is not None:
+        frames.append(
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": text},
+                    },
+                },
+            }
+        )
+    frames.append({"id": 4, "result": {"stopReason": "end_turn"}})
+    _install_rpc(monkeypatch, frames)
+    result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert any("without assistant text" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("model", "error"),
+    [
+        ("claude-opus-5-5[foo=1]", "invalid effort overrides"),
+        ("claude-opus-5-5-high[effort=low]", "conflicting effort encodings"),
+    ],
+)
+def test_cursor_brokered_rejects_bad_model_effort_before_session_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str, error: str
+) -> None:
+    _install_rpc(monkeypatch, [])
+    with pytest.raises(HeadlessRequestError, match=error):
+        AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+            _request(tmp_path, model=model),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+    assert _FakeRpc.instances == []
 
 
 def test_cursor_many_non_text_updates_and_tools_remain_bounded(
@@ -898,6 +1065,41 @@ def test_codex_mcp_form_requires_exact_schema_content(tmp_path: Path) -> None:
     assert rpc.sent == []
 
 
+@pytest.mark.parametrize(
+    ("outcome", "action"),
+    [
+        (PlanInteractionOutcome.DENIED, "decline"),
+        (PlanInteractionOutcome.SKIPPED, "decline"),
+        (PlanInteractionOutcome.CANCELLED, "cancel"),
+    ],
+)
+def test_codex_mcp_form_forwards_refusal(
+    tmp_path: Path, outcome: PlanInteractionOutcome, action: str
+) -> None:
+    from crossby.ai_tools.codex import _answer_codex_mcp_elicitation
+
+    rpc = _FakeRpc([], cwd=tmp_path)
+    message = {
+        "id": 92,
+        "params": {
+            "threadId": "thr-exact",
+            "turnId": "turn-exact",
+            "serverName": "fixture-server",
+            "mode": "form",
+            "message": "Choose a value",
+            "requestedSchema": {"type": "object"},
+        },
+    }
+    _answer_codex_mcp_elicitation(
+        rpc,
+        message,
+        thread_id="thr-exact",
+        turn_id="turn-exact",
+        handler=lambda _interaction: SessionInteractionResponse(outcome=outcome),
+    )
+    assert rpc.sent == [("respond", {"id": 92, "result": {"action": action}})]
+
+
 def test_codex_mcp_url_preserves_elicitation_id(tmp_path: Path) -> None:
     from crossby.ai_tools.codex import _answer_codex_mcp_elicitation
 
@@ -1030,6 +1232,111 @@ def test_protocol_controller_blocks_reused_and_late_native_replies(
     with pytest.raises(ValueError, match="no longer live"):
         controller.respond_native(18, {"answer": "late"})
     assert _FakeRpc.instances[-1].sent == [("respond", {"id": 17, "result": {"answer": "one"}})]
+
+
+@pytest.mark.parametrize("notify", [False, True])
+def test_protocol_controller_uses_notification_for_cursor_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, notify: bool
+) -> None:
+    from crossby.ai_tools.session_protocol import ProtocolSessionController
+
+    _install_rpc(monkeypatch, [])
+
+    class FakeContext:
+        deadline = 9999999999.0
+
+        def remaining_seconds(self) -> float:
+            return 10.0
+
+        def register_cleanup(self, hooks: Any) -> None:
+            self.hooks = hooks
+
+    context = FakeContext()
+    controller = ProtocolSessionController(context, ["fixture"], cwd=tmp_path)
+    controller.set_abort("session/cancel", {"sessionId": "ses-exact"}, notify=notify)
+    context.hooks.native_abort(None)
+    payload = _FakeRpc.instances[-1].sent[-1][1]
+    assert payload == {
+        **({} if notify else {"id": 999_999}),
+        "method": "session/cancel",
+        "params": {"sessionId": "ses-exact"},
+    }
+
+
+def test_managed_cli_kills_new_child_when_rotation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.headless_cli import run_managed_command
+
+    child = object()
+    killed: list[object] = []
+
+    class FakeContext:
+        def checkpoint(self) -> None:
+            return None
+
+        def transport_error(self, message: str) -> RuntimeError:
+            return RuntimeError(message)
+
+    class FakeOwner:
+        cleanup_requested = threading.Event()
+
+        def rotate(self, _child: object) -> None:
+            raise RuntimeError("previous child is still live")
+
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.subprocess.Popen", lambda *_a, **_k: child)
+    monkeypatch.setattr("crossby.ai_tools.headless_cli.kill_process_group", killed.append)
+    with pytest.raises(RuntimeError, match="could not rotate"):
+        run_managed_command(
+            FakeContext(),  # type: ignore[arg-type]
+            argv=["fixture"],
+            cwd=tmp_path,
+            controller=FakeOwner(),  # type: ignore[arg-type]
+        )
+    assert killed == [child]
+
+
+def test_opencode_abort_respects_cleanup_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.headless import HeadlessCleanupContext
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    timeouts: list[float] = []
+
+    class FakeConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            timeouts.append(timeout)
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def getresponse(self) -> FakeConnection:
+            return self
+
+        def read(self, _size: int) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
+    )
+    server = OpenCodeServer.__new__(OpenCodeServer)
+    server.active_session_id = "ses-exact"
+    server.port = 1234
+    server.directory = tmp_path
+    server.authorization = "fixture"
+    cancelled = threading.Event()
+    server._abort_active_session(HeadlessCleanupContext(time.monotonic() - 1, cancelled))
+    cancelled.set()
+    server._abort_active_session(HeadlessCleanupContext(time.monotonic() + 1, cancelled))
+    assert timeouts == []
+    cancelled.clear()
+    server._abort_active_session(HeadlessCleanupContext(time.monotonic() + 0.05, cancelled))
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= 0.05
 
 
 @pytest.mark.parametrize(

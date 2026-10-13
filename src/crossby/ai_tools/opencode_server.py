@@ -278,11 +278,14 @@ class OpenCodeServer:
                 _required_text(properties, "delta")
                 context.mark_progress()
 
-    def _abort_active_session(self, _ctx: HeadlessCleanupContext) -> None:
+    def _abort_active_session(self, ctx: HeadlessCleanupContext) -> None:
         session_id = self.active_session_id
         if session_id is None or self.port is None:
             return
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=0.2)
+        budget = ctx.remaining_seconds()
+        if budget <= 0 or ctx.cancel_event.is_set():
+            return
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=min(0.2, budget))
         try:
             connection.request(
                 "POST",

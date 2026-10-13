@@ -211,7 +211,13 @@ def run_managed_command(
             **process_tree_popen_kwargs(),
         )
         proc = child
-        owner.rotate(child)
+        try:
+            owner.rotate(child)
+        except RuntimeError:
+            kill_process_group(child)
+            raise context.transport_error(
+                "The managed headless transport could not rotate the native CLI."
+            ) from None
         own_process_tree(child)
     except (OSError, ValueError):
         owned_process = owner.current()

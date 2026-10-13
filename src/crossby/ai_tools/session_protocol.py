@@ -45,6 +45,7 @@ class ProtocolSessionController:
         self._resolved = False
         self._abort_method: str | None = None
         self._abort_params: dict[str, Any] | None = None
+        self._abort_notification = False
         process_type = HeaderlessJsonRpcProcess if headerless else JsonRpcProcess
         self.process = process_type(
             command,
@@ -68,12 +69,13 @@ class ProtocolSessionController:
     def stderr(self) -> str:
         return self.process.stderr
 
-    def set_abort(self, method: str, params: dict[str, Any]) -> None:
+    def set_abort(self, method: str, params: dict[str, Any], *, notify: bool = False) -> None:
         with self._lock:
             if self._resolved:
                 return
             self._abort_method = method
             self._abort_params = params
+            self._abort_notification = notify
 
     def request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
         self.context.checkpoint()
@@ -121,11 +123,15 @@ class ProtocolSessionController:
             self._resolved = True
             self._pending.clear()
             method, params = self._abort_method, self._abort_params
+            notify = self._abort_notification
         if method is None or params is None or self.process.returncode is not None:
             return
         # Cleanup has a fixed grace independent of the expired work deadline.
         # The runtime bounds this cooperative hook before closing the pipe.
-        self.process.send_cleanup({"id": 999_999, "method": method, "params": params})
+        payload: dict[str, Any] = {"method": method, "params": params}
+        if not notify:
+            payload["id"] = 999_999
+        self.process.send_cleanup(payload)
 
     def _close_input(self, _cleanup: HeadlessCleanupContext) -> None:
         self.process.close_input()

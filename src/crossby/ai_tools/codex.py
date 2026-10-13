@@ -800,16 +800,16 @@ class CodexAdapter(AbstractAITool):
                     ):
                         raise ValueError("Codex completed an empty agent message")
                     final_text = text if final_text is None else f"{final_text}\n{text}"
-                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="completed")
+                    delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="completed")
                 elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
-                    context.emit(
+                    delta_progress.note(
                         HeadlessEventKind.TOOL_COMPLETED
                         if method == "item/completed"
                         else HeadlessEventKind.TOOL_STARTED,
                         message=str(item_kind),
                     )
                 else:
-                    context.emit(HeadlessEventKind.PROGRESS, message="item updated")
+                    delta_progress.note(HeadlessEventKind.PROGRESS, message="item updated")
                 continue
             if method in _CODEX_BROKERED_PROGRESS_METHODS:
                 if not isinstance(params, dict) or (
@@ -1745,6 +1745,12 @@ def _answer_codex_mcp_elicitation(
         ),
     )
     response = handler(interaction)
+    if response.outcome in {PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED}:
+        rpc.respond(message["id"], {"action": "decline"})
+        return
+    if response.outcome is PlanInteractionOutcome.CANCELLED:
+        rpc.respond(message["id"], {"action": "cancel"})
+        return
     if response.option_id != "accept" or response.option_ids or response.answer is not None:
         raise ValueError("Codex MCP elicitation requires an explicit accept option")
     if schema is not None:

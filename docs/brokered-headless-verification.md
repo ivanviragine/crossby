@@ -9,7 +9,7 @@ runtime terminal checks, and cleanup.
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
-| Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` for the active session, then process cleanup |
+| Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` notification for the active session, then process cleanup |
 | OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | session abort only for a newly created session, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
 
@@ -23,8 +23,9 @@ requests have no such field; the response schemas define the exact `accept`,
 offers those native decisions when the request omits the list. Built-in
 permission requests carry a structured permission profile; an explicit
 approval grants that exact profile for the turn. MCP form content is checked
-against the request schema before a response is sent. A missing or invalid
-selection cannot become a native response.
+against the request schema before an accepted response is sent; denied or
+skipped elicitation sends `decline`, and cancellation sends `cancel`. A missing
+or invalid selection cannot become a native response.
 Ordinary Codex threads are persisted so their returned thread IDs can be
 resumed; collected-plan threads keep their prior ephemeral behavior.
 Bounded agent-message, reasoning, plan, command, file-change, and MCP progress
@@ -42,13 +43,15 @@ and a clean process exit. It populates executable operation fields only from
 `rawInput`; a tool's display title cannot authorize a command. At most 512
 message chunk, usage, and fallback progress updates produce visible events;
 tool updates have a separate 512-event cap. Later updates still refresh the
-idle deadline, and all message chunks assemble the final response. A denied
-permission response cannot forward a selected native option, even if the
-handler supplies one. Cursor's
-brokered profile does not offer command policy or response schemas. It applies
-model-encoded effort and rechecks model, effort, and variants after all
-configuration updates. It checks `agentCapabilities.loadSession` before
-loading a saved session, validates
+idle deadline, and assistant messages assemble in native order under an 8 MiB
+aggregate UTF-8 limit. An `end_turn` without non-blank assistant text yields
+`INVALID_OUTPUT`. A denied permission response cannot forward a selected
+native option, even if the handler supplies one. Cursor's brokered profile
+does not offer command policy or response schemas. It applies
+model-encoded effort and rejects malformed or conflicting effort encodings in
+preflight, even without a separate effort request. It rechecks model, effort,
+and variants after all configuration updates. It checks
+`agentCapabilities.loadSession` before loading a saved session, validates
 replayed session IDs, and rejects model or effort overrides on load.
 The installed 2026.09.10 build advertised `loadSession` during an ACP
 initialize probe; the local CLI required a Cursor login before a live
