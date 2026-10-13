@@ -158,6 +158,13 @@ class SceneLaunchContext:
 
     def deselected_mcp(self) -> set[str]:
         """Discovered MCP servers the scene drops (universe minus selected)."""
+        if (
+            self.resolved.configured_concerns is not None
+            and "mcp" not in self.resolved.configured_concerns
+        ):
+            # An omitted selector leaves the native runtime's project/user
+            # layers alone; no strict config or additional MCP flags are needed.
+            return set()
         disabled = self.sync_data.mcp_disabled | {
             name for name, cfg in self.sync_data.mcp_servers.items() if not cfg.enabled
         }

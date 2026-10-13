@@ -14,6 +14,8 @@ cannot be rendered as a strict launch configuration.
 An MCP-scoped scene launch refuses invalid native activation before persistent
 fallback, artifact pruning, or child-process dispatch. Activation validation
 covers every scanned source, including declarations that lose name conflicts.
+Scenes that omit MCP apply no MCP filter or strict-config flags; native runtime
+layering continues to control their project and user servers.
 
 ## Audited surfaces
 
@@ -62,6 +64,12 @@ overrides or search ancestor settings layers outside that directory.
   working directory; sanitization replaces non-ASCII-alphanumeric runs with
   hyphens and trims leading/trailing hyphens. `CURSOR_CONFIG_DIR` relocates
   configuration, while `CURSOR_DATA_DIR` relocates this state.
+- [Cursor MCP configuration](https://prod.cursor.com/docs/mcp) accepts remote
+  URL-only entries. The same installed client starts them with streamable HTTP
+  and preserves explicit `type: "sse"`; Crossby normalizes the HTTP-first
+  default before validation. Native fallback from HTTP to SSE is not probed or
+  reproduced across tools: set an explicit SSE type before porting an SSE-only
+  endpoint.
 - [VS Code MCP documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
   explicitly separates enable/disable state from `mcp.json`.
 

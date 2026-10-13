@@ -188,6 +188,10 @@ def discover_mcp_servers(
             # an explicit transport discriminator (unlike Claude's url).
             if tool == "antigravity-cli" and "serverUrl" in entry and "command" not in entry:
                 normalized.setdefault("transport", "http")
+            # Cursor's native client starts URL-only declarations with
+            # streamable HTTP; an explicit SSE discriminator remains intact.
+            if tool == "cursor" and "url" in entry and "command" not in entry:
+                normalized.setdefault("transport", "http")
             enabled = (
                 _entry_enabled(
                     entry, "disabled", f"{path}: MCP server `{name}`", result.errors, invert=True

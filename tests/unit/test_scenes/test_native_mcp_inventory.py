@@ -134,3 +134,26 @@ def test_malformed_native_activation_refuses_strict_scene_configuration(tmp_path
     context = _context(tmp_path, ["native"])
     with pytest.raises(SceneLaunchInputError, match="Invalid native MCP activation"):
         context.selected_mcp()
+
+
+@pytest.mark.parametrize("scoped_mcp", [False, True])
+def test_skills_scene_omitted_mcp_does_not_create_strict_config_for_native_disables(
+    tmp_path: Path, scoped_mcp: bool
+) -> None:
+    from crossby.ai_tools.claude import ClaudeAdapter
+
+    source = _native(tmp_path, {"enabled": False})
+    scene = SceneConfig(
+        skills=SceneSelector(include=[]),
+        mcp=SceneSelector(include=["native", "portable"]) if scoped_mcp else None,
+    )
+    scan = scan_project(tmp_path, [AIToolID.CLAUDE, AIToolID.CODEX])
+    resolved = resolve_scene(scene, scan, tmp_path)
+    context = SceneLaunchContext("skills", resolved, tmp_path, build_sync_data(tmp_path))
+    assert ("mcp" in (resolved.configured_concerns or ())) is scoped_mcp
+    assert context.narrows_mcp() is scoped_mcp
+    args = ClaudeAdapter().scene_launch_args(context)
+    assert ("--strict-mcp-config" in args.args) is scoped_mcp
+    assert ("--mcp-config" in args.args) is scoped_mcp
+    assert ("native" in context.deselected_mcp()) is scoped_mcp
+    assert "enabled = false" in source.read_text()

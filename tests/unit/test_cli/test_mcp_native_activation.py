@@ -523,3 +523,50 @@ def test_losing_source_malformed_activation_cannot_authorize_owned_removal(
     result = CliRunner().invoke(app, ["sync", "mcp", "--path", str(tmp_path)])
     assert result.exit_code == 1, result.output
     assert (target.read_bytes(), ledger_path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("transport", [None, "sse"])
+def test_cursor_remote_transport_and_native_disable_use_production_flow(
+    tmp_path: Path, transport: str | None
+) -> None:
+    source = tmp_path / ".cursor/mcp.json"
+    source.parent.mkdir()
+    remote = {"url": "https://example.test/mcp"}
+    if transport is not None:
+        remote["type"] = transport
+    source.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "local": {"command": "local-server"},
+                    "remote": remote,
+                }
+            }
+        )
+    )
+    result = sync(tmp_path, "cursor", target="claude")
+    assert result.exit_code == 0, result.output
+    target = tmp_path / ".mcp.json"
+    servers = json.loads(target.read_text())["mcpServers"]
+    assert set(servers) == {"local", "remote"}
+    assert servers["remote"]["type"] == (transport or "http")
+    assert load_ledger(tmp_path).mcp(AIToolID.CLAUDE) == {"local", "remote"}
+    sidecar = cursor_disabled_path(tmp_path)
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text('["remote"]')
+    result = sync(tmp_path, "cursor", target="claude")
+    assert result.exit_code == 0, result.output
+    assert set(json.loads(target.read_text())["mcpServers"]) == {"local"}
+    assert load_ledger(tmp_path).mcp(AIToolID.CLAUDE) == {"local"}
+
+
+def test_fresh_disabled_cursor_url_only_remote_is_not_provisioned(tmp_path: Path) -> None:
+    source = tmp_path / ".cursor/mcp.json"
+    source.parent.mkdir()
+    source.write_text('{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}')
+    sidecar = cursor_disabled_path(tmp_path)
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text('["remote"]')
+    result = sync(tmp_path, "cursor", target="claude")
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".mcp.json").exists()
