@@ -71,6 +71,10 @@ class ResolvedScene:
     tool_id: AIToolID | None
     groups: tuple[ResolvedGroup, ...]
     warnings: tuple[str, ...]
+    # None retains compatibility for callers constructing resolved scenes
+    # directly. The resolver records explicit scope even when a selector keeps
+    # every project item, which differs from omitting that concern entirely.
+    configured_concerns: frozenset[str] | None = None
 
     def groups_for(self, concern: str) -> tuple[ResolvedGroup, ...]:
         """Return the resolved groups for a single concern."""
@@ -168,7 +172,14 @@ def resolve_scene(
                 )
             )
 
-    return ResolvedScene(tool_id=tool_id, groups=tuple(groups), warnings=tuple(warnings))
+    return ResolvedScene(
+        tool_id=tool_id,
+        groups=tuple(groups),
+        warnings=tuple(warnings),
+        configured_concerns=frozenset(
+            concern for concern in SCENE_CONCERNS if getattr(scene, concern) is not None
+        ),
+    )
 
 
 def concern_universe(scan: ProjectScan, project_root: Path) -> dict[str, tuple[str, ...]]:
