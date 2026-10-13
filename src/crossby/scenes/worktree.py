@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -196,6 +197,13 @@ class WorktreeRequest:
                     repository, "show", f"{commit}:{name}", raw=True
                 )
 
+        def fold_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(unicodedata.normalize("NFD", part).casefold() for part in parts)
+
+        folded_links = {fold_parts(parts): parts for parts in links}
+        if len(folded_links) != len(links):
+            raise WorktreeError("Case-ambiguous committed symlink paths are unsupported.")
+
         def resolve_committed(path: Path) -> Path:
             pending = list(path.parts)
             resolved: list[str] = []
@@ -210,7 +218,10 @@ class WorktreeRequest:
                     resolved.pop()
                     continue
                 resolved.append(component)
-                if (target_link := links.get(tuple(resolved))) is not None:
+                key = tuple(resolved)
+                if key not in links and fold_parts(key) in folded_links:
+                    raise WorktreeError(f"Case-ambiguous committed symlink chain: {path}")
+                if (target_link := links.get(key)) is not None:
                     followed += 1
                     if not target_link or Path(target_link).is_absolute() or followed > 40:
                         raise WorktreeError(f"Unsafe committed symlink chain: {path}")

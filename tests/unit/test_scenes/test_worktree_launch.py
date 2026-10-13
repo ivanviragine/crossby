@@ -1307,3 +1307,40 @@ def test_inherited_pathspec_modes_cannot_change_literal_isolation_queries(
     with request(project).create() as owned:
         assert (owned.path / "package/app.py").read_text() == "committed\n"
     assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize(
+    ("alias", "target"),
+    [("alias", "ALIAS/.."), ("alias", "aLiAs/.."), ("caf\u00e9", "cafe\u0301/..")],
+)
+def test_case_ambiguous_symlink_chains_refused_before_allocation(
+    project: dict[str, Path], alias: str, target: str
+) -> None:
+    repo = project["repo"]
+    (repo / alias).symlink_to(".", target_is_directory=True)
+    (repo / "up").symlink_to(target, target_is_directory=True)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "case alias fixture")
+    with pytest.raises(WorktreeError, match="Case-ambiguous"):
+        request(project)
+    assert not list(project["owners"].iterdir())
+
+
+def test_duplicate_case_folded_link_identities_refused(project: dict[str, Path]) -> None:
+    repo = project["repo"]
+    (repo / "alias").symlink_to(".", target_is_directory=True)
+    git(repo, "add", "alias")
+    git(repo, "config", "core.ignoreCase", "false")
+    blob = (
+        subprocess.check_output(
+            ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=b"."
+        )
+        .decode()
+        .strip()
+    )
+    # Index plumbing creates both identities even on a case-insensitive volume.
+    git(repo, "update-index", "--add", "--cacheinfo", "120000", blob, "ALIAS")
+    git(repo, "commit", "-qm", "duplicate link identities fixture")
+    with pytest.raises(WorktreeError, match="Case-ambiguous"):
+        request(project)
+    assert not list(project["owners"].iterdir())

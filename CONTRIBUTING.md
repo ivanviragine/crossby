@@ -155,7 +155,9 @@ and checkout on the same frozen tree, including conditional configuration.
 Resolve hook paths through committed symlink components before checking their
 mode in the unpopulated target; a filesystem existence check cannot do this.
 Use literal Git pathspecs for filenames from HEAD or configuration, including
-hook targets beginning with pathspec magic such as `:(literal)`.
+hook targets beginning with pathspec magic such as `:(literal)`. Refuse
+case/Unicode-normalization aliases of committed link components and duplicate
+link identities conservatively, so validation also holds on macOS filesystems.
 Bulk Git operations have a finite 600-second deadline; metadata queries retain
 30 seconds. Normalize reciprocal Gitlinks relative to their
 containing directories, including after native relative-path repair.

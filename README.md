@@ -313,7 +313,8 @@ native per-launch MCP overrides instead of a global scene profile.
 is an error. Injection requires effective worktree isolation. `--keep-worktree`
 requires isolation, and isolation requires `--scene`, a Git repository and a
 foreground CLI tool; it cannot resume an old session. V1 refuses submodules,
-committed symlink chains escaping the checkout and executable Git `post-checkout`
+committed symlink chains escaping the checkout, case-ambiguous symlink paths,
+and executable Git `post-checkout`
 hooks. Active Git smudge/process filters for files in HEAD are also refused,
 including attributes from `.git/info/attributes` or global configuration. Unused
 filter drivers are allowed. Checking configured drivers requires Git 2.43 or
