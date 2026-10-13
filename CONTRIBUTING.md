@@ -1162,7 +1162,8 @@ and [app-server read contract](https://developers.openai.com/codex/app-server)
 describe the relevant controls and methods.
 
 Ordinary managed unattended requests preserve their model, effort, sandbox and
-network inputs. Fresh ordinary CLI checks audit a narrow option set; profiles,
+network inputs, including the adapter's native effort mapping (`MAX` is `xhigh`
+for Codex). Fresh ordinary CLI checks audit a narrow option set; profiles,
 source-changing flags, local providers, cwd/worktree relocation, custom thread
 sources, brokered transports, resume and planning return `unknown`. Mixed feature
 toggles and config overrides return `unknown` because native precedence differs

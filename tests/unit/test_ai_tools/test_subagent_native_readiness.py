@@ -337,22 +337,28 @@ def test_managed_request_compatibility(
     assert "private-prompt" not in result.model_dump_json()
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_managed_context_preserves_model_effort_and_network(
     native: dict[str, Any],
     tmp_path: Path,
+    effort: str,
 ) -> None:
     request = HeadlessSessionRequest(
         prompt="private-prompt",
         working_dir=tmp_path,
         model="fixture-model",
-        effort="high",
+        effort=effort,
         network_access=False,
     )
-    result = AbstractAITool.get("codex").subagent_spawning_status(request=request)
+    adapter = AbstractAITool.get("codex")
+    result = adapter.subagent_spawning_status(request=request)
     assert result.state is SubagentSpawnState.AVAILABLE
     command = native["launches"][0][0]
     assert 'model="fixture-model"' in command
-    assert 'model_reasoning_effort="high"' in command
+    launch = adapter._headless_command(request, schema_path=None)
+    native_effort = f'model_reasoning_effort="{"xhigh" if effort == "max" else effort}"'
+    assert native_effort in launch
+    assert native_effort in command
     assert 'sandbox_mode="workspace-write"' in command
     assert "sandbox_workspace_write.network_access=false" in command
     assert "private-prompt" not in repr(native["calls"]) + repr(command)

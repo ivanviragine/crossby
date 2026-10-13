@@ -68,7 +68,11 @@ def _unknown() -> ReadinessProbeError:
     return ReadinessProbeError(SubagentSpawnReason.PROBE_UNPARSEABLE)
 
 
-def _options(context: SubagentLaunchContext, request: HeadlessSessionRequest | None) -> list[str]:
+def _options(
+    adapter: AbstractAITool,
+    context: SubagentLaunchContext,
+    request: HeadlessSessionRequest | None,
+) -> list[str]:
     """Keep native semantics narrow; never reorder mixed feature/config forms."""
     options: list[str] = []
     selectors: dict[str, str] = {}
@@ -137,7 +141,7 @@ def _options(context: SubagentLaunchContext, request: HeadlessSessionRequest | N
         if request.model is not None:
             selectors["model"] = request.model
         if request.effort is not None:
-            selectors["model_reasoning_effort"] = request.effort.value
+            options.extend(adapter.effort_args(request.effort))
         selectors["sandbox_mode"] = "workspace-write" if request.sandbox else "danger-full-access"
         if request.sandbox:
             options.extend(
@@ -453,7 +457,7 @@ def codex_readiness(adapter: AbstractAITool, context: SubagentLaunchContext) -> 
                 evidence,
             )
         request = ordinary_request(adapter, context, deadline)
-        options = _options(context, request)
+        options = _options(adapter, context, request)
         binary = context.binary_path("codex")
         if binary is None:
             raise ReadinessProbeError(SubagentSpawnReason.TOOL_NOT_INSTALLED)
