@@ -35,6 +35,8 @@ def read_merge_write_json(
     updates: dict[str, Any],
     removals: set[str],
     dry_run: bool = False,
+    *,
+    preserve_entry_booleans: frozenset[str] = frozenset(),
 ) -> tuple[SyncAction, str, list[str], list[str], int]:
     """Atomic read-modify-write for a JSON config file.
 
@@ -71,13 +73,37 @@ def read_merge_write_json(
 
     section: dict[str, Any] = existing.get(key, {})
     if not isinstance(section, dict):
+        if preserve_entry_booleans:
+            return "error", f"{path}: {key} must be an object", [], [], 0
         section = {}
+
+    # Native MCP activation belongs to the target user/scene. Validate the
+    # touched entries before mutating anything, then retain those booleans when
+    # refreshing connection fields. Other JSON merge callers use no such keys.
+    for name in set(updates) | removals:
+        current = section.get(name)
+        if isinstance(current, dict):
+            for field_name in preserve_entry_booleans:
+                if field_name in current and not isinstance(current[field_name], bool):
+                    return (
+                        "error",
+                        f"{path}: MCP server `{name}` {field_name} must be a boolean",
+                        [],
+                        [],
+                        0,
+                    )
 
     written: list[str] = []
     created: list[str] = []
     removed = 0
 
     for name, entry in updates.items():
+        current = section.get(name)
+        if preserve_entry_booleans and isinstance(current, dict):
+            entry = {
+                **entry,
+                **{key: current[key] for key in preserve_entry_booleans if key in current},
+            }
         if section.get(name) != entry:
             # Claim ownership only for names absent before this run — overwriting
             # a same-named entry (hand-authored or otherwise) applies the change

@@ -189,6 +189,8 @@ def discover_mcp(
     include_user_scope: bool = False,
     diagnostics: list[str] | None = None,
     sources: dict[str, str] | None = None,
+    disabled: set[str] | None = None,
+    errors: list[str] | None = None,
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
@@ -198,11 +200,15 @@ def discover_mcp(
     crosses tool boundaries; filtering the globally-resolved result by tool
     *after* the scan would silently drop a tool's own server whenever another
     tool defined the same name earlier in the (unscoped) scan order. User-scope
-    ``~/.claude.json`` is only read when *include_user_scope* is set.
+    definitions in ``~/.claude.json`` are imported only when
+    *include_user_scope* is set; project activation metadata is always read.
 
     Returns server name → MCPServerConfig (validated).
     When *diagnostics* is supplied, append value-free manual-fix messages for
     unsupported Codex entries there; direct discovery callers receive warnings.
+    *disabled* collects authoritative native disables independently of
+    portability, and *errors* collects invalid-source diagnostics for the
+    concern-scoped write gate.
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
@@ -211,6 +217,13 @@ def discover_mcp(
         include_user_scope=include_user_scope,
         from_tool=str(from_tool) if from_tool is not None else None,
     )
+    if errors is not None:
+        errors.extend(discovery.errors)
+    elif discovery.errors:
+        logger.warning("mcp.invalid_activation", errors=discovery.errors)
+    # Incomplete activation cannot be interpreted as an enabled inventory.
+    if discovery.errors:
+        return {}
     for name, kept_from, ignored_from in discovery.conflicts:
         logger.warning(
             "mcp.conflict",
@@ -224,11 +237,37 @@ def discover_mcp(
         )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
+        if discovered.enabled is None:
+            continue
+        # Validate connection shape before granting removal authority. This
+        # still allows valid native-only fields excluded by portability checks.
+        try:
+            server = MCPServerConfig(**discovered.data)
+        except Exception:
+            message = (
+                f"MCP server `{name}` (from {discovered.source_tool}) has an invalid "
+                "connection configuration; target and ownership preserved."
+            )
+            if errors is not None:
+                errors.append(message)
+            else:
+                logger.warning("mcp.invalid_configuration", message=message)
+            continue
+        if sources is not None:
+            sources[name] = discovered.source_tool
+        if not discovered.enabled and disabled is not None:
+            disabled.add(name)
         if discovered.unsupported_fields:
+            outcome = (
+                "The source explicitly disables this server; only Crossby-owned target "
+                "copies may be revoked."
+                if not discovered.enabled
+                else "This server was not synced; existing target entries are preserved."
+            )
             message = (
                 f"MCP server `{name}` (from {discovered.source_tool}) uses fields "
                 f"Crossby cannot faithfully port: {', '.join(discovered.unsupported_fields)}. "
-                "This server was not synced; existing target entries are preserved. "
+                f"{outcome} "
                 "This is a manual-fix — configure it directly in each target's native config."
             )
             if diagnostics is not None:
@@ -236,12 +275,7 @@ def discover_mcp(
             else:
                 logger.warning("mcp.unsupported", message=message)
             continue
-        try:
-            servers[name] = MCPServerConfig(**discovered.data)
-        except Exception:
-            continue
-        if sources is not None:
-            sources[name] = discovered.source_tool
+        servers[name] = server
     return servers
 
 
@@ -1216,7 +1250,7 @@ def scan_project(
         rules=ConcernScan(found=rules_found, summary=rules_summary),
         agents=ConcernScan(found=dict(agents_found), summary=agents_summary),
         skills=ConcernScan(found=dict(skills_found), summary=skills_summary),
-        mcp=ConcernScan(found=dict(mcp_by_tool), summary=mcp_summary),
+        mcp=ConcernScan(found=dict(mcp_by_tool), summary=mcp_summary, errors=discovery.errors),
         permissions=ConcernScan(found=dict(perm_by_tool), summary=perm_summary, errors=perm_errors),
         hooks=ConcernScan(found=dict(hooks_by_tool), summary=hooks_summary, errors=hook_errors),
         plugins=ConcernScan(found=dict(plugins_found), summary=plugins_summary),
@@ -1274,12 +1308,16 @@ def build_sync_data(
     # MCP, permissions, hooks
     mcp_warnings: list[str] = []
     mcp_sources: dict[str, str] = {}
+    mcp_disabled: set[str] = set()
+    mcp_errors: list[str] = []
     mcp_servers = discover_mcp(
         project_root,
         from_tool=from_tool,
         include_user_scope=include_user_scope,
         diagnostics=mcp_warnings,
         sources=mcp_sources,
+        disabled=mcp_disabled,
+        errors=mcp_errors,
     )
     perm_errors: list[str] = []
     hook_errors: list[str] = []
@@ -1294,11 +1332,13 @@ def build_sync_data(
         mcp_servers=mcp_servers,
         mcp_warnings=mcp_warnings,
         mcp_sources=mcp_sources,
+        mcp_disabled=mcp_disabled,
         allowed_commands=allowed_commands,
         hooks=hooks,
         source_errors={
             c: errors
             for c, errors in (
+                (SyncConcern.MCP, mcp_errors),
                 (SyncConcern.PERMISSIONS, perm_errors),
                 (SyncConcern.HOOKS, hook_errors),
             )
