@@ -32,7 +32,7 @@ from crossby.models.config import SCENE_CONCERNS, SceneConfig, SceneSelector
 from crossby.sync.readers import (
     ProjectScan,
     discover_hooks,
-    discover_mcp,
+    discover_mcp_names,
     discover_permissions,
 )
 
@@ -258,14 +258,18 @@ def _collect_groups(concern: str, scan: ProjectScan, project_root: Path) -> list
     if concern == "agents":
         return _dir_groups(scan.agents.found, project_root, _list_agent_names)
     if concern == "mcp":
-        return _global_group(sorted(discover_mcp(project_root)), scan)
+        return _global_group(sorted(discover_mcp_names(project_root)), scan)
     if concern == "permissions":
         # sorted() like mcp/hooks: discover_permissions preserves reader order,
         # so sort here to keep every concern's group.names deterministic.
-        return _global_group(sorted(discover_permissions(project_root)), scan)
+        errors: list[str] = []
+        patterns = discover_permissions(project_root, errors=errors)
+        return _global_group([] if errors else sorted(patterns), scan)
     if concern == "hooks":
-        names = [f"{hook.event}:{hook.command}" for hook in discover_hooks(project_root)]
-        return _global_group(sorted(names), scan)
+        errors = []
+        hooks = discover_hooks(project_root, errors=errors)
+        names = [f"{hook.event}:{hook.command}" for hook in hooks]
+        return _global_group([] if errors else sorted(names), scan)
     return []  # unreachable — SCENE_CONCERNS is the single source of truth
 
 
