@@ -97,6 +97,7 @@ class AntigravityAdapter(AbstractAITool):
         *,
         sandbox: bool = True,
         on_event: InteractiveLaunchHandler | None = None,
+        owned_process: bool = False,
     ) -> int:
         # The Antigravity IDE is a GUI launcher: it has no sandbox, so
         # `network_access` and `sandbox` are inert (the CLI warns + ignores
@@ -105,6 +106,8 @@ class AntigravityAdapter(AbstractAITool):
         # `antigravity <path>` opens the workspace, mirroring the VS Code-family
         # launcher convention (`code <path>` / `cursor <path>`). Pass the working
         # dir explicitly rather than "." so the target is unambiguous.
+        if owned_process:
+            raise ValueError("Owned worktree launches require a foreground CLI tool")
         if on_event is not None:
             raise ValueError("This adapter does not support interactive startup events")
 

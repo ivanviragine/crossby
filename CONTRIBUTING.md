@@ -139,6 +139,76 @@ CLI command
 
 Keep these separate when adding launch logic.
 
+### Owned isolated launches
+
+`scenes/worktree.py` freezes HEAD and validates source bundles and committed cwd
+before allocation, resolving committed symlink chains without relying on lexical
+normalization. Inspect effective last-value Git filter configuration and HEAD
+attributes via `check-attr --source` before allocation; account for repository
+info/global attributes, preserve the original index, and allow unused or locally
+disabled drivers. Allocate with `worktree add --no-checkout`, establish ownership,
+then recheck effective filters and hooks in that worktree before populating it.
+Conditional includes can change configuration by Git directory or branch; the
+original checkout alone cannot authorize population. Strip `GIT_ATTR_SOURCE`
+from Git subprocesses and pin `attr.tree` during population to keep validation
+and checkout on the same frozen tree, including conditional configuration.
+Resolve hook paths through committed symlink components before checking their
+mode in the unpopulated target; a filesystem existence check cannot do this.
+Use literal Git pathspecs for filenames from HEAD or configuration, including
+hook targets beginning with pathspec magic such as `:(literal)`. Refuse
+case/Unicode-normalization aliases of committed link components and duplicate
+link identities conservatively, so validation also holds on macOS filesystems.
+Check hook aliases against all committed paths, including regular directories
+and files. Git subprocess transport must preserve CR/LF and arbitrary filename
+bytes; text-mode universal-newline conversion changes attribute query inputs.
+Bulk Git operations have a finite 600-second deadline; metadata queries retain
+30 seconds. Normalize reciprocal Gitlinks relative to their
+containing directories, including after native relative-path repair.
+Frozen explicit payloads include executable file modes. Ownership
+lives outside the checkout in a private temporary
+container and is repeated in Git's per-worktree directory. Cleanup must validate
+both receipts, registration and reciprocal `.git` links before asking Git to
+remove a disposable checkout; never fall back to recursive container deletion.
+This shares Git metadata and is not a security sandbox. Do not copy dirty or
+untracked project state, run setup hooks, commit, or push automatically.
+
+`cli/launch.py` maps the cwd and scene root into the checkout, injects explicit
+bundles into the same effective source used by projection (including safe
+committed source symlinks), then reuses scene resolution and per-tool compilation.
+Report recovered retained paths even when allocation never yields. An isolated
+`SceneLaunchContext` skips shared `info/exclude` writes and global pruning;
+Codex renders native `-c` overrides instead of a global profile. Its override
+parser splits keys on literal dots without parsing TOML key quotes: use bare
+paths for simple names, or one partial `mcp_servers` inline table for complex
+names. Native config-read evidence and preservation checks are recorded in
+[the isolated-launch audit](docs/isolated-scene-launches.md). Concern-scoped
+persistent fallback is allowed only inside the owned checkout, and partial
+activation errors prevent dispatch. Keep fatal `SceneLaunchInputError` behavior.
+Pass the explicit `concerns` scope through activation to the engine's declaration,
+projection and removal phases, and record only those concerns in persistent
+state. `concerns=None` preserves ordinary persistent scene behavior; changing
+only `ResolvedScene.configured_concerns` does not scope engine phases.
+
+`utils/owned_launch.py` owns the subprocess group/tree through exit and
+cancellation before checkout deletion. POSIX plain launches hand off and restore
+the controlling terminal's foreground group. Transcript launches own the CLI's
+PTY directly: BSD `script` puts the tool in another process group, so killing the
+wrapper's group alone leaks descendants. Preserve actual redirected stdin and
+EOF rather than replacing a pipe with an un-fed PTY. Observe the leader without
+reaping it
+until the last group signal, and retain the checkout on teardown failure. A
+failed kqueue registration with ESRCH means the leader already exited; close the
+unregistered watcher instead of blocking on it. Forward SIGWINCH to the owned
+transcript PTY and restore the prior handler. Terminal Plan launches reuse their
+existing managed PTY transport, which completes group teardown before returning;
+regressions cover actual adapter dispatch and cancellation with descendants.
+Keep BSD-only `kqueue` calls behind explicit platform narrowing as well as the
+runtime `waitid` capability check. Validate `uv run mypy --platform linux
+src/crossby/` when editing this fallback on macOS; native Mac typing alone misses
+Linux's narrower standard-library stubs.
+Regression tests use temporary Git repositories and local stub executables in
+`test_scenes/test_worktree_launch.py`; never substitute live paid agent turns.
+
 ### Browser terminal (`crossby ui`)
 
 `crossby/web/` serves a loopback page that runs one AI tool per pseudo-terminal.

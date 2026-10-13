@@ -260,6 +260,102 @@ Key behaviours:
 
 Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.
 
+### Isolated scene launches
+
+Use an owned temporary Git worktree to add a task-specific skill for one run:
+
+```bash
+crossby launch --scene pr-review --isolate worktree
+crossby launch --scene pr-review --isolate worktree --keep-worktree
+# Inspect the printed checkout path before explicitly discarding it:
+crossby scene cleanup-worktree /path/to/crossby-scene-.../checkout --discard-changes
+```
+
+A scene can request the same mode and declare explicit skill bundles:
+
+```yaml
+scenes:
+  pr-review:
+    isolation: worktree
+    inject:
+      skills:
+        review: /path/to/review-bundle
+        crossby-sync: catalog:crossby-sync
+    skills:
+      include: [review, crossby-sync]
+```
+
+Each source directory must contain `SKILL.md`; its regular files and resource
+subdirectories are copied with file permissions only into the isolated workspace.
+Relative sources
+resolve from the scene configuration directory. The bundled catalog currently
+contains only `crossby-sync`; Crossby does not search your other installed skills
+or download bundles. Destination names use letters, digits, underscores and
+hyphens, starting with a letter or digit. Symlinks, special files, Git metadata,
+collisions with committed skill destinations, and scene selectors excluding an
+injected skill are refused. `isolation` and `inject` inherit through `extends`
+with replacement semantics, like other scene fields.
+
+V1 creates a detached checkout of the original repository's **committed HEAD**.
+It does not copy modified files, untracked files, `.env`, dependencies, or local
+secrets automatically. The current launch configuration selects the request;
+project inventory and scene artifacts are then compiled inside the isolated
+checkout. The launch's relative subdirectory must exist in HEAD. Injection goes
+to the selected tool's native skills directory and, when needed for existing
+scene projections, the checkout's canonical skills source, resolving safe
+committed source symlinks. Original files,
+skills, scene state, and ordinary launches remain unchanged. Only persistent
+scene mechanisms write native files inside the temporary checkout; concerns
+handled by launch flags remain per-launch. Codex uses
+native per-launch MCP overrides instead of a global scene profile.
+
+`--isolate` accepts `worktree` or `none`; a flag contradicting the scene setting
+is an error. Injection requires effective worktree isolation. `--keep-worktree`
+requires isolation, and isolation requires `--scene`, a Git repository and a
+foreground CLI tool; it cannot resume an old session. V1 refuses submodules,
+committed symlink chains escaping the checkout, case-ambiguous symlink paths,
+and executable Git `post-checkout`
+hooks. Active Git smudge/process filters for files in HEAD are also refused,
+including attributes from `.git/info/attributes` or global configuration. Unused
+filter drivers are allowed. Checking configured drivers requires Git 2.43 or
+newer (`git check-attr --source`); older Git refuses that preflight. These checks
+avoid running checkout setup commands before ownership is established. Crossby
+first registers an unpopulated worktree, records ownership, then rechecks its
+effective configuration before checkout, including conditional Git includes.
+Hook paths are checked through committed symlink chains; relative hook paths
+resolving outside the checkout are refused. Git attribute-source environment
+and `attr.tree` configuration overrides cannot change the validated tree used
+for materialization. A refused retained worktree may therefore contain only its
+Git binding.
+`crossby scene use` retains its existing persistent semantics and does not
+allocate a worktree or inject bundles.
+
+Normal completion, launch errors and cancellation remove the owned disposable
+checkout, including changes made there by the tool. Use `--keep-worktree` to
+preserve those changes; it prints the retained checkout path even after a
+launch error or cancellation. Crossby never commits or pushes child changes.
+Relative transcript and plan-output paths follow the isolated cwd and disappear
+with a disposable checkout; choose an explicit absolute output path or retain
+the worktree when you need the artifacts. Isolated transcript capture uses an
+owned POSIX PTY; redirected stdin, its EOF and interactive terminal resizing
+are preserved. Owned cleanup
+refuses changed/missing ownership records,
+replaced Git bindings, symlinked ownership paths and nested repositories.
+Without `--discard-changes`, explicit cleanup also refuses dirty checkouts
+(including injected files) or a HEAD changed by child commits. Extra files outside the checkout in its container
+are preserved. If ownership cannot be established after an interrupted setup,
+Crossby retains the path for inspection instead of guessing what can be deleted.
+SIGKILL or a machine crash can leave an abandoned checkout; use the same owned
+cleanup command after inspecting it.
+
+This isolates **checkout state**, not access permissions. Git objects and
+repository metadata are shared with the original clone. Tools inherit their
+normal environment, credentials, global configuration, network policy and
+sandbox settings, and can access other paths when those settings permit it.
+Cleanup owns the launched process group/tree; deliberately detached processes
+are outside this guarantee. Choose the tool's own sandbox/approval policy for
+access restrictions. No native paid agent turns are needed to create a checkout.
+
 ### Authoring scenes
 
 You don't have to hand-write `scenes:` YAML. `crossby scene create` walks a wizard over the skills, agents, MCP servers, hooks, and permissions it actually finds in the project, and `add` / `remove` edit a scene's selectors from the command line:

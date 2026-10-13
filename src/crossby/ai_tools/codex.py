@@ -1436,6 +1436,21 @@ class CodexAdapter(AbstractAITool):
         if not scene.narrows_mcp():
             return SceneLaunchArgs()
 
+        if scene.isolated:
+            # Codex splits override keys on literal dots; TOML quotes in a key
+            # are not parsed. Put complex names in the parsed table value instead.
+            names = sorted(scene.deselected_mcp())
+            if all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names):
+                args = tuple(
+                    arg for name in names for arg in ("-c", f"mcp_servers.{name}.enabled=false")
+                )
+            else:
+                table = ",".join(
+                    f"{json.dumps(name, ensure_ascii=False)}={{enabled=false}}" for name in names
+                )
+                args = ("-c", f"mcp_servers={{{table}}}")
+            return SceneLaunchArgs(args=args)
+
         try:
             write_codex_profile(scene.project_root, scene.name, scene.deselected_mcp())
         except FileExistsError as exc:

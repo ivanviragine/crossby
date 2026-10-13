@@ -81,10 +81,13 @@ class VSCodeAdapter(AbstractAITool):
         *,
         sandbox: bool = True,
         on_event: InteractiveLaunchHandler | None = None,
+        owned_process: bool = False,
     ) -> int:
         # VS Code is a GUI launcher: `network_access` and `sandbox` are inert
         # (the CLI already warns + ignores unsupported options for GUI tools),
         # and no session-scoped scene lever exists, so `scene` is inert too.
+        if owned_process:
+            raise ValueError("Owned worktree launches require a foreground CLI tool")
         if on_event is not None:
             raise ValueError("This adapter does not support interactive startup events")
 

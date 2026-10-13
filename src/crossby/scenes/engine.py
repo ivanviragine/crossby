@@ -77,6 +77,7 @@ def apply_scene(
     dry_run: bool = False,
     force: bool = False,
     tools: Iterable[AIToolID] | None = None,
+    concerns: frozenset[str] | None = None,
 ) -> list[SyncResult]:
     """Apply *resolved* to every installed tool, least-invasive mechanism first.
 
@@ -85,7 +86,16 @@ def apply_scene(
     re-point of a real, non-crossby directory (crossby's own symlinks always
     re-point). ``tools`` narrows the apply to a subset of the installed tools
     (``crossby scene use --tool``); ``None`` means every installed tool.
+    ``concerns`` explicitly scopes isolated activation phases; ``None`` retains
+    the ordinary persistent lifecycle's existing behavior.
     """
+    from crossby.models.config import SCENE_CONCERNS
+
+    enabled = frozenset(SCENE_CONCERNS) if concerns is None else concerns
+    if not enabled.issubset(SCENE_CONCERNS):
+        raise ValueError("Unknown persistent scene concern")
+    if not enabled:
+        return []
     ctx = _context(project_root, resolved, dry_run=dry_run, force=force, tools=tools)
     results: list[SyncResult] = []
 
@@ -101,24 +111,33 @@ def apply_scene(
         #    disk and re-save it (owned section), and load_ledger/to_json round-trip
         #    the scene section, so this early save is preserved.
         try:
-            results.extend(_declare_skills(ctx))
-            results.extend(_declare_agents(ctx))
-            results.extend(_declare_mcp(ctx))
+            if "skills" in enabled:
+                results.extend(_declare_skills(ctx))
+            if "agents" in enabled:
+                results.extend(_declare_agents(ctx))
+            if "mcp" in enabled:
+                results.extend(_declare_mcp(ctx))
         finally:
             if not dry_run:
                 save_ledger(project_root, ctx.ledger)
 
         # 2. PROJECT the skills/agents directories at the filtered source tree.
-        results.extend(_project_concern(ctx, "skills", ctx.base.skills_source))
-        results.extend(_project_concern(ctx, "agents", ctx.base.agents_source))
-        _ensure_scene_gitignore(ctx)
+        if "skills" in enabled:
+            results.extend(_project_concern(ctx, "skills", ctx.base.skills_source))
+        if "agents" in enabled:
+            results.extend(_project_concern(ctx, "agents", ctx.base.agents_source))
+        if enabled & {"skills", "agents"}:
+            _ensure_scene_gitignore(ctx)
 
         # 3. hooks / permissions: revocable-sync removal channel, once each.
-        results.extend(_filter_removable(ctx, "hooks", SyncConcern.HOOKS))
-        results.extend(_filter_removable(ctx, "permissions", SyncConcern.PERMISSIONS))
+        if "hooks" in enabled:
+            results.extend(_filter_removable(ctx, "hooks", SyncConcern.HOOKS))
+        if "permissions" in enabled:
+            results.extend(_filter_removable(ctx, "permissions", SyncConcern.PERMISSIONS))
 
         # 4. Plugin-provided skills are reachable by neither mechanism.
-        results.extend(_report_plugin_skills(project_root))
+        if "skills" in enabled:
+            results.extend(_report_plugin_skills(project_root))
         return results
     except Exception as exc:
         # The caller must retain both reversible provenance and irreversible
