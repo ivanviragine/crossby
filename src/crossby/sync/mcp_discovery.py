@@ -173,10 +173,12 @@ def discover_mcp_servers(
     if from_tool is not None:
         sources = [s for s in sources if s[0] == from_tool]
 
+    scanned_tools: set[str] = set()
     for tool, path, key, scope in sources:
         section = _read_json_section(path, key, result.errors)
         if section is None:
             continue
+        scanned_tools.add(tool)
         for name, entry in section.items():
             if not isinstance(entry, dict):
                 result.errors.append(f"{path}: MCP server `{name}` must be an object")
@@ -222,6 +224,9 @@ def discover_mcp_servers(
                 if not isinstance(entry, dict):
                     result.errors.append(f"{codex_path}: MCP server `{name}` must be a table")
                     continue
+                enabled = _entry_enabled(
+                    entry, "enabled", f"{codex_path}: MCP server `{name}`", result.errors
+                )
                 if name in result.servers:
                     result.conflicts.append((name, result.servers[name].source_tool, "codex"))
                 else:
@@ -233,14 +238,15 @@ def discover_mcp_servers(
                         source_tool="codex",
                         data=normalized,
                         unsupported_fields=unsupported,
-                        enabled=_entry_enabled(
-                            entry, "enabled", f"{codex_path}: MCP server `{name}`", result.errors
-                        ),
+                        enabled=enabled,
                     )
 
     from crossby.sync.mcp_activation import claude_disabled_names, cursor_disabled_names
 
-    if any(server.source_tool == "claude" for server in result.servers.values()):
+    # Every scanned source's activation must be valid, even when all its names
+    # lose conflict resolution. A losing malformed source cannot grant writes
+    # or removals based on the winning definition.
+    if "claude" in scanned_tools:
         rejected, toggled = claude_disabled_names(
             project_root, _GLOBAL_CLAUDE_JSON_PATH, result.errors
         )
@@ -250,7 +256,7 @@ def discover_mcp_servers(
             ):
                 server.enabled = False
                 server.data["enabled"] = False
-    if any(server.source_tool == "cursor" for server in result.servers.values()):
+    if "cursor" in scanned_tools:
         disabled = cursor_disabled_names(project_root, result.errors)
         for name, server in result.servers.items():
             if server.source_tool == "cursor" and name in disabled:

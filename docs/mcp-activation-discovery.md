@@ -11,6 +11,9 @@ restriction inventory, but strict launch files omit their connection entries
 and native launch restrictions keep them disabled. Selecting a name in a scene
 does not enable a source the user disabled. A malformed activation decision
 cannot be rendered as a strict launch configuration.
+An MCP-scoped scene launch refuses invalid native activation before persistent
+fallback, artifact pruning, or child-process dispatch. Activation validation
+covers every scanned source, including declarations that lose name conflicts.
 
 ## Audited surfaces
 

@@ -489,3 +489,37 @@ def test_claude_project_toggle_uses_git_root_for_nested_working_directory(tmp_pa
     result = sync(nested, "claude")
     assert result.exit_code == 0, result.output
     assert not (nested / ".cursor/mcp.json").exists()
+
+
+@pytest.mark.parametrize("losing_source", ["cursor", "codex"])
+def test_losing_source_malformed_activation_cannot_authorize_owned_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, losing_source: str
+) -> None:
+    from crossby.sync.ownership import OwnershipLedger, save_ledger
+
+    source_file(tmp_path, "claude", disabled=True)
+    if losing_source == "codex":
+        source_file(tmp_path, "codex", disabled=0)
+    else:
+        cursor = tmp_path / ".cursor/mcp.json"
+        cursor.parent.mkdir()
+        cursor.write_text('{"mcpServers":{"prod":{"command":"cursor-server"}}}')
+        sidecar = cursor_disabled_path(tmp_path)
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text("null")
+    target = tmp_path / ".vscode/mcp.json"
+    target.parent.mkdir()
+    target.write_text('{"servers":{"prod":{"command":"owned-server"}}}')
+    ledger = OwnershipLedger()
+    ledger.record_mcp(AIToolID.COPILOT, {"prod"})
+    save_ledger(tmp_path, ledger)
+    ledger_path = tmp_path / ".crossby/owned.json"
+    before = target.read_bytes(), ledger_path.read_bytes()
+    monkeypatch.setattr(
+        "crossby.ai_tools.base.AbstractAITool.detect_installed",
+        lambda: ["claude", "copilot", losing_source],
+    )
+    monkeypatch.setattr("crossby.ui.prompts.confirm", lambda *args, **kwargs: True)
+    result = CliRunner().invoke(app, ["sync", "mcp", "--path", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert (target.read_bytes(), ledger_path.read_bytes()) == before

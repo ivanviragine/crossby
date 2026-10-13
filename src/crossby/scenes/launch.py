@@ -91,6 +91,10 @@ class SceneLaunchFallbackError(Exception):
         return self.reason
 
 
+class SceneLaunchInputError(ValueError):
+    """Invalid native input forbids both launch and persistent fallback writes."""
+
+
 @dataclass(frozen=True)
 class SceneLaunchArgs:
     """Extra argv and environment one adapter contributes for a scene launch.
@@ -131,7 +135,7 @@ class SceneLaunchContext:
     def selected_mcp(self) -> dict[str, MCPServerConfig]:
         """The discovered MCP servers the scene keeps enabled, keyed by name."""
         if self.sync_data.source_errors.get(SyncConcern.MCP):
-            raise SceneLaunchFallbackError(
+            raise SceneLaunchInputError(
                 "Invalid native MCP activation; cannot render a strict launch config."
             )
         keep = self.selected("mcp")

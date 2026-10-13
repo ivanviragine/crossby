@@ -128,7 +128,9 @@ def test_native_disable_survives_scene_selection_and_strict_launch(
 
 
 def test_malformed_native_activation_refuses_strict_scene_configuration(tmp_path: Path) -> None:
+    from crossby.scenes.launch import SceneLaunchInputError
+
     _native(tmp_path, {"enabled": "false"})
     context = _context(tmp_path, ["native"])
-    with pytest.raises(SceneLaunchFallbackError, match="Invalid native MCP activation"):
+    with pytest.raises(SceneLaunchInputError, match="Invalid native MCP activation"):
         context.selected_mcp()
