@@ -29,7 +29,8 @@ before population; tests cover both automatic cleanup and retained refusals,
 without executing the configured filter or post-checkout hook. Additional cases
 cover inherited `GIT_ATTR_SOURCE` and ordinary/conditional `attr.tree` settings
 pointing at a different commit, plus conditional hook paths through committed
-directory, file and chained symlinks. Older
+directory, file and chained symlinks, including a literal filename beginning
+with Git pathspec magic. Older
 Git lacking this option refuses the configured-driver preflight. Relative
 worktree bindings are validated by canonical identity, including after native
 `worktree repair`; cleanup remains conditional on duplicate ownership receipts.

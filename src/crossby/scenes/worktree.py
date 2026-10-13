@@ -35,6 +35,10 @@ _GIT_ENV = {
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
     "GIT_ATTR_SOURCE",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
 }
 
 
@@ -56,7 +60,7 @@ def _git(
     }
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", "--literal-pathspecs", "-C", str(root), *args],
             capture_output=True,
             text=True,
             env=env,

@@ -1262,7 +1262,7 @@ def test_git_attr_source_cannot_change_materialized_head(
     assert not list(project["owners"].iterdir())
 
 
-@pytest.mark.parametrize("kind", ["directory", "file", "chain"])
+@pytest.mark.parametrize("kind", ["directory", "file", "chain", "pathspec-magic"])
 def test_conditional_hook_symlinks_refused_before_population(
     project: dict[str, Path], kind: str
 ) -> None:
@@ -1270,16 +1270,16 @@ def test_conditional_hook_symlinks_refused_before_population(
 
     repo = project["repo"]
     sentinel = project["tmp"] / "symlink-hook-outside-write"
-    storage = repo / "hook-storage"
+    storage = repo / (":(literal)hook-storage" if kind == "pathspec-magic" else "hook-storage")
     storage.mkdir()
     executable = storage / "post-checkout"
     executable.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
     executable.chmod(0o755)
     if kind == "directory":
         (repo / ".hooks").symlink_to("hook-storage", target_is_directory=True)
-    elif kind == "file":
+    elif kind in ("file", "pathspec-magic"):
         (repo / ".hooks").mkdir()
-        (repo / ".hooks/post-checkout").symlink_to("../hook-storage/post-checkout")
+        (repo / ".hooks/post-checkout").symlink_to(f"../{storage.name}/post-checkout")
     else:
         (repo / "hook-alias").symlink_to("hook-storage", target_is_directory=True)
         (repo / ".hooks").symlink_to("hook-alias/../hook-storage", target_is_directory=True)
@@ -1294,4 +1294,16 @@ def test_conditional_hook_symlinks_refused_before_population(
         pytest.fail("Committed hook symlinks must not evade target preflight")
     assert not sentinel.exists()
     assert (repo / ".git/index").read_bytes() == initial_index
+    assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize(
+    "name", ["GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]
+)
+def test_inherited_pathspec_modes_cannot_change_literal_isolation_queries(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "1")
+    with request(project).create() as owned:
+        assert (owned.path / "package/app.py").read_text() == "committed\n"
     assert not list(project["owners"].iterdir())
