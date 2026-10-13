@@ -24,6 +24,7 @@ from crossby.ai_tools.headless import (
     HeadlessCleanupHooks,
     HeadlessRuntimeContext,
 )
+from crossby.ai_tools.headless_cli import BoundedProgress
 from crossby.ai_tools.plan_mode import (
     PlanArtifactMalformedError,
     PlanBindingMismatchError,
@@ -217,7 +218,11 @@ class OpenCodeServer:
         self._event_thread.start()
 
     def drain_events(
-        self, context: HeadlessRuntimeContext, session_id: str, prompt_id: str
+        self,
+        context: HeadlessRuntimeContext,
+        session_id: str,
+        prompt_id: str,
+        progress: BoundedProgress,
     ) -> None:
         """Normalize only bounded events for the active native prompt."""
         if self._event_error is not None:
@@ -235,16 +240,13 @@ class OpenCodeServer:
                 info = properties.get("info")
                 if not isinstance(info, dict):
                     raise ValueError("OpenCode SSE message update omitted info")
-                if (
-                    info.get("sessionID") != session_id
-                    or info.get("role") != "assistant"
-                    or info.get("parentID") != prompt_id
-                ):
+                message_id = _bound_assistant_id(info, session_id, prompt_id)
+                if message_id is None:
                     continue
-                self._bound_message_ids.add(_required_text(info, "id"))
-                context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
+                self._bound_message_ids.add(message_id)
+                progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="message update")
                 if isinstance(info.get("tokens"), dict):
-                    context.emit(HeadlessEventKind.USAGE, message="usage updated")
+                    progress.note(HeadlessEventKind.USAGE, message="usage updated")
             elif kind == "message.part.updated":
                 part = properties.get("part")
                 if not isinstance(part, dict):
@@ -261,7 +263,7 @@ class OpenCodeServer:
                 if self._tool_states.get(part_id) == status:
                     continue
                 self._tool_states[part_id] = status
-                context.emit(
+                progress.note(
                     HeadlessEventKind.TOOL_COMPLETED
                     if status in {"completed", "error"}
                     else HeadlessEventKind.TOOL_STARTED,
@@ -563,13 +565,14 @@ def run_native_session(
         server.open_events()
     server.request("POST", session_path + "/prompt_async", prompt)
     context.emit(HeadlessEventKind.STARTED, message="OpenCode session started")
+    progress = BoundedProgress(context)
     observed: set[str] = set(existing_ids)
     prompt_seen = False
     answered_requests: dict[str, str] = {}
     while True:
         context.checkpoint()
         if hasattr(server, "drain_events"):
-            server.drain_events(context, session_id, prompt_id)
+            server.drain_events(context, session_id, prompt_id, progress)
         for question in _prompt_bound_requests(
             server, server.request("GET", "/question"), session_id, prompt_id
         ):
@@ -610,10 +613,13 @@ def run_native_session(
                 if info.get("role") != "user":
                     raise ValueError("OpenCode prompt ID belongs to a non-user message")
                 prompt_seen = True
+            bound_message_id = _bound_assistant_id(info, session_id, prompt_id)
+            if bound_message_id is not None:
+                server._bound_message_ids.add(bound_message_id)
             if message_id not in observed:
                 observed.add(message_id)
-                if info.get("role") == "assistant" and info.get("parentID") == prompt_id:
-                    context.emit(HeadlessEventKind.ASSISTANT_MESSAGE, message="message")
+                if bound_message_id is not None:
+                    progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="message")
         if prompt_seen:
             bound = [
                 message["info"]
@@ -769,6 +775,17 @@ def _required_text(value: Any, field: str) -> str:
     return result
 
 
+def _bound_assistant_id(info: Any, session_id: str, prompt_id: str) -> str | None:
+    """Return the exact assistant ID only for this session's submitted prompt."""
+    if not isinstance(info, dict) or (
+        info.get("sessionID") != session_id
+        or info.get("role") != "assistant"
+        or info.get("parentID") != prompt_id
+    ):
+        return None
+    return _required_text(info, "id")
+
+
 def _bound_requests(value: Any, session_id: str) -> list[dict[str, Any]]:
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
         raise ValueError("OpenCode returned malformed pending requests")
@@ -798,8 +815,9 @@ def _prompt_bound_requests(
             info.get("id") != message_id or info.get("sessionID") != session_id
         ):
             raise ValueError("OpenCode pending request has an unbound tool message")
-        if info.get("role") != "assistant" or info.get("parentID") != prompt_id:
+        if _bound_assistant_id(info, session_id, prompt_id) is None:
             continue
+        server._bound_message_ids.add(message_id)
         parts = message.get("parts")
         if (
             not isinstance(parts, list)

@@ -92,13 +92,14 @@ class BoundedProgress:
         kind: HeadlessEventKind = HeadlessEventKind.PROGRESS,
         *,
         message: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Record one fixed progress milestone without exposing native frame data."""
         if self._emitted >= self._limit:
             self._context.mark_progress()
             return
         self._emitted += 1
-        self._context.emit(kind, message=message)
+        self._context.emit(kind, message=message, payload=payload)
 
 
 class ResumableManagedCLIController:

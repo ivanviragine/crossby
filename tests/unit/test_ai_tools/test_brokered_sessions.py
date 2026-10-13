@@ -223,6 +223,38 @@ def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
     assert sum(event.message == "delta" for event in result.events) == 512
 
 
+def test_codex_rejects_aggregate_assistant_text_before_retaining_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("crossby.ai_tools.codex._CODEX_MESSAGE_LIMIT", 10)
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            *[
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thr-exact",
+                        "turnId": "turn-exact",
+                        "item": {"type": "agentMessage", "id": f"msg-{i}", "text": text},
+                    },
+                }
+                for i, text in enumerate(("ááá", "éé"))
+            ],
+        ],
+    )
+    with pytest.raises(HeadlessTransportError, match="assistant messages exceeded"):
+        AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+            _request(tmp_path),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+
+
 def test_codex_item_lifecycle_events_are_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -839,6 +871,7 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
             self.calls: list[tuple[str, str, Any]] = []
             self.active_session_id: str | None = None
             self.prompt_id: str | None = None
+            self._bound_message_ids: set[str] = set()
             self.instances.append(self)
 
         def start(self) -> None:
@@ -1086,6 +1119,7 @@ def test_opencode_assistant_failure_returns_failed_terminal(
         def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
             self.active_session_id: str | None = None
             self.prompt_id: str | None = None
+            self._bound_message_ids: set[str] = set()
 
         def start(self) -> None:
             return None
@@ -1502,6 +1536,7 @@ def test_opencode_sse_parser_handles_fragmentation_and_rejects_bad_frames() -> N
 
 
 def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
+    from crossby.ai_tools.headless_cli import BoundedProgress
     from crossby.ai_tools.opencode_server import OpenCodeServer
 
     server = OpenCodeServer.__new__(OpenCodeServer)
@@ -1614,13 +1649,154 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
             self.progress_count += 1
 
     context = FakeContext()
-    server.drain_events(context, "ses-exact", "prompt-exact")
+    server.drain_events(context, "ses-exact", "prompt-exact", BoundedProgress(context))
     assert context.events == [
         (HeadlessEventKind.ASSISTANT_MESSAGE, "message update", None),
         (HeadlessEventKind.USAGE, "usage updated", None),
         (HeadlessEventKind.TOOL_COMPLETED, None, {"tool_call_id": "tool-exact"}),
     ]
     assert context.progress_count == 1
+
+
+def test_opencode_sse_progress_stays_bounded_across_drains() -> None:
+    from crossby.ai_tools.headless_cli import BoundedProgress
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    server = OpenCodeServer.__new__(OpenCodeServer)
+    server._event_error = None
+    server._events = queue.Queue()
+    server._bound_message_ids = set()
+    server._tool_states = {}
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.events = 0
+            self.progress = 0
+
+        def emit(self, _kind: HeadlessEventKind, **_fields: Any) -> None:
+            self.events += 1
+
+        def mark_progress(self) -> None:
+            self.progress += 1
+
+    context = FakeContext()
+    progress = BoundedProgress(context, limit=2)
+    for _ in range(2):
+        for index in range(3):
+            server._events.put(
+                {
+                    "type": "message.updated",
+                    "properties": {
+                        "info": {
+                            "id": f"msg-{index}",
+                            "sessionID": "ses-exact",
+                            "role": "assistant",
+                            "parentID": "prompt-exact",
+                        }
+                    },
+                }
+            )
+        server.drain_events(context, "ses-exact", "prompt-exact", progress)
+    assert context.events == 2
+    assert context.progress == 4
+
+
+def test_opencode_poll_binding_keeps_later_sse_deltas_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.headless_cli import BoundedProgress
+    from crossby.ai_tools.opencode_server import OpenCodeServer
+
+    class FakeServer:
+        instance: ClassVar[FakeServer]
+
+        def __init__(self, _request: Any, _deadline: float, runtime: Any = None) -> None:
+            self.active_session_id: str | None = None
+            self.prompt_id: str | None = None
+            self._bound_message_ids: set[str] = set()
+            self._events: queue.Queue[dict[str, Any]] = queue.Queue()
+            self._event_error = None
+            self._tool_states: dict[str, str] = {}
+            self.polls = 0
+            FakeServer.instance = self
+
+        def start(self) -> None:
+            pass
+
+        def open_events(self) -> None:
+            pass
+
+        def request(self, method: str, path: str, payload: Any = None) -> Any:
+            if method == "POST" and path == "/session":
+                return {"id": "ses-exact"}
+            if path == "/session/ses-exact/prompt_async":
+                self.prompt_id = payload["messageID"]
+                return None
+            if path in {"/question", "/permission"}:
+                return []
+            if path == "/session/ses-exact/message":
+                self.polls += 1
+                return [
+                    {"info": {"id": self.prompt_id, "sessionID": "ses-exact", "role": "user"}},
+                    {
+                        "info": {
+                            "id": "msg-bound",
+                            "sessionID": "ses-exact",
+                            "role": "assistant",
+                            "parentID": self.prompt_id,
+                            **(
+                                {"finish": "stop", "time": {"completed": 1}}
+                                if self.polls > 1
+                                else {}
+                            ),
+                        }
+                    },
+                ]
+            if path == "/session/ses-exact/message/msg-bound":
+                return {
+                    "info": {
+                        "id": "msg-bound",
+                        "sessionID": "ses-exact",
+                        "role": "assistant",
+                        "parentID": self.prompt_id,
+                    },
+                    "parts": [{"type": "text", "text": "Done."}],
+                }
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("crossby.ai_tools.opencode_server.OpenCodeServer", FakeServer)
+    result = AbstractAITool.get(AIToolID.OPENCODE).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    server = FakeServer.instance
+    assert server._bound_message_ids == {"msg-bound"}
+    server._events.put(
+        {
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses-exact",
+                "messageID": "msg-bound",
+                "partID": "part-bound",
+                "field": "text",
+                "delta": "streaming",
+            },
+        }
+    )
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.progress = 0
+
+        def mark_progress(self) -> None:
+            self.progress += 1
+
+    context = FakeContext()
+    OpenCodeServer.drain_events(
+        server, context, "ses-exact", server.prompt_id, BoundedProgress(context)
+    )
+    assert context.progress == 1
 
 
 def test_opencode_sse_survives_quiet_period_longer_than_200ms(
@@ -1896,6 +2072,45 @@ def test_antigravity_nonzero_exit_emits_failed_terminal(
     assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
 
 
+def test_antigravity_invalid_native_answer_emits_failed_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools import headless_cli
+
+    class FakeOwner:
+        def __init__(self, _context: Any) -> None:
+            pass
+
+    monkeypatch.setattr(headless_cli, "ResumableManagedCLIController", FakeOwner)
+    monkeypatch.setattr(
+        headless_cli,
+        "run_managed_command",
+        lambda *_args, **_kwargs: HeadlessCommandOutput(
+            0,
+            json.dumps(
+                {
+                    "status": "WAITING_FOR_INPUT",
+                    "conversation_id": "conv-exact",
+                    "question": {
+                        "id": "choice",
+                        "prompt": "Continue?",
+                        "options": [{"id": "yes", "label": "Yes"}],
+                    },
+                }
+            ),
+            "",
+        ),
+    )
+    result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON),
+        lambda _interaction: SessionInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED, answer="maybe"
+        ),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
+
+
 def test_codex_resume_starts_normal_turn_on_exact_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2001,6 +2216,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
             self.active_session_id: str | None = None
             self.prompted = False
             self.prompt_id: str | None = None
+            self._bound_message_ids: set[str] = set()
             self.instances.append(self)
 
         def start(self) -> None:
@@ -2082,6 +2298,7 @@ def test_opencode_resume_ignores_historical_assistant_message(
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "New answer."
     assert FakeServer.instances[0].active_session_id is None
+    assert FakeServer.instances[0]._bound_message_ids == {"msg-new"}
     prompt = next(
         payload
         for method, path, payload in FakeServer.instances[0].calls
@@ -2106,6 +2323,7 @@ def test_opencode_resume_answers_only_current_prompts_requests(
             self.calls: list[tuple[str, str, Any]] = []
             self.active_session_id: str | None = None
             self.prompt_id: str | None = None
+            self._bound_message_ids: set[str] = set()
             FakeServer.instance = self
 
         def start(self) -> None:
@@ -2197,6 +2415,7 @@ def test_opencode_resume_answers_only_current_prompts_requests(
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "Current answer."
+    assert FakeServer.instance._bound_message_ids == {"msg-current", "msg-done"}
     assert [interaction.request_id for interaction in seen] == [f"{kind}-current"]
     replies = [path for method, path, _ in FakeServer.instance.calls if method == "POST"]
     assert f"/{kind}/{kind}-current/reply" in replies

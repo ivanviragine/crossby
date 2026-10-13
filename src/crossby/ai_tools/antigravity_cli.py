@@ -675,6 +675,10 @@ class AntigravityCLIAdapter(AbstractAITool):
                 try:
                     answer = _agy_native_answer(interaction, response)
                 except ValueError:
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
                     return context.complete(
                         HeadlessTerminalStatus.FAILED,
                         conversation_id=conversation_id,

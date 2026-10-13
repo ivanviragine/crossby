@@ -92,6 +92,7 @@ _CODEX_BROKERED_PROGRESS_METHODS = frozenset(
         "item/mcpToolCall/progress",
     }
 )
+_CODEX_MESSAGE_LIMIT = 8 * 1024 * 1024
 
 
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
@@ -754,7 +755,8 @@ class CodexAdapter(AbstractAITool):
         from crossby.ai_tools.headless_cli import BoundedProgress
 
         delta_progress = BoundedProgress(context)
-        final_text: str | None = None
+        final_parts: list[str] = []
+        final_bytes = 0
         usage: Any = None
         while True:
             message = pending_notifications.popleft() if pending_notifications else rpc.read()
@@ -799,7 +801,13 @@ class CodexAdapter(AbstractAITool):
                         or not message_id.strip()
                     ):
                         raise ValueError("Codex completed an empty agent message")
-                    final_text = text if final_text is None else f"{final_text}\n{text}"
+                    next_bytes = len(text.encode("utf-8")) + bool(final_parts)
+                    if final_bytes + next_bytes > _CODEX_MESSAGE_LIMIT:
+                        raise context.transport_error(
+                            "Codex assistant messages exceeded the final output size limit."
+                        )
+                    final_bytes += next_bytes
+                    final_parts.append(text)
                     delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="completed")
                 elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
                     delta_progress.note(
@@ -892,7 +900,7 @@ class CodexAdapter(AbstractAITool):
         context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
         return context.complete(
             terminal,
-            final_text=final_text,
+            final_text="\n".join(final_parts) or None,
             native_status="completed",
             exit_code=exit_code,
             session_id=thread_id,
