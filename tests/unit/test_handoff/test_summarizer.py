@@ -21,6 +21,7 @@ from crossby.handoff.models import (
     SessionRef,
     ToolCall,
 )
+from crossby.handoff.readers import codex as codex_reader
 from crossby.handoff.summarizer import (
     HandoffSummarizer,
     SummarizerParseError,
@@ -945,3 +946,46 @@ def test_summarize_structured_raises_on_claude_is_error() -> None:
         summarizer.summarize_structured(
             _transcript(), source_tool=AIToolID.CLAUDE, target_tool=AIToolID.CODEX
         )
+
+
+@pytest.mark.parametrize("mode", ["structured", "raw"])
+@pytest.mark.parametrize("budget", [10_000, 8])
+def test_codex_result_reaches_summarizer_prompt(tmp_path: Path, mode: str, budget: int) -> None:
+    session_file = tmp_path / "rollout.jsonl"
+    payloads = [
+        {
+            "type": "function_call",
+            "name": "shell",
+            "arguments": '{"command":"pytest"}',
+            "call_id": "test1",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "test1",
+            "output": "FAILED: payment charged twice",
+        },
+    ]
+    session_file.write_text(
+        "\n".join(json.dumps({"type": "response_item", "payload": p}) for p in payloads),
+        encoding="utf-8",
+    )
+    ref = _ref().model_copy(update={"tool_id": AIToolID.CODEX, "path": session_file})
+    transcript = codex_reader.read_session(ref)
+    tool = _make_summarizer_tool()
+    summarizer = HandoffSummarizer(tool, prompt_template="TEST", token_budget=budget)
+    proc = subprocess.CompletedProcess(args=[], returncode=0, stdout='{"blockers":[]}', stderr="")
+    with (
+        patch.object(AbstractAITool, "detect_installed", return_value=[AIToolID.CLAUDE]),
+        patch("crossby.handoff.summarizer.subprocess.run", return_value=proc),
+    ):
+        if mode == "structured":
+            summarizer.summarize_structured(transcript, AIToolID.CODEX, AIToolID.CLAUDE)
+        else:
+            summarizer.summarize_raw(transcript, AIToolID.CODEX, AIToolID.CLAUDE, "test")
+    prompt = tool.build_launch_command.call_args.kwargs["prompt"]
+    assert "[tool] call_id=test1\nFAILED: payment charged twice" in prompt
+    if budget == 10_000:
+        assert 'tool_call: shell({"command": "pytest"}) call_id=test1' in prompt
+    else:
+        assert "tool_call: shell" not in prompt
+        assert "transcript was truncated" in prompt

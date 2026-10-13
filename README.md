@@ -212,6 +212,8 @@ crossby never *removes* configuration you own — it only ever *revokes an entry
 
 Within that boundary, hooks and permissions are *additive by default but revocable*: syncing `--from A` then `--from B` leaves each target reflecting B, not the union of both — a hook or permission pattern crossby wrote for A is taken back once it's gone from the source. MCP servers are narrower: crossby removes a server only when it wrote that server *and* the source marks it disabled (`enabled: false`); a server merely dropped from the source is left in place, so for MCP the two syncs leave the union. A same-named MCP server you wrote by hand is never deleted, though a normal MCP merge can still overwrite its config — the ledger bounds *removal*, not additive or update writes. A fresh clone starts with an empty ledger, so it never revokes until it has recorded writes of its own.
 
+If a hook or permission source cannot be read or parsed as a JSON object, crossby reports an error and exits 1 for that concern, preserving its targets and ownership. The diagnostic also appears when the selected target has no writer for the concern or no target tools are installed. Invalid `hooks`, `permissions`, or `permissions.allow` sections also refuse the affected concern. For supported hook events, malformed event lists, entries, nested handlers, commands, or scope/protection fields likewise refuse sync; they cannot stand in for an explicit removal. Unknown events and explicit non-command native handler types remain outside command sync and do not fail validation. Multi-source discovery refuses that concern if any scanned source fails; other concerns can still sync. Valid empty or absent source configurations still revoke crossby-owned hooks and permissions. `--dry-run`, `--plan`, and `--doctor` report the same source errors without writing.
+
 ## Scenes
 
 A **scene** is a task-shaped slice of the project's skills, agents, MCP servers, hooks, and permissions. Activating one filters each installed tool down to just the selected capabilities, using the least-invasive mechanism per tool — a native disable key where one exists (Claude `skillOverrides`, MCP toggles), otherwise a re-pointed, filtered projection of the source directory.
@@ -336,7 +338,11 @@ crossby handoff --from claude --to codex --prompt-preset cc-compact
 crossby handoff --from claude --to codex --prompt ./my-prompt.md
 ```
 
+Codex handoffs preserve function and custom-tool calls plus their text results, with call IDs linking results to commands. Results count toward the transcript token budget; older turns can be dropped, and non-text output blocks are skipped.
+
 crossby reads the chosen session from the source tool, asks an LLM to summarize it into a structured handoff document, writes it to `.crossby/handoffs/HANDOFF-<timestamp>.md`, and — for a CLI target — launches the tool with the file **path** (not its contents) as the initial prompt, so it fits under OS argv limits regardless of transcript size.
+
+Use `--output <path>` to choose the destination. Relative output paths are resolved from your current directory, even when `--path` selects a different project; the target receives the absolute path to the written file.
 
 The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
 

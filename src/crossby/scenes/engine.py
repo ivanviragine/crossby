@@ -875,6 +875,16 @@ def _filter_removable(ctx: _Context, concern_key: str, concern: SyncConcern) -> 
     subset of what the project already has); when the scene selects everything
     there is nothing to remove and re-syncing would needlessly propagate.
     """
+    if ctx.base.source_errors.get(concern):
+        # Scene filtering also depends on complete source discovery. Preserve
+        # the same per-concern refusal as ordinary sync before narrowing.
+        return run_sync(
+            ctx.base,
+            ctx.project_root,
+            concern=concern,
+            dry_run=ctx.dry_run,
+            installed_tools=ctx.installed,
+        )
     if concern == SyncConcern.HOOKS:
         universe = {f"{h.event}:{h.command}" for h in ctx.base.hooks}
     else:
