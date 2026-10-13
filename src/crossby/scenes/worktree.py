@@ -63,17 +63,19 @@ def _git(
         result = subprocess.run(
             ["git", "--literal-pathspecs", "-C", str(root), *args],
             capture_output=True,
-            text=True,
             env=env,
             timeout=timeout,
-            input=input_text,
+            input=input_text.encode("utf-8", "surrogateescape") if input_text is not None else None,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorktreeError(f"Git isolation operation failed: {exc}") from exc
     if result.returncode:
-        raise WorktreeError(result.stderr.strip() or "Git isolation operation failed")
-    return result.stdout if raw else result.stdout.strip()
+        raise WorktreeError(
+            result.stderr.decode("utf-8", "replace").strip() or "Git isolation operation failed"
+        )
+    output = result.stdout.decode("utf-8", "surrogateescape")
+    return output if raw else output.removesuffix("\n")
 
 
 def _check_checkout_hook(
@@ -185,9 +187,12 @@ class WorktreeRequest:
         links: dict[tuple[str, ...], str] = {}
         entries = _git(repository, "ls-tree", "-rz", commit, timeout=_GIT_BULK_TIMEOUT).split("\0")
         checkout_paths: list[str] = []
+        committed_paths: set[tuple[str, ...]] = set()
         for entry in filter(None, entries):
             header, name = entry.split("\t", 1)
             mode = header.split()[0]
+            parts = tuple(name.split("/"))
+            committed_paths.update(parts[:index] for index in range(1, len(parts) + 1))
             if mode in ("100644", "100755"):
                 checkout_paths.append(name)
             if mode == "160000":
@@ -200,9 +205,10 @@ class WorktreeRequest:
         def fold_parts(parts: tuple[str, ...]) -> tuple[str, ...]:
             return tuple(unicodedata.normalize("NFD", part).casefold() for part in parts)
 
-        folded_links = {fold_parts(parts): parts for parts in links}
-        if len(folded_links) != len(links):
-            raise WorktreeError("Case-ambiguous committed symlink paths are unsupported.")
+        folded_paths: dict[tuple[str, ...], tuple[str, ...] | None] = {}
+        for parts in committed_paths:
+            folded = fold_parts(parts)
+            folded_paths[folded] = None if folded in folded_paths else parts
 
         def resolve_committed(path: Path) -> Path:
             pending = list(path.parts)
@@ -219,8 +225,8 @@ class WorktreeRequest:
                     continue
                 resolved.append(component)
                 key = tuple(resolved)
-                if key not in links and fold_parts(key) in folded_links:
-                    raise WorktreeError(f"Case-ambiguous committed symlink chain: {path}")
+                if folded_paths.get(fold_parts(key), key) != key:
+                    raise WorktreeError(f"Case-ambiguous committed path: {path}")
                 if (target_link := links.get(key)) is not None:
                     followed += 1
                     if not target_link or Path(target_link).is_absolute() or followed > 40:

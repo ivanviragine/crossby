@@ -1344,3 +1344,90 @@ def test_duplicate_case_folded_link_identities_refused(project: dict[str, Path])
     with pytest.raises(WorktreeError, match="Case-ambiguous"):
         request(project)
     assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize("alias", ["directory-case", "file-case", "normalization"])
+def test_conditional_hook_regular_path_alias_is_refused(
+    project: dict[str, Path], alias: str
+) -> None:
+    import shlex
+
+    repo = project["repo"]
+    sentinel = project["tmp"] / "regular-hook-alias-write"
+    directory = ".hôoks" if alias == "normalization" else ".hooks"
+    hook_directory = repo / directory
+    hook_directory.mkdir()
+    hook_name = "POST-CHECKOUT" if alias == "file-case" else "post-checkout"
+    hook = hook_directory / hook_name
+    hook.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
+    hook.chmod(0o755)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "regular hook alias fixture")
+    config = project["tmp"] / "conditional-regular-hook-config"
+    configured = (
+        ".HOOKS"
+        if alias == "directory-case"
+        else ".ho\u0302oks"
+        if alias == "normalization"
+        else ".hooks"
+    )
+    git(repo, "config", "--file", str(config), "core.hooksPath", configured)
+    git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    prepared = request(project)
+    initial_index = (repo / ".git/index").read_bytes()
+    with pytest.raises(WorktreeError, match=r"Case-ambiguous|post-checkout"), prepared.create():
+        pytest.fail("Regular-path aliases must not bypass hook validation")
+    assert not sentinel.exists()
+    assert (repo / ".git/index").read_bytes() == initial_index
+    assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize("name", ["evil\rfile", "evil\r\nfile", "evil\nfile"])
+def test_exact_control_char_filename_filter_refused(project: dict[str, Path], name: str) -> None:
+    import shlex
+
+    repo = project["repo"]
+    (repo / name).write_text("committed payload\n")
+    (repo / ".gitattributes").write_text(json.dumps(name) + " filter=poison\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "exact filename attributes fixture")
+    sentinel = project["tmp"] / "control-filename-outside-write"
+    git(repo, "config", "filter.poison.smudge", "touch " + shlex.quote(str(sentinel)) + "; cat")
+    initial_index = (repo / ".git/index").read_bytes()
+    with pytest.raises(WorktreeError, match=r"checkout.*filters"), request(project).create():
+        pytest.fail("Exact committed filenames must reach attribute validation")
+    assert not sentinel.exists()
+    assert (repo / ".git/index").read_bytes() == initial_index
+    assert not list(project["owners"].iterdir())
+
+
+def test_conflicting_case_hook_modes_are_refused_before_population(
+    project: dict[str, Path],
+) -> None:
+    import shlex
+
+    repo = project["repo"]
+    sentinel = project["tmp"] / "conflicting-hook-mode-write"
+    (repo / ".hooks").mkdir()
+    hook = repo / ".hooks/post-checkout"
+    hook.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
+    hook.chmod(0o755)
+    git(repo, "add", ".")
+    git(repo, "config", "core.ignoreCase", "false")
+    blob = (
+        subprocess.check_output(
+            ["git", "-C", str(repo), "hash-object", "-w", "--stdin"], input=b"non-executable\n"
+        )
+        .decode()
+        .strip()
+    )
+    git(repo, "update-index", "--add", "--cacheinfo", "100644", blob, ".HOOKS/post-checkout")
+    git(repo, "commit", "-qm", "conflicting hook mode fixture")
+    config = project["tmp"] / "conflicting-hook-config"
+    git(repo, "config", "--file", str(config), "core.hooksPath", ".HOOKS")
+    git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    prepared = request(project)
+    with pytest.raises(WorktreeError, match="Case-ambiguous"), prepared.create():
+        pytest.fail("An exact non-executable spelling cannot authorize a conflicting alias")
+    assert not sentinel.exists()
+    assert not list(project["owners"].iterdir())

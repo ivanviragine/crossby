@@ -32,7 +32,10 @@ pointing at a different commit, plus conditional hook paths through committed
 directory, file and chained symlinks, including a literal filename beginning
 with Git pathspec magic. A native macOS probe also reproduced an escaping
 case-variant link chain; case and Unicode-normalization aliases and duplicate
-link identities are now refused consistently across platforms. Older
+link identities are now refused consistently across platforms. Hook aliases
+are checked against the full HEAD inventory, including regular paths. Raw Git
+transport regressions cover filenames containing CR, CRLF and LF, ensuring
+attribute checks receive the exact committed names. Older
 Git lacking this option refuses the configured-driver preflight. Relative
 worktree bindings are validated by canonical identity, including after native
 `worktree repair`; cleanup remains conditional on duplicate ownership receipts.

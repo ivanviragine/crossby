@@ -158,6 +158,9 @@ Use literal Git pathspecs for filenames from HEAD or configuration, including
 hook targets beginning with pathspec magic such as `:(literal)`. Refuse
 case/Unicode-normalization aliases of committed link components and duplicate
 link identities conservatively, so validation also holds on macOS filesystems.
+Check hook aliases against all committed paths, including regular directories
+and files. Git subprocess transport must preserve CR/LF and arbitrary filename
+bytes; text-mode universal-newline conversion changes attribute query inputs.
 Bulk Git operations have a finite 600-second deadline; metadata queries retain
 30 seconds. Normalize reciprocal Gitlinks relative to their
 containing directories, including after native relative-path repair.
