@@ -21,6 +21,7 @@ Strategies:
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -48,6 +49,12 @@ from crossby.sync.file_utils import (
 )
 from crossby.sync.gitignore_utils import update_managed_block
 from crossby.sync.safe_write import ProjectScope, safe_copy, safe_rmtree, safe_write_text
+from crossby.sync.skills_provenance import (
+    PROVENANCE_NAME,
+    read_provenance,
+    skill_fingerprint,
+    write_provenance,
+)
 
 logger = structlog.get_logger()
 
@@ -179,9 +186,28 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         if ancestor_err is not None:
             return ancestor_err
 
+        if (
+            data.skills_strategy == "translate"
+            and force
+            and (target_dir.is_dir() or target_dir.is_symlink())
+        ):
+            # Validate/render the selected inventory before backing up or unlinking.
+            # A forced preview sees the same prospective empty target as execution.
+            preview = self._sync_translate(
+                source_dir,
+                target_dir,
+                project_root=project_root,
+                dry_run=True,
+                source_tools=data.skills_source_tools,
+                replacing_target=True,
+            )
+            if preview.action == "error" or dry_run:
+                return preview
+
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
         # outside the project.
+        target_removed = False
         if data.skills_strategy in {"copy", "translate"} and target_dir.is_symlink():
             if not force:
                 return SyncResult(
@@ -196,6 +222,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 )
             if not dry_run:
                 target_dir.unlink()
+                target_removed = True
                 logger.info("skills.symlink_replaced", target=str(target_dir))
 
         # Existing real directory — may need to error, proceed, or back up.
@@ -217,7 +244,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 # so subsequent runs preserve translate/copy semantics.
                 if data.skills_strategy == "translate":
                     return self._sync_translate(
-                        source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                        source_dir,
+                        target_dir,
+                        project_root=project_root,
+                        dry_run=dry_run,
+                        source_tools=data.skills_source_tools,
                     )
                 return self._sync_copy(
                     source_dir, target_dir, project_root=project_root, dry_run=dry_run
@@ -228,12 +259,22 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 scope = ProjectScope(project_root)
                 safe_copy(scope, bak, target_dir)
                 safe_rmtree(scope, target_dir)
+                target_removed = True
                 logger.info("skills.dir_backed_up", original=str(target_dir), backup=str(bak))
 
         if data.skills_strategy == "translate":
-            return self._sync_translate(
-                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+            result = self._sync_translate(
+                source_dir,
+                target_dir,
+                project_root=project_root,
+                dry_run=dry_run,
+                source_tools=data.skills_source_tools,
             )
+            if target_removed and result.action == "skipped":
+                result.action = "updated"
+                result.message = "target removed; no skills to translate"
+                result.revoked = 1
+            return result
 
         if data.skills_strategy == "copy":
             return self._sync_copy(
@@ -409,6 +450,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         *,
         project_root: Path,
         dry_run: bool,
+        source_tools: tuple[AIToolID, ...] | None = None,
+        replacing_target: bool = False,
     ) -> SyncResult:
         """Per-skill copy with target-aware SKILL.md rewriting.
 
@@ -420,8 +463,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         idempotency. Stale skill subdirectories whose source disappeared are
         removed.
 
-        When a source tool that has a slash-command primitive (Claude /
-        Cursor today) lives in the project and ``self.tool_id`` is
+        When a selected source tool has a slash-command primitive (Claude /
+        Cursor today) and lives in the project and ``self.tool_id`` is
         different, each of that tool's commands is wrapped as a single-file
         skill named ``<source>-command-<slug>`` so the prompt body survives
         the migration. See :mod:`crossby.sync.slash_commands` for the
@@ -430,18 +473,115 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         from crossby.sync.slash_commands import iter_command_skills
 
         command_skills: list[tuple[str, str]] = []
-        for _src_path, source_tool, definition in iter_command_skills(project_root):
+        owners: dict[str, str] = {}
+        for _src_path, source_tool, definition in iter_command_skills(
+            project_root, source_tools=source_tools
+        ):
             if source_tool == self.tool_id:
                 # Don't wrap a tool's own commands into skills for itself.
                 continue
             rendered = render_markdown_skill(definition)
+            if definition.name in owners:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=f"command skill name collision: {definition.name}",
+                )
             command_skills.append((definition.name, rendered))
+            owners[definition.name] = f"command:{source_tool}"
 
         skill_dirs = [
             child
             for child in sorted(source_dir.iterdir())
             if child.is_dir() and (child / "SKILL.md").is_file()
         ]
+        native_owner = f"skills:{Path(os.path.relpath(source_dir, project_root)).as_posix()}"
+        native_rendered: dict[str, str] = {}
+        for skill_dir in skill_dirs:
+            if skill_dir.name in owners:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=f"native/command skill name collision: {skill_dir.name}",
+                )
+            owners[skill_dir.name] = native_owner
+            definition = parse_markdown_skill(
+                (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
+                fallback_name=skill_dir.name,
+            )
+            native_rendered[skill_dir.name] = render_markdown_skill(
+                translate_skill_for_target(definition, self.tool_id)
+            )
+
+        if replacing_target:
+            from crossby.sync.manual_fix import has_manual_fix_block
+
+            rendered_skills = list(native_rendered.values()) + [
+                rendered for _, rendered in command_skills
+            ]
+            manual_fix_count = sum(has_manual_fix_block(text) for text in rendered_skills)
+            if not rendered_skills:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="updated",
+                    file_path=target_dir,
+                    message="target removed (dry-run; no skills to translate)",
+                    revoked=1,
+                )
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="created",
+                file_path=target_dir,
+                message=f"translated (dry-run, {manual_fix_count} manual-fix)",
+            )
+
+        try:
+            provenance = read_provenance(target_dir)
+        except (OSError, ValueError) as exc:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=str(exc),
+            )
+
+        # The tree marker alone cannot prove which source owns a child. Scoped
+        # writes refuse collisions before cleanup or any target mutation.
+        if source_tools is not None:
+            for name, owner in owners.items():
+                child = target_dir / name
+                if not child.exists() and not child.is_symlink():
+                    continue
+                entry = provenance.get(name)
+                if (
+                    entry is None
+                    or entry["source"] != owner
+                    or skill_fingerprint(child) != entry["fingerprint"]
+                ):
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="error",
+                        message=f"skill target collision: {name}; preserving existing content",
+                    )
+
+        selected_owners = {native_owner} | {f"command:{tool}" for tool in (source_tools or ())}
+
+        def stale_in_scope(child: Path) -> bool:
+            if child.name in owners or child.name in {MANAGED_MARKER_NAME, PROVENANCE_NAME}:
+                return False
+            entry = provenance.get(child.name)
+            if entry is None:
+                # Preserve the legacy whole-tree cleanup for unscoped API flows.
+                return source_tools is None
+            return (
+                source_tools is None or entry["source"] in selected_owners
+            ) and skill_fingerprint(child) == entry["fingerprint"]
+
         target_existed = target_dir.is_dir()
         # Even when there's nothing to translate, an existing target may have
         # stale entries from a previous run; we still want to walk it once.
@@ -465,14 +605,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
             manual_fix_count = 0
             would_change = False
-            wanted_names = {sd.name for sd in skill_dirs} | {n for n, _ in command_skills}
             for skill_dir in skill_dirs:
-                definition = parse_markdown_skill(
-                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
-                    fallback_name=skill_dir.name,
-                )
-                translated = translate_skill_for_target(definition, self.tool_id)
-                rendered = render_markdown_skill(translated)
+                rendered = native_rendered[skill_dir.name]
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
                 target_skill = target_dir / skill_dir.name
@@ -499,7 +633,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     would_change = True
             if target_dir.is_dir():  # stale skill *dirs* whose source is gone
                 for child in target_dir.iterdir():
-                    if child.name in wanted_names or child.name == MANAGED_MARKER_NAME:
+                    if not stale_in_scope(child):
                         continue
                     # Mirror the real stale-cleanup predicate: a real dir, a live
                     # dir-symlink, or a broken symlink is removed; a real file or
@@ -510,6 +644,16 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             would_change = True
                     elif child.is_dir():
                         would_change = True
+            would_change |= any(
+                entry["source"] != owner
+                and (target_dir / name).exists()
+                and skill_fingerprint(target_dir / name) == entry["fingerprint"]
+                for name, owner in owners.items()
+                if (entry := provenance.get(name)) is not None
+            )
+            would_change |= write_provenance(
+                target_dir, provenance, project_root=project_root, dry_run=True
+            )
             # The real run (re)writes the ``.crossby-managed`` marker; an existing
             # managed dir missing one is a change even when every SKILL.md matches.
             would_change |= write_managed_marker(
@@ -533,15 +677,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         # managed dir that lacked one is a real change, so an otherwise-idempotent
         # translate is reported ``updated`` (matching the dry-run's would-change).
         marker_wrote = write_managed_marker(target_dir, project_root=project_root)
-        wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
-            name for name, _ in command_skills
-        }
         # Stale cleanup — only stale skill *directories* are removed; unrelated
         # top-level files are left alone.
         removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
-                if child.name in wanted_names:
+                if not stale_in_scope(child):
                     continue
                 if child.is_symlink():
                     # A stale skill-dir symlink — live (points to a dir) or broken
@@ -555,87 +696,127 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     shutil.rmtree(child)
                 else:
                     continue  # a real file — out of scope
+                provenance.pop(child.name, None)
                 logger.info("skills.stale_removed", path=str(child))
                 removed_any = True
 
         skipped_all = True
-        for skill_dir in skill_dirs:
-            target_skill = target_dir / skill_dir.name
-            # A symlinked target skill dir must be replaced, never written
-            # through: ``mkdir(exist_ok=True)`` silently succeeds on a
-            # symlink-to-a-directory (``is_dir()`` follows it) without replacing
-            # it, so the direct ``SKILL.md`` write below would land at the
-            # symlink's destination — outside the project root for
-            # ``.agents/skills/demo -> /outside``. Support dirs guard their own
-            # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
-            # is guarded here.
-            if target_skill.is_symlink():
-                target_skill.unlink()
-                skipped_all = False
-            target_skill.mkdir(parents=True, exist_ok=True)
-
-            source_skill_md = skill_dir / "SKILL.md"
-            target_skill_md = target_skill / "SKILL.md"
-            # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
-            # replaced, not read/written through — write_text/read_text follow it
-            # to the link's destination, which may be outside the project root.
-            if target_skill_md.is_symlink():
-                target_skill_md.unlink()
-                skipped_all = False
-            definition = parse_markdown_skill(
-                source_skill_md.read_text(encoding="utf-8"),
-                fallback_name=skill_dir.name,
-            )
-            translated = translate_skill_for_target(definition, self.tool_id)
-            rendered = render_markdown_skill(translated)
-
-            if target_skill_md.is_file() and (
-                hashlib.sha256(
-                    target_skill_md.read_text(encoding="utf-8").encode("utf-8")
-                ).hexdigest()
-                == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-            ):
-                # SKILL.md unchanged — but support dirs may still need a refresh.
-                # A support-dir change means this skill was not a no-op, so a
-                # re-sync that only touched (or should touch) scripts/references/
-                # assets is reported as ``updated`` rather than ``skipped``.
-                if _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root):
+        before_writes: dict[str, str | None] = {}
+        completed_names: set[str] = set()
+        try:
+            for skill_dir in skill_dirs:
+                target_skill = target_dir / skill_dir.name
+                before_writes[target_skill.name] = (
+                    skill_fingerprint(target_skill)
+                    if target_skill.exists() or target_skill.is_symlink()
+                    else None
+                )
+                # A symlinked target skill dir must be replaced, never written
+                # through: ``mkdir(exist_ok=True)`` silently succeeds on a
+                # symlink-to-a-directory (``is_dir()`` follows it) without replacing
+                # it, so the direct ``SKILL.md`` write below would land at the
+                # symlink's destination — outside the project root for
+                # ``.agents/skills/demo -> /outside``. Support dirs guard their own
+                # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
+                # is guarded here.
+                if target_skill.is_symlink():
+                    target_skill.unlink()
                     skipped_all = False
-                continue
+                target_skill.mkdir(parents=True, exist_ok=True)
 
-            skipped_all = False
-            safe_write_text(
-                ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
-            )
-            _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root)
+                target_skill_md = target_skill / "SKILL.md"
+                # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
+                # replaced, not read/written through — write_text/read_text follow it
+                # to the link's destination, which may be outside the project root.
+                if target_skill_md.is_symlink():
+                    target_skill_md.unlink()
+                    skipped_all = False
+                rendered = native_rendered[skill_dir.name]
 
-        for name, rendered in command_skills:
-            target_skill = target_dir / name
-            # Same symlink guard as the translated-skill loop above — a
-            # symlinked target skill dir would redirect the SKILL.md write
-            # outside the project root.
-            if target_skill.is_symlink():
-                target_skill.unlink()
+                if target_skill_md.is_file() and (
+                    hashlib.sha256(
+                        target_skill_md.read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    # SKILL.md unchanged — but support dirs may still need a refresh.
+                    # A support-dir change means this skill was not a no-op, so a
+                    # re-sync that only touched (or should touch) scripts/references/
+                    # assets is reported as ``updated`` rather than ``skipped``.
+                    if _refresh_skill_support_dirs(
+                        skill_dir, target_skill, project_root=project_root
+                    ):
+                        skipped_all = False
+                    completed_names.add(target_skill.name)
+                    continue
+
                 skipped_all = False
-            target_skill.mkdir(parents=True, exist_ok=True)
-            target_skill_md = target_skill / "SKILL.md"
-            # Same leaf-symlink guard as the translated-skill loop above.
-            if target_skill_md.is_symlink():
-                target_skill_md.unlink()
-                skipped_all = False
-            if target_skill_md.is_file() and (
-                hashlib.sha256(
-                    target_skill_md.read_text(encoding="utf-8").encode("utf-8")
-                ).hexdigest()
-                == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-            ):
-                continue
-            skipped_all = False
-            safe_write_text(
-                ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
-            )
+                safe_write_text(
+                    ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
+                )
+                _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root)
+                completed_names.add(target_skill.name)
 
-        if skipped_all and target_existed and not removed_any and not marker_wrote:
+            for name, rendered in command_skills:
+                target_skill = target_dir / name
+                before_writes[name] = (
+                    skill_fingerprint(target_skill)
+                    if target_skill.exists() or target_skill.is_symlink()
+                    else None
+                )
+                # Same symlink guard as the translated-skill loop above — a
+                # symlinked target skill dir would redirect the SKILL.md write
+                # outside the project root.
+                if target_skill.is_symlink():
+                    target_skill.unlink()
+                    skipped_all = False
+                target_skill.mkdir(parents=True, exist_ok=True)
+                target_skill_md = target_skill / "SKILL.md"
+                # Same leaf-symlink guard as the translated-skill loop above.
+                if target_skill_md.is_symlink():
+                    target_skill_md.unlink()
+                    skipped_all = False
+                if target_skill_md.is_file() and (
+                    hashlib.sha256(
+                        target_skill_md.read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    completed_names.add(name)
+                    continue
+                skipped_all = False
+                safe_write_text(
+                    ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
+                )
+                completed_names.add(name)
+
+        finally:
+            # Record actual mutations, including partial generated writes. An
+            # unscoped caller can encounter human content: never adopt that tree
+            # just because mkdir succeeded or a later read failed.
+            for name, before in before_writes.items():
+                entry = provenance.get(name)
+                if before is not None and (entry is None or entry["fingerprint"] != before):
+                    continue
+                child = target_dir / name
+                if not child.exists() and not child.is_symlink():
+                    provenance.pop(name, None)
+                    continue
+                after = skill_fingerprint(child)
+                if after != before or (
+                    name in completed_names
+                    and entry is not None
+                    and entry["source"] != owners[name]
+                ):
+                    provenance[name] = {"source": owners[name], "fingerprint": after}
+            provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
+        if (
+            skipped_all
+            and target_existed
+            and not removed_any
+            and not marker_wrote
+            and not provenance_wrote
+        ):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,

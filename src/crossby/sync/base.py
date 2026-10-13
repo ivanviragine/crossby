@@ -51,6 +51,9 @@ class SyncData:
     skills_source: str | None = None  # relative path to canonical skills directory
     skills_strategy: Literal["symlink", "copy", "translate"] = "symlink"
     skills_gitignore: bool = True
+    # Effective source boundary for secondary discovery (slash commands).
+    # None intentionally scans all sources; an empty tuple scans none.
+    skills_source_tools: tuple[AIToolID, ...] | None = None
 
     # MCP servers concern
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
