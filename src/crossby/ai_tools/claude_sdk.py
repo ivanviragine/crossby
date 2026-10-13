@@ -420,9 +420,9 @@ class SDKTransport:
             ):
                 raise ValueError("Claude SDK reported an unsupported result origin")
             human = origin is None or origin.get("kind") == "human"
-            if self.terminal is None and human:
+            submitted_result = self.terminal is None and human
+            if submitted_result:
                 self.terminal = frame
-                self._record_prompt_accounting(frame)
             elif self.terminal is not None and human:
                 raise ValueError("Claude SDK returned a second submitted-prompt result")
             self.turn_in_progress = False
@@ -449,6 +449,10 @@ class SDKTransport:
                 and not self.inflight_tasks
                 and self.session_state in (None, "idle")
             )
+            # All native state/provenance must precede user callbacks: an
+            # observer may cancel, expire or raise while receiving accounting.
+            if submitted_result:
+                self._record_prompt_accounting(frame)
             if not self.query_submitted:
                 # Wake the SDK's pending initialize request immediately. It
                 # otherwise waits its fixed minimum even after native refusal.
@@ -857,8 +861,9 @@ def run_sdk_session(
                     cancel_event=threading.Event(),
                 )
                 await asyncio.to_thread(transport.controller._abort, cleanup)
-            if "finishing" in locals() and finishing is not None and not finishing.done():
-                finishing.cancel()
+            if "finishing" in locals() and finishing is not None:
+                if not finishing.done():
+                    finishing.cancel()
                 with suppress(BaseException):
                     await finishing
             if "pending" in locals():

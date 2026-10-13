@@ -83,6 +83,7 @@ through EOF, checking process exit; active state at EOF cannot become success.
 
 Observed native failure/abort uses bounded interrupt and cleanup rather than
 waiting for idle, preserving terminal status, actual exit code and prompt usage.
+Native failure state and provenance are recorded before invoking usage observers.
 Prompt usage/cost is recorded immediately when its result arrives, so later
 background timeout/cancellation retains observed accounting. An absent result
 origin means human; a second such result is rejected rather than attributed to

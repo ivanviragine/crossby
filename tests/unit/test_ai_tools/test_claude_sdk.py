@@ -1062,3 +1062,52 @@ def test_prompt_accounting_survives_background_cancellation(sdk_child: Any) -> N
     assert next(
         event.payload for event in result.events if event.kind is HeadlessEventKind.USAGE
     ) == {"cost_usd": 0.25}
+
+
+@pytest.mark.parametrize("callback_outcome", ["cancel", "timeout", "error"])
+def test_native_failure_provenance_precedes_usage_callback(
+    sdk_child: Any,
+    callback_outcome: str,
+) -> None:
+    run, _ = sdk_child
+    cancelled = threading.Event()
+    release = threading.Event()
+
+    def observe(event: Any) -> None:
+        if event.kind is not HeadlessEventKind.USAGE:
+            return
+        if callback_outcome == "cancel":
+            cancelled.set()
+        elif callback_outcome == "timeout":
+            release.wait(1)
+        else:
+            raise RuntimeError("Private observer error")
+
+    try:
+        values = {"subtype": "error_during_execution", "is_error": True}
+        kwargs = {
+            "event_handler": observe,
+            "cancel_event": cancelled,
+            "request_values": {"idle_timeout_seconds": 0.15},
+        }
+        if callback_outcome == "error":
+            with pytest.raises(HeadlessTransportError) as error:
+                run(values, **kwargs)
+            result = error.value.partial
+        else:
+            result = run(values, **kwargs)
+            assert result.status is (
+                HeadlessTerminalStatus.CANCELLED
+                if callback_outcome == "cancel"
+                else HeadlessTerminalStatus.TIMED_OUT
+            )
+        assert result.native_status == "error_during_execution"
+        assert result.session_id == "session-exact"
+        assert result.usage.input_tokens == 5
+        assert any(
+            event.payload == {"cost_usd": 0.25}
+            for event in result.events
+            if event.kind is HeadlessEventKind.USAGE
+        )
+    finally:
+        release.set()
