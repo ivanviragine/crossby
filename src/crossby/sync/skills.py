@@ -489,6 +489,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             if child.is_dir() and (child / "SKILL.md").is_file()
         ]
         native_owner = f"skills:{Path(os.path.relpath(source_dir, project_root)).as_posix()}"
+        native_rendered: dict[str, str] = {}
         for skill_dir in skill_dirs:
             if skill_dir.name in owners:
                 return SyncResult(
@@ -498,19 +499,20 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     message=f"native/command skill name collision: {skill_dir.name}",
                 )
             owners[skill_dir.name] = native_owner
+            definition = parse_markdown_skill(
+                (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
+                fallback_name=skill_dir.name,
+            )
+            native_rendered[skill_dir.name] = render_markdown_skill(
+                translate_skill_for_target(definition, self.tool_id)
+            )
 
         if replacing_target:
             from crossby.sync.manual_fix import has_manual_fix_block
 
-            rendered_skills = [rendered for _, rendered in command_skills]
-            for skill_dir in skill_dirs:
-                definition = parse_markdown_skill(
-                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
-                    fallback_name=skill_dir.name,
-                )
-                rendered_skills.append(
-                    render_markdown_skill(translate_skill_for_target(definition, self.tool_id))
-                )
+            rendered_skills = list(native_rendered.values()) + [
+                rendered for _, rendered in command_skills
+            ]
             manual_fix_count = sum(has_manual_fix_block(text) for text in rendered_skills)
             return SyncResult(
                 tool_id=self.tool_id,
@@ -587,12 +589,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
             manual_fix_count = 0
             would_change = False
             for skill_dir in skill_dirs:
-                definition = parse_markdown_skill(
-                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
-                    fallback_name=skill_dir.name,
-                )
-                translated = translate_skill_for_target(definition, self.tool_id)
-                rendered = render_markdown_skill(translated)
+                rendered = native_rendered[skill_dir.name]
                 if has_manual_fix_block(rendered):
                     manual_fix_count += 1
                 target_skill = target_dir / skill_dir.name
@@ -681,88 +678,92 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 removed_any = True
 
         skipped_all = True
-        for skill_dir in skill_dirs:
-            target_skill = target_dir / skill_dir.name
-            # A symlinked target skill dir must be replaced, never written
-            # through: ``mkdir(exist_ok=True)`` silently succeeds on a
-            # symlink-to-a-directory (``is_dir()`` follows it) without replacing
-            # it, so the direct ``SKILL.md`` write below would land at the
-            # symlink's destination — outside the project root for
-            # ``.agents/skills/demo -> /outside``. Support dirs guard their own
-            # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
-            # is guarded here.
-            if target_skill.is_symlink():
-                target_skill.unlink()
-                skipped_all = False
-            target_skill.mkdir(parents=True, exist_ok=True)
-
-            source_skill_md = skill_dir / "SKILL.md"
-            target_skill_md = target_skill / "SKILL.md"
-            # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
-            # replaced, not read/written through — write_text/read_text follow it
-            # to the link's destination, which may be outside the project root.
-            if target_skill_md.is_symlink():
-                target_skill_md.unlink()
-                skipped_all = False
-            definition = parse_markdown_skill(
-                source_skill_md.read_text(encoding="utf-8"),
-                fallback_name=skill_dir.name,
-            )
-            translated = translate_skill_for_target(definition, self.tool_id)
-            rendered = render_markdown_skill(translated)
-
-            if target_skill_md.is_file() and (
-                hashlib.sha256(
-                    target_skill_md.read_text(encoding="utf-8").encode("utf-8")
-                ).hexdigest()
-                == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-            ):
-                # SKILL.md unchanged — but support dirs may still need a refresh.
-                # A support-dir change means this skill was not a no-op, so a
-                # re-sync that only touched (or should touch) scripts/references/
-                # assets is reported as ``updated`` rather than ``skipped``.
-                if _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root):
+        touched_names: set[str] = set()
+        try:
+            for skill_dir in skill_dirs:
+                target_skill = target_dir / skill_dir.name
+                # A symlinked target skill dir must be replaced, never written
+                # through: ``mkdir(exist_ok=True)`` silently succeeds on a
+                # symlink-to-a-directory (``is_dir()`` follows it) without replacing
+                # it, so the direct ``SKILL.md`` write below would land at the
+                # symlink's destination — outside the project root for
+                # ``.agents/skills/demo -> /outside``. Support dirs guard their own
+                # symlinks in ``_refresh_skill_support_dirs``; the skill dir itself
+                # is guarded here.
+                if target_skill.is_symlink():
+                    target_skill.unlink()
                     skipped_all = False
-                continue
+                target_skill.mkdir(parents=True, exist_ok=True)
+                touched_names.add(target_skill.name)
 
-            skipped_all = False
-            safe_write_text(
-                ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
-            )
-            _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root)
+                target_skill_md = target_skill / "SKILL.md"
+                # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
+                # replaced, not read/written through — write_text/read_text follow it
+                # to the link's destination, which may be outside the project root.
+                if target_skill_md.is_symlink():
+                    target_skill_md.unlink()
+                    skipped_all = False
+                rendered = native_rendered[skill_dir.name]
 
-        for name, rendered in command_skills:
-            target_skill = target_dir / name
-            # Same symlink guard as the translated-skill loop above — a
-            # symlinked target skill dir would redirect the SKILL.md write
-            # outside the project root.
-            if target_skill.is_symlink():
-                target_skill.unlink()
+                if target_skill_md.is_file() and (
+                    hashlib.sha256(
+                        target_skill_md.read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    # SKILL.md unchanged — but support dirs may still need a refresh.
+                    # A support-dir change means this skill was not a no-op, so a
+                    # re-sync that only touched (or should touch) scripts/references/
+                    # assets is reported as ``updated`` rather than ``skipped``.
+                    if _refresh_skill_support_dirs(
+                        skill_dir, target_skill, project_root=project_root
+                    ):
+                        skipped_all = False
+                    continue
+
                 skipped_all = False
-            target_skill.mkdir(parents=True, exist_ok=True)
-            target_skill_md = target_skill / "SKILL.md"
-            # Same leaf-symlink guard as the translated-skill loop above.
-            if target_skill_md.is_symlink():
-                target_skill_md.unlink()
-                skipped_all = False
-            if target_skill_md.is_file() and (
-                hashlib.sha256(
-                    target_skill_md.read_text(encoding="utf-8").encode("utf-8")
-                ).hexdigest()
-                == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
-            ):
-                continue
-            skipped_all = False
-            safe_write_text(
-                ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
-            )
+                safe_write_text(
+                    ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
+                )
+                _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root)
 
-        for name, owner in owners.items():
-            provenance[name] = {
-                "source": owner,
-                "fingerprint": skill_fingerprint(target_dir / name),
-            }
-        provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
+            for name, rendered in command_skills:
+                target_skill = target_dir / name
+                # Same symlink guard as the translated-skill loop above — a
+                # symlinked target skill dir would redirect the SKILL.md write
+                # outside the project root.
+                if target_skill.is_symlink():
+                    target_skill.unlink()
+                    skipped_all = False
+                target_skill.mkdir(parents=True, exist_ok=True)
+                touched_names.add(target_skill.name)
+                target_skill_md = target_skill / "SKILL.md"
+                # Same leaf-symlink guard as the translated-skill loop above.
+                if target_skill_md.is_symlink():
+                    target_skill_md.unlink()
+                    skipped_all = False
+                if target_skill_md.is_file() and (
+                    hashlib.sha256(
+                        target_skill_md.read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest()
+                    == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                ):
+                    continue
+                skipped_all = False
+                safe_write_text(
+                    ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
+                )
+
+        finally:
+            # A support-copy failure can follow successful SKILL.md writes. Save
+            # only outputs this run touched, including a partial generated tree,
+            # so a repaired retry doesn't mistake our writes for human edits.
+            for name in touched_names:
+                provenance[name] = {
+                    "source": owners[name],
+                    "fingerprint": skill_fingerprint(target_dir / name),
+                }
+            provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
         if (
             skipped_all
             and target_existed

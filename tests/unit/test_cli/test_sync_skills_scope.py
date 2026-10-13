@@ -384,3 +384,77 @@ def test_forced_preview_and_execution_agree_on_replacement(
         backups = list(target.parent.glob("skills.bak*"))
         assert len(backups) == 1
         assert _snapshot(backups[0]) == original
+
+
+@pytest.mark.parametrize("failure", ["invalid-source", "support-copy"])
+def test_failed_update_then_repaired_retry_preserves_output_provenance(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from crossby.sync import skills
+
+    source_a = _skill(project, "claude", "a")
+    source_z = _skill(project, "claude", "z")
+    scripts = source_z / "scripts"
+    scripts.mkdir()
+    (scripts / "run.sh").write_text("old support\n")
+    _sync(project, "claude")
+    target = project / ".agents/skills"
+    before = _snapshot(target)
+    (source_a / "SKILL.md").write_text("---\nname: a\ndescription: Changed.\n---\nUPDATED A\n")
+    valid_z = (source_z / "SKILL.md").read_bytes()
+    (scripts / "run.sh").write_text("updated support\n")
+    if failure == "invalid-source":
+        (source_z / "SKILL.md").write_bytes(b"\xff")
+    else:
+        refresh = skills._refresh_skill_support_dirs
+
+        def fail_after_copy(
+            source: Path,
+            target_skill: Path,
+            *,
+            project_root: Path,
+            dry_run: bool = False,
+        ) -> bool:
+            changed = refresh(source, target_skill, project_root=project_root, dry_run=dry_run)
+            if source.name == "z" and not dry_run:
+                raise OSError("injected support-copy failure")
+            return changed
+
+        monkeypatch.setattr(skills, "_refresh_skill_support_dirs", fail_after_copy)
+    result = runner.invoke(
+        app,
+        [
+            "sync",
+            "skills",
+            "--from",
+            "claude",
+            "--to",
+            "codex",
+            "--strategy",
+            "translate",
+            "--path",
+            str(project),
+            "--no-persist-report",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    if failure == "invalid-source":
+        assert _snapshot(target) == before  # pre-render fails before cleanup or writes
+    else:
+        assert "UPDATED A" in (target / "a/SKILL.md").read_text()
+        assert (target / "z/scripts/run.sh").read_text() == "updated support\n"
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        "crossby.ai_tools.base.AbstractAITool.detect_installed",
+        lambda: [AIToolID.CLAUDE, AIToolID.CURSOR, AIToolID.CODEX],
+    )
+    monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+    (source_z / "SKILL.md").write_bytes(valid_z)
+    _sync(project, "claude")
+    assert "UPDATED A" in (target / "a/SKILL.md").read_text()
+    assert (target / "z/scripts/run.sh").read_text() == "updated support\n"
+    complete = _snapshot(target)
+    _sync(project, "claude")
+    assert _snapshot(target) == complete
