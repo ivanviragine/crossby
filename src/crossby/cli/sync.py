@@ -161,6 +161,7 @@ def sync(
             concern=concern,
             mode="doctor" if doctor else "plan",
             strategy=strategy,
+            force=force,
             include_user_scope=include_user_scope,
         )
         return
@@ -436,6 +437,7 @@ def sync(
             question = f"Port skills ({source_path}) to {', '.join(other_tools)}?"
             if other_tools and prompts.confirm(question, default=True):
                 data.skills_source = source_path
+                data.skills_source_tools = (source,)
                 skills_src_tool = source
 
     # MCP
@@ -530,6 +532,8 @@ def sync(
     if not has_sync:
         console.info("Nothing to sync.")
         return
+
+    _apply_strategy(data, strategy)
 
     # Execute per-concern to avoid writing back to the source tool.
     # Rules and agents have an explicit source; exclude it from their targets.
@@ -889,6 +893,7 @@ def _run_inspection(
     concern: str | None,
     mode: Literal["plan", "doctor"],
     strategy: str | None = None,
+    force: bool = False,
     include_user_scope: bool = False,
 ) -> None:
     """Run a dry-run sync and print a plan or doctor summary."""
@@ -945,7 +950,7 @@ def _run_inspection(
         tool_id=target,
         concern=sync_concern,
         dry_run=True,
-        force=False,
+        force=force,
         installed_tools=target_tools,
         include_user_scope=include_user_scope,
         skip_concerns=skip_concerns,

@@ -167,7 +167,7 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 | ----------- | -------------------- | -------------------------------------------------------------------------------------------- |
 | Rules       | Symlink (auto-copy)  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md` (`AGENTS.md` is shared by Codex and Antigravity CLI). Falls back to copy with a `<!-- crossby:manual-fix -->` block when the source mentions surfaces specific to a different tool (`/hooks`, `ExitPlanMode`, `permissionMode`, …). |
 | Agents      | Symlink / translate  | Markdown-shape tools (Claude / Cursor / Copilot / Antigravity CLI) symlink directories. Codex translates per file into `.codex/agents/<name>.toml` with `permissionMode → sandbox_mode`, `model + effort` family-mapped to GPT, lossy fields preserved as a manual-fix block. |
-| Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
+| Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts selected Claude/Cursor slash commands (`.<source>/commands/**/*.md`) into `<source>-command-<slug>` skills for other tools. |
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` per tool — **Claude and Cursor only** (see [above](#direct-sync-targets)). Revocable: a pattern crossby wrote is removed when the source drops it (see [Revocable sync](#revocable-sync)). |
 | Hooks       | Write                | Per-tool native hook schema; a crossby-written hook's matcher narrows as well as widens on re-runs, and the hook is revoked when the source drops it. |
 | MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars` and restored on reverse sync. Native Codex `url` entries imply HTTP. |
@@ -199,6 +199,10 @@ Default strategy is `symlink` (with content-aware copy fallback for rules). Pass
 crossby sync --from claude --strategy translate
 ```
 
+For skills, `--from` also scopes slash-command conversion: `--from claude` imports only Claude commands, and `--from cursor` imports only Cursor commands. A configured or wizard-selected source has the same boundary; sources without native slash commands import none. `--plan` and `--dry-run` use that same inventory, including the prospective replacement tree when `--force` is requested. For an empty selected source, forcing an existing target reports its removal in previews and the sync report; repeating with no target left reports no change.
+
+Scoped translation records each output's source in `.crossby-translated-skills.json` inside the target skills directory. Switching sources preserves outputs from unselected sources. Cleanup removes only unchanged outputs recorded for the current source; human skills, edits, and added support files survive. A name collision with another source or human content reports an error before changing the target. Source skill files are read and rendered before cleanup; if a support-file write fails later, changed outputs remain tracked so a repaired retry can proceed. Updates never grant cleanup ownership over pre-existing human additions. Older translated trees without per-skill provenance are preserved; resolve collisions by moving the affected skill aside, or use `--force` to back up and replace the target tree deliberately.
+
 When a field has no faithful equivalent on the target — e.g. Claude `permissionMode: plan` going to Codex, or `allowed-tools` going to a tool that doesn't enforce them — the rendered file gets a clearly-marked block:
 
 ```markdown
@@ -209,7 +213,7 @@ When a field has no faithful equivalent on the target — e.g. Claude `permissio
 <!-- crossby:manual-fix:end -->
 ```
 
-Re-running `crossby sync` replaces the block in lockstep with the source — no stacking. Removing the block once you've addressed the note is supported; the next sync only re-emits it if the source still triggers it.
+Re-running `crossby sync` replaces the block in lockstep with the source — no stacking. Removing the block once you've addressed the note is supported; the next sync only re-emits it if the source still triggers it. Scoped skill translation preserves such target edits and reports a collision until you resolve them.
 
 > Need to translate a single allowlist pattern by hand? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool. To translate a single subagent file (Claude / Cursor / Copilot / Codex), use `crossby agents convert --from claude --to codex .claude/agents/researcher.md`.
 
