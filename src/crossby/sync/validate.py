@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tomllib
 from collections.abc import Mapping
@@ -136,6 +137,30 @@ def _parse_skill_frontmatter(skill_md: Path) -> dict[str, object] | None:
 # ---------------------------------------------------------------------------
 
 
+_CURSOR_COMMAND_ENV_REF = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_cursor_command_for_validation(command: str) -> str | None:
+    """Look up supported native refs once, only for a requested PATH check.
+
+    Do not expand literal $NAME/${NAME} or rescan replacement values. An unset
+    variable makes the lookup unverifiable, rather than a literal executable.
+    The caller must keep diagnostics in terms of the original command.
+    """
+    missing = False
+
+    def replace_reference(match: re.Match[str]) -> str:
+        nonlocal missing
+        value = os.environ.get(match.group(1))
+        if value is None:
+            missing = True
+            return match.group(0)
+        return value
+
+    resolved = _CURSOR_COMMAND_ENV_REF.sub(replace_reference, command)
+    return None if missing else resolved
+
+
 def _validate_mcp_commands_on_path(
     findings: list[ValidationFinding],
     project_root: Path,
@@ -147,10 +172,9 @@ def _validate_mcp_commands_on_path(
     """Append one ``ok`` / ``warning`` finding per server-with-a-command.
 
     Servers without a ``command`` (e.g. pure HTTP/SSE transports) are
-    skipped. Env-var-templated commands are expanded via
-    :func:`os.path.expandvars` before the :func:`shutil.which` lookup so
-    ``${HOME}/bin/foo`` resolves the same way the shell would when Codex /
-    Claude / Cursor actually launches the server.
+    skipped. Cursor expands only supported native ``${env:NAME}`` references,
+    once, for this validation lookup. Other tools retain the existing
+    :func:`os.path.expandvars` behavior. Nothing is executed or persisted.
     """
     for name, server in sorted(servers.items()):
         if not isinstance(server, dict):
@@ -159,8 +183,23 @@ def _validate_mcp_commands_on_path(
         if not command:
             continue
         command_str = str(command)
-        resolved = os.path.expandvars(command_str)
-        if shutil.which(resolved):
+        resolved = (
+            _expand_cursor_command_for_validation(command_str)
+            if tool_id == AIToolID.CURSOR
+            else os.path.expandvars(command_str)
+        )
+        if resolved is None:
+            findings.append(
+                _warn(
+                    project_root,
+                    config_path,
+                    f"MCP `{name}` command `{command_str}` has an unset environment "
+                    "reference; cannot check PATH",
+                    tool_id=tool_id,
+                    concern=SyncConcern.MCP,
+                )
+            )
+        elif shutil.which(resolved):
             findings.append(
                 _ok(
                     project_root,
