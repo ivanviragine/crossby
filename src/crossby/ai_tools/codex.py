@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -774,7 +775,7 @@ class CodexAdapter(AbstractAITool):
         from crossby.ai_tools.headless_cli import BoundedProgress
 
         delta_progress = BoundedProgress(context)
-        final_parts: list[str] = []
+        final_text = io.StringIO()
         final_bytes = 0
         usage: Any = None
         while True:
@@ -820,13 +821,15 @@ class CodexAdapter(AbstractAITool):
                         or not message_id.strip()
                     ):
                         raise ValueError("Codex completed an empty agent message")
-                    next_bytes = len(text.encode("utf-8")) + bool(final_parts)
+                    next_bytes = len(text.encode("utf-8")) + bool(final_bytes)
                     if final_bytes + next_bytes > _CODEX_MESSAGE_LIMIT:
                         raise context.transport_error(
                             "Codex assistant messages exceeded the final output size limit."
                         )
+                    if final_bytes:
+                        final_text.write("\n")
+                    final_text.write(text)
                     final_bytes += next_bytes
-                    final_parts.append(text)
                     delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
                     delta_progress.note(
@@ -917,7 +920,7 @@ class CodexAdapter(AbstractAITool):
         context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
         return context.complete(
             terminal,
-            final_text="\n".join(final_parts) or None,
+            final_text=final_text.getvalue() or None,
             native_status="completed",
             exit_code=exit_code,
             session_id=thread_id,

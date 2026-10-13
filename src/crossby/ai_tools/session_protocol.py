@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import threading
-from contextlib import suppress
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -51,8 +53,10 @@ class ProtocolSessionController:
             command,
             cwd=cwd,
             env=env,
-            timeout=context.remaining_seconds(),
+            # Idle progress moves the per-operation budget, never this lifetime.
+            timeout=max(0.0, context.deadline - time.monotonic()),
             deadline=context.deadline,
+            cancel_event=context.cancel_event,
         )
         context.register_cleanup(
             HeadlessCleanupHooks(
@@ -78,18 +82,25 @@ class ProtocolSessionController:
             self._abort_notification = notify
 
     def request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
-        self.context.checkpoint()
-        self.process.request(request_id, method, params)
+        with self._operation() as timeout:
+            self.process.request(request_id, method, params, timeout=timeout)
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        self.context.checkpoint()
-        self.process.notify(method, params)
+        with self._operation() as timeout:
+            self.process.notify(method, params, timeout=timeout)
 
     def read(self) -> dict[str, Any]:
+        with self._operation() as timeout:
+            return self.process.read(timeout=timeout)
+
+    @contextmanager
+    def _operation(self) -> Iterator[float]:
+        """Reconcile expired work budgets even when native I/O raises first."""
         self.context.checkpoint()
-        frame = self.process.read(timeout=self.context.remaining_seconds())
-        self.context.checkpoint()
-        return frame
+        try:
+            yield self.context.remaining_seconds()
+        finally:
+            self.context.checkpoint()
 
     def track_native_request(self, frame: dict[str, Any]) -> int | str:
         request_id = frame.get("id")
@@ -102,11 +113,10 @@ class ProtocolSessionController:
         return request_id
 
     def respond_native(self, request_id: int | str, result: Any) -> None:
-        with self._lock:
-            self.context.checkpoint()
+        with self._lock, self._operation() as timeout:
             if self._resolved or request_id not in self._pending:
                 raise ValueError("native request is no longer live")
-            self.process.respond(request_id, result)
+            self.process.respond(request_id, result, timeout=timeout)
             self._pending.remove(request_id)
 
     respond = respond_native
@@ -116,7 +126,8 @@ class ProtocolSessionController:
             self.context.checkpoint()
             self._resolved = True
             self._pending.clear()
-        return self.process.close()
+        with self._operation() as timeout:
+            return self.process.close(timeout=timeout)
 
     def _abort(self, _cleanup: HeadlessCleanupContext) -> None:
         with self._lock:
@@ -147,8 +158,8 @@ class ProtocolSessionController:
             proc.terminate()
 
     def _kill(self, _cleanup: HeadlessCleanupContext) -> None:
-        if self.process._proc.poll() is None:
-            kill_process_group(self.process._proc)
+        # A parent may already be gone while its tool children still own pipes.
+        kill_process_group(self.process._proc)
 
     def _reap(self, cleanup: HeadlessCleanupContext) -> None:
         with suppress(subprocess.TimeoutExpired):

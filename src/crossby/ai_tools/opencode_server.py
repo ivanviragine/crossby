@@ -14,6 +14,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Collection
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from crossby.ai_tools.headless import (
     HeadlessCleanupHooks,
     HeadlessRuntimeContext,
 )
-from crossby.ai_tools.headless_cli import BoundedProgress
+from crossby.ai_tools.headless_cli import BoundedProgress, tool_event_payload
 from crossby.ai_tools.plan_mode import (
     PlanArtifactMalformedError,
     PlanBindingMismatchError,
@@ -37,7 +38,7 @@ from crossby.ai_tools.plan_mode import (
     validate_plan_option_selection,
 )
 from crossby.ai_tools.plan_policy import command_pattern_to_shell_pattern
-from crossby.ai_tools.plan_process import JsonRpcProcess, kill_process_group
+from crossby.ai_tools.plan_process import ByteBoundedQueue, JsonRpcProcess, kill_process_group
 from crossby.models.ai import (
     AIToolID,
     HeadlessEventKind,
@@ -59,6 +60,11 @@ _HTTP_BODY_LIMIT = 8 * 1024 * 1024
 _HTTP_BODY_CHUNK_SIZE = 64 * 1024
 _SSE_EVENT_LIMIT = 1024 * 1024
 _SSE_QUEUE_LIMIT = 256
+_SSE_QUEUE_BYTES_LIMIT = 8 * 1024 * 1024
+_SSE_DATA_LINE_LIMIT = 4096
+_NATIVE_STATE_LIMIT = 4096
+_NATIVE_ID_BYTES_LIMIT = 4096
+_NATIVE_STATUS_BYTES_LIMIT = 64
 
 
 class BoundedSSEParser:
@@ -71,12 +77,12 @@ class BoundedSSEParser:
 
     def feed(self, chunk: bytes) -> list[dict[str, Any]]:
         self._pending.extend(chunk)
-        if len(self._pending) > _SSE_EVENT_LIMIT:
-            raise ValueError("OpenCode SSE line exceeded its size limit")
         events: list[dict[str, Any]] = []
         while (newline := self._pending.find(b"\n")) >= 0:
             line = bytes(self._pending[:newline]).removesuffix(b"\r")
             del self._pending[: newline + 1]
+            if len(line) > _SSE_EVENT_LIMIT:
+                raise ValueError("OpenCode SSE line exceeded its size limit")
             if not line:
                 if self._data:
                     encoded = b"\n".join(self._data)
@@ -92,10 +98,12 @@ class BoundedSSEParser:
                 continue
             if line.startswith(b"data:"):
                 data = line[5:].removeprefix(b" ")
-                self._data_size += len(data)
-                if self._data_size > _SSE_EVENT_LIMIT:
+                self._data_size += len(data) + bool(self._data)
+                if self._data_size > _SSE_EVENT_LIMIT or len(self._data) >= _SSE_DATA_LINE_LIMIT:
                     raise ValueError("OpenCode SSE event exceeded its size limit")
                 self._data.append(data)
+        if len(self._pending) > _SSE_EVENT_LIMIT:
+            raise ValueError("OpenCode SSE line exceeded its size limit")
         return events
 
     def finish(self) -> None:
@@ -119,8 +127,15 @@ class OpenCodeServer:
         self.active_session_id: str | None = None
         self._event_stop = threading.Event()
         self._event_connection: http.client.HTTPConnection | None = None
+        self._event_socket: socket.socket | None = None
         self._event_thread: threading.Thread | None = None
-        self._events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_SSE_QUEUE_LIMIT)
+        self._events: queue.Queue[dict[str, Any]] = ByteBoundedQueue(
+            _SSE_QUEUE_LIMIT,
+            max_bytes=_SSE_QUEUE_BYTES_LIMIT,
+            size_of=lambda event: len(
+                json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ),
+        )
         self._event_error: ValueError | None = None
         self._bound_message_ids: set[str] = set()
         self._tool_states: dict[str, str] = {}
@@ -131,7 +146,8 @@ class OpenCodeServer:
         self.process = JsonRpcProcess(
             ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"],
             cwd=request.working_dir,
-            timeout=self.remaining(),
+            timeout=max(0.0, deadline - time.monotonic()),
+            deadline=deadline,
             env={
                 **os.environ,
                 "OPENCODE_SERVER_USERNAME": "opencode",
@@ -152,11 +168,17 @@ class OpenCodeServer:
             )
 
     def _close_input(self, _ctx: HeadlessCleanupContext) -> None:
+        self._stop_events()
+        self.process.close_input()
+
+    def _stop_events(self) -> None:
         self._event_stop.set()
+        transport = getattr(self, "_event_socket", None)
+        if transport is not None:
+            _shutdown_socket(transport)
         if self._event_connection is not None:
             with suppress(OSError):
                 self._event_connection.close()
-        self.process.close_input()
 
     def _join_workers(self, ctx: HeadlessCleanupContext) -> None:
         self.process.join_workers(timeout=ctx.remaining_seconds())
@@ -186,6 +208,11 @@ class OpenCodeServer:
                         "Accept": "text/event-stream",
                     },
                 )
+                self._event_socket = connection.sock
+                if self._event_stop.is_set():
+                    if self._event_socket is not None:
+                        _shutdown_socket(self._event_socket)
+                    return
                 response = connection.getresponse()
                 if response.status != 200 or "text/event-stream" not in response.getheader(
                     "Content-Type", ""
@@ -243,7 +270,7 @@ class OpenCodeServer:
                 message_id = _bound_assistant_id(info, session_id, prompt_id)
                 if message_id is None:
                     continue
-                self._bound_message_ids.add(message_id)
+                _remember_native_id(self._bound_message_ids, message_id)
                 progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 if isinstance(info.get("tokens"), dict):
                     progress.note(HeadlessEventKind.USAGE)
@@ -258,16 +285,23 @@ class OpenCodeServer:
                 part_id = _required_text(part, "id")
                 state = part.get("state")
                 status = state.get("status") if isinstance(state, dict) else None
-                if not isinstance(status, str) or not status.strip():
+                if (
+                    not isinstance(status, str)
+                    or not status.strip()
+                    or len(status.encode("utf-8")) > _NATIVE_STATUS_BYTES_LIMIT
+                ):
                     raise ValueError("OpenCode SSE tool update omitted its status")
                 if self._tool_states.get(part_id) == status:
                     continue
+                _check_native_id(self._tool_states, part_id)
                 self._tool_states[part_id] = status
                 progress.note(
                     HeadlessEventKind.TOOL_COMPLETED
                     if status in {"completed", "error"}
                     else HeadlessEventKind.TOOL_STARTED,
-                    payload={"tool_call_id": part_id},
+                    payload=tool_event_payload(
+                        part_id, prompt=self.runtime.request.prompt if self.runtime else ""
+                    ),
                 )
             elif kind == "message.part.delta":
                 if (
@@ -315,6 +349,8 @@ class OpenCodeServer:
             self.process._proc.wait(timeout=ctx.remaining_seconds())
 
     def remaining(self) -> float:
+        if self.runtime is not None:
+            return self.runtime.remaining_seconds()
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("OpenCode plan session exceeded its timeout")
@@ -384,10 +420,7 @@ class OpenCodeServer:
             connection.close()
 
     def close(self) -> int:
-        self._event_stop.set()
-        if self._event_connection is not None:
-            with suppress(OSError):
-                self._event_connection.close()
+        self._stop_events()
         if self._event_thread is not None and self._event_thread.ident is not None:
             self._event_thread.join(timeout=min(0.2, max(0.0, self.deadline - time.monotonic())))
         return self.process.close()
@@ -558,7 +591,7 @@ def run_native_session(
             message_id = _required_text(info, "id")
             if message_id in existing_ids:
                 raise ValueError("OpenCode resumed duplicate native message IDs")
-            existing_ids.add(message_id)
+            _remember_native_id(existing_ids, message_id)
     if prompt_id in existing_ids:
         raise ValueError("OpenCode generated a duplicate native prompt ID")
     if hasattr(server, "open_events"):
@@ -577,6 +610,7 @@ def run_native_session(
             server, server.request("GET", "/question"), session_id, prompt_id
         ):
             request_id = _required_text(question, "id")
+            _check_native_id(answered_requests, request_id)
             if request_id in answered_requests:
                 if answered_requests[request_id] != "question":
                     raise ValueError("OpenCode reused a native request ID across interaction kinds")
@@ -589,6 +623,7 @@ def run_native_session(
             server, server.request("GET", "/permission"), session_id, prompt_id
         ):
             request_id = _required_text(permission, "id")
+            _check_native_id(answered_requests, request_id)
             if request_id in answered_requests:
                 if answered_requests[request_id] != "permission":
                     raise ValueError("OpenCode reused a native request ID across interaction kinds")
@@ -616,9 +651,9 @@ def run_native_session(
                 prompt_seen = True
             bound_message_id = _bound_assistant_id(info, session_id, prompt_id)
             if bound_message_id is not None:
-                server._bound_message_ids.add(bound_message_id)
+                _remember_native_id(server._bound_message_ids, bound_message_id)
             if message_id not in observed:
-                observed.add(message_id)
+                _remember_native_id(observed, message_id)
                 if bound_message_id is not None:
                     progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
         if prompt_seen:
@@ -776,6 +811,19 @@ def _required_text(value: Any, field: str) -> str:
     return result
 
 
+def _check_native_id(known: Collection[str], native_id: str) -> None:
+    """Bound bookkeeping independently of visible progress and HTTP frame limits."""
+    if len(native_id.encode("utf-8")) > _NATIVE_ID_BYTES_LIMIT or (
+        native_id not in known and len(known) >= _NATIVE_STATE_LIMIT
+    ):
+        raise ValueError("OpenCode native identifier state exceeded its size limit")
+
+
+def _remember_native_id(known: set[str], native_id: str) -> None:
+    _check_native_id(known, native_id)
+    known.add(native_id)
+
+
 def _bound_assistant_id(info: Any, session_id: str, prompt_id: str) -> str | None:
     """Return the exact assistant ID only for this session's submitted prompt."""
     if not isinstance(info, dict) or (
@@ -818,7 +866,7 @@ def _prompt_bound_requests(
             raise ValueError("OpenCode pending request has an unbound tool message")
         if _bound_assistant_id(info, session_id, prompt_id) is None:
             continue
-        server._bound_message_ids.add(message_id)
+        _remember_native_id(server._bound_message_ids, message_id)
         parts = message.get("parts")
         if (
             not isinstance(parts, list)

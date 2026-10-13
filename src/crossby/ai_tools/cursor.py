@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import time
 import warnings
@@ -65,6 +66,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 _CURSOR_MESSAGE_LIMIT = 8 * 1024 * 1024
+_CURSOR_MESSAGE_ID_BYTES_LIMIT = 1024 * 1024
+_CURSOR_MESSAGE_COUNT_LIMIT = 4096
 
 # Cursor encodes reasoning effort in the model ID rather than a flag:
 # ``<family>[-thinking]-<effort>[-fast]`` (``claude-opus-5-5-high-fast``,
@@ -886,12 +889,13 @@ class CursorAdapter(AbstractAITool):
             _cursor_acp_prompt_params(session_id, request.prompt),
         )
         context.emit(HeadlessEventKind.STARTED)
-        from crossby.ai_tools.headless_cli import BoundedProgress
+        from crossby.ai_tools.headless_cli import BoundedProgress, tool_event_payload
 
         chunk_progress = BoundedProgress(context)
         tool_events = 0
-        messages: dict[str, list[str]] = {}
+        messages: dict[str, io.StringIO] = {}
         message_bytes = 0
+        message_id_bytes = 0
         while True:
             message = rpc.read()
             if message.get("id") == prompt_id and "method" not in message:
@@ -930,6 +934,16 @@ class CursorAdapter(AbstractAITool):
                     ):
                         raise ValueError("Cursor message chunk lacked exact ID or text")
                     chunk_bytes = len(text.encode("utf-8"))
+                    if message_id not in messages:
+                        next_id_bytes = len(message_id.encode("utf-8"))
+                        if (
+                            len(messages) >= _CURSOR_MESSAGE_COUNT_LIMIT
+                            or message_id_bytes + next_id_bytes > _CURSOR_MESSAGE_ID_BYTES_LIMIT
+                        ):
+                            raise context.transport_error(
+                                "Cursor assistant message identifiers exceeded the size limit."
+                            )
+                        message_id_bytes += next_id_bytes
                     if message_id not in messages and messages:
                         chunk_bytes += 1  # Separator between assistant messages.
                     if message_bytes + chunk_bytes > _CURSOR_MESSAGE_LIMIT:
@@ -937,7 +951,11 @@ class CursorAdapter(AbstractAITool):
                             "Cursor assistant messages exceeded the final output size limit."
                         )
                     message_bytes += chunk_bytes
-                    messages.setdefault(message_id, []).append(text)
+                    if message_id not in messages:
+                        messages[message_id] = io.StringIO()
+                    # Keep text in a compact buffer; empty/tiny native chunks
+                    # must not create an unbounded list of Python objects.
+                    messages[message_id].write(text)
                     chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
                 elif kind in {"tool_call", "tool_call_update"}:
                     tool_id = update.get("toolCallId")
@@ -949,7 +967,7 @@ class CursorAdapter(AbstractAITool):
                             HeadlessEventKind.TOOL_COMPLETED
                             if update.get("status") in {"completed", "failed"}
                             else HeadlessEventKind.TOOL_STARTED,
-                            payload={"tool_call_id": tool_id},
+                            payload=tool_event_payload(tool_id, prompt=request.prompt),
                         )
                     else:
                         context.mark_progress()
@@ -985,7 +1003,7 @@ class CursorAdapter(AbstractAITool):
                 continue
             if isinstance(method, str) and "id" in message:
                 raise ValueError(f"Cursor requested unsupported ACP method {method!r}")
-        joined = "\n".join("".join(chunks) for chunks in messages.values())
+        joined = "\n".join(buffer.getvalue() for buffer in messages.values())
         final_text = joined if joined.strip() else None
         exit_code = rpc.close_cleanly()
         if exit_code != 0:
@@ -1877,6 +1895,23 @@ def _answer_cursor_permission(
         label_fields=("name", "label"),
         require_id=True,
     )
+    raw_options = params.get("options")
+    native_kinds = (
+        {
+            option["optionId"]: option.get("kind")
+            for option in raw_options
+            if isinstance(option, dict) and isinstance(option.get("optionId"), str)
+        }
+        if isinstance(raw_options, list)
+        else {}
+    )
+
+    def option_of_kind(kind: str) -> str | None:
+        return next(
+            (option.option_id for option in options if native_kinds.get(option.option_id) == kind),
+            None,
+        )
+
     tool_call = params.get("toolCall")
     tool_call_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
     title = tool_call.get("title") if isinstance(tool_call, dict) else None
@@ -1990,14 +2025,7 @@ def _answer_cursor_permission(
         ),
     )
     if deny_automatically:
-        selected = next(
-            (
-                option.option_id
-                for option in options
-                if any(word in option.label.lower() for word in ("deny", "reject", "cancel"))
-            ),
-            None,
-        )
+        selected = option_of_kind("reject_once") or option_of_kind("reject_always")
     elif handler is None:
         raise PlanInteractionRequiredError(
             "Cursor requires a permission decision to continue planning.",
@@ -2013,17 +2041,7 @@ def _answer_cursor_permission(
             PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.SKIPPED,
         }:
-            selected = next(
-                (
-                    option.option_id
-                    for option in options
-                    if any(
-                        word in option.label.lower()
-                        for word in ("deny", "reject", "cancel", "decline")
-                    )
-                ),
-                None,
-            )
+            selected = option_of_kind("reject_once") or option_of_kind("reject_always")
         else:
             if response.answer is not None:
                 raise PlanInteractionRequiredError(
@@ -2045,14 +2063,7 @@ def _answer_cursor_permission(
                 )
             selected = next(iter(selected_ids), None)
             if selected is None and response.outcome is PlanInteractionOutcome.APPROVED:
-                selected = next(
-                    (
-                        option.option_id
-                        for option in options
-                        if "allow" in option.label.lower() or "approve" in option.label.lower()
-                    ),
-                    None,
-                )
+                selected = option_of_kind("allow_once")
             valid_ids = {option.option_id for option in options}
             if selected is None or selected not in valid_ids:
                 raise PlanInteractionRequiredError(

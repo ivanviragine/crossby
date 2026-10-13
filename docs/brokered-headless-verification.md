@@ -10,6 +10,17 @@ Brokered start, progress, and interaction events use their event kind without
 fixed diagnostic messages. This avoids treating generic labels as prompt leaks
 when a short prompt happens to match them; prompt-bearing event messages and
 payloads still fail the shared runtime guard.
+Optional tool-event identifiers are omitted when their key or value overlaps
+the prompt, preserving activity events without exposing protected content.
+
+Shared stdio processes use owned POSIX process groups or Windows Job Objects;
+Windows children are attached before they resume. Cleanup kills the entire
+owned tree even when the direct parent has already exited. Process lifetime
+uses the overall deadline, while each brokered read, write, reply, and shutdown
+uses the runtime's current idle/overall budget. Native I/O expiry is reconciled
+with runtime timeout and cancellation before reporting a transport failure.
+The stdio queue retains at most 256 frames and 8 MiB of UTF-8 data, applying
+backpressure without dropping frames. Its 1 MiB frame limit counts bytes.
 
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
@@ -59,11 +70,17 @@ message chunk, usage, and fallback progress updates produce visible events;
 tool updates have a separate 512-event cap. ACP `usage_update.used` describes
 current context occupancy, so the brokered Cursor result leaves turn token
 usage unset. Later updates still refresh the idle deadline, and assistant
-messages assemble in native order under an 8 MiB aggregate UTF-8 limit. An
-`end_turn` without non-blank assistant text yields
-`INVALID_OUTPUT`. A denied permission response cannot forward a selected
-native option, even if the handler supplies one. Cursor's brokered profile
-does not offer command policy or response schemas. It applies
+messages assemble in native order under an 8 MiB aggregate UTF-8 limit. Each
+assistant message uses a compact text buffer rather than retaining every native
+chunk, including empty chunks. Message IDs have a separate 1 MiB aggregate
+budget and a 4,096-message cap. An `end_turn` without non-blank assistant
+text yields `INVALID_OUTPUT`. A denied permission response cannot forward a selected
+native option, even if the handler supplies one. Cursor's shared permission
+helper uses ACP's `allow_once` and `reject_once`/`reject_always`
+option kinds for implicit permission decisions, never display labels. Without
+a typed rejection option, denial returns native `cancelled`; an implicit
+approval requires `allow_once`. An explicit offered option ID is preserved.
+Cursor's brokered profile does not offer command policy or response schemas. It applies
 model-encoded effort and rejects malformed or conflicting effort encodings in
 preflight, even without a separate effort request. It rechecks model, effort,
 and variants after all configuration updates. It checks
@@ -90,7 +107,7 @@ message binding can be established by SSE, message polling, or a verified
 pending interaction, so later part updates still count when the initial SSE
 message update was missed. SSE and polling share a 512-event progress cap;
 later updates continue to refresh the idle deadline. SSE progress is dropped
-if its bounded queue fills; polling remains
+if its 256-event or 8 MiB queue fills; polling remains
 the terminal authority because [some 1.18.x builds](https://github.com/anomalyco/opencode/issues/46733)
 have an `/event` endpoint that stays quiet during a live session. The current
 ordinary driver does not expose response schemas or command-policy changes on
@@ -98,8 +115,15 @@ resume. It records historical message IDs before prompting a resumed session
 so an old assistant answer cannot become the new result; a concurrent reply
 to another prompt cannot satisfy this binding. The SSE read and HTTP request
 share the session deadline, and HTTP bodies have a fixed size
-limit. Permission interactions carry the request's working directory as
-execution context. Reply IDs use the native pending request ID; no command is
+limit. HTTP startup and request waits also respect the current runtime idle
+budget. Closing SSE shuts down the active socket before closing its connection
+so a blocked buffered reader wakes during cleanup. Each SSE event is limited
+to 1 MiB of data including inter-line separators and 4,096 `data:` lines;
+line validation is independent of network chunk boundaries.
+Native message, tool, observed-history, and answered-request bookkeeping has
+a 4,096-entry cap per collection, a 4 KiB limit per retained identifier, and
+a 64-byte limit for tool status tokens; excess state fails the run through managed cleanup. Permission interactions
+carry the request's working directory as execution context. Reply IDs use the native pending request ID; no command is
 inferred from display patterns. A resumed session may also be in use by another
 client, so cleanup does not send its session-wide abort; it terminates this
 run's loopback server instead.
@@ -121,6 +145,9 @@ offered native answer ends with a failed terminal event.
 The deterministic wire tests are in
 `tests/unit/test_ai_tools/test_brokered_sessions.py`; existing collected-plan
 tests cover their independent plan artifacts. Run those tests and
+`tests/unit/test_ai_tools/test_brokered_transport_safety.py` for real-pipe idle
+progress, operation budgets, exited-parent cleanup, simulated Windows job
+ownership, blocked socket cleanup, and cross-path permission decisions. Run
 `scripts/check.sh` after changing a profile. Increase a profile's version floor
 when a newly advertised native request shape was verified only on a later
 build. Unsupported combinations must fail during preflight before starting a

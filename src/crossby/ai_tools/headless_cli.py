@@ -102,6 +102,13 @@ class BoundedProgress:
         self._context.emit(kind, message=message, payload=payload)
 
 
+def tool_event_payload(tool_call_id: str, *, prompt: str) -> dict[str, str] | None:
+    """Omit optional tool metadata when it overlaps protected prompt content."""
+    if prompt and (prompt in "tool_call_id" or prompt in tool_call_id):
+        return None
+    return {"tool_call_id": tool_call_id}
+
+
 class ResumableManagedCLIController:
     """Keep one runtime cleanup registration across continuation processes."""
 

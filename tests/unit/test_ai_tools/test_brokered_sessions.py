@@ -58,13 +58,13 @@ class _FakeRpc:
         self._proc = _FakeProcess()
         self.instances.append(self)
 
-    def request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
+    def request(self, request_id: int, method: str, params: dict[str, Any], **_kwargs: Any) -> None:
         self.sent.append((method, params))
 
-    def notify(self, method: str, params: dict[str, Any]) -> None:
+    def notify(self, method: str, params: dict[str, Any], **_kwargs: Any) -> None:
         self.sent.append((method, params))
 
-    def respond(self, request_id: object, result: Any) -> None:
+    def respond(self, request_id: object, result: Any, **_kwargs: Any) -> None:
         self.sent.append(("respond", {"id": request_id, "result": result}))
 
     def read(self, *, timeout: float) -> dict[str, Any]:
@@ -73,7 +73,7 @@ class _FakeRpc:
             raise EOFError("fixture exhausted")
         return self.messages.pop(0)
 
-    def close(self) -> int:
+    def close(self, **_kwargs: Any) -> int:
         self.returncode = 0
         return 0
 
@@ -648,8 +648,9 @@ def test_cursor_question_preserves_native_option_id_and_omits_plan_mode(
     ) in sent
 
 
+@pytest.mark.parametrize("text", ["", "x"])
 def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
     chunks = [
         {
@@ -659,7 +660,7 @@ def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "messageId": "msg-exact",
-                    "content": {"type": "text", "text": "x"},
+                    "content": {"type": "text", "text": text},
                 },
             },
         }
@@ -671,6 +672,17 @@ def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
             {"id": 1, "result": {"authMethods": []}},
             {"id": 3, "result": {"sessionId": "ses-exact"}},
             *chunks,
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "ses-exact",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "msg-exact",
+                        "content": {"type": "text", "text": "Done."},
+                    },
+                },
+            },
             {"id": 4, "result": {"stopReason": "end_turn"}},
         ],
     )
@@ -679,7 +691,7 @@ def test_cursor_many_message_chunks_keep_response_without_exhausting_events(
         lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
-    assert result.final_text == "x" * 4200
+    assert result.final_text == text * 4200 + "Done."
     assert sum(event.kind is HeadlessEventKind.ASSISTANT_MESSAGE for event in result.events) == 512
 
 
@@ -787,6 +799,45 @@ def test_cursor_brokered_bounds_message_bytes_before_result(
         )
 
 
+@pytest.mark.parametrize("bound", ["count", "bytes"])
+def test_cursor_bounds_message_identifiers_even_for_empty_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: str
+) -> None:
+    monkeypatch.setattr(
+        "crossby.ai_tools.cursor."
+        + ("_CURSOR_MESSAGE_COUNT_LIMIT" if bound == "count" else "_CURSOR_MESSAGE_ID_BYTES_LIMIT"),
+        2 if bound == "count" else 8,
+    )
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {"authMethods": []}},
+            {"id": 3, "result": {"sessionId": "ses-exact"}},
+            *[
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "ses-exact",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": f"é{i}",
+                            "content": {"type": "text", "text": ""},
+                        },
+                    },
+                }
+                for i in range(3)
+            ],
+        ],
+    )
+    with pytest.raises(HeadlessTransportError, match="message identifiers exceeded"):
+        AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
+            _request(tmp_path),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+
+
 @pytest.mark.parametrize("text", [None, " \t "])
 def test_cursor_brokered_empty_end_turn_is_invalid_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
@@ -841,8 +892,9 @@ def test_cursor_brokered_rejects_bad_model_effort_before_session_setup(
     assert _FakeRpc.instances == []
 
 
+@pytest.mark.parametrize("prompt", ["Implement the ordinary task", "a", "tool", "call"])
 def test_cursor_many_non_text_updates_and_tools_remain_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
 ) -> None:
     updates = [
         {
@@ -879,7 +931,7 @@ def test_cursor_many_non_text_updates_and_tools_remain_bounded(
         ],
     )
     result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
-        _request(tmp_path),
+        _request(tmp_path, prompt=prompt),
         lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
@@ -888,8 +940,16 @@ def test_cursor_many_non_text_updates_and_tools_remain_bounded(
     assert len(result.events) < 1100
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        PlanInteractionOutcome.APPROVED,
+        PlanInteractionOutcome.DENIED,
+        PlanInteractionOutcome.SKIPPED,
+    ],
+)
 def test_cursor_brokered_accepts_cursor_permission_method(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: PlanInteractionOutcome
 ) -> None:
     _install_rpc(
         monkeypatch,
@@ -903,8 +963,8 @@ def test_cursor_brokered_accepts_cursor_permission_method(
                     "sessionId": "ses-exact",
                     "toolCall": {"toolCallId": "tool-exact", "title": "Run a command?"},
                     "options": [
-                        {"optionId": "allow-once", "name": "Allow once"},
-                        {"optionId": "deny-once", "name": "Deny once"},
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "deny-once", "name": "Deny once", "kind": "reject_once"},
                     ],
                 },
             },
@@ -925,13 +985,24 @@ def test_cursor_brokered_accepts_cursor_permission_method(
     result = AbstractAITool.get(AIToolID.CURSOR).run_headless_session(
         _request(tmp_path),
         lambda _interaction: SessionInteractionResponse(
-            outcome=PlanInteractionOutcome.APPROVED, option_id="allow-once"
+            outcome=outcome,
+            option_id="allow-once" if outcome is PlanInteractionOutcome.APPROVED else None,
         ),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert (
         "respond",
-        {"id": 90, "result": {"outcome": {"outcome": "selected", "optionId": "allow-once"}}},
+        {
+            "id": 90,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": (
+                        "allow-once" if outcome is PlanInteractionOutcome.APPROVED else "deny-once"
+                    ),
+                }
+            },
+        },
     ) in _FakeRpc.instances[0].sent
 
 
@@ -1500,6 +1571,7 @@ def test_protocol_controller_blocks_reused_and_late_native_replies(
 
     class FakeContext:
         deadline = 9999999999.0
+        cancel_event = None
 
         def __init__(self) -> None:
             self.hooks: Any = None
@@ -1538,6 +1610,7 @@ def test_protocol_controller_uses_notification_for_cursor_abort(
 
     class FakeContext:
         deadline = 9999999999.0
+        cancel_event = None
 
         def remaining_seconds(self) -> float:
             return 10.0
@@ -1618,6 +1691,7 @@ def test_opencode_abort_respects_cleanup_budget(
         "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
     )
     server = OpenCodeServer.__new__(OpenCodeServer)
+    server.runtime = None
     server.active_session_id = "ses-exact"
     server.port = 1234
     server.directory = tmp_path
@@ -1686,6 +1760,7 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
     from crossby.ai_tools.opencode_server import OpenCodeServer
 
     server = OpenCodeServer.__new__(OpenCodeServer)
+    server.runtime = None
     server._event_error = None
     server._events = queue.Queue()
     server._bound_message_ids = set()
@@ -1809,6 +1884,7 @@ def test_opencode_sse_progress_stays_bounded_across_drains() -> None:
     from crossby.ai_tools.opencode_server import OpenCodeServer
 
     server = OpenCodeServer.__new__(OpenCodeServer)
+    server.runtime = None
     server._event_error = None
     server._events = queue.Queue()
     server._bound_message_ids = set()
@@ -1971,6 +2047,8 @@ def test_opencode_sse_survives_quiet_period_longer_than_200ms(
             return b""
 
     class FakeConnection:
+        sock = None
+
         def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
             self.timeout = timeout
             connections.append(self)
@@ -1989,6 +2067,7 @@ def test_opencode_sse_survives_quiet_period_longer_than_200ms(
         "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
     )
     server = OpenCodeServer.__new__(OpenCodeServer)
+    server.runtime = None
     server.port = 1234
     server.directory = tmp_path
     server.authorization = "Basic fixture"
@@ -2026,6 +2105,8 @@ def test_opencode_sse_full_queue_does_not_fail_polling_session(
             return b""
 
     class FakeConnection:
+        sock = None
+
         def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
             pass
 
@@ -2043,6 +2124,7 @@ def test_opencode_sse_full_queue_does_not_fail_polling_session(
         "crossby.ai_tools.opencode_server.http.client.HTTPConnection", FakeConnection
     )
     server = OpenCodeServer.__new__(OpenCodeServer)
+    server.runtime = None
     server.port = 1234
     server.directory = tmp_path
     server.authorization = "Basic fixture"

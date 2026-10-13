@@ -326,6 +326,12 @@ Collected-plan entry points retain their artifact checks and native plan-mode
 selection. Codex and Cursor share app-server/ACP setup payload builders across
 the two paths; Antigravity shares native question-to-continuation mapping.
 Keep the ordinary brokered path free of plan mode and plan artifacts.
+Exercise lifecycle invariants with real child processes and blocked pipes or
+sockets, as in `test_brokered_transport_safety.py`; protocol mocks alone cannot
+verify native deadlines, backpressure, or descendant cleanup. Check related
+read/write/reply paths and every adapter that shares a helper when fixing a
+permission, binding, resource-limit, or timeout defect. Permission option
+display labels must never choose an implicit allow or deny decision.
 The checked behavior and version floors are documented in
 `docs/brokered-headless-verification.md`.
 
