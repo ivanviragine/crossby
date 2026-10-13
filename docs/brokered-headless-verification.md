@@ -22,7 +22,8 @@ requests have no such field; the response schemas define the exact `accept`,
 `acceptForSession`, `decline`, and `cancel` decisions. The brokered adapter
 offers those native decisions when the request omits the list. Built-in
 permission requests carry a structured permission profile; an explicit
-approval grants that exact profile for the turn. With `approval_policy=never`,
+approval grants that exact profile for the turn. When `approval_policy=never` or
+a brokered handler denies or skips the optionless built-in request,
 the adapter responds with an empty permission profile scoped to the turn, so
 the native turn can continue without granting the requested permissions. MCP
 form content is checked
@@ -86,7 +87,8 @@ resume. It records historical message IDs before prompting a resumed session
 so an old assistant answer cannot become the new result; a concurrent reply
 to another prompt cannot satisfy this binding. The SSE read and HTTP request
 share the session deadline, and HTTP bodies have a fixed size
-limit. Permission reply IDs use the native pending request ID; no command is
+limit. Permission interactions carry the request's working directory as
+execution context. Reply IDs use the native pending request ID; no command is
 inferred from display patterns. A resumed session may also be in use by another
 client, so cleanup does not send its session-wide abort; it terminates this
 run's loopback server instead.

@@ -540,9 +540,7 @@ class HeadlessRuntimeContext:
             PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.SKIPPED,
         }
-        can_decline = (
-            interaction.kind is PlanInteractionKind.PERMISSION and interaction.options
-        ) or (
+        can_decline = (interaction.kind is PlanInteractionKind.PERMISSION) or (
             interaction.kind is PlanInteractionKind.QUESTION
             and (interaction.form_schema is not None or interaction.url is not None)
         )

@@ -1021,14 +1021,32 @@ def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_appro
     ]
 
     rpc.sent.clear()
-    with pytest.raises(ValueError):
+    for outcome in (PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED):
+        _answer_codex_builtin_permission(
+            rpc,
+            message,
+            thread_id="thr-exact",
+            turn_id="turn-exact",
+            handler=lambda _interaction, outcome=outcome: SessionInteractionResponse(
+                outcome=outcome
+            ),
+        )
+    assert (
+        rpc.sent
+        == [
+            ("respond", {"id": 91, "result": {"permissions": {}, "scope": "turn"}}),
+        ]
+        * 2
+    )
+    rpc.sent.clear()
+    with pytest.raises(ValueError, match="refusal included answer fields"):
         _answer_codex_builtin_permission(
             rpc,
             message,
             thread_id="thr-exact",
             turn_id="turn-exact",
             handler=lambda _interaction: SessionInteractionResponse(
-                outcome=PlanInteractionOutcome.DENIED
+                outcome=PlanInteractionOutcome.DENIED, answer="approve"
             ),
         )
     assert rpc.sent == []
@@ -1044,8 +1062,11 @@ def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_appro
     assert rpc.sent == [("respond", {"id": 91, "result": {"permissions": {}, "scope": "turn"}})]
 
 
-def test_codex_never_policy_denies_builtin_permission_and_completes_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "outcome", [None, PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED]
+)
+def test_codex_builtin_permission_denial_completes_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: PlanInteractionOutcome | None
 ) -> None:
     _install_rpc(
         monkeypatch,
@@ -1088,14 +1109,28 @@ def test_codex_never_policy_denies_builtin_permission_and_completes_turn(
     )
     from crossby.models.ai import PlanApprovalPolicy
 
-    def unexpected_interaction(_interaction: SessionInteraction) -> SessionInteractionResponse:
-        pytest.fail("approval_policy=never must not ask for a permission decision")
+    seen: list[SessionInteraction] = []
+
+    def deny(interaction: SessionInteraction) -> SessionInteractionResponse:
+        if outcome is None:
+            pytest.fail("approval_policy=never must not ask for a permission decision")
+        seen.append(interaction)
+        return SessionInteractionResponse(outcome=outcome)
 
     result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
-        _request(tmp_path, approval_policy=PlanApprovalPolicy.NEVER), unexpected_interaction
+        _request(
+            tmp_path,
+            approval_policy=(
+                PlanApprovalPolicy.NEVER if outcome is None else PlanApprovalPolicy.ON_REQUEST
+            ),
+        ),
+        deny,
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "Permission denied."
+    assert len(seen) == (0 if outcome is None else 1)
+    if outcome is not None:
+        assert result.denials
     assert (
         "respond",
         {"id": 91, "result": {"permissions": {}, "scope": "turn"}},
@@ -2417,6 +2452,9 @@ def test_opencode_resume_answers_only_current_prompts_requests(
     assert result.final_text == "Current answer."
     assert FakeServer.instance._bound_message_ids == {"msg-current", "msg-done"}
     assert [interaction.request_id for interaction in seen] == [f"{kind}-current"]
+    if kind == "permission":
+        assert seen[0].operation is not None
+        assert seen[0].operation.execution_dir == tmp_path.resolve()
     replies = [path for method, path, _ in FakeServer.instance.calls if method == "POST"]
     assert f"/{kind}/{kind}-current/reply" in replies
     assert f"/{kind}/{kind}-foreign/reply" not in replies

@@ -1685,6 +1685,16 @@ def _answer_codex_builtin_permission(
         ),
     )
     response = handler(interaction)
+    if response.outcome in {PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED}:
+        if (
+            response.answer is not None
+            or response.option_id is not None
+            or response.option_ids
+            or response.content is not None
+        ):
+            raise ValueError("Codex built-in permission refusal included answer fields")
+        rpc.respond(message["id"], {"permissions": {}, "scope": "turn"})
+        return
     if response.outcome is not PlanInteractionOutcome.APPROVED:
         raise ValueError("Codex built-in permission was not explicitly approved")
     rpc.respond(message["id"], {"permissions": permissions, "scope": "turn"})

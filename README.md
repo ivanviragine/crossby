@@ -500,10 +500,11 @@ result = tool.run_headless_session(request, interaction_handler=answer_native_re
 The handler receives a `SessionInteraction` with native IDs and returns a
 `SessionInteractionResponse`. It should choose an offered option ID or provide
 an allowed free-form answer. Permission decisions require an explicit native
-option or approval of a structured built-in request; a missing, late, or invalid
-answer never becomes a native approval. Cursor and Antigravity CLI encode `effort` in the
-model argument, so a headless request that specifies `effort` must also specify
-`model`. Cursor accepts the request only when the model encodes the requested
+option or approval of a structured built-in request. A denied or skipped Codex
+built-in permission sends an empty turn-scoped grant; a missing, late, or invalid
+answer never becomes a native approval. Cursor and Antigravity CLI encode
+`effort` in the model argument, so a headless request that specifies `effort`
+must also specify `model`. Cursor accepts the request only when the model encodes the requested
 tier exactly: matching `[effort=…]` overrides and registered bare-medium
 families are preserved, while `auto`, malformed or conflicting overrides,
 unknown models, and unavailable tiers fail before spawning. For Antigravity,

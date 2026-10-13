@@ -599,6 +599,7 @@ def run_native_session(
                 session_id,
                 context.native_interaction_response,
                 capability,
+                execution_dir=request.working_dir,
             )
             answered_requests[request_id] = "permission"
         messages = server.request("GET", session_path + "/message")

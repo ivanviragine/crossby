@@ -199,6 +199,30 @@ def test_native_refusal_reaches_protocol_helper(
 
 
 @pytest.mark.parametrize("outcome", [PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED])
+def test_optionless_permission_refusal_reaches_protocol_helper(
+    tmp_path: Path, outcome: PlanInteractionOutcome
+) -> None:
+    interaction = SessionInteraction(
+        kind=PlanInteractionKind.PERMISSION,
+        question_id="permission-1",
+        prompt="Grant additional permissions?",
+        session_id="session-1",
+    )
+
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        response = context.native_interaction_response(interaction)
+        assert response.outcome is outcome
+        return context.complete(final_text="declined", exit_code=0)
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED),
+        lambda _interaction: SessionInteractionResponse(outcome=outcome),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.denials
+
+
+@pytest.mark.parametrize("outcome", [PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED])
 def test_mcp_refusal_cannot_forward_accept_option(
     tmp_path: Path, outcome: PlanInteractionOutcome
 ) -> None:
