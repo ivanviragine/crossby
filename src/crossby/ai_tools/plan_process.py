@@ -16,14 +16,16 @@ import stat
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, ClassVar
+from typing import IO, Any, ClassVar, TypeVar
 
 _STDERR_TAIL_LIMIT = 8 * 1024
 _STDOUT_QUEUE_LIMIT = 256
+_QUEUED_OUTPUT_BYTES_LIMIT = 8 * 1024 * 1024
 _QUEUE_PUT_TIMEOUT_SECONDS = 0.1
 _JSON_RPC_FRAME_LIMIT = 1024 * 1024
 _JSON_RPC_READ_CHUNK_SIZE = 64 * 1024
@@ -39,6 +41,39 @@ _WINDOWS_INVALID_DWORD = 0xFFFFFFFF
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _WINDOWS_SNAPSHOT_THREADS = 0x00000004
 _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
+
+_QueueItem = TypeVar("_QueueItem")
+
+
+class ByteBoundedQueue(queue.Queue[_QueueItem]):
+    """Bound retained wire data by both item count and serialized bytes.
+
+    Byte pressure raises ``Full`` even for a blocking put. Producers either
+    retry with bounded backpressure (stdio) or drop advisory progress (SSE).
+    Queue's mutex protects the byte accounting alongside its normal storage.
+    """
+
+    def __init__(
+        self, maxsize: int, *, max_bytes: int, size_of: Callable[[_QueueItem], int]
+    ) -> None:
+        super().__init__(maxsize=maxsize)
+        self._max_bytes = max_bytes
+        self._size_of = size_of
+        self._bytes = 0
+        self._sizes: deque[int] = deque()
+
+    def _put(self, item: _QueueItem) -> None:
+        size = self._size_of(item)
+        if self._bytes + size > self._max_bytes:
+            raise queue.Full
+        super()._put(item)
+        self._sizes.append(size)
+        self._bytes += size
+
+    def _get(self) -> _QueueItem:
+        item = super()._get()
+        self._bytes -= self._sizes.popleft()
+        return item
 
 
 class _WindowsJobBasicLimits(ctypes.Structure):
@@ -591,6 +626,7 @@ class JsonRpcProcess:
         )
         self._cancel_event = cancel_event
         self._write_thread: threading.Thread | None = None
+        self._send_lock = threading.Lock()
         self._proc = subprocess.Popen(
             command,
             cwd=cwd,
@@ -602,16 +638,25 @@ class JsonRpcProcess:
             encoding="utf-8",
             errors="strict",
             bufsize=1,
-            start_new_session=os.name == "posix",
+            **process_tree_popen_kwargs(),
         )
+        try:
+            own_process_tree(self._proc)
+        except BaseException:
+            _kill_process_group(self._proc)
+            with suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            raise
         if self._proc.stdin is None or self._proc.stdout is None or self._proc.stderr is None:
             _kill_process_group(self._proc)
             with suppress(subprocess.TimeoutExpired):
                 self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
             raise OSError("failed to create JSON-RPC stdio pipes")
         self._stdin: IO[str] = self._proc.stdin
-        self._stdout_queue: queue.Queue[str | ValueError | None] = queue.Queue(
-            maxsize=_STDOUT_QUEUE_LIMIT
+        self._stdout_queue: queue.Queue[str | ValueError | None] = ByteBoundedQueue(
+            _STDOUT_QUEUE_LIMIT,
+            max_bytes=_QUEUED_OUTPUT_BYTES_LIMIT,
+            size_of=lambda value: len(value.encode("utf-8")) if isinstance(value, str) else 0,
         )
         self._stderr_tail = ""
         self._stderr_lock = threading.Lock()
@@ -644,7 +689,7 @@ class JsonRpcProcess:
             while line := stream.readline(_JSON_RPC_FRAME_LIMIT + 1):
                 if self._discard_stdout.is_set():
                     continue
-                if len(line) > _JSON_RPC_FRAME_LIMIT:
+                if len(line.encode("utf-8")) > _JSON_RPC_FRAME_LIMIT:
                     proc = getattr(self, "_proc", None)
                     if proc is not None:
                         _kill_process_group(proc)
@@ -666,6 +711,7 @@ class JsonRpcProcess:
             try:
                 self._stdout_queue.put(line, timeout=_QUEUE_PUT_TIMEOUT_SECONDS)
             except queue.Full:
+                self._closing.wait(_QUEUE_PUT_TIMEOUT_SECONDS)
                 continue
             return True
         return False
@@ -689,7 +735,18 @@ class JsonRpcProcess:
             if not self._closing.is_set():
                 raise
 
-    def send(self, payload: dict[str, Any]) -> None:
+    def send(self, payload: dict[str, Any], *, timeout: float | None = None) -> None:
+        deadline = self._deadline
+        if timeout is not None:
+            deadline = min(deadline, time.monotonic() + timeout)
+        if not self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("timed out waiting to write a JSON-RPC message")
+        try:
+            self._send_locked(payload, deadline=deadline)
+        finally:
+            self._send_lock.release()
+
+    def _send_locked(self, payload: dict[str, Any], *, deadline: float) -> None:
         cancel_event = getattr(self, "_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             raise SessionProcessCancelledError("JSON-RPC child was cancelled")
@@ -706,7 +763,7 @@ class JsonRpcProcess:
             except (OSError, ValueError) as exc:
                 errors.append(exc)
 
-        remaining = self._deadline - time.monotonic()
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("timed out writing a JSON-RPC message")
         self._write_thread = threading.Thread(target=write, daemon=True)
@@ -717,7 +774,7 @@ class JsonRpcProcess:
                 _kill_process_group(self._proc)
                 self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
                 raise SessionProcessCancelledError("JSON-RPC child was cancelled")
-            remaining = self._deadline - time.monotonic()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             self._write_thread.join(timeout=min(_QUEUE_PUT_TIMEOUT_SECONDS, remaining))
@@ -728,23 +785,84 @@ class JsonRpcProcess:
         if errors:
             raise errors[0]
 
-    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+    def send_cleanup(self, payload: dict[str, Any]) -> None:
+        """Best-effort native abort after the ordinary work deadline expires."""
+        if self._proc.poll() is not None:
+            return
+        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
+        encoded = (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(encoded) > _JSON_RPC_FRAME_LIMIT:
+            raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
+        # The runtime bounds this hook. A stalled prior writer cannot be
+        # overtaken by an abort that would corrupt the native JSONL stream.
+        cleanup_deadline = time.monotonic() + _CAPTURE_CLEANUP_GRACE_SECONDS
+        if not self._send_lock.acquire(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS):
+            return
+        try:
+            if self._proc.poll() is None and not self._stdin.closed:
+                fd = self._stdin.fileno()
+                view = memoryview(encoded)
+                try:
+                    was_blocking = os.get_blocking(fd)
+                    os.set_blocking(fd, False)
+                except OSError:
+                    return
+                try:
+                    while view and time.monotonic() < cleanup_deadline:
+                        try:
+                            written = os.write(fd, view)
+                        except BlockingIOError:
+                            time.sleep(min(0.01, max(0.0, cleanup_deadline - time.monotonic())))
+                            continue
+                        except OSError:
+                            break
+                        if written == 0:
+                            break
+                        view = view[written:]
+                finally:
+                    with suppress(OSError):
+                        os.set_blocking(fd, was_blocking)
+        finally:
+            self._send_lock.release()
+
+    def close_input(self) -> None:
+        """Close stdin only after the bounded writer has relinquished it."""
+        if (
+            self._write_thread is None or not self._write_thread.is_alive()
+        ) and not self._stdin.closed:
+            with suppress(OSError, ValueError):
+                self._stdin.close()
+
+    def join_workers(self, *, timeout: float) -> None:
+        """Join owned reader and writer workers within a cleanup stage."""
+        self._closing.set()
+        threads = [self._stdout_thread, self._stderr_thread]
+        if self._write_thread is not None:
+            threads.append(self._write_thread)
+        _join_until(tuple(threads), time.monotonic() + max(0.0, timeout))
+
+    def notify(
+        self, method: str, params: dict[str, Any] | None = None, *, timeout: float | None = None
+    ) -> None:
         payload: dict[str, Any] = {"method": method}
         if params is not None:
             payload["params"] = params
-        self.send(payload)
+        self.send(payload, timeout=timeout)
 
-    def request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
+    def request(
+        self, request_id: int, method: str, params: dict[str, Any], *, timeout: float | None = None
+    ) -> None:
         self.send(
             {
                 "id": request_id,
                 "method": method,
                 "params": params,
-            }
+            },
+            timeout=timeout,
         )
 
-    def respond(self, request_id: object, result: Any) -> None:
-        self.send({"id": request_id, "result": result})
+    def respond(self, request_id: object, result: Any, *, timeout: float | None = None) -> None:
+        self.send({"id": request_id, "result": result}, timeout=timeout)
 
     def read_line(self, *, timeout: float) -> str:
         """Read a bounded stdout line, also usable for a server's startup banner."""
@@ -788,14 +906,17 @@ class JsonRpcProcess:
             raise ValueError("malformed JSON-RPC envelope: missing both id and method")
         return payload
 
-    def close(self) -> int:
+    def close(self, *, timeout: float | None = None) -> int:
         """Stop the server and its helpers, then close only drained reader pipes."""
         writer_finished = self._write_thread is None or not self._write_thread.is_alive()
+        deadline = self._deadline
+        if timeout is not None:
+            deadline = min(deadline, time.monotonic() + timeout)
         if writer_finished and not self._stdin.closed:
             with suppress(OSError):
                 self._stdin.close()
         if self._proc.poll() is None:
-            remaining = self._deadline - time.monotonic()
+            remaining = deadline - time.monotonic()
             if remaining > 0:
                 with suppress(subprocess.TimeoutExpired):
                     self._proc.wait(timeout=min(1.0, remaining))
@@ -807,7 +928,7 @@ class JsonRpcProcess:
             with suppress(subprocess.TimeoutExpired):
                 self._proc.wait(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
         if self._write_thread is not None:
-            remaining = self._deadline - time.monotonic()
+            remaining = deadline - time.monotonic()
             if remaining > 0:
                 self._write_thread.join(timeout=min(_CAPTURE_CLEANUP_GRACE_SECONDS, remaining))
             if not self._write_thread.is_alive() and not self._stdin.closed:

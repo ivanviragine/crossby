@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import re
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -27,7 +30,9 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HeadlessCapability,
+    HeadlessEventKind,
     HeadlessInteractionMode,
+    HeadlessModeCapability,
     HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessPromptTransport,
@@ -78,6 +83,19 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
 _CODEX_STREAM_EVENT_KINDS = frozenset(
     {"thread.started", "turn.started", "item.completed", "turn.completed", "turn.failed", "error"}
 )
+_CODEX_BROKERED_PROGRESS_METHODS = frozenset(
+    {
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+        "item/fileChange/outputDelta",
+        "item/mcpToolCall/progress",
+    }
+)
+_CODEX_MESSAGE_LIMIT = 8 * 1024 * 1024
+_CODEX_NOTIFICATION_BYTES_LIMIT = 8 * 1024 * 1024
 
 
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
@@ -90,6 +108,67 @@ def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
     item = frame.get("item")
     item_kind = non_blank_text(item.get("type")) if isinstance(item, dict) else None
     return f"item.completed/{item_kind or 'item'}"
+
+
+def _codex_initialize_params(client_version: str) -> dict[str, Any]:
+    return {
+        "clientInfo": {"name": "crossby", "title": "Crossby", "version": client_version},
+        "capabilities": {"experimentalApi": True},
+    }
+
+
+def _codex_thread_params(
+    request: HeadlessSessionRequest | PlanSessionRequest,
+    *,
+    ephemeral: bool = True,
+) -> dict[str, Any]:
+    """Use the same policy-preserving app-server thread setup in both modes."""
+    params: dict[str, Any] = {
+        "cwd": str(request.working_dir.resolve()),
+        "model": request.model,
+        "sandbox": "workspace-write" if request.sandbox else "danger-full-access",
+        "approvalPolicy": request.approval_policy.value,
+        "ephemeral": ephemeral,
+    }
+    if request.sandbox:
+        params["config"] = {
+            "sandbox_workspace_write": {
+                "network_access": request.network_access,
+                "writable_roots": [str(path) for path in request.trusted_dirs],
+            }
+        }
+    return params
+
+
+def _codex_turn_params(
+    request: HeadlessSessionRequest | PlanSessionRequest,
+    thread_id: str,
+    *,
+    plan_model: str | None = None,
+) -> dict[str, Any]:
+    """Start an ordinary turn unless the plan collector supplies a plan model."""
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": request.prompt}],
+    }
+    effort = (
+        _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
+        if request.effort is not None
+        else None
+    )
+    if plan_model is None:
+        if effort is not None:
+            params["effort"] = effort
+    else:
+        params["collaborationMode"] = {
+            "mode": "plan",
+            "settings": {
+                "model": plan_model,
+                "reasoning_effort": effort,
+                "developer_instructions": None,
+            },
+        }
+    return params
 
 
 class CodexAdapter(AbstractAITool):
@@ -121,7 +200,35 @@ class CodexAdapter(AbstractAITool):
                 # than an isolated final response, so every managed run uses the
                 # JSONL event wire and derives TEXT from its agent messages.
                 native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.APP_SERVER,
+                    prompt_transport=HeadlessPromptTransport.PROTOCOL,
+                    native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
+                    supports_native_abort=True,
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    successful_native_statuses=("completed",),
+                    supported_approval_policies=(
+                        PlanApprovalPolicy.ON_REQUEST,
+                        PlanApprovalPolicy.NEVER,
+                    ),
+                    command_policy_support=PlanCommandPolicySupport.CALLBACK,
+                    supported_interaction_kinds=(
+                        PlanInteractionKind.QUESTION,
+                        PlanInteractionKind.PERMISSION,
+                    ),
+                    version_requirement="Codex CLI with the verified app-server protocol.",
+                    verified_version="0.162.1",
+                    limitation=(
+                        "Only text and exact app-server thread resumption are supported. Native "
+                        "question, permission, and MCP requests are bound to one live turn."
+                    ),
+                ),
                 supports_response_schema=True,
                 successful_native_statuses=("turn.completed",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
@@ -342,6 +449,8 @@ class CodexAdapter(AbstractAITool):
         cancel_event: threading.Event | None = None,
     ) -> list[str]:
         """Return Codex's command without the temporary response-schema path."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return ["codex", "app-server", "--stdio"]
         return self._headless_command(
             request,
             schema_path=None,
@@ -402,6 +511,8 @@ class CodexAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended ``codex exec`` turn and normalize its JSONL events."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return self._run_brokered_session(request, context)
         import json
         import shutil
         import tempfile
@@ -580,6 +691,244 @@ class CodexAdapter(AbstractAITool):
             warnings=warnings,
         )
 
+    def _run_brokered_session(
+        self,
+        request: HeadlessSessionRequest,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one ordinary Codex app-server turn with exact live bindings."""
+        from crossby.ai_tools.headless_cli import usage_from
+        from crossby.ai_tools.session_protocol import ProtocolSessionController
+
+        rpc = ProtocolSessionController(
+            context,
+            ["codex", "app-server", "--stdio"],
+            cwd=request.working_dir,
+            headerless=True,
+        )
+        pending_notifications: deque[dict[str, Any]] = deque()
+        pending_notification_bytes = 0
+
+        def response(request_id: int, *, allow_notifications: bool = True) -> dict[str, Any]:
+            nonlocal pending_notification_bytes
+            while True:
+                message = rpc.read()
+                if message.get("id") != request_id:
+                    if "method" in message and "id" in message:
+                        raise ValueError("Codex requested an interaction before turn binding")
+                    if isinstance(message.get("method"), str):
+                        if not allow_notifications or len(pending_notifications) >= 4096:
+                            raise ValueError("Codex emitted a late or excessive notification")
+                        # All handshake phases share one budget. Count UTF-8 bytes
+                        # before retaining decoded frames, including unknown methods.
+                        message_bytes = len(
+                            json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode(
+                                "utf-8"
+                            )
+                        )
+                        if (
+                            pending_notification_bytes + message_bytes
+                            > _CODEX_NOTIFICATION_BYTES_LIMIT
+                        ):
+                            raise context.transport_error(
+                                "Codex pending notifications exceeded the aggregate size limit."
+                            )
+                        pending_notification_bytes += message_bytes
+                        pending_notifications.append(message)
+                    continue
+                result = message.get("result")
+                if "error" in message or not isinstance(result, dict):
+                    raise ValueError(f"Codex rejected app-server request {request_id}")
+                return result
+
+        rpc.request(
+            1,
+            "initialize",
+            _codex_initialize_params("session-v1"),
+        )
+        response(1)
+        rpc.notify("initialized", {})
+        if request.resume_id is None:
+            rpc.request(2, "thread/start", _codex_thread_params(request, ephemeral=False))
+        else:
+            resume_params = _codex_thread_params(request)
+            resume_params.pop("ephemeral")
+            resume_params["threadId"] = request.resume_id
+            rpc.request(2, "thread/resume", resume_params)
+        thread_result = response(2)
+        thread = thread_result.get("thread")
+        thread_id = thread.get("id") if isinstance(thread, dict) else None
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            raise ValueError("Codex thread/start omitted its native thread ID")
+        if request.resume_id is not None and thread_id != request.resume_id:
+            raise ValueError("Codex resumed a different native thread")
+        context.set_provenance(session_id=thread_id, thread_id=thread_id)
+        rpc.request(3, "turn/start", _codex_turn_params(request, thread_id))
+        turn_result = response(3)
+        turn = turn_result.get("turn")
+        turn_id = turn.get("id") if isinstance(turn, dict) else None
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            raise ValueError("Codex turn/start omitted its native turn ID")
+        context.set_provenance(turn_id=turn_id)
+        rpc.set_abort("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+        context.emit(HeadlessEventKind.STARTED)
+        from crossby.ai_tools.headless_cli import BoundedProgress
+
+        delta_progress = BoundedProgress(context)
+        final_text = io.StringIO()
+        final_bytes = 0
+        usage: Any = None
+        while True:
+            message = pending_notifications.popleft() if pending_notifications else rpc.read()
+            method = message.get("method")
+            params = message.get("params")
+            if method == "turn/completed":
+                if not isinstance(params, dict) or params.get("threadId") != thread_id:
+                    raise ValueError("Codex completed a different native thread")
+                completed = params.get("turn")
+                if not isinstance(completed, dict) or completed.get("id") != turn_id:
+                    raise ValueError("Codex completed a different native turn")
+                if completed.get("status") != "completed":
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        native_status=str(completed.get("status") or "failed"),
+                        session_id=thread_id,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                    )
+                usage = completed.get("usage")
+                break
+            if method in {"item/started", "item/completed", "item/updated"}:
+                if not isinstance(params, dict) or (
+                    params.get("threadId") != thread_id or params.get("turnId") != turn_id
+                ):
+                    raise ValueError("Codex emitted an item for another turn")
+                item = params.get("item")
+                if not isinstance(item, dict):
+                    raise ValueError("Codex emitted a malformed item")
+                item_kind = item.get("type")
+                if method == "item/completed" and item_kind == "agentMessage":
+                    text = item.get("text")
+                    message_id = item.get("id")
+                    if (
+                        not isinstance(text, str)
+                        or not text.strip()
+                        or not isinstance(message_id, str)
+                        or not message_id.strip()
+                    ):
+                        raise ValueError("Codex completed an empty agent message")
+                    next_bytes = len(text.encode("utf-8")) + bool(final_bytes)
+                    if final_bytes + next_bytes > _CODEX_MESSAGE_LIMIT:
+                        raise context.transport_error(
+                            "Codex assistant messages exceeded the final output size limit."
+                        )
+                    if final_bytes:
+                        final_text.write("\n")
+                    final_text.write(text)
+                    final_bytes += next_bytes
+                    delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
+                elif item_kind in {"commandExecution", "fileChange", "mcpToolCall"}:
+                    delta_progress.note(
+                        HeadlessEventKind.TOOL_COMPLETED
+                        if method == "item/completed"
+                        else HeadlessEventKind.TOOL_STARTED,
+                    )
+                else:
+                    delta_progress.note(HeadlessEventKind.PROGRESS)
+                continue
+            if method in _CODEX_BROKERED_PROGRESS_METHODS:
+                if not isinstance(params, dict) or (
+                    params.get("threadId") != thread_id or params.get("turnId") != turn_id
+                ):
+                    raise ValueError("Codex emitted progress for another turn")
+                delta_progress.note(
+                    HeadlessEventKind.ASSISTANT_MESSAGE
+                    if method == "item/agentMessage/delta"
+                    else HeadlessEventKind.PROGRESS,
+                )
+                continue
+            if method == "item/tool/requestUserInput" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_codex_questions(
+                    rpc,
+                    message,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                )
+                continue
+            if (
+                method
+                in {
+                    "item/commandExecution/requestApproval",
+                    "item/fileChange/requestApproval",
+                }
+                and "id" in message
+            ):
+                rpc.track_native_request(message)
+                _answer_codex_approval(
+                    rpc,
+                    message,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                    deny_automatically=request.approval_policy is PlanApprovalPolicy.NEVER,
+                    command_policy=request.command_policy,
+                    allowed_execution_roots=(request.working_dir, *request.trusted_dirs),
+                    verified_decision_fallback=True,
+                )
+                continue
+            if method == "item/permissions/requestApproval" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_codex_builtin_permission(
+                    rpc,
+                    message,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    handler=context.native_interaction_response,
+                    deny_automatically=request.approval_policy is PlanApprovalPolicy.NEVER,
+                )
+                continue
+            if method == "mcpServer/elicitation/request" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_codex_mcp_elicitation(
+                    rpc,
+                    message,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    handler=context.native_interaction_response,
+                )
+                continue
+            if isinstance(method, str) and "id" in message:
+                raise ValueError(f"Codex requested unsupported method {method!r}")
+        if pending_notifications:
+            raise ValueError("Codex emitted a native notification after turn completion")
+        rpc.request(4, "thread/backgroundTerminals/clean", {"threadId": thread_id})
+        response(4, allow_notifications=False)
+        exit_code = rpc.close_cleanly()
+        terminal = (
+            HeadlessTerminalStatus.SUCCEEDED if exit_code == 0 else HeadlessTerminalStatus.FAILED
+        )
+        context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
+        return context.complete(
+            terminal,
+            final_text=final_text.getvalue() or None,
+            native_status="completed",
+            exit_code=exit_code,
+            session_id=thread_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            usage=usage_from(usage, input_tokens="inputTokens", output_tokens="outputTokens"),
+        )
+
     def _run_plan_session(
         self,
         request: PlanSessionRequest,
@@ -653,14 +1002,7 @@ class CodexAdapter(AbstractAITool):
             rpc.request(
                 1,
                 "initialize",
-                {
-                    "clientInfo": {
-                        "name": "crossby",
-                        "title": "Crossby",
-                        "version": "plan-session-v1",
-                    },
-                    "capabilities": {"experimentalApi": True},
-                },
+                _codex_initialize_params("plan-session-v1"),
             )
             wait_response(1)
             rpc.notify("initialized", {})
@@ -676,25 +1018,7 @@ class CodexAdapter(AbstractAITool):
                     capability=capability,
                 )
 
-            config: dict[str, Any] = {}
-            if request.sandbox:
-                sandbox_config: dict[str, Any] = {
-                    # Pin both values so ambient config cannot silently widen a
-                    # Crossby-managed planning thread.
-                    "network_access": request.network_access,
-                    "writable_roots": [str(path) for path in request.trusted_dirs],
-                }
-                config["sandbox_workspace_write"] = sandbox_config
-            thread_params: dict[str, Any] = {
-                "cwd": str(request.working_dir.resolve()),
-                "model": request.model,
-                "sandbox": "workspace-write" if request.sandbox else "danger-full-access",
-                "approvalPolicy": request.approval_policy.value,
-                "ephemeral": True,
-            }
-            if config:
-                thread_params["config"] = config
-            rpc.request(3, "thread/start", thread_params)
+            rpc.request(3, "thread/start", _codex_thread_params(request))
             thread_result = wait_response(3)
             thread = thread_result.get("thread")
             thread_id = thread.get("id") if isinstance(thread, dict) else None
@@ -708,22 +1032,7 @@ class CodexAdapter(AbstractAITool):
             rpc.request(
                 4,
                 "turn/start",
-                {
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": request.prompt}],
-                    "collaborationMode": {
-                        "mode": "plan",
-                        "settings": {
-                            "model": effective_model,
-                            "reasoning_effort": (
-                                _CODEX_EFFORT_MAP.get(request.effort, request.effort.value)
-                                if request.effort is not None
-                                else None
-                            ),
-                            "developer_instructions": None,
-                        },
-                    },
-                },
+                _codex_turn_params(request, thread_id, plan_model=effective_model),
             )
             turn_result = wait_response(4)
             turn = turn_result.get("turn")
@@ -1283,6 +1592,7 @@ def _answer_codex_questions(
                 thread_id=thread_id,
                 turn_id=turn_id,
                 artifact_id=str(params.get("itemId") or "") or None,
+                request_id=str(message["id"]),
             )
         )
 
@@ -1345,6 +1655,156 @@ def _answer_codex_questions(
             )
         answers[interaction.question_id] = {"answers": answer_values}
     rpc.respond(message["id"], {"answers": answers})
+
+
+def _answer_codex_builtin_permission(
+    rpc: Any,
+    message: dict[str, Any],
+    *,
+    thread_id: str,
+    turn_id: str,
+    handler: PlanInteractionHandler,
+    deny_automatically: bool = False,
+) -> None:
+    """Grant only the exact structured permission profile explicitly approved."""
+    params = message.get("params")
+    if not isinstance(params, dict) or (
+        params.get("threadId") != thread_id or params.get("turnId") != turn_id
+    ):
+        raise ValueError("Codex built-in permission changed thread or turn binding")
+    permissions = params.get("permissions")
+    cwd = params.get("cwd")
+    item_id = params.get("itemId")
+    if (
+        not isinstance(permissions, dict)
+        or not permissions
+        or set(permissions) - {"fileSystem", "network"}
+        or not isinstance(cwd, str)
+        or not cwd.strip()
+        or not isinstance(item_id, str)
+        or not item_id.strip()
+    ):
+        raise ValueError("Codex built-in permission omitted authoritative fields")
+    if deny_automatically:
+        rpc.respond(message["id"], {"permissions": {}, "scope": "turn"})
+        return
+    interaction = PlanInteraction(
+        kind=PlanInteractionKind.PERMISSION,
+        question_id=str(message["id"]),
+        prompt=str(params.get("reason") or "Codex requests additional permissions."),
+        session_id=thread_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        artifact_id=item_id,
+        request_id=str(message["id"]),
+        operation=PlanOperation(
+            kind=PlanOperationKind.OTHER,
+            execution_dir=Path(cwd),
+            permission_targets=_codex_permission_targets({"additionalPermissions": permissions}),
+            native_binding_ids=(PlanNativeBindingID(name="item_id", value=item_id),),
+        ),
+    )
+    response = handler(interaction)
+    if response.outcome in {PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED}:
+        if (
+            response.answer is not None
+            or response.option_id is not None
+            or response.option_ids
+            or response.content is not None
+        ):
+            raise ValueError("Codex built-in permission refusal included answer fields")
+        rpc.respond(message["id"], {"permissions": {}, "scope": "turn"})
+        return
+    if response.outcome is not PlanInteractionOutcome.APPROVED:
+        raise ValueError("Codex built-in permission was not explicitly approved")
+    rpc.respond(message["id"], {"permissions": permissions, "scope": "turn"})
+
+
+def _answer_codex_mcp_elicitation(
+    rpc: Any,
+    message: dict[str, Any],
+    *,
+    thread_id: str,
+    turn_id: str,
+    handler: PlanInteractionHandler,
+) -> None:
+    """Return an exact form/URL elicitation response to its live JSON-RPC ID."""
+    from jsonschema import Draft202012Validator, SchemaError, ValidationError
+
+    params = message.get("params")
+    if not isinstance(params, dict) or (
+        params.get("threadId") != thread_id or params.get("turnId") != turn_id
+    ):
+        raise ValueError("Codex MCP elicitation changed thread or turn binding")
+    server_name = params.get("serverName")
+    prompt = params.get("message")
+    mode = params.get("mode")
+    if (
+        not isinstance(server_name, str)
+        or not server_name.strip()
+        or not isinstance(prompt, str)
+        or not prompt.strip()
+        or mode not in {"form", "openai/form", "openaiForm", "url"}
+    ):
+        raise ValueError("Codex emitted an unsupported MCP elicitation")
+    schema = params.get("requestedSchema") if mode != "url" else None
+    url = params.get("url") if mode == "url" else None
+    elicitation_id = params.get("elicitationId") if mode == "url" else None
+    if mode == "url":
+        if (
+            not isinstance(url, str)
+            or not url.strip()
+            or not isinstance(elicitation_id, str)
+            or not elicitation_id.strip()
+        ):
+            raise ValueError("Codex MCP URL elicitation omitted its URL or native ID")
+    elif not isinstance(schema, dict):
+        raise ValueError("Codex MCP form elicitation omitted its schema")
+    interaction = PlanInteraction(
+        kind=PlanInteractionKind.QUESTION,
+        question_id=str(message["id"]),
+        prompt=prompt,
+        options=(PlanQuestionOption(option_id="accept", label="Accept"),),
+        session_id=thread_id,
+        thread_id=thread_id,
+        turn_id=turn_id,
+        request_id=str(message["id"]),
+        form_schema=schema,
+        url=url,
+        operation=PlanOperation(
+            kind=PlanOperationKind.OTHER,
+            native_binding_ids=(
+                PlanNativeBindingID(name="mcp_server", value=server_name),
+                *(
+                    (PlanNativeBindingID(name="elicitation_id", value=elicitation_id),)
+                    if isinstance(elicitation_id, str)
+                    else ()
+                ),
+            ),
+        ),
+    )
+    response = handler(interaction)
+    if response.outcome in {PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED}:
+        rpc.respond(message["id"], {"action": "decline"})
+        return
+    if response.outcome is PlanInteractionOutcome.CANCELLED:
+        rpc.respond(message["id"], {"action": "cancel"})
+        return
+    if response.option_id != "accept" or response.option_ids or response.answer is not None:
+        raise ValueError("Codex MCP elicitation requires an explicit accept option")
+    if schema is not None:
+        if not isinstance(response.content, dict):
+            raise ValueError("Codex MCP form requires structured content")
+        try:
+            Draft202012Validator.check_schema(schema)
+            Draft202012Validator(schema).validate(response.content)
+        except (SchemaError, ValidationError, ValueError) as exc:
+            raise ValueError("Codex MCP form response failed native schema validation") from exc
+        rpc.respond(message["id"], {"action": "accept", "content": response.content})
+    else:
+        if response.content is not None:
+            raise ValueError("Codex MCP URL response cannot carry form content")
+        rpc.respond(message["id"], {"action": "accept"})
 
 
 def _codex_permission_targets(params: dict[str, Any]) -> tuple[PlanPermissionTarget, ...]:
@@ -1508,11 +1968,17 @@ def _codex_approval_options(
     capability: PlanModeCapability,
     thread_id: str,
     turn_id: str,
+    verified_decision_fallback: bool = False,
 ) -> tuple[PlanQuestionOption, ...]:
     """Preserve native decision IDs when app-server advertises them."""
     available = params.get("availableDecisions")
     decision_ids: tuple[str, ...]
-    if available is None:
+    if available is None and verified_decision_fallback:
+        # The app-server 0.162.1 schema omits this field on file-change
+        # requests and permits null on command requests. Both response schemas
+        # define these exact four string decisions.
+        decision_ids = ("accept", "acceptForSession", "decline", "cancel")
+    elif available is None:
         decision_ids = ("accept", "decline", "cancel")
     elif not isinstance(available, list) or not available:
         raise PlanTransportError(
@@ -1573,6 +2039,7 @@ def _answer_codex_approval(
     deny_automatically: bool,
     command_policy: PlanCommandPolicy | None = None,
     allowed_execution_roots: tuple[Path, ...] = (),
+    verified_decision_fallback: bool = False,
 ) -> None:
     from crossby.ai_tools.plan_mode import (
         PlanCommandPolicyUnsupportedError,
@@ -1601,6 +2068,7 @@ def _answer_codex_approval(
         capability=capability,
         thread_id=thread_id,
         turn_id=turn_id,
+        verified_decision_fallback=verified_decision_fallback,
     )
     option_ids = {option.option_id for option in options}
     interaction = PlanInteraction(
@@ -1612,6 +2080,7 @@ def _answer_codex_approval(
         thread_id=thread_id,
         turn_id=turn_id,
         artifact_id=str(params.get("itemId") or "") or None,
+        request_id=str(message["id"]),
         operation=operation,
     )
     policy_match = command_policy is not None and operation_matches_command_policy(

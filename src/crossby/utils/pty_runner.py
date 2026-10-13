@@ -666,7 +666,8 @@ def _await_exit(pid: int, deadline: float) -> int | None:
             return None
         if info is not None:
             killed = info.si_code in (os.CLD_KILLED, os.CLD_DUMPED)
-            return -info.si_status if killed else info.si_status
+            status = int(info.si_status)
+            return -status if killed else status
         if time.monotonic() >= deadline:
             return None
         time.sleep(EXIT_POLL_SECONDS)

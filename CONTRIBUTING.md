@@ -313,6 +313,31 @@ direct child, and bound worker joins. Terminal-event evidence, native status,
 exit status, and caller schema validation are reconciled before exactly one
 terminal event is delivered.
 
+Brokered profiles live in `HeadlessCapability.brokered`; the legacy flat fields
+remain the unattended contract. Preflight and runtime use the selected profile,
+including its version floor and interaction kinds. Protocol adapters use
+`ProtocolSessionController` to register one cleanup chain, track live JSON-RPC
+request IDs, and block late or duplicate replies. Antigravity uses
+`ResumableManagedCLIController` to rotate continuation processes under the same
+deadline and cleanup registration. Revalidate complete continuation argv with
+the mapped answer and conversation ID before launching; callback text and native
+option labels must satisfy both per-argument and aggregate platform limits.
+Preserve exact native session, turn,
+conversation, request, and option IDs. Derive executable command fields only
+from native raw input; display text is never authority for command policy.
+Collected-plan entry points retain their artifact checks and native plan-mode
+selection. Codex and Cursor share app-server/ACP setup payload builders across
+the two paths; Antigravity shares native question-to-continuation mapping.
+Keep the ordinary brokered path free of plan mode and plan artifacts.
+Exercise lifecycle invariants with real child processes and blocked pipes or
+sockets, as in `test_brokered_transport_safety.py`; protocol mocks alone cannot
+verify native deadlines, backpressure, or descendant cleanup. Check related
+read/write/reply paths and every adapter that shares a helper when fixing a
+permission, binding, resource-limit, or timeout defect. Permission option
+display labels must never choose an implicit allow or deny decision.
+The checked behavior and version floors are documented in
+`docs/brokered-headless-verification.md`.
+
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget
 for blocking work and exit when cancelled; the runtime continues hard process

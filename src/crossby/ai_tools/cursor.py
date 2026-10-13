@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import time
 import warnings
@@ -25,7 +26,9 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HeadlessCapability,
+    HeadlessEventKind,
     HeadlessInteractionMode,
+    HeadlessModeCapability,
     HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessPromptTransport,
@@ -62,6 +65,9 @@ if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
 
 logger = structlog.get_logger()
+_CURSOR_MESSAGE_LIMIT = 8 * 1024 * 1024
+_CURSOR_MESSAGE_ID_BYTES_LIMIT = 1024 * 1024
+_CURSOR_MESSAGE_COUNT_LIMIT = 4096
 
 # Cursor encodes reasoning effort in the model ID rather than a flag:
 # ``<family>[-thinking]-<effort>[-fast]`` (``claude-opus-5-5-high-fast``,
@@ -88,6 +94,22 @@ _CURSOR_STREAM_EVENT_KINDS = frozenset({"system", "user", "thinking", "assistant
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
 _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
+
+
+def _cursor_acp_initialize_params(client_version: str) -> dict[str, Any]:
+    return {
+        "protocolVersion": 1,
+        "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
+        "clientInfo": {"name": "crossby", "version": client_version},
+    }
+
+
+def _cursor_acp_session_params(working_dir: Path) -> dict[str, Any]:
+    return {"cwd": str(working_dir.resolve()), "mcpServers": []}
+
+
+def _cursor_acp_prompt_params(session_id: str, prompt: str) -> dict[str, Any]:
+    return {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}
 
 
 def _effort_template(model: str) -> tuple[str, EffortLevel | None, bool]:
@@ -289,7 +311,30 @@ class CursorAdapter(AbstractAITool):
                 # plain-text output carries no terminal status, so only the two
                 # execution-output formats are offered.
                 native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.ACP,
+                    prompt_transport=HeadlessPromptTransport.PROTOCOL,
+                    native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
+                    supports_native_abort=True,
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    successful_native_statuses=("end_turn",),
+                    supported_interaction_kinds=(
+                        PlanInteractionKind.QUESTION,
+                        PlanInteractionKind.PERMISSION,
+                    ),
+                    version_requirement="Cursor Agent with the verified ACP v1 protocol.",
+                    verified_version="2026.09.10-fd3934a",
+                    limitation=(
+                        "Only text and exact ACP loadSession resumption are verified. Loaded "
+                        "sessions cannot override model or effort; command policy is unavailable."
+                    ),
+                ),
                 supports_response_schema=False,
                 successful_native_statuses=("success",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
@@ -416,9 +461,23 @@ class CursorAdapter(AbstractAITool):
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Reject effort requests whose selected model cannot encode the exact tier."""
-        from crossby.ai_tools.headless import HeadlessRequestError
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
 
-        if request.effort is None:
+        if (
+            request.interaction_mode is HeadlessInteractionMode.BROKERED
+            and request.resume_id is not None
+            and (request.model is not None or request.effort is not None)
+        ):
+            raise HeadlessUnsupportedError(
+                "Cursor ACP loadSession cannot verify model or effort overrides before prompting.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+        if request.effort is None and (
+            request.interaction_mode is not HeadlessInteractionMode.BROKERED
+            or request.model is None
+        ):
             return
         if not request.model:
             raise HeadlessRequestError(
@@ -447,6 +506,8 @@ class CursorAdapter(AbstractAITool):
                 tool_id=self.TOOL_ID,
                 capability=self.capabilities().headless,
             )
+        if request.effort is None:
+            return
         if model.split("[", 1)[0] == "auto":
             raise HeadlessRequestError(
                 f"Cursor cannot preserve effort={request.effort.value!r} with model='auto' "
@@ -498,6 +559,8 @@ class CursorAdapter(AbstractAITool):
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
         """Return Cursor's complete command, including its argument-delivered prompt."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"]
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
@@ -528,6 +591,8 @@ class CursorAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended Cursor print turn and normalize its result envelope."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return self._run_brokered_session(request, context)
         from crossby.ai_tools.headless_cli import (
             capture_failure_warnings,
             complete_session,
@@ -659,6 +724,304 @@ class CursorAdapter(AbstractAITool):
             warnings=warnings,
         )
 
+    def _run_brokered_session(
+        self,
+        request: HeadlessSessionRequest,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run an ordinary ACP prompt without entering native plan mode."""
+        from crossby.ai_tools.session_protocol import ProtocolSessionController
+
+        rpc = ProtocolSessionController(
+            context,
+            ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"],
+            cwd=request.working_dir,
+        )
+
+        def response(request_id: int, *, replay_session_id: str | None = None) -> dict[str, Any]:
+            while True:
+                message = rpc.read()
+                if message.get("id") != request_id:
+                    if "method" in message and "id" in message:
+                        raise ValueError("Cursor requested an interaction before session setup")
+                    if replay_session_id is not None and message.get("method") == "session/update":
+                        params = message.get("params")
+                        if not isinstance(params, dict) or params.get("sessionId") != (
+                            replay_session_id
+                        ):
+                            raise ValueError("Cursor replayed a different native session")
+                    continue
+                result = message.get("result")
+                if replay_session_id is not None and result is None and "error" not in message:
+                    return {}
+                if "error" in message or not isinstance(result, dict):
+                    raise ValueError(f"Cursor ACP rejected request {request_id}")
+                return result
+
+        rpc.request(
+            1,
+            "initialize",
+            _cursor_acp_initialize_params("session-v1"),
+        )
+        initialized = response(1)
+        auth_methods = initialized.get("authMethods")
+        if isinstance(auth_methods, list) and auth_methods:
+            first = auth_methods[0]
+            method_id = first.get("id") if isinstance(first, dict) else first
+            if not isinstance(method_id, str) or not method_id.strip():
+                raise ValueError("Cursor advertised a malformed authentication method")
+            rpc.request(2, "authenticate", {"methodId": method_id})
+            response(2)
+        if request.resume_id is None:
+            rpc.request(3, "session/new", _cursor_acp_session_params(request.working_dir))
+            state = response(3)
+            session_id = state.get("sessionId")
+        else:
+            agent_capabilities = initialized.get("agentCapabilities")
+            if (
+                not isinstance(agent_capabilities, dict)
+                or agent_capabilities.get("loadSession") is not True
+            ):
+                raise ValueError("Cursor ACP did not advertise loadSession")
+            rpc.request(
+                3,
+                "session/load",
+                {
+                    **_cursor_acp_session_params(request.working_dir),
+                    "sessionId": request.resume_id,
+                },
+            )
+            state = response(3, replay_session_id=request.resume_id)
+            session_id = request.resume_id
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("Cursor session/new omitted its native session ID")
+        context.set_provenance(session_id=session_id)
+        rpc.set_abort("session/cancel", {"sessionId": session_id}, notify=True)
+
+        next_id = 4
+        requested_effort = request.effort
+        if request.model is not None and requested_effort is None:
+            requested_effort = _parameterized_effort(request.model) or _encoded_effort(
+                request.model
+            )
+        configured_variants: dict[str, str] = {}
+        configured_effort: tuple[str, str] | None = None
+        if request.model is not None:
+            model_base = _cursor_model_base(request.model)
+            offered = _cursor_config_option(state, option_id="model")
+            if model_base not in {option["value"] for option in offered["options"]}:
+                raise ValueError("Cursor did not advertise the requested model")
+            rpc.request(
+                next_id,
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": "model", "value": model_base},
+            )
+            state = response(next_id)
+            if _cursor_config_option(state, option_id="model")["currentValue"] != model_base:
+                raise ValueError("Cursor did not preserve the requested model")
+            next_id += 1
+        if requested_effort is not None:
+            configured = _cursor_effort_option(state, requested_effort)
+            if configured is None:
+                raise ValueError("Cursor did not advertise the requested effort")
+            option, value = configured
+            rpc.request(
+                next_id,
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": option["id"], "value": value},
+            )
+            state = response(next_id)
+            confirmed = _cursor_effort_option(state, requested_effort)
+            if confirmed is None or confirmed[0]["currentValue"] != value:
+                raise ValueError("Cursor did not preserve the requested effort")
+            configured_effort = (option["id"], value)
+            next_id += 1
+        if request.model is not None:
+            model_name = request.model.split("[", 1)[0]
+            for variant_id, variant_value in (
+                ("thinking", "true" if "-thinking" in model_name else "false"),
+                ("fast", "true" if model_name.endswith("-fast") else "false"),
+            ):
+                variant_option = _cursor_optional_config_option(state, option_id=variant_id)
+                if variant_option is None:
+                    if variant_value == "true":
+                        raise ValueError(f"Cursor cannot preserve the requested {variant_id} model")
+                    continue
+                if variant_value not in {item["value"] for item in variant_option["options"]}:
+                    raise ValueError(f"Cursor cannot preserve the requested {variant_id} model")
+                rpc.request(
+                    next_id,
+                    "session/set_config_option",
+                    {
+                        "sessionId": session_id,
+                        "configId": variant_option["id"],
+                        "value": variant_value,
+                    },
+                )
+                state = response(next_id)
+                if _cursor_config_option(state, option_id=variant_id)["currentValue"] != (
+                    variant_value
+                ):
+                    raise ValueError(f"Cursor did not preserve the requested {variant_id} model")
+                configured_variants[variant_id] = variant_value
+                next_id += 1
+        if (
+            request.model is not None
+            and _cursor_config_option(state, option_id="model")["currentValue"] != model_base
+        ):
+            raise ValueError("Cursor reset the requested model while configuring the session")
+        if requested_effort is not None:
+            final_effort = _cursor_effort_option(state, requested_effort)
+            if (
+                final_effort is None
+                or configured_effort is None
+                or final_effort[0]["id"] != configured_effort[0]
+                or final_effort[0]["currentValue"] != configured_effort[1]
+            ):
+                raise ValueError("Cursor reset the requested effort while configuring the session")
+        for variant_id, variant_value in configured_variants.items():
+            if _cursor_config_option(state, option_id=variant_id)["currentValue"] != variant_value:
+                raise ValueError(f"Cursor reset the requested {variant_id} model")
+        prompt_id = next_id
+        rpc.request(
+            prompt_id,
+            "session/prompt",
+            _cursor_acp_prompt_params(session_id, request.prompt),
+        )
+        context.emit(HeadlessEventKind.STARTED)
+        from crossby.ai_tools.headless_cli import BoundedProgress, tool_event_payload
+
+        chunk_progress = BoundedProgress(context)
+        tool_events = 0
+        messages: dict[str, io.StringIO] = {}
+        message_bytes = 0
+        message_id_bytes = 0
+        while True:
+            message = rpc.read()
+            if message.get("id") == prompt_id and "method" not in message:
+                result = message.get("result")
+                if "error" in message or not isinstance(result, dict):
+                    raise ValueError("Cursor ACP prompt failed")
+                stop_reason = result.get("stopReason")
+                if stop_reason != "end_turn":
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        native_status=str(stop_reason or "unknown"),
+                        session_id=session_id,
+                    )
+                break
+            method = message.get("method")
+            params = message.get("params")
+            if method == "session/update":
+                if not isinstance(params, dict) or params.get("sessionId") != session_id:
+                    raise ValueError("Cursor emitted an update for another session")
+                update = params.get("update")
+                if not isinstance(update, dict):
+                    raise ValueError("Cursor emitted a malformed session update")
+                kind = update.get("sessionUpdate")
+                if kind == "agent_message_chunk":
+                    message_id = update.get("messageId")
+                    content = update.get("content")
+                    text = content.get("text") if isinstance(content, dict) else None
+                    if (
+                        not isinstance(message_id, str)
+                        or not message_id.strip()
+                        or not isinstance(text, str)
+                    ):
+                        raise ValueError("Cursor message chunk lacked exact ID or text")
+                    chunk_bytes = len(text.encode("utf-8"))
+                    if message_id not in messages:
+                        next_id_bytes = len(message_id.encode("utf-8"))
+                        if (
+                            len(messages) >= _CURSOR_MESSAGE_COUNT_LIMIT
+                            or message_id_bytes + next_id_bytes > _CURSOR_MESSAGE_ID_BYTES_LIMIT
+                        ):
+                            raise context.transport_error(
+                                "Cursor assistant message identifiers exceeded the size limit."
+                            )
+                        message_id_bytes += next_id_bytes
+                    if message_id not in messages and messages:
+                        chunk_bytes += 1  # Separator between assistant messages.
+                    if message_bytes + chunk_bytes > _CURSOR_MESSAGE_LIMIT:
+                        raise context.transport_error(
+                            "Cursor assistant messages exceeded the final output size limit."
+                        )
+                    message_bytes += chunk_bytes
+                    if message_id not in messages:
+                        messages[message_id] = io.StringIO()
+                    # Keep text in a compact buffer; empty/tiny native chunks
+                    # must not create an unbounded list of Python objects.
+                    messages[message_id].write(text)
+                    chunk_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE)
+                elif kind in {"tool_call", "tool_call_update"}:
+                    tool_id = update.get("toolCallId")
+                    if not isinstance(tool_id, str) or not tool_id.strip():
+                        raise ValueError("Cursor tool update omitted its native ID")
+                    if tool_events < 512:
+                        tool_events += 1
+                        context.emit(
+                            HeadlessEventKind.TOOL_COMPLETED
+                            if update.get("status") in {"completed", "failed"}
+                            else HeadlessEventKind.TOOL_STARTED,
+                            payload=tool_event_payload(tool_id, prompt=request.prompt),
+                        )
+                    else:
+                        context.mark_progress()
+                elif kind == "usage_update":
+                    chunk_progress.note(HeadlessEventKind.USAGE)
+                else:
+                    chunk_progress.note(HeadlessEventKind.PROGRESS)
+                continue
+            if method == "cursor/ask_question" and "id" in message:
+                rpc.track_native_request(message)
+                _answer_cursor_question(
+                    rpc,
+                    message,
+                    session_id=session_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                )
+                continue
+            if method in {"session/request_permission", "cursor/request_permission"} and (
+                "id" in message
+            ):
+                rpc.track_native_request(message)
+                _answer_cursor_permission(
+                    rpc,
+                    message,
+                    session_id=session_id,
+                    handler=context.native_interaction_response,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().plan_mode,
+                    deny_automatically=False,
+                )
+                continue
+            if isinstance(method, str) and "id" in message:
+                raise ValueError(f"Cursor requested unsupported ACP method {method!r}")
+        joined = "\n".join(buffer.getvalue() for buffer in messages.values())
+        final_text = joined if joined.strip() else None
+        exit_code = rpc.close_cleanly()
+        if exit_code != 0:
+            terminal = HeadlessTerminalStatus.FAILED
+        elif final_text is None:
+            terminal = HeadlessTerminalStatus.INVALID_OUTPUT
+            context.add_warning("Cursor ended the turn without assistant text.")
+        else:
+            terminal = HeadlessTerminalStatus.SUCCEEDED
+        context.emit(HeadlessEventKind.TERMINAL, terminal_status=terminal)
+        return context.complete(
+            terminal,
+            final_text=final_text,
+            native_status="end_turn",
+            exit_code=exit_code,
+            session_id=session_id,
+        )
+
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate model/effort encodings before prospective workspace creation."""
         from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
@@ -776,11 +1139,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 1,
                 "initialize",
-                {
-                    "protocolVersion": 1,
-                    "clientCapabilities": {"_meta": {"parameterizedModelPicker": True}},
-                    "clientInfo": {"name": "crossby", "version": "plan-session-v1"},
-                },
+                _cursor_acp_initialize_params("plan-session-v1"),
             )
             initialized = wait_response(1)
             auth_methods = initialized.get("authMethods")
@@ -799,7 +1158,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 3,
                 "session/new",
-                {"cwd": str(request.working_dir.resolve()), "mcpServers": []},
+                _cursor_acp_session_params(request.working_dir),
             )
             session_result = wait_response(3)
             session_id = session_result.get("sessionId")
@@ -970,10 +1329,7 @@ class CursorAdapter(AbstractAITool):
             rpc.request(
                 prompt_request_id,
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": request.prompt}],
-                },
+                _cursor_acp_prompt_params(session_id, request.prompt),
             )
 
             plans: list[tuple[str, str]] = []
@@ -1437,6 +1793,7 @@ def _answer_cursor_question(
                 allow_multiple=allow_multiple,
                 session_id=session_id,
                 artifact_id=tool_call_id,
+                request_id=str(message["id"]),
             )
         )
 
@@ -1538,6 +1895,23 @@ def _answer_cursor_permission(
         label_fields=("name", "label"),
         require_id=True,
     )
+    raw_options = params.get("options")
+    native_kinds = (
+        {
+            option["optionId"]: option.get("kind")
+            for option in raw_options
+            if isinstance(option, dict) and isinstance(option.get("optionId"), str)
+        }
+        if isinstance(raw_options, list)
+        else {}
+    )
+
+    def option_of_kind(kind: str) -> str | None:
+        return next(
+            (option.option_id for option in options if native_kinds.get(option.option_id) == kind),
+            None,
+        )
+
     tool_call = params.get("toolCall")
     tool_call_id = tool_call.get("toolCallId") if isinstance(tool_call, dict) else None
     title = tool_call.get("title") if isinstance(tool_call, dict) else None
@@ -1640,6 +2014,7 @@ def _answer_cursor_permission(
         options=options,
         session_id=session_id,
         artifact_id=binding_value,
+        request_id=request_id,
         operation=PlanOperation(
             kind=operation_kind,
             argv=argv,
@@ -1650,14 +2025,7 @@ def _answer_cursor_permission(
         ),
     )
     if deny_automatically:
-        selected = next(
-            (
-                option.option_id
-                for option in options
-                if any(word in option.label.lower() for word in ("deny", "reject", "cancel"))
-            ),
-            None,
-        )
+        selected = option_of_kind("reject_once") or option_of_kind("reject_always")
     elif handler is None:
         raise PlanInteractionRequiredError(
             "Cursor requires a permission decision to continue planning.",
@@ -1673,17 +2041,7 @@ def _answer_cursor_permission(
             PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.SKIPPED,
         }:
-            selected = next(
-                (
-                    option.option_id
-                    for option in options
-                    if any(
-                        word in option.label.lower()
-                        for word in ("deny", "reject", "cancel", "decline")
-                    )
-                ),
-                None,
-            )
+            selected = option_of_kind("reject_once") or option_of_kind("reject_always")
         else:
             if response.answer is not None:
                 raise PlanInteractionRequiredError(
@@ -1705,14 +2063,7 @@ def _answer_cursor_permission(
                 )
             selected = next(iter(selected_ids), None)
             if selected is None and response.outcome is PlanInteractionOutcome.APPROVED:
-                selected = next(
-                    (
-                        option.option_id
-                        for option in options
-                        if "allow" in option.label.lower() or "approve" in option.label.lower()
-                    ),
-                    None,
-                )
+                selected = option_of_kind("allow_once")
             valid_ids = {option.option_id for option in options}
             if selected is None or selected not in valid_ids:
                 raise PlanInteractionRequiredError(

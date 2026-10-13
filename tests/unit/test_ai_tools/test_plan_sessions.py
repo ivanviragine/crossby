@@ -2932,8 +2932,8 @@ class TestProtocolCollectors:
                     "sessionId": "cursor-exact-123",
                     "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
                     "options": [
-                        {"optionId": "allow-once", "name": "Allow once"},
-                        {"optionId": "deny-once", "name": "Deny once"},
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "deny-once", "name": "Deny once", "kind": "reject_once"},
                     ],
                 },
             },
@@ -2968,8 +2968,8 @@ class TestProtocolCollectors:
         [
             (
                 [
-                    {"optionId": "allow-once", "name": "Allow once"},
-                    {"optionId": "deny-once", "name": "Deny once"},
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "deny-once", "name": "Deny once", "kind": "reject_once"},
                 ],
                 PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.APPROVED,
@@ -2981,7 +2981,7 @@ class TestProtocolCollectors:
                 PlanInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
             ),
             (
-                [{"optionId": "allow-once", "name": "Allow once"}],
+                [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}],
                 PlanInteractionResponse(
                     outcome=PlanInteractionOutcome.APPROVED,
                     option_id="fabricated-option",
@@ -3081,8 +3081,8 @@ class TestProtocolCollectors:
                     "sessionId": "cursor-exact-123",
                     "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
                     "options": [
-                        {"optionId": "allow-once", "name": "Allow once"},
-                        {"optionId": "deny-once", "name": "Deny once"},
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "deny-once", "name": "Deny once", "kind": "reject_once"},
                     ],
                 },
             },
@@ -3125,7 +3125,9 @@ class TestProtocolCollectors:
                 "params": {
                     "sessionId": "cursor-exact-123",
                     "toolCall": {"toolCallId": "command-1", "title": "Run a command?"},
-                    "options": [{"optionId": "allow-once", "name": "Allow once"}],
+                    "options": [
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}
+                    ],
                 },
             },
         )

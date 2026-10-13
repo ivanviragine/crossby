@@ -22,7 +22,9 @@ from crossby.models.ai import (
     AIToolType,
     EffortLevel,
     HeadlessCapability,
+    HeadlessEventKind,
     HeadlessInteractionMode,
+    HeadlessModeCapability,
     HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessPromptTransport,
@@ -37,6 +39,7 @@ from crossby.models.ai import (
     PlanInteraction,
     PlanInteractionKind,
     PlanInteractionOutcome,
+    PlanInteractionResponse,
     PlanInteractionSupport,
     PlanLaunchApprovalMode,
     PlanModeActivation,
@@ -152,7 +155,29 @@ class AntigravityCLIAdapter(AbstractAITool):
                     HeadlessNativeOutput.JSON,
                     HeadlessNativeOutput.JSONL,
                 ),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.HEADLESS_CLI,
+                    prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                    native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
+                    supports_response_schema=True,
+                    supports_resume=True,
+                    successful_native_statuses=("success", "completed"),
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    supported_interaction_kinds=(PlanInteractionKind.QUESTION,),
+                    version_requirement="Antigravity CLI with verified JSON continuation output.",
+                    verified_version="1.2.6",
+                    limitation=(
+                        "Questions can be brokered through conversation continuation; "
+                        "permissions and native abort are unsupported."
+                    ),
+                ),
                 supports_response_schema=True,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
@@ -299,6 +324,11 @@ class AntigravityCLIAdapter(AbstractAITool):
         return self._headless_command(
             request,
             print_timeout_seconds=max(1, math.ceil(request.timeout_seconds)),
+            conversation_id=(
+                request.resume_id
+                if request.interaction_mode is HeadlessInteractionMode.BROKERED
+                else None
+            ),
         )
 
     def _headless_command(
@@ -306,6 +336,8 @@ class AntigravityCLIAdapter(AbstractAITool):
         request: HeadlessSessionRequest,
         *,
         print_timeout_seconds: int,
+        prompt_override: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[str]:
         """Build the exact unattended ``agy --print`` invocation."""
         native_formats = {
@@ -315,8 +347,9 @@ class AntigravityCLIAdapter(AbstractAITool):
         }
         command = [
             "agy",
+            *(["--conversation", conversation_id] if conversation_id is not None else []),
             "--print",
-            request.prompt,
+            prompt_override if prompt_override is not None else request.prompt,
             "--output-format",
             native_formats[request.native_output],
             # agy's own whole-run bound. Crossby's outer deadline still owns
@@ -342,6 +375,8 @@ class AntigravityCLIAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended ``agy --print`` turn and normalize its result."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return self._run_brokered_session(request, context)
         from crossby.ai_tools.headless_cli import (
             MISSING,
             capture_failure_warnings,
@@ -514,6 +549,212 @@ class AntigravityCLIAdapter(AbstractAITool):
             warnings=warnings,
         )
 
+    def _run_brokered_session(
+        self,
+        request: HeadlessSessionRequest,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Continue exact native questions under one runtime and nine invocations."""
+        from crossby.ai_tools.headless import HeadlessRequestError
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            BoundedProgress,
+            ResumableManagedCLIController,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            parse_json_lines,
+            parse_json_object,
+            recognized_frame_kind,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        owner = ResumableManagedCLIController(context)
+        conversation_id = request.resume_id
+        answer: str | None = None
+        warnings_seen: list[str] = []
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        progress = BoundedProgress(context)
+        for _invocation in range(9):
+            if answer is not None:
+                # Callback answers and native labels replace the original prompt
+                # in argv; recheck the full continuation, including its binding.
+                try:
+                    self._validate_headless_argv(
+                        request.model_copy(update={"prompt": answer, "resume_id": conversation_id})
+                    )
+                except HeadlessRequestError:
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        conversation_id=conversation_id,
+                        warnings=(
+                            *warnings_seen,
+                            "Antigravity continuation exceeds native command limits. "
+                            "Shorten the answer or native option label.",
+                        ),
+                    )
+            output = run_managed_command(
+                context,
+                argv=self._headless_command(
+                    request,
+                    print_timeout_seconds=_whole_run_timeout_seconds(
+                        context.deadline, time.monotonic()
+                    ),
+                    prompt_override=answer,
+                    conversation_id=conversation_id,
+                ),
+                cwd=request.working_dir,
+                env=child_environment({"NO_COLOR": "1"}),
+                on_stdout_lines=(
+                    frame_streamer(
+                        context,
+                        kind_of=lambda frame: recognized_frame_kind(
+                            frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
+                        ),
+                        provenance_of=lambda frame: {
+                            "conversation_id": _agy_conversation_id(frame)
+                        },
+                        progress=progress,
+                    )
+                    if streaming
+                    else None
+                ),
+                controller=owner,
+            )
+            warnings_seen.extend(capture_failure_warnings(output))
+            if output.overflowed or output.undecodable:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    conversation_id=conversation_id,
+                    warnings=tuple(warnings_seen),
+                )
+            envelope: dict[str, Any] | None
+            if streaming:
+                frames = parse_json_lines(output.stdout)
+                if frames is None:
+                    envelope = None
+                else:
+                    results = [
+                        frame.get("result")
+                        for frame in frames
+                        if frame.get("event") == "result" and isinstance(frame.get("result"), dict)
+                    ]
+                    envelope = (
+                        results[0]
+                        if len(results) == 1 and frames[-1].get("event") == "result"
+                        else None
+                    )
+            else:
+                envelope = parse_json_object(output.stdout)
+            if envelope is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    conversation_id=conversation_id,
+                    warnings=(*warnings_seen, "Antigravity emitted no exact result envelope."),
+                )
+            emitted_id = _agy_conversation_id(envelope)
+            if emitted_id is None or (
+                conversation_id is not None and emitted_id != conversation_id
+            ):
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    conversation_id=conversation_id,
+                    warnings=(*warnings_seen, "Antigravity changed conversation binding."),
+                )
+            conversation_id = emitted_id
+            context.set_provenance(conversation_id=conversation_id)
+            if output.returncode != 0:
+                context.emit(
+                    HeadlessEventKind.TERMINAL,
+                    terminal_status=HeadlessTerminalStatus.FAILED,
+                )
+                return context.complete(
+                    HeadlessTerminalStatus.FAILED,
+                    exit_code=output.returncode,
+                    conversation_id=conversation_id,
+                    native_status=_agy_status(envelope),
+                    warnings=tuple(warnings_seen),
+                )
+            if _agy_waiting(envelope):
+                try:
+                    interaction = _agy_interaction(envelope, conversation_id)
+                except ValueError:
+                    return context.complete(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        conversation_id=conversation_id,
+                        warnings=(*warnings_seen, "Antigravity emitted malformed question data."),
+                    )
+                response = context.native_interaction_response(interaction)
+                try:
+                    answer = _agy_native_answer(interaction, response)
+                except ValueError:
+                    context.emit(
+                        HeadlessEventKind.TERMINAL,
+                        terminal_status=HeadlessTerminalStatus.FAILED,
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.FAILED,
+                        conversation_id=conversation_id,
+                        warnings=(*warnings_seen, "Antigravity question was not answered."),
+                    )
+                continue
+            schema_echo = envelope.get("json_schema", envelope.get("schema"))
+            if isinstance(schema_echo, str):
+                try:
+                    schema_echo = json.loads(schema_echo)
+                except ValueError:
+                    schema_echo = None
+            if request.response_schema is not None and schema_echo != request.response_schema:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    conversation_id=conversation_id,
+                    warnings=(*warnings_seen, "Antigravity did not echo the requested schema."),
+                )
+            status = (
+                HeadlessTerminalStatus.SUCCEEDED
+                if _agy_success(envelope)
+                else HeadlessTerminalStatus.FAILED
+            )
+            context.emit(HeadlessEventKind.TERMINAL, terminal_status=status)
+            return complete_session(
+                context,
+                request,
+                status=status,
+                exit_code=output.returncode,
+                response_text=envelope.get("response"),
+                native_object=envelope,
+                structured_output=envelope.get("structured_output", MISSING),
+                native_status=_agy_status(envelope),
+                conversation_id=conversation_id,
+                usage=usage_from(
+                    envelope.get("usage"),
+                    total="total_tokens",
+                    input_tokens="input_tokens",
+                    output_tokens="output_tokens",
+                    cached="cache_read_tokens",
+                    session_id=conversation_id,
+                ),
+                warnings=tuple(warnings_seen),
+            )
+        context.emit(
+            HeadlessEventKind.TERMINAL,
+            terminal_status=HeadlessTerminalStatus.FAILED,
+        )
+        return context.complete(
+            HeadlessTerminalStatus.FAILED,
+            conversation_id=conversation_id,
+            warnings=("Antigravity exhausted its nine native continuation invocations.",),
+        )
+
     def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
         """Validate model/effort pairing before preflight creates any workspace."""
         from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
@@ -684,35 +925,15 @@ class AntigravityCLIAdapter(AbstractAITool):
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
-            if answer_response.answer and not interaction.allow_other:
-                raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question does not allow a free-form answer.",
-                    interaction=interaction,
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
             try:
-                selected_ids = validate_plan_option_selection(interaction, answer_response)
+                answer = _agy_native_answer(interaction, answer_response)
             except ValueError as exc:
                 raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question requires valid native option IDs.",
+                    f"Antigravity CLI planning question {exc}.",
                     interaction=interaction,
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 ) from exc
-            option_labels = {option.option_id: option.label for option in interaction.options}
-            answer = (
-                answer_response.answer
-                or ", ".join(option_labels[option_id] for option_id in selected_ids)
-                or None
-            )
-            if not answer:
-                raise PlanInteractionRequiredError(
-                    "Antigravity CLI planning question was left unanswered.",
-                    interaction=interaction,
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
             command = [
                 "agy",
                 "--conversation",
@@ -962,7 +1183,22 @@ def _agy_interaction(payload: dict[str, Any], conversation_id: str) -> PlanInter
         options=options,
         allow_other=not options,
         session_id=conversation_id,
+        request_id=question_id,
     )
+
+
+def _agy_native_answer(interaction: PlanInteraction, response: PlanInteractionResponse) -> str:
+    """Map exact option IDs to the label required by agy's continuation CLI."""
+    if response.outcome is not PlanInteractionOutcome.ANSWERED:
+        raise ValueError("the native question was left unanswered")
+    if response.answer and not interaction.allow_other:
+        raise ValueError("the native question disallows free-form input")
+    selected_ids = validate_plan_option_selection(interaction, response)
+    labels = {option.option_id: option.label for option in interaction.options}
+    answer = response.answer or ", ".join(labels[option_id] for option_id in selected_ids)
+    if not answer:
+        raise ValueError("the native question was left unanswered")
+    return answer
 
 
 def _agy_required_question_field(question: dict[str, Any], *names: str) -> str:
