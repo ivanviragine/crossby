@@ -2,6 +2,18 @@
 
 Thanks for your interest in contributing. This document is the maintainer/developer guide — architecture, conventions, and how to extend crossby safely. If you're looking for usage docs, see [README.md](README.md).
 
+## Codex terminal startup
+
+`ai_tools/codex_terminal.py` owns the temporary POSIX PTY startup adapter.
+It observes Codex (0.154.0 or newer) screen state, submits `/plan`, and exposes typed
+`PLAN_READY` / `MESSAGE_SUBMITTED` events through `ai_tools.interactive`.
+Consumers own the initial task via the one-shot input port; native questions
+and subsequent keyboard input remain in Codex. Keep only a version floor (no
+exact-version allowlist; unrecognized screens already fail closed) and replace this adapter when a native pre-prompt Plan selector is verified.
+Deterministic tests use nested PTYs and a fake CLI; live evidence is documented
+in `docs/codex-terminal-plan-verification.md`. The separate app-server collector
+retains its own `collector_verified_version` floor.
+
 ## Development Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
@@ -41,6 +53,7 @@ src/crossby/
 ├── models/       # Shared data models (AIToolID, capabilities, …)
 ├── data/         # Static model catalog and bundled prompt presets
 ├── ui/           # Rich/questionary UI components
+├── web/          # Local browser UI (crossby ui) — HTTP + PTY broker
 └── logging/      # structlog configuration
 ```
 
@@ -76,7 +89,7 @@ CLI command
 ### Key Concepts
 
 - **`AIToolID`** (`models/ai.py`) — a `StrEnum`. Works as both an enum member and a string key.
-- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides.
+- **`AbstractAITool`** (`ai_tools/base.py`) — every adapter subclasses this. Setting the `TOOL_ID` class variable auto-registers the adapter via `__init_subclass__` — no other file needs to change. Its launch contract keeps sandbox selection separate from autonomy: the keyword-only `sandbox` input is translated only when `supports_sandbox_toggle=True`; false-capability adapters retain their existing trusted-directory composition, including legacy `sandbox_config_args()` overrides. Ordinary automation uses the separate `AIToolCapabilities.headless` declaration and `run_headless_session()` managed boundary; its conservative default is unavailable and does not follow from the legacy `supports_headless` flag. Native planning has two fail-closed views: `supports_plan_mode` describes activation-only `launch()`, while `supports_plan_session` requires a native selector, collector transport, and exact binding for `run_plan_session()`. The latter performs one version probe, common request validation, and centralized result/provenance validation before returning Markdown. `preflight_plan_session()` shares the static request/capability/version boundary without requiring the prospective working directory to exist; runtime always repeats it. `AIToolCapabilities.plan_mode` declares these dimensions, including `command_policy_support`, independently; capability models forbid unknown fields so stale constructor keywords fail loudly instead of being ignored.
 - **`SyncRegistry`** (`sync/base.py`) — maps `(tool_id, concern)` → writer instance. Populated in `sync/__init__.py`; `run_sync()` orchestrates matching writers and collects `SyncResult`s.
 - **`SyncConcern`** — enumeration of what a writer handles: `RULES`, `AGENTS`, `SKILLS`, `PERMISSIONS`, `HOOKS`, `MCP`, `PLUGINS`. `PLUGINS` is detect-only — `run_sync()` injects findings via `sync/plugins.py` after the regular writer pass.
 - **Canonical agent IR** lives in `subagents/` (PR #46): `SubagentIR` plus one parser and one emitter per tool. `sync.agents._sync_translate` / `CodexAgentsWriter` delegate to `subagents.api.convert` for cross-tool translation; `ConversionWarning`s with `severity=lossy|dropped` are turned into `<!-- crossby:manual-fix -->` blocks by `_ir_body_with_manual_fix` before emit so the lossy edge surfaces inside the artifact, not just on the terminal.
@@ -97,6 +110,519 @@ CLI command
 
 Keep these separate when adding launch logic.
 
+### Browser terminal (`crossby ui`)
+
+`crossby/web/` serves a loopback page that runs one AI tool per pseudo-terminal.
+Three pieces:
+
+- **`utils/pty_runner.py`** — `PtySession`. The counterpart to
+  `utils/process.py`: that module runs a child on *this* process's stdio, this
+  one allocates a PTY so a caller with no terminal can host one. Three details
+  carry the whole feature and are easy to regress:
+  - `start_new_session=True` makes the child a session leader, but a session
+    leader does **not** acquire a controlling terminal just by inheriting the
+    slave as fd 0/1/2. `preexec_fn` issues `TIOCSCTTY` to close that gap.
+    Without it `Ctrl-C` generates no `SIGINT` and `SIGWINCH` reaches nobody —
+    and nothing else looks wrong, so a test asserts `/dev/tty` is openable in
+    the child.
+  - `TIOCSWINSZ` on the master both records the size and makes the kernel
+    deliver `SIGWINCH`. A session that never sets it inherits 0x0.
+  - Output is **bytes end to end**. A read boundary routinely splits a UTF-8
+    sequence or an escape, so nothing decodes per chunk; the browser decodes.
+- **`web/sessions.py`** — validates a request against the adapter's own
+  `AIToolCapabilities` *before* spawning, then builds argv through
+  `build_launch_command()`. A session runs in any directory at or below an
+  allowed root (`--path` plus any `--allow-dir`), resolved and containment-checked
+  before anything is spawned — the browser chooses within that boundary, never
+  outside it.
+- **`web/server.py`** — stdlib `ThreadingHTTPServer`. Output streams as
+  base64 inside SSE frames, input and resize come back as POSTs. No new
+  dependency, and no asyncio next to an otherwise synchronous codebase.
+
+**One stream carries every session** (`MultiplexedStream`). This is not
+premature generality: a browser allows roughly six HTTP/1.1 connections per
+origin, and a stream per session spends one apiece. Measured, the sixth open
+terminal exhausts the pool and stalls *every* other request — including the
+POSTs carrying keystrokes, so typing silently stops working. One pump thread per
+session feeds a shared queue; sessions opened while the stream is live arrive
+through `SessionManager.add_listener`, and closing the stream detaches every
+subscription, which also releases pumps parked on a quiet session. Do not
+reintroduce per-session streams.
+
+**Replay geometry is load-bearing** (frontend). Scrollback is a raw byte stream
+containing absolute cursor-positioning escapes computed for the size the tool
+was drawing at. A restored tab therefore constructs its `Terminal` with the
+session's *server-reported* `cols`/`rows` and only refits once it is activated.
+Replaying into xterm's 80x24 default silently puts the content off-screen — the
+buffer ends up genuinely empty, which looks exactly like a lost session. For the
+same reason, a session the page has not seen buffers its frames until
+`GET /api/sessions/{id}` returns the real geometry.
+
+**xterm does not paint into a hidden container** and does not repaint merely on
+becoming visible, so `activate()` forces `term.refresh()`. Panes are hidden with
+`visibility`, not `display: none`, so they keep their dimensions — which also
+means a background pane still occupies layout, so `.panes` clips with
+`overflow: hidden` (without it a background tab left at a larger geometry
+stretched the page and produced a horizontal scrollbar).
+
+**Terminal reports are filtered while the tty echoes** (`pty_runner.write`).
+A tool enables focus reporting, the browser answers, and roughly a millisecond
+later the tool turns the mode off again — which re-enables echo. The reply lands
+after that flip and the kernel prints it as a literal `^[[I` / `^[[?1;2c`. A
+local terminal answers in microseconds and wins the race; a browser never can,
+so the fix belongs on the server: if the payload is *only* an emulator-generated
+report (focus, device attributes, cursor position) and `termios.tcgetattr` on the
+master says ECHO is on, drop it. The tool is not reading raw replies in that
+window and re-queries once it is back in raw mode. Where termios cannot be read
+through the master, `_echo_enabled()` returns `None` and nothing is filtered —
+never guess, since the cost of a wrong guess is swallowed keystrokes.
+
+**Scrollback is a cushion, not a transcript.** It is bounded, and a tool with an
+idle animation (Codex: ~10.8 KB/s doing nothing) fills it with animation in
+seconds, so a reattaching viewer must *force a redraw* — the page nudges the
+terminal size, and the tool repaints from its own state. The trim also resumes
+at the next ESC rather than an arbitrary byte, because cutting mid-sequence made
+the replay open with a fragment rendered as garbage.
+
+**Working directories are operator-bounded, not page-chosen.** A session may run
+anywhere at or below `--path` or an `--allow-dir` root, and nowhere else.
+`SessionManager.resolve_workdir` resolves the request first and only then checks
+containment via `assert_within`, so a symlink pointing out of a root is refused
+rather than followed; `browse()` applies the same check and withholds the parent
+at a root, so the picker cannot be used to enumerate the filesystem. Relaxing
+this to arbitrary paths would mean a leaked token buys the whole filesystem
+rather than a known tree — keep the boundary.
+
+**Tab shortcuts are bound twice on purpose.** `Cmd`/`Ctrl` + `1`-`9` is what
+people expect, and `Cmd` is the only modifier macOS never delivers to a terminal
+application — so it cannot collide with the tool's own keys. It is confirmed working in ordinary Chrome on macOS, but
+some browsers claim it for their own tab strip and handle it in the browser
+process where a page cannot intercept it (`preventDefault()` does nothing), so
+`Cmd`/`Ctrl`+`Alt`+`1`-`9` is registered alongside as the always-available one.
+Match on `event.code`, never `event.key`: with Option held, macOS reports
+Option+1 as `¡`. Each terminal's `attachCustomKeyEventHandler` returns false for
+these combinations so a tab switch cannot leak a digit into the running tool.
+
+**Autonomy is one exclusive choice** (`Autonomy` in `web/sessions.py`), not
+independent booleans: plan mode is exclusive and the rest have a fixed
+precedence, exactly as `crossby launch` treats them. Modelling it as a ladder
+makes the contradictory combinations unrepresentable. `build_launch_command`
+runs the adapter's own plan-mode gate, whose `PlanModeLaunchError` is translated
+into a 400 rather than escaping as a server error.
+
+**Why this does not call `cli/launch.py`.** That function resolves
+interactively, prints Rich markup and raises `typer.Exit` — none of which
+survives a browser. Adapters, by contrast, import nothing from `crossby.ui`, so
+the web layer talks to them directly. Richer launch behaviour (scenes,
+profiles, transcripts) should arrive by **extracting that orchestration into
+`services/`** returning result objects, the way `activate_scene()` already
+returns a `SceneActivationOutcome` — not by calling the command function.
+
+**Security invariants.** These are load-bearing; the server spawns AI tools with
+filesystem access. Loopback binding only (`serve()` refuses anything else); a
+`secrets` token on every **API** request compared with `compare_digest`; `Host`
+validation (DNS rebinding); and `Origin` rejection (CSRF), enforced on the static
+shell too. Static files resolve through `config/json_utils.assert_within`.
+`tests/integration/test_web_server.py` drives a real socket for each of these;
+keep it that way.
+
+**The static shell is intentionally unauthenticated.** It was once covered by a
+`SameSite=Strict` cookie, which failed in practice: cookies ignore the port, so
+they outlive a restart and leak between concurrent servers, while every run mints
+a fresh token. A reload from a bookmark, or a cached shell after a restart, then
+401'd the stylesheet and script while the HTML still loaded — a blank broken page
+with no explanation. The shell is vendored xterm.js, this project's own CSS/JS,
+and a page that does nothing without a token; the thing worth guarding is the
+API, and it still demands one. Do not reintroduce cookie auth. The index is
+served `no-store` so a stale copy cannot mask a token change.
+
+**Vendored frontend.** `data/ui/vendor/` holds xterm.js, committed rather than
+fetched so `pip install crossby` yields a working offline UI with no npm and no
+CDN dependency. `data/ui/vendor/README.md` records versions and the refresh
+command.
+
+**Backpressure is not drop-oldest.** The obvious policy for a slow subscriber —
+discard its oldest pending chunk — is wrong here. Terminal output is a stateful
+escape-sequence stream, so dropping bytes mid-sequence desynchronizes that
+viewer's emulator permanently *and invisibly*. An overrun subscriber is cut with
+`SubscriberDesyncError` instead; the server ends the SSE response without an
+exit frame, `EventSource` reconnects on its own, and the fresh scrollback plus
+the next repaint restores a correct screen. Preserve that property if you touch
+`_offer`/`_broadcast`.
+
+**No web test may need an AI tool installed.** CI runners have none, and a
+developer machine usually does — so a test that spawns `claude`, or that asserts
+on real argv or a detected tool version, passes locally and fails on CI. Six did
+exactly that. Use the `stub_tool` fixture (patches `build_launch_command` to a
+harmless local process) for anything that needs a live session, stub
+`capabilities()` when asserting on what a tool supports, and assert on the flags
+handed to the adapter rather than the argv it produces — turning flags into argv
+is the adapter's contract, tested in its own suite. To check before pushing, run
+the suite with the tools off `PATH`; `AbstractAITool.detect_installed()` should
+return `[]`.
+
+**Testing the terminal.** Unit tests drive a real child on a real PTY, because
+the behaviours that matter (controlling terminal, SIGWINCH, signal-generated
+exits) are invisible to mocks. Beyond that, the stack has been driven in a real
+browser against real full-screen TUIs — `vim`, `top`, `less` — which is what
+validates the parts a line-oriented stub cannot: alternate screen, modal input,
+self-driven repaint, mouse reporting, and resize confirmed against the running
+program's own `columns`/`lines`. A line-oriented fake binary proves the PTY and
+the transport and nothing about TUI rendering; do not treat it as sufficient.
+Interactive login flows for the real AI CLIs remain unverified.
+### Native interactive Plan launch
+
+`launch()` and `build_launch_command(initial_message=...)` retain the native
+terminal UI. `PlanModeCapability.supported_launch_approval_modes` declares which
+approval tiers coexist with Plan. `plan_approval_args()` handles native
+combinations that differ from ordinary launch, such as Claude's bypass-available
+flag and Plan-specific classifier setting. Keep the Plan selector independent
+of approval precedence, reject unsupported combinations before launch, and do
+not assume interactive approval semantics for headless or collected sessions.
+Native permissions, account eligibility, folder trust, and explicit deny rules
+remain authoritative. Do not emulate unavailable modes with prompt text or
+terminal input. The reusable real-CLI probe is `scripts/probe_native_plan.py`.
+
+### Managed ordinary headless sessions
+
+`run_headless_session(request, interaction_handler, event_handler,
+cancel_event=...)` is the ordinary automation boundary. It is independent from
+interactive `launch()`, legacy prompt-to-command construction, and collected
+Plan mode. An adapter integration must declare `AIToolCapabilities.headless`
+truthfully and implement `_run_headless_session(request, version, context)`.
+Do not advertise support merely because a CLI has a `--print`, `exec`, or
+similar legacy headless flag.
+
+The base class starts the absolute deadline before request validation, repeats
+all preflight checks, performs one bounded version probe, and executes the
+protected hook in an isolated worker so startup or collection cannot outlive
+the request. Adapter code obtains every blocking budget from
+`HeadlessRuntimeContext.remaining_seconds()`, emits only bounded normalized
+events, resolves interactions through `context.interact()`, registers one
+ordered cleanup sequence, and constructs the result through
+`context.complete()`. Never put native frames, prompt/answer text, argv, or
+command rendering in an event, warning, denial, or exception.
+
+`UNATTENDED` questions fail and permissions deny without consulting parent
+stdin. `BROKERED` callbacks and event callbacks run in daemon workers and are
+bounded by the idle, interaction, and overall deadlines. A late answer is never
+returned to the adapter. Handler exceptions are `HeadlessTransportError`s with
+a safe partial snapshot. Cancellation and timeout call native abort once when
+declared, then close input, terminate/kill the owned process group, reap the
+direct child, and bound worker joins. Terminal-event evidence, native status,
+exit status, and caller schema validation are reconciled before exactly one
+terminal event is delivered.
+
+Brokered profiles live in `HeadlessCapability.brokered`; the legacy flat fields
+remain the unattended contract. Preflight and runtime use the selected profile,
+including its version floor and interaction kinds. Protocol adapters use
+`ProtocolSessionController` to register one cleanup chain, track live JSON-RPC
+request IDs, and block late or duplicate replies. Antigravity uses
+`ResumableManagedCLIController` to rotate continuation processes under the same
+deadline and cleanup registration. Revalidate complete continuation argv with
+the mapped answer and conversation ID before launching; callback text and native
+option labels must satisfy both per-argument and aggregate platform limits.
+Preserve exact native session, turn,
+conversation, request, and option IDs. Derive executable command fields only
+from native raw input; display text is never authority for command policy.
+Collected-plan entry points retain their artifact checks and native plan-mode
+selection. Codex and Cursor share app-server/ACP setup payload builders across
+the two paths; Antigravity shares native question-to-continuation mapping.
+Keep the ordinary brokered path free of plan mode and plan artifacts.
+Exercise lifecycle invariants with real child processes and blocked pipes or
+sockets, as in `test_brokered_transport_safety.py`; protocol mocks alone cannot
+verify native deadlines, backpressure, or descendant cleanup. Check related
+read/write/reply paths and every adapter that shares a helper when fixing a
+permission, binding, resource-limit, or timeout defect. Permission option
+display labels must never choose an implicit allow or deny decision.
+The checked behavior and version floors are documented in
+`docs/brokered-headless-verification.md`.
+
+Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
+its cleanup-stage deadline and cancellation signal. Hooks must use that budget
+for blocking work and exit when cancelled; the runtime continues hard process
+teardown after a bounded cooperative wait.
+
+Use `ai_tools/session_process.py` for shared captured/JSON-RPC primitives. It is
+the same live module as the historical `ai_tools/plan_process.py` path, keeping
+existing Plan imports and safety-limit patches compatible. Carry the runtime's
+absolute deadline and cancellation event into version probes, prompt writes,
+protocol reads/writes, parsing, and final collection.
+
+#### The shared unattended CLI transport
+
+Every terminal adapter runs its native non-interactive CLI through
+`ai_tools/headless_cli.py`, never its own `subprocess` call. `run_managed_command`
+owns one child process group, gives the child a stdin pipe it closes right after
+delivering the prompt (or `/dev/null` when the prompt travels in argv), registers
+the cleanup sequence *before* the first blocking read, and takes every wait
+budget from `context.remaining_seconds()`.
+
+Its `on_stdout_lines` callback is what makes a streaming transport observable.
+Native lines are handed to the adapter from the same thread that is waiting on
+the child, so provenance is recorded and the idle deadline refreshes while the
+run is still in flight — and a timed-out session still returns the session,
+thread, or conversation ID it had already seen. `frame_streamer` builds that
+callback from a `kind_of`/`provenance_of` pair; only a verified frame *kind*
+refreshes the idle deadline and emits a content-free progress event. Unknown
+JSON frames remain available to terminal parsing but cannot keep a stalled
+process alive, and native frame content is never exposed (Cursor's `user` frame
+and agy's `text_delta` are the proof).
+
+`complete_session` then renders the terminal result in the caller's requested
+shape: a `response_schema` selects the native structured output for the runtime
+to validate, `TEXT` returns the final response text, and `JSON`/`JSONL` return
+the native object that carried it. An adapter that cannot honor a schema must
+reject it in `_validate_headless_requirements` so the request fails before
+version probing or spawn.
+
+Capability declarations are evidence, not aspiration. `verified_version` is the
+exact build the flags and envelope were checked against and becomes the runtime
+floor, and `successful_native_statuses` may only be declared when *every*
+supported native output carries that status. Each fixture's exact provenance is
+recorded in `docs/unattended-headless-verification.md`: live captures,
+documented Codex success events, or a synthetic Antigravity waiting state. When
+a CLI changes its envelope, update the fixture and the verified version
+together.
+
+### Collected native plan sessions
+
+`run_plan_session(PlanSessionRequest, interaction_handler)` is the integration
+boundary for automation. Do not change `launch()` to return an artifact: its
+exit-code behavior is public and intentionally remains suitable for human
+interactive sessions. A complete collector must:
+
+1. Activate the documented native mode before the first planning turn. Prompt
+   prefixes and slash-command text are never selectors.
+2. Declare collector activation, transport, artifact source, exact binding,
+   interaction support, sandbox/approval behavior, the exact
+   `supported_approval_policies`, and truthful `command_policy_support` plus
+   detail in `PlanModeCapability`. If any requested policy cannot be preserved,
+   reject it before process creation. A legacy launch flag builder or persistent
+   project allowlist does not prove collected-session support.
+3. Bind collection to an identifier or isolated location created or returned by
+   that invocation. Never inspect a global "latest" plan/session, call an
+   ID-less export, use prefix/name matching, or scrape a harness's private
+   storage as a fallback.
+4. Surface native questions through `PlanInteractionHandler`, preserving native
+   question and option IDs plus the native multi-select and free-form-answer
+   capabilities. For permission events, attach a `PlanOperation` containing only
+   authoritative provider fields: distinguish `argv` from `shell_expression`,
+   preserve the execution directory, targets, operation kind, and binding IDs,
+   and leave unavailable evidence unset. Never parse display prose into command
+   evidence. Model final plan approval as
+   `PlanInteractionKind.PLAN_APPROVAL`; collection must never translate it into
+   permission to implement. Never infer interactive consent from a TTY: callers
+   must explicitly pass `terminal_interaction_handler` when terminal input is
+   intentional.
+5. Return `PlanSessionResult` with non-blank Markdown, the exact text from the
+   single version probe, native-mode evidence, and all available binding IDs.
+   Missing, duplicate, malformed, cross-session, non-zero-exit, timeout, and EOF
+   cases use the typed errors in `ai_tools/plan_mode.py`.
+6. Apply one request-wide deadline to the version probe, initial invocation,
+   every protocol read/write or continuation wait, file-backed artifact
+   collection, and any subprocess-backed export.
+   Always terminate protocol children, isolate captured, interactive, and protocol
+   POSIX subprocesses in run-owned process groups, hard-limit captured
+   stdout/stderr, redact/truncate diagnostics, and remove only run-owned temporary
+   artifacts. Capture-worker joins share the request deadline on every platform;
+   on POSIX, a deadline or output overflow must also terminate descendants
+   retaining inherited pipes, including when their parent already exited.
+   Claude retains successful and partial artifacts and removes only empty UUID
+   directories after failure. Catch `subprocess.TimeoutExpired` before
+   broader subprocess failures and never stringify it: its command field may
+   contain a prompt or continuation answer.
+
+The public preflight boundary validates complete-session capability, the
+statically knowable request/policy combination, and a bounded exact CLI version.
+Put adapter-only static requirements in
+`_validate_collected_plan_requirements()` so preflight can reject them without a
+dummy worktree. Do not perform authentication, provider/model discovery,
+protocol negotiation, or configuration/artifact writes there. A successful
+`PlanSessionPreflight` must continue to report those runtime checks as deferred;
+never cache it as authority or skip runtime validation.
+
+`PlanCommandPolicy` accepts only the portable simple-command subset implemented
+in `ai_tools/plan_policy.py`: exact commands or one trailing argument wildcard.
+Native implementations must scope rules to the new session/invocation and leave
+project/global permission files untouched. Callback implementations may approve
+only authoritative command operations, only inside the request's working or
+trusted directories, only without extra permission targets, and only with a
+native one-operation approval. Missing metadata, compound shell syntax, unknown
+operation kinds, and unmatched commands stay on the requested approval-policy
+path. Command policy never substitutes for sandbox, network, directory trust,
+or final plan approval.
+
+Use the stdlib helpers in `ai_tools/plan_process.py` for captured subprocesses,
+strict JSONL, versioned line-delimited JSON-RPC, and Codex app-server's separate
+headerless JSONL dialect. Captured CLI stdout and stderr have hard byte limits;
+protocol stdout has a per-frame cap and a fixed-size queue so a child that keeps
+emitting while an interaction callback runs receives pipe backpressure instead
+of growing parent-process memory without limit. Protocol stderr is consumed in
+bounded chunks and retained only as a tail; a frame overflow terminates the
+owned process group. Bound protocol writes too: a server that stops reading
+stdin must not trap collection past its deadline. Close stream wrappers only
+after their worker threads stop. Read file-backed plan artifacts through the
+bounded helper before UTF-8 decoding; check regular-file identity and reject
+symlinks/replacements. Claude holds a POSIX directory descriptor from before
+launch and reads relative to it so path replacement cannot redirect collection.
+Keep progress/transcript parsing out of artifact parsers: only
+the adapter's declared authoritative event, export, structured field, or
+isolated path may become `result.plan`.
+
+The common session boundary runs callback-based interaction handlers in daemon
+workers and waits only until the original request deadline. Never resume the
+native session from that worker: only the collecting thread may forward a
+timely response. A timeout must unwind the adapter's cleanup even while caller
+code remains blocked. Python cannot cancel such code, so caller-owned waits
+must support cancellation or their own timeout; callbacks need not run on the
+main thread. Keep Claude's terminal-handler identity check intact, since its
+actual interactive process is bounded separately.
+Claude's collected-session command policy reuses its per-invocation
+`--allowedTools` translation and adds `--setting-sources ""` to exclude user,
+project, and local settings allowlists. It must not invoke the persistent
+permission writer. This extra isolation is policy-only; omitted-policy command
+construction remains byte-for-byte compatible.
+
+Lifecycle completion is adapter-specific and must be explicit. Codex waits for
+the matching successful `turn/completed`, rejects a second completed plan item,
+then acknowledges `thread/backgroundTerminals/clean` and requires app-server to
+exit zero before returning. Cursor likewise configures and verifies the requested
+model, thought level, and thinking/fast state through ACP and requires a zero
+protocol-process exit. Codex must always send the complete
+`sandbox_workspace_write.writable_roots` list, including `[]` when no extra roots
+were requested: omission lets app-server retain ambient configuration roots.
+Codex collected-session command policy is callback-backed: match only a
+documented command-approval payload with a simple authoritative shell expression,
+an absolute in-scope `cwd`, no additional targets, and an advertised `accept`
+decision. Respond with `accept` (once), never `acceptForSession`; unmatched or
+ambiguous operations continue through `on-request` or `never` normally. Preserve
+representable string `availableDecisions` IDs in callback interactions when
+app-server provides them; reject the whole approval request if it also advertises
+a structured choice whose required payload cannot be represented.
+
+Copilot supports interactive native `--plan` activation only. CLI 1.0.83's
+`--prompt` transport does not expose `ask_user` to the model, so the collected
+API fails before spawning. A future collector must verify a real native question
+→ callback → continuation → plan flow before declaring support. Local-provider
+runs of 1.0.83 emit `result.sessionId` and integer `exitCode` (not
+`status="completed"`), and Markdown shares start with `# Copilot CLI Session`
+and a quoted `> - **Session ID:**` metadata line. Do not revive the prior
+synthetic event/share fixtures or infer question support from a tool allowlist.
+
+OpenCode uses `opencode serve` on a fresh loopback port with a run-owned password,
+then creates one native session and selects `agent="plan"` in `prompt_async`.
+An explicit command policy is supplied in that session's `permission` ruleset:
+put a `bash` catch-all `ask` rule first and the narrow `allow` rules after it,
+because OpenCode resolves the last matching rule. Do not write `opencode.json`
+or reuse the ordinary launch allowlist path.
+The verified `run --format json` command disables questions and cannot implement
+the interaction contract. The native question API preserves `multiple` and
+returns selected labels as arrays; batched question IDs use the native request ID
+plus the question index. Inspect the originating tool call to distinguish
+`plan_exit` from an ordinary question, and never approve a switch to building.
+After a successful terminal plan message, export only that exact session and
+require the exported artifact to match the terminal message ID. Progress before
+a clarification/tool call may create several assistant messages. Select the
+unique export record with the completed message ID; reject
+duplicate records for that ID, not earlier plan-agent prose. Native API calls,
+question handling, and export share one deadline. HTTP response bodies are bounded
+and read incrementally with that deadline recomputed before each receive; a
+deadline timer interrupts status/header parsing that trickles data indefinitely.
+Pending question and permission batches reject duplicate request IDs before any
+interaction callback runs.
+
+For explicit OpenCode effort, validate the selected model's advertised variants
+from `GET /provider` before creating the session or submitting the prompt.
+The adapter-wide `low`/`medium`/`high` list is not a model-specific guarantee:
+OpenCode silently ignores unavailable variants. Resolve the model from the
+request, then the native plan agent (`GET /agent`), then configured default
+(`GET /config`), and pin that validated model in the prompt. If no public
+configured default exists, reject with explicit-model remediation instead of
+scraping recent-model state or choosing an arbitrary provider. No-effort
+requests retain native default behavior.
+
+Every complete collector needs sanitized captures from its verified release
+under `tests/fixtures/plan_sessions/`, preserving real framing, metadata, and
+status casing, plus contract tests covering success, malformed output,
+missing/duplicate artifacts, mismatched identifiers,
+interaction-required behavior, process cleanup, and independent sandbox and
+approval choices. Seed decoy sessions/files to prove exact binding. Tests for an
+unknown or below-floor version must assert that no adapter process was created
+after the version-probe subprocess.
+
+Treat recognized interaction envelopes as protocol data: required identifiers,
+prompts, booleans, and every native option must retain their documented types and
+shape. Reject duplicate question IDs before invoking callbacks. Do not silently
+drop malformed options, and validate every callback selection against the native
+option IDs before resuming or responding. Preserve a native free-form affordance
+as `PlanInteraction.allow_other`, and reject answer text when it is false.
+This also applies to permission callbacks: reject text on an `ANSWERED` or
+`APPROVED` response before sending approval, while keeping explicit denial and
+cancellation precedence over stale response fields.
+
+When an upstream protocol changes, capture a sanitized fixture from the new
+release, update the parser and positive/negative tests, then raise
+`verified_version` to the oldest release whose exact shape the adapter supports.
+Do not lower or bypass the runtime gate merely because a similarly named CLI
+flag exists in an older build. Record the newly verified selector and protocol
+shape in the README support matrix.
+
+Authenticated smoke tests are opt-in because they use the developer's normal
+CLI credentials and can consume paid model tokens. Authenticate each selected
+harness first (and configure an OpenCode provider/model), then run only the
+tools you intend to exercise in disposable temporary repositories:
+
+```bash
+CROSSBY_PLAN_SMOKE_TOOLS=codex,cursor \
+CROSSBY_PLAN_SMOKE_ANSWER="Use the existing public API" \
+  uv run pytest -s tests/integration/test_plan_sessions_smoke.py
+```
+
+The answer variable is needed only when a harness asks an open-ended informational
+planning question. For option-based questions, the smoke handler selects the first
+emitted native option; final plan and permission requests are denied.
+Never enable these tests in the default or unauthenticated CI suite.
+To exercise Claude's real per-invocation command policy, select Claude alone and
+set a canonical pattern; `-s` records the exact detected CLI version:
+
+```bash
+CROSSBY_PLAN_SMOKE_TOOLS=claude \
+CROSSBY_PLAN_SMOKE_ALLOWED_COMMANDS="git status" \
+  uv run pytest -s tests/integration/test_plan_sessions_smoke.py
+```
+
+OpenCode also has a deterministic native test that uses a local model stub and
+isolated configuration/data directories, without credentials or paid calls:
+
+```bash
+CROSSBY_OPENCODE_LOCAL_SMOKE=1 \
+  uv run pytest tests/integration/test_opencode_plan_http.py
+```
+
+It requires the verified OpenCode binary and exercises a real native multi-select
+question with preceding progress text, its reply, and exact-session export. It
+also checks supported and disabled effort variants for explicit, default, and
+plan-agent models, including the actual local model request options and a native
+session-scoped command policy. The current fixture was exercised with OpenCode
+1.18.29; it performs real local protocol/model work, not a mocked adapter run.
+
+Codex also has a local policy test with isolated configuration. It checks the
+actual app-server sandbox response and stops before any model inference:
+
+```bash
+CROSSBY_CODEX_LOCAL_SMOKE=1 \
+  uv run pytest tests/integration/test_codex_plan_policy.py
+```
+
+The current no-inference check was exercised with Codex CLI 0.154.0 and includes
+a public callback-backed command policy. It validates real app-server request
+compatibility and sandbox metadata; command matching itself remains deterministic
+unit coverage because this smoke deliberately stops before a model turn. Claude
+command construction is likewise unit-tested; the authenticated command above is
+the opt-in real harness check and must not be reported as run unless it actually
+was.
+
 ## Adding a New AI Tool
 
 The adapter pattern is designed so adding a tool is a single-file change.
@@ -104,7 +630,7 @@ The adapter pattern is designed so adding a tool is a single-file change.
 1. Add the tool ID to `AIToolID` in `src/crossby/models/ai.py`.
 2. Create `src/crossby/ai_tools/<tool>.py` subclassing `AbstractAITool`:
    - Set `TOOL_ID = AIToolID.<TOOL>` (this auto-registers the adapter).
-   - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, `supports_*` booleans.
+   - Implement `capabilities()` returning an `AIToolCapabilities` with at minimum `binary`, `display_name`, `model_flag`, and applicable `supports_*` booleans. Declare `plan_mode=PlanModeCapability(...)` explicitly: use `CLI_ARGUMENT` only when a native selector is verified before the first turn, provide the oldest parseable `verified_version` Crossby supports as its conservative runtime floor, and otherwise use `UNSUPPORTED` with actionable remediation.
    - Override the optional hooks that apply — e.g. `yolo_args()`, `effort_args()`,
      `trusted_dirs_args()`, `normalize_model_format()`, `resolve_effort_model()`, and
      `initial_message_args()`. A tool that can explicitly enable and disable its sandbox
@@ -113,6 +639,16 @@ The adapter pattern is designed so adding a tool is a single-file change.
      maps directly to `--sandbox enabled|disabled`. Do not infer approval flags from this
      hook. Adapters without the capability may retain a pre-toggle
      `build_launch_command()` override: `launch()` does not forward `sandbox` to it.
+   - If activation-only native plan mode is supported, override
+     `plan_mode_args()` with the real selector. Never synthesize a slash-command
+     prompt. For complete collection, also declare the collector fields and
+     override `_run_plan_session()` according to the obligations above. The
+     shared validators compare the installed `--version` result with
+     `verified_version`, so add old/unknown-version no-spawn tests alongside
+     command-composition coverage. Add prospective-directory preflight tests,
+     declare command-policy support or rejection explicitly, describe artifact
+     provenance truthfully, and reject `plan_output_dir` when the requested
+     location cannot be guaranteed.
 3. If the tool should participate in `crossby sync`, add writers under `src/crossby/sync/<concern>.py` for each concern it supports (see below) and register them in `sync/__init__.py`.
 4. If the tool should be a handoff **source**, override `locate_sessions()` and `read_session()` in the adapter.
 5. Add static model entries to `src/crossby/data/` if the tool has a known model catalog.
@@ -139,15 +675,15 @@ Register the instance in `src/crossby/sync/__init__.py` alongside the other writ
 
 ### Revocation and the ownership ledger
 
-crossby's sync is **additive by default but revocable**: it can take back an entry it wrote earlier (e.g. after `sync --from A` then `sync --from B`, a target reflects B's hooks/permissions, not the union of both). The mechanism is a provenance ledger (`sync/ownership.py` → `.crossby/owned.json`) that records what crossby wrote per `(tool_id, concern)` — hook `(event, command)` pairs, canonical permission patterns, and MCP server names.
+crossby's sync is **additive by default but revocable**: it can take back an entry it wrote earlier (e.g. after `sync --from A` then `sync --from B`, a target reflects B's hooks/permissions, not the union of both). The mechanism is a provenance ledger (`sync/ownership.py` → `.crossby/owned.json`) that records what crossby wrote per `(tool_id, concern)` — hook `(event, command)` pairs, canonical permission patterns, and MCP server names — plus the exact physical-path baselines needed to revert PROJECT scene mechanisms.
 
 The load-bearing rule when adding removal to a writer:
 
 - **Writers must never infer "absent from `data` ⇒ remove".** Revocation is computed **only** in `run_sync()` as `ledger_owned − current_set` and handed to the writer through an explicit, default-empty field on `SyncData` (`hooks_remove`, `permissions_remove`, `mcp_remove`). A writer that inferred removal from its own `data` would be catastrophic: `config/claude_allowlist.configure_plan_hooks` and the Cursor/Copilot equivalents call writers directly with a single-hook `SyncData` on every plan-mode/worktree session setup, and would wipe every other hook in the file.
 - **Ownership is what crossby *wrote*, not what matched the source.** Each writer reports the identities it created **fresh** this run via `SyncResult.created` (an entry it appended, a permission/server it added — never one already present). `run_sync()` records `new_owned = (ledger_owned ∩ current) ∪ created`. This is what keeps a hand-authored entry that merely shares a `(event, command)` / pattern / server-name with the source from being claimed — and thereby later narrowed or revoked — by crossby.
 - `run_sync()` records new ownership **only** for writers that did not return `error` — an error leaves the ledger untouched so the next run retries cleanly.
-- The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A missing or malformed `owned.json` degrades to "own nothing", never a crash. Persistence is best-effort too: an `OSError` while saving `owned.json` or updating `.gitignore` is logged and swallowed, so a read-only dir or full disk never discards the `SyncResult`s whose writes already succeeded (the ledger simply retries next run).
-- **Scene mutate/revert operations fail *closed* on a *corrupt* ledger.** The additive degradation above ("own nothing") is safe for sync — a fresh clone only adds — but for a scene `use`/`clear` it would revert nothing yet let the engine's `finally: save_ledger` overwrite the corrupt file and the CLI delete `scene-state.json`, stranding applied settings with no recovery record. So `load_ledger_checked()` returns a `LoadedLedger(corrupt=…)` signal: corrupt when the path *exists* (`os.path.lexists`, so a broken symlink counts — not `Path.is_file()`) but is a **symlink** (of any kind — a symlinked `owned.json` is refused, never followed, so the pre-save read can't be redirected outside `.crossby/`), a directory, unparseable, or non-dict-root, **or** its `scene` section is anything other than `{<AIToolID>: {<SceneDeclareKey>: [str, …]}}` (the scene section is the revert *authority*, so it is validated strictly — including unknown tool/key names and an explicit `null` — unlike the leniently-parsed `owned` section; a truly-absent or valid-empty ledger is not corrupt). `cli/scene.py`'s shared `_refuse_if_ledger_corrupt` guard runs before *any* engine call in both `use` and `clear` (including `--plan` and first-time apply). `load_ledger()` itself is unchanged (still lenient) for every existing sync caller.
+- The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A truly missing `owned.json` degrades to "own nothing". A malformed ledger is never overwritten: ordinary sync refuses hooks, permissions, and MCP writers before mutation because their ownership could not be persisted, while unrelated whole-artifact writers may still run. Post-writer persistence remains best-effort: an `OSError` while saving a previously valid ledger or updating `.gitignore` is surfaced in result rows without discarding the writes that already succeeded.
+- **Scene mutate/revert operations fail *closed* on missing or corrupt recovery authority.** `load_ledger_checked()` marks an existing ledger corrupt when it is a symlink, directory, unparseable/non-object JSON, or contains malformed `scene` or `scene_paths` restore provenance. The `scene_paths` section accepts only registered project-relative targets and exact sibling `.bak[2…]` paths. Each descriptor records true absence, a literal symlink target, a deliberately unchanged canonical source, or a real directory's allocated backup. Directory descriptors also persist the captured device/inode and a pending/completed displacement phase, so a retry can authenticate the exact directory on either side of an interrupted rename and never adopt recreated managed output as the baseline. `use`, `clear`, and their `--plan` paths validate ancestors and descriptors before inspecting or mutating targets; legacy PROJECT output without exact provenance requires manual recovery.
 - MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. `mcp_remove` bounds the existing `enabled=False` deletion so crossby can never delete a same-named server a human wrote. Hooks and permissions do revoke-on-absence.
 - A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
 - **The interactive wizard revokes on *environment-wide absence*.** Each revocable concern (hooks, permissions, MCP) dispatches on *data OR ownership*: the wizard loads the ledger once and runs `run_sync()` for a concern when the merged source data is non-empty **or** any installed target still owns entries for it. Because the wizard merges discovery across *all* installed tools (no `--from` scope), "revoke" here means the concern has emptied across the **whole environment** — an entry still present on any installed tool is rediscovered as current and is **not** stripped. This is *not* entry-for-entry `--from` parity (where an entry present only on other tools would be revoked). Two consequences to know: MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP dispatch removes nothing and just emits `skipped`/discovery rows; and declining a still-present port while the ledger owns entries leaves `data` empty for that concern, so the ownership arm fires and revokes the owned copies (a later confirm re-adds them). Hardening "decline ≠ revoke" (e.g. also requiring `not scan.<concern>.found`) is a possible follow-up, not current behavior.
@@ -204,21 +740,31 @@ Rules that keep the matrix honest:
   types get their own `scene` section in `.crossby/owned.json` (`SceneDeclareKey`
   in `sync/ownership.py`). `clear_scene` reverts only entries crossby recorded —
   a user's own `skillOverrides`/`deny`/`disabled` value survives untouched.
+- **PROJECT baselines are ledgered by physical path.** Capture and save the
+  descriptor before changing a target; save the completed directory-displacement
+  phase before materialising scene output; and remove the descriptor only after
+  the exact baseline is restored. Clear/switch never rediscover a canonical
+  source or scan neighboring backups. Partial clears narrow `scene-state.json`
+  to mechanisms that still need recovery, and the projection remains until no
+  recorded target depends on it.
 - **Report honestly.** Plugin-provided skills (reachable by neither mechanism),
   Codex toggles on an untrusted project (silently ignored until trusted), and a
   Claude build below `2.1.129` are each surfaced as report rows rather than a
-  quiet no-op. `dry_run` computes the full result set and never touches disk;
-  `apply_scene` is idempotent and safe to re-run from a half-applied state.
+  quiet no-op. `dry_run` computes the full result set, applies the same ancestor
+  and recovery preconditions as a write, and never touches disk; `apply_scene`
+  safely resumes authenticated partial work and fails closed on ambiguity.
 
 ### Session-scoped scene launch
 
-`crossby launch --scene <name>` applies a scene to a **single session** without
-mutating any tracked file — the session-scoped counterpart to the persistent
-`scene use` above. The two share the resolver (`ResolvedScene`) but diverge on
-enactment: instead of writing tool config files, each adapter renders throwaway
-artefacts under `.crossby/scene/<name>/launch/` (kept out of git via
-`.git/info/exclude`, never a tracked `.gitignore` edit) and returns the
-flags/env that point its CLI at them. The code lives in `scenes/launch.py`
+`crossby launch --scene <name>` prefers a **single-session** scene without
+mutating tracked files — the session-scoped counterpart to persistent
+`scene use`. Adapters with a launch lever render throwaway artefacts under
+`.crossby/scene/<name>/launch/` (kept out of git via `.git/info/exclude`, never
+a tracked `.gitignore` edit) and return the flags/env that point their CLI at
+them. Tools without a usable lever enter the same recoverable persistent
+activation lifecycle as `scene use`; that policy is centralized in
+`services/scene_activation.py`, while UI wording and exit behavior stay in the
+two CLI modules. The session launch code lives in `scenes/launch.py`
 (the `SceneLaunchContext`/`SceneLaunchArgs` types plus rendering, the Codex
 profile helpers, and pruning), each adapter's `scene_launch_args`, the
 `scene_*` capability fields on `AIToolCapabilities`, and the `--scene` handling
@@ -228,9 +774,9 @@ in `cli/launch.py`.
 |---|---|
 | Claude | `--mcp-config <file> --strict-mcp-config` (selected servers), a `--settings` file of `skillOverrides` (gated on `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (deselected servers → `enabled = false`); gated on `codex ≥ 0.134.0` |
-| Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); a profile's `--allow-tool` entries naming an excluded tool are filtered out (approval layer) before both are emitted |
+| Copilot | `--disable-mcp-server <name>` per deselected server (visibility layer); profile-native `allow_tools` approvals travel independently, and entries naming an excluded MCP server are filtered before they are emitted |
 | Cursor | none — falls back to persistent activation (`CURSOR_CONFIG_DIR` relocates the whole config base, auth included — not just MCP) |
-| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so nothing is narrowed and the project's `opencode.json` stays authoritative |
+| OpenCode | none — persistent fallback records lifecycle state but has no tool-config mechanism, so nothing is narrowed and the project's `opencode.json` stays authoritative |
 | Antigravity CLI | none — no launch lever; falls back to persistent activation |
 | VS Code / Antigravity IDE | none (GUI, override `launch()`); the CLI warns and drops the scene before dispatch |
 
@@ -255,14 +801,38 @@ Rules that keep this honest:
   profile matching the naming pattern, or a hand-made directory under
   `.crossby/scene/`, is therefore never deleted — the filename/path alone is
   never sufficient.
-- **No silent no-op, no silent mutation.** A terminal tool with no launch lever
-  (Antigravity CLI) or a runtime gate that failed (Codex too old) falls back to
-  persistent `scene use` activation for that tool, warning that config was
-  written. A GUI tool warns that a scene cannot apply and launches without it.
+- **One persistent lifecycle.** A terminal tool with no launch lever
+  (Antigravity CLI, Cursor, OpenCode) or a runtime gate that failed (Codex too
+  old) calls `services.scene_activation.activate_scene`, just like `scene use`.
+  The service validates ownership provenance before any engine call, records
+  shared-directory effects only for the shared concern, enforces
+  single-active-scene switch rules, checks every outgoing path for primary tools
+  but only the shared skills path for skills-only co-sharers, reverts the
+  affected records, applies, hashes, merges scoped state, and atomically records
+  `applied` or `partial`. Preconditions and
+  exceptional apply/state failures abort before a child starts; error result
+  rows record `partial` and retain the historical launch-anyway policy. If the
+  state write fails after apply, the service clears reversible changes and stale
+  records for the rolled-back scope while retaining recovery state for untouched
+  tools; hook/permission revocations make that rollback explicitly incomplete
+  and require `crossby sync` for restoration. An apply exception preserves
+  prior revocations in partial recovery state and reports the same clear-then-
+  sync remediation.
+- **Codex collision is orchestration, not adapter mutation.** A colliding
+  hand-written namespaced profile makes `CodexAdapter.scene_launch_args` raise
+  `SceneLaunchFallbackError` before subprocess dispatch. `cli/launch.py`
+  preserves the file, invokes the shared persistent lifecycle, then dispatches
+  once with no `--profile`. `PathContainmentError` remains a separate hard
+  failure and never enters fallback.
+- **No silent no-op, no silent mutation.** A fallback with no persistent
+  mechanism reports the unsupported concern. Any successful or partial
+  fallback is visible to `scene status` and is removable with `scene clear`.
+  A GUI tool warns that a scene cannot apply and launches without it.
 - **Precedence** matches the profile rule: explicit CLI flags > scene > profile
   > `ai:` defaults. A scene may name a default `profile:`; an explicit
   `--profile` (or positional profile name) overrides it. `--scene` targets
-  exactly one tool and never fans out.
+  exactly one launch tool. A persistent fallback may expand its recorded skills
+  scope to an installed tool sharing the same physical skills directory.
 
 ### Scene authoring (writing `.crossby.yml`)
 
@@ -371,8 +941,9 @@ Crossby translates its unified CLI flags into each tool's native syntax. A dash 
 | Binary        | `claude`                           | `copilot`         | `agy`                             | `codex`                                    | `opencode`        | `agent`                    | `code`  | `antigravity`   |
 | `--model`     | `--model`                          | `--model`         | `--model`                         | `--model`                                  | `--model`         | `--model`                  | —       | —               |
 | `--yolo`      | `--dangerously-skip-permissions`   | `--yolo`          | `--dangerously-skip-permissions`  | `-a never` (approval only)                 | —          | `--force`                  | —       | —               |
-| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan`                     | —                                          | —                 | `--mode plan`              | —       | —               |
-| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | model suffix (`-thinking`) | —       | —               |
+| `--plan`      | `--permission-mode plan`           | `--plan`          | `--mode plan` (private artifacts) | unsupported                                | `--agent plan`    | `--mode plan`              | unsupported | unsupported   |
+| `--plan-output-dir` | `--settings` with project-relative `plansDirectory` | rejected (private store) | rejected (private store) | rejected with `--plan` | rejected (managed plan path) | rejected (session only) | rejected | rejected |
+| `--effort`    | `--effort <level>`                 | —                 | model suffix (`-<level>`)          | `-c model_reasoning_effort="…"`            | `--variant <level>` | catalog sibling (`-<level>`) | —       | —               |
 | `--prompt`    | positional                         | `-i <prompt>`     | `--prompt-interactive <prompt>`   | positional                                 | `--prompt <prompt>` | positional                | —       | —               |
 | `--transcript`| `script` wrapper                   | `script` wrapper  | `script` wrapper                  | `script` wrapper                           | `script` wrapper  | `script` wrapper           | —       | —               |
 | `--resume`    | `--resume <id>`                    | `--resume=<id>`   | `--conversation <id>`             | `codex resume <id>` (subcommand)           | `-s <id>`         | —                          | —       | —               |
@@ -385,13 +956,37 @@ Codex's sandbox argv (mode + writable roots + trusted `--add-dir` + network pin)
 
 ### Effort Level Mapping
 
-| Crossby Level | Claude   | Codex   | OpenCode | Cursor              | Antigravity CLI (Gemini only) |
-| ------------- | -------- | ------- | -------- | ------------------- | ----------------------------- |
-| `low`         | `low`    | `low`   | `low`    | —                   | `<model>-low`                 |
-| `medium`      | `medium` | `medium`| `medium` | —                   | `<model>-medium`              |
-| `high`        | `high`   | `high`  | `high`   | `<model>-thinking`  | `<model>-high`                |
-| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
-| `max`         | `max`    | `xhigh` | `high`   | `<model>-thinking`  | `<model>-high`                |
+| Crossby Level | Claude   | Codex   | OpenCode | Cursor                           | Antigravity CLI (Gemini only) |
+| ------------- | -------- | ------- | -------- | -------------------------------- | ----------------------------- |
+| `low`         | `low`    | `low`   | `low`    | `<family>-low`                   | `<model>-low`                 |
+| `medium`      | `medium` | `medium`| `medium` | `<family>-medium` or bare family | `<model>-medium`              |
+| `high`        | `high`   | `high`  | `high`   | `<family>-high`                  | `<model>-high`                |
+| `xhigh`       | `xhigh`  | `xhigh` | `high`   | `<family>-xhigh` / `-extra-high` | `<model>-high`                |
+| `max`         | `max`    | `xhigh` | `high`   | `<family>-max`                   | `<model>-high`                |
+
+The OpenCode `xhigh`/`max` → `high` entries describe interactive launch
+compatibility. Complete collection accepts only `low`, `medium`, and `high`,
+because `run_plan_session()` rejects a requested effort tier that OpenCode's
+native `variant` value cannot preserve exactly.
+
+Cursor has no effort flag; its catalog encodes effort in the model ID
+(`claude-opus-5-5-high-fast`, `claude-opus-5-thinking-xhigh`,
+`claude-4.6-sonnet-medium-thinking`). At launch, `CursorAdapter.resolve_effort_model`
+swaps the given model for the registered sibling carrying the requested effort,
+keeping its `-thinking`/`-fast` choice; a family's bare ID (`gpt-5.3-codex`) is
+its medium tier. A family missing the requested tier gets the nearest one (ties
+go higher) with a warning, and a model with no registered effort siblings,
+`auto`, or bracket overrides (`claude-opus-4-8[effort=high]`, which the CLI
+accepts only for some "parameterized" models) passes through unchanged, so the
+result is always a registry ID or the input.
+
+The Cursor entries also describe interactive launch compatibility. Complete
+collection never collapses two requested tiers onto that generic mapping: it
+opts into ACP's parameterized model picker, maps a tiered CLI ID back to its base
+model, selects that advertised model plus its reasoning-effort and optional
+thinking/fast variant options, and verifies all returned values before
+prompting. Conflicting tiers and `auto` fail before ACP starts; models or tiers
+unavailable to the authenticated ACP session fail before the first prompt.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed

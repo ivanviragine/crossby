@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
     from crossby.ai_tools.base import AbstractAITool
-    from crossby.models.ai import AIToolCapabilities
+    from crossby.models.ai import AIToolCapabilities, AIToolID, EffortLevel
     from crossby.models.config import CrossbyConfig, SceneConfig
     from crossby.scenes.launch import SceneLaunchContext
+    from crossby.services.scene_activation import SceneActivationOutcome
 
 
 def launch(
@@ -39,8 +42,8 @@ def launch(
         "--auto",
         help=(
             "Permission mode (not model selection): request the classifier-"
-            "mediated auto mode where available (Claude); downgrades to accept-"
-            "edits, then default prompting, elsewhere. Never escalates to yolo."
+            "mediated auto mode where available (Claude, Cursor); ordinary launches "
+            "downgrade elsewhere. With --plan, requires native support."
         ),
     ),
     command: str | None = typer.Option(
@@ -77,6 +80,14 @@ def launch(
             "Allow network access inside the tool's sandbox (Codex only). "
             "Security-sensitive: lets sandboxed commands reach the network. "
             "Warned and ignored on tools without a sandbox network opt-in."
+        ),
+    ),
+    plan_output_dir: Path | None = typer.Option(
+        None,
+        "--plan-output-dir",
+        help=(
+            "Require native plan artifacts to be writable in this directory. "
+            "Requires --plan; non-routable artifact harnesses reject it."
         ),
     ),
 ) -> None:
@@ -121,6 +132,13 @@ def launch(
         work_dir = Path(".").resolve()
     else:
         work_dir = path.resolve()
+
+    if resume is not None and (plan or plan_output_dir is not None):
+        console.error("--resume cannot be combined with --plan or --plan-output-dir.")
+        raise typer.Exit(1)
+
+    if plan_output_dir is not None and not plan_output_dir.is_absolute():
+        plan_output_dir = work_dir / plan_output_dir
 
     try:
         config = load_config(work_dir)
@@ -300,6 +318,22 @@ def launch(
         raise typer.Exit(1) from e
     caps = adapter.capabilities()
 
+    from crossby.ai_tools.plan_mode import PlanModeLaunchError
+
+    try:
+        adapter.validate_plan_mode_request(
+            plan_mode=plan,
+            yolo=resolved_yolo,
+            auto=resolved_auto,
+            accept_edits=resolved_accept_edits,
+            initial_message=prompt,
+            plan_output_dir=plan_output_dir,
+            working_dir=work_dir,
+        )
+    except PlanModeLaunchError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from exc
+
     normalized_trusted_dirs = list(trusted_dirs) if trusted_dirs else None
     if normalized_trusted_dirs and not caps.supports_trusted_dirs:
         console.error(f"{caps.display_name} does not support --trusted-dir.")
@@ -316,45 +350,32 @@ def launch(
     # build_launch_command(). But GUI adapters (VS Code, Antigravity IDE) override
     # launch() and never reach the builder, so an unsupported flag would be
     # dropped silently; normalizing here keeps the summary honest for every tool.
-    if resolved_auto and not caps.supports_auto:
+    if not plan and resolved_auto and not caps.supports_auto:
         if caps.supports_accept_edits:
             console.warn(f"{caps.display_name} does not support --auto; using accept-edits.")
             resolved_accept_edits = True
         else:
             console.warn(f"{caps.display_name} does not support --auto; using default prompting.")
         resolved_auto = False
-    if resolved_accept_edits and not caps.supports_accept_edits:
+    if not plan and resolved_accept_edits and not caps.supports_accept_edits:
         console.warn(
             f"{caps.display_name} does not support --accept-edits; using default prompting."
         )
         resolved_accept_edits = False
 
-    # A higher autonomy tier (yolo/auto/accept-edits) supersedes plan_mode in
-    # build_launch_command(), so don't error on tools that lack plan mode when
-    # any of those flags are also set.
-    if (
-        plan
-        and not caps.supports_plan_mode
-        and not (resolved_yolo or resolved_auto or resolved_accept_edits)
-    ):
-        console.error(f"{caps.display_name} does not support --plan.")
-        raise typer.Exit(1)
-
-    # Display the effective selection. Autonomy tiers are shown in ladder order;
-    # the builder resolves precedence (yolo > auto > accept-edits > plan) at launch.
-    # The highest requested tier is the effective one ("on"); any lower tier the
-    # user also requested is shown as "superseded" so the summary never implies a
-    # moot tier is active.
+    # Planning and approval are independent native dimensions. Show both;
+    # approval flags retain yolo > auto > accept-edits precedence.
     console.kv("AI tool", caps.display_name)
     if resolved_model:
-        console.kv("Model", resolved_model)
+        console.kv("Model", _launched_model_label(adapter, resolved_model, resolved_effort))
     if resolved_effort:
         console.kv("Effort", resolved_effort.value)
+    if plan:
+        console.kv("Plan mode", "on")
     autonomy_tiers = (
         ("YOLO mode", resolved_yolo),
         ("Auto mode", resolved_auto),
         ("Accept-edits mode", resolved_accept_edits),
-        ("Plan mode", plan),
     )
     effective_shown = False
     for label, requested in autonomy_tiers:
@@ -378,7 +399,6 @@ def launch(
             caps=caps,
             scene_root=compute_scene_root(work_dir),
             config=config,
-            allow_tools=profile_allow_tools,
         )
 
     # Deliver prompt if tool doesn't support initial messages
@@ -393,28 +413,60 @@ def launch(
             console.error(f"Cannot create transcript directory: {e}")
             raise typer.Exit(1) from e
 
-    # Launch. A scene artefact write that would escape the project root raises
-    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
-    # cleanly here rather than let it become a persistent-write fallback (the
-    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
-    # containment error already propagates untouched).
-    try:
-        exit_code = adapter.launch(
+    def _dispatch(scene_for_launch: SceneLaunchContext | None) -> int:
+        return adapter.launch(
             working_dir=work_dir,
             model=resolved_model,
             prompt=prompt if caps.supports_initial_message else None,
             transcript_path=transcript,
             trusted_dirs=normalized_trusted_dirs,
             effort=resolved_effort,
+            allow_tools=profile_allow_tools,
             yolo=resolved_yolo,
             plan_mode=plan,
             accept_edits=resolved_accept_edits,
             auto=resolved_auto,
-            scene=scene_ctx,
+            scene=scene_for_launch,
             network_access=network_effective,
+            plan_output_dir=plan_output_dir,
         )
+
+    # Launch. A scene artefact write that would escape the project root raises
+    # PathContainmentError from inside adapter.launch → scene_launch_args; abort
+    # cleanly here rather than let it become a persistent-write fallback (the
+    # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
+    # containment error already propagates untouched).
+    from crossby.scenes.launch import SceneLaunchFallbackError
+
+    try:
+        exit_code = _dispatch(scene_ctx)
     except PathContainmentError as exc:
         console.error(f"Refusing to launch scene {scene!r}: {exc}")
+        raise typer.Exit(1) from exc
+    except SceneLaunchFallbackError as exc:
+        # The adapter signals before spawning.  Preserve the hand-written
+        # artefact, activate through the same recoverable lifecycle as every
+        # other fallback, then launch exactly once without the unusable profile.
+        if scene_ctx is None or scene_cfg is None or scene is None:
+            console.error(f"Could not prepare persistent scene fallback: {exc}")
+            raise typer.Exit(1) from exc
+        console.warn(
+            f"{exc} The hand-written profile was preserved; falling back to "
+            f"persistent activation for scene {scene!r}."
+        )
+        from crossby.models.ai import AIToolID
+
+        _activate_persistent_scene(
+            scene_name=scene,
+            scene_cfg=scene_cfg,
+            context=scene_ctx,
+            tool_id=AIToolID(resolved_tool),
+            installed=AbstractAITool.detect_installed(),
+            display_name=caps.display_name,
+        )
+        exit_code = _dispatch(None)
+    except PlanModeLaunchError as exc:
+        console.error(str(exc))
         raise typer.Exit(1) from exc
 
     if exit_code != 0:
@@ -455,7 +507,6 @@ def _prepare_scene_launch(
     caps: AIToolCapabilities,
     scene_root: Path,
     config: CrossbyConfig,
-    allow_tools: list[str],
 ) -> SceneLaunchContext | None:
     """Resolve *scene_cfg* for one launch and pick how it applies to the tool.
 
@@ -493,7 +544,6 @@ def _prepare_scene_launch(
     """
     from crossby.ai_tools.base import AbstractAITool
     from crossby.models.ai import AIToolID, AIToolType
-    from crossby.scenes.engine import apply_scene
     from crossby.scenes.launch import (
         SceneLaunchContext,
         prune_stale_artifacts,
@@ -535,7 +585,6 @@ def _prepare_scene_launch(
             resolved=resolved,
             project_root=scene_root,
             sync_data=build_sync_data(scene_root),
-            allow_tools=tuple(allow_tools),
         )
 
     reason = (
@@ -551,13 +600,19 @@ def _prepare_scene_launch(
         f"{caps.display_name} {reason}; attempting persistent activation for scene "
         f"{scene_name!r} instead — results follow."
     )
-    results = apply_scene(resolved, scene_root, tools=[tool_id])
-    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
-    # lever for, e.g. deselected MCP servers that stay enabled). Benign skips
-    # (already linked / already applied) stay quiet.
-    for result in results:
-        if result.unsupported and result.message:
-            console.warn(result.message)
+    _activate_persistent_scene(
+        scene_name=scene_name,
+        scene_cfg=scene_cfg,
+        context=SceneLaunchContext(
+            name=scene_name,
+            resolved=resolved,
+            project_root=scene_root,
+            sync_data=build_sync_data(scene_root),
+        ),
+        tool_id=tool_id,
+        installed=installed,
+        display_name=caps.display_name,
+    )
     # A concern the scene declares that this tool can scope neither at launch nor
     # persistently (its cell is UNSUPPORTED) produces no result at all, so it
     # would be silently ignored. Name it. ``mcp`` is excluded — it has its own
@@ -580,9 +635,92 @@ def _prepare_scene_launch(
             f"{scene_name!r} at launch or persistently; "
             f"{'those remain' if len(no_mechanism) > 1 else 'that remains'} unchanged."
         )
-    if any(r.action == "error" for r in results):
-        console.warn("Scene activation reported errors; launching anyway.")
     return None
+
+
+def _activate_persistent_scene(
+    *,
+    scene_name: str,
+    scene_cfg: SceneConfig,
+    context: SceneLaunchContext,
+    tool_id: AIToolID,
+    installed: list[AIToolID],
+    display_name: str,
+) -> SceneActivationOutcome:
+    """Run and render the shared persistent lifecycle for a launch fallback."""
+    from crossby.services.scene_activation import SceneActivationError, activate_scene
+
+    try:
+        outcome = activate_scene(
+            scene_name=scene_name,
+            scene=scene_cfg,
+            resolved=context.resolved,
+            project_root=context.project_root,
+            requested_tools=[tool_id],
+            installed_candidates=installed,
+            force=False,
+        )
+    except SceneActivationError as exc:
+        for warning in exc.warnings:
+            console.warn(warning)
+        for result in exc.results:
+            if result.message:
+                console.warn(result.message)
+        console.error(f"Persistent scene activation refused: {exc.message}")
+        for path in exc.drifted:
+            console.detail(path)
+        if exc.hint:
+            console.hint(exc.hint)
+        console.hint("The AI tool was not started.")
+        raise typer.Exit(1) from exc
+
+    for warning in outcome.warnings:
+        console.warn(warning)
+    # Surface only genuinely-unsupported outcomes (a narrowing the tool has no
+    # lever for, e.g. deselected MCP servers that stay enabled) and error rows.
+    # Benign skips (already linked / already applied) stay quiet. Keeping this
+    # rendering in the shared helper ensures a Codex profile-collision fallback
+    # cannot discard a partial activation's recovery guidance.
+    for result in outcome.results:
+        if (result.unsupported or result.action == "error") and result.message:
+            console.warn(result.message)
+    if outcome.has_errors:
+        console.warn(
+            "Scene activation is partial; launching anyway. Run 'crossby scene clear' "
+            "to retry recovery afterward."
+        )
+    extra = [tool for tool in outcome.scope if tool != tool_id]
+    if extra:
+        console.info(
+            f"Persistent activation also affects {', '.join(str(tool) for tool in extra)} "
+            "(shared skills directory)."
+        )
+    changed = any(
+        result.action in ("created", "updated")
+        or (result.action == "error" and (result.added > 0 or result.revoked > 0))
+        for result in outcome.results
+    )
+    if changed:
+        console.warn(
+            f"{display_name} is using persistent scene configuration recorded by crossby; "
+            "run 'crossby scene clear' when the session ends."
+        )
+    else:
+        console.warn(
+            "Crossby recorded this persistent scene fallback even though no tool "
+            "configuration changed; run 'crossby scene clear' when the session ends."
+        )
+    removed = [
+        result
+        for result in outcome.results
+        if result.concern.value in ("hooks", "permissions") and result.revoked > 0
+    ]
+    if removed:
+        console.warn(
+            "This fallback removed hook(s)/permission(s); 'crossby scene clear' does not "
+            "restore them. Re-run 'crossby sync' after clearing the scene."
+        )
+    return outcome
 
 
 def _warn_unsupported_scene_concerns(
@@ -612,3 +750,22 @@ def _warn_unsupported_scene_concerns(
             f"{'those' if len(unsupported) > 1 else 'that'} only via persistent "
             "'crossby scene use'."
         )
+
+
+def _launched_model_label(adapter: AbstractAITool, model: str, effort: EffortLevel | None) -> str:
+    """Render the model the tool will actually receive, escaped for Rich.
+
+    Cursor and Antigravity CLI bake effort into the model ID, so the adapter's
+    ``resolve_effort_model`` may swap in a sibling ID at launch
+    (``claude-opus-5-5-medium`` at high effort -> ``claude-opus-5-5-high``, or a
+    bare Gemini model -> its default ``-medium`` tier). Showing that ID, with the
+    requested one alongside, keeps the summary truthful. Warnings are left to
+    the launch itself so they are not printed twice.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        launched = adapter.resolve_effort_model(model, effort)
+    if not isinstance(launched, str) or not launched or launched == model:
+        return escape(model)
+    source = f"{model} at {effort.value} effort" if effort else f"{model} at its default effort"
+    return escape(f"{launched} (from {source})")

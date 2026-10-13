@@ -1334,7 +1334,7 @@ class TestCodexAgentsTranslate:
         # _translate_codex_agent pre-translates Claude-family models +
         # effort tiers to GPT equivalents before calling emit_codex (which
         # would otherwise pass the Claude model id through verbatim).
-        assert parsed["model"] == "gpt-5.4-mini"
+        assert parsed["model"] == "gpt-6-luna"
         # Sonnet HIGH bumps to XHIGH per family-aware mapping.
         assert parsed["model_reasoning_effort"] == "xhigh"
 

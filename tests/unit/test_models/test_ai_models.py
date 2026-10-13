@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -182,7 +183,18 @@ class TestModelCompatibility:
         assert adapter.is_model_compatible("o3") is True
         assert adapter.is_model_compatible("claude-opus") is False
 
-    @pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+        ],
+    )
     def test_codex_accepts_gpt_5_6(self, model: str) -> None:
         """The gpt-5.6 family (luna/sol/terra) is codex-native — Issue #112."""
         adapter = AbstractAITool.get("codex")
@@ -275,9 +287,12 @@ class TestBuildLaunchCommand:
     def test_cursor_plan_mode_launch(self) -> None:
         """Cursor plan mode uses --mode plan."""
         adapter = AbstractAITool.get("cursor")
-        cmd = adapter.build_launch_command(
-            model="sonnet-4.6", initial_message="Do stuff", plan_mode=True
-        )
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2026, 9, 2)):
+            cmd = adapter.build_launch_command(
+                model="sonnet-4.6",
+                initial_message="Do stuff",
+                plan_mode=True,
+            )
         assert cmd == [
             "agent",
             "Do stuff",
@@ -384,6 +399,24 @@ class TestClassifyTierUniversal:
     ) -> None:
         assert classify_tier_universal(model) == expected
 
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gpt-6-luna", ModelTier.FAST),
+            ("gpt-6-sol", ModelTier.POWERFUL),
+            ("gpt-6-astra", ModelTier.POWERFUL),
+            ("openai/gpt-6-astra", ModelTier.POWERFUL),
+            ("gpt-6.1-sol", ModelTier.POWERFUL),
+            ("openai/gpt-6.1-sol-ultrafast", ModelTier.POWERFUL),
+        ],
+    )
+    def test_codex_gpt_6_uses_documented_family_roles(
+        self, model: str, expected: ModelTier
+    ) -> None:
+        """Astra is OpenAI's most capable GPT-6 model, so it must not fall
+        through to the BALANCED default like an unrecognized ID would."""
+        assert classify_tier_universal(model) == expected
+
 
 class TestTrustedDirsArgs:
     """Test trusted directory CLI arguments per tool."""
@@ -413,13 +446,13 @@ class TestPlanModeArgs:
         adapter = AbstractAITool.get("copilot")
         assert adapter.plan_mode_args() == ["--plan"]
 
-    def test_codex_no_plan_mode(self) -> None:
+    def test_codex_terminal_plan_mode(self) -> None:
         adapter = AbstractAITool.get("codex")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--no-alt-screen"]
 
-    def test_opencode_no_plan_mode(self) -> None:
+    def test_opencode_plan_mode(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        assert adapter.plan_mode_args() == []
+        assert adapter.plan_mode_args() == ["--agent", "plan"]
 
     def test_cursor_plan_mode(self) -> None:
         adapter = AbstractAITool.get("cursor")
@@ -427,7 +460,8 @@ class TestPlanModeArgs:
 
     def test_plan_mode_in_launch_command(self) -> None:
         adapter = AbstractAITool.get("claude")
-        cmd = adapter.build_launch_command(plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 263)):
+            cmd = adapter.build_launch_command(plan_mode=True)
         assert "--permission-mode" in cmd
         assert "plan" in cmd
 
@@ -522,15 +556,15 @@ class TestCrossProviderModelTranslation:
             cmd = adapter.build_launch_command(model="claude-sonnet-4.6")
         assert "--model" in cmd
         idx = cmd.index("--model")
-        # Sonnet maps to gpt-5.4-mini per family mapping.
-        assert cmd[idx + 1] == "gpt-5.4-mini"
+        # Sonnet maps to gpt-6-luna per family mapping.
+        assert cmd[idx + 1] == "gpt-6-luna"
 
     def test_claude_opus_to_codex(self) -> None:
         adapter = AbstractAITool.get("codex")
         with pytest.warns(UserWarning, match="Translating model"):
             cmd = adapter.build_launch_command(model="claude-opus-4.6")
         idx = cmd.index("--model")
-        assert cmd[idx + 1] == "gpt-5.4"
+        assert cmd[idx + 1] == "gpt-6-sol"
 
     def test_effort_biased_when_translating_to_codex(self) -> None:
         from crossby.models.ai import EffortLevel
@@ -550,11 +584,11 @@ class TestCrossProviderModelTranslation:
     def test_codex_model_translated_for_claude(self) -> None:
         adapter = AbstractAITool.get("claude")
         with pytest.warns(UserWarning, match="Translating model"):
-            cmd = adapter.build_launch_command(model="gpt-5.4")
+            cmd = adapter.build_launch_command(model="gpt-6-sol")
         idx = cmd.index("--model")
-        # gpt-5.4 reverse-maps to claude-opus-5; normalize_model_format leaves
-        # it unchanged (no dotted digit pair to dash).
-        assert cmd[idx + 1] == "claude-opus-5"
+        # gpt-6-sol reverse-maps to claude-opus-5.5, which
+        # normalize_model_format dashes for the Claude CLI.
+        assert cmd[idx + 1] == "claude-opus-5-5"
 
     def test_native_model_not_translated(self) -> None:
         # Claude → Claude with a native id should not warn.

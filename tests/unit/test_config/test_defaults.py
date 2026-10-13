@@ -37,18 +37,17 @@ _ALL_DEFAULT_MODEL_IDS = sorted({model_id for _, _, model_id in _iter_tier_defau
 
 # Expected tier for every distinct TOOL_DEFAULTS model ID, hand-derived from
 # classify_tier_universal's documented keyword rules (haiku/flash/mini/luna ->
-# FAST; opus/fable/pro/sol/max -> POWERFUL; sonnet/terra or no keyword ->
+# FAST; opus/fable/astra/pro/sol/max -> POWERFUL; sonnet/terra or no keyword ->
 # BALANCED). Pins how the novel effort-encoded IDs
-# (composer-2.5-fast, claude-opus-5-high, gemini-3.8-flash-*)
+# (composer-2.5-fast, claude-opus-5-5-high, gemini-3.8-flash-*)
 # parse, so a regex/keyword regression fails the test instead of slipping through.
 _EXPECTED_TIERS: dict[str, ModelTier] = {
     "anthropic/claude-haiku-4.5": ModelTier.FAST,
     "anthropic/claude-opus-4.7": ModelTier.POWERFUL,
     "anthropic/claude-sonnet-4.6": ModelTier.BALANCED,
     "claude-haiku-4.5": ModelTier.FAST,
-    "claude-opus-5": ModelTier.POWERFUL,
-    "claude-opus-5-high": ModelTier.POWERFUL,
-    "claude-sonnet-4.6": ModelTier.BALANCED,
+    "claude-opus-5.5": ModelTier.POWERFUL,
+    "claude-opus-5-5-high": ModelTier.POWERFUL,
     "claude-sonnet-5": ModelTier.BALANCED,
     "composer-2.5": ModelTier.BALANCED,  # no keyword -> BALANCED fallback
     # "fast" is not a FAST keyword (haiku/flash/spark/mini/luna are), so this
@@ -119,7 +118,7 @@ class TestDefaultsRegistryGuard:
     @pytest.mark.parametrize("model_id", _ALL_DEFAULT_MODEL_IDS)
     def test_default_classifies_to_expected_tier(self, model_id: str) -> None:
         # Genuine regression guard: the novel effort-encoded IDs
-        # (composer-2.5-fast, claude-opus-5-high, gemini-3.6-flash-*) must keep
+        # (composer-2.5-fast, claude-opus-5-5-high, gemini-3.6-flash-*) must keep
         # classifying by their family keyword rather than shifting tier.
         assert classify_tier_universal(model_id) == _EXPECTED_TIERS[model_id]
 
@@ -190,7 +189,7 @@ class TestClaudeTierDefaults:
         assert mapping.easy == "claude-haiku-4.5"
         assert mapping.medium == "claude-sonnet-5"
         assert mapping.complex == "claude-sonnet-5"
-        assert mapping.very_complex == "claude-opus-5"
+        assert mapping.very_complex == "claude-opus-5.5"
 
 
 @pytest.mark.parametrize(
@@ -198,7 +197,7 @@ class TestClaudeTierDefaults:
     [
         (
             AIToolID.COPILOT,
-            ("claude-haiku-4.5", "claude-sonnet-4.6", "claude-sonnet-4.6", "gpt-5.4"),
+            ("claude-haiku-4.5", "claude-sonnet-5", "claude-sonnet-5", "gpt-5.4"),
         ),
         (
             AIToolID.ANTIGRAVITY_CLI,

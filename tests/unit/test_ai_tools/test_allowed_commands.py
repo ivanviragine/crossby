@@ -132,3 +132,34 @@ class TestBuildLaunchCommandWithAllowedCommands:
         )
         assert "--allow-tool" in cmd
         assert "shell(crossby:*)" in cmd
+
+
+class TestNativeProfileAllowTools:
+    """Profile-native approvals bypass canonical command-pattern translation."""
+
+    def test_copilot_preserves_native_entries_verbatim_and_in_order(self) -> None:
+        args = CopilotAdapter().allow_tools_args(
+            ["shell(git:*)", "github", "github(create_issue)"], None
+        )
+        assert args == [
+            "--allow-tool",
+            "shell(git:*)",
+            "--allow-tool",
+            "github",
+            "--allow-tool",
+            "github(create_issue)",
+        ]
+
+    def test_native_entry_is_not_rewrapped_as_a_canonical_shell_pattern(self) -> None:
+        adapter = CopilotAdapter()
+        assert adapter.allow_tools_args(["shell(git:*)"], None) == [
+            "--allow-tool",
+            "shell(git:*)",
+        ]
+        assert adapter.allowed_commands_args(["shell(git:*)"]) == [
+            "--allow-tool",
+            "shell(shell(git:*))",
+        ]
+
+    def test_non_copilot_adapter_has_no_native_approval_flags(self) -> None:
+        assert ClaudeAdapter().allow_tools_args(["shell(git:*)"], None) == []

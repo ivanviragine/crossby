@@ -12,12 +12,27 @@ from crossby.models.ai import (
     AIToolCapabilities,
     AIToolID,
     AIToolType,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanCommandPolicySupport,
+    PlanLaunchApprovalMode,
+    PlanModeActivation,
+    PlanModeCapability,
+    PlanRequestBehavior,
     TokenUsage,
 )
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 
@@ -40,7 +55,51 @@ class CopilotAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # 1.0.83 advertises --output-format json (JSONL), but its event
+                # schema is not verified, so the managed transport stays on the
+                # documented text response rather than guessing a shape.
+                native_outputs=(HeadlessNativeOutput.TEXT,),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=False,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                # Per-invocation --allow-tool shell(...) entries; no other tool
+                # is auto-approved because --allow-all-tools is never emitted.
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                version_requirement=(
+                    "GitHub Copilot CLI exposing --prompt, --silent, and --no-ask-user."
+                ),
+                verified_version="1.0.83",
+                remediation=(
+                    "Upgrade GitHub Copilot CLI to 1.0.83 or newer. Copilot exposes no "
+                    "final-response JSON Schema flag, so schema-constrained sessions must use "
+                    "Claude Code, Codex CLI, or Antigravity CLI."
+                ),
+            ),
+            plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.ACCEPT_EDITS,
+                ),
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --plan before the first interactive prompt.",
+                version_requirement="GitHub Copilot CLI exposing --plan.",
+                verified_version="1.0.83",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.SESSION,
+                artifact_location_detail=(
+                    "Interactive plans remain in Copilot-managed session storage. "
+                    "No complete collected-session transport is verified."
+                ),
+                remediation=(
+                    "Use interactive launch(..., plan_mode=True), or another adapter for "
+                    "collected sessions. Copilot 1.0.83 --prompt omits ask_user; its result and "
+                    "share formats do not establish a native question/continuation contract."
+                ),
+            ),
             supports_accept_edits=True,
             supports_session_start_hook=True,
             supports_stop_hook=True,
@@ -60,9 +119,8 @@ class CopilotAdapter(AbstractAITool):
             # (`timeoutSec`).
             hook_fail_open_default=False,
             # Session-scoped scenes: deselected MCP servers become repeated
-            # --disable-mcp-server flags; the visibility (--excluded-tools) and
-            # approval (--allow-tool) layers are independent, so a scene-excluded
-            # tool is also filtered out of any profile-supplied allow entries.
+            # --disable-mcp-server flags. Profile-native approvals travel on an
+            # independent launch channel and are filtered against the scene here.
             supports_scene_launch=True,
             scene_tool_denylist_flag="--excluded-tools",
         )
@@ -142,23 +200,115 @@ class CopilotAdapter(AbstractAITool):
             return re.sub(r"(\d)-(\d)", r"\1.\2", model_id)
         return model_id
 
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
+        """Return Copilot's complete command, including its argument-delivered prompt."""
+        return self._headless_command(request)
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``copilot --prompt`` invocation."""
+        command = [
+            "copilot",
+            "--prompt",
+            request.prompt,
+            # -s keeps stdout to the agent response alone, and --no-ask-user
+            # removes the ask_user tool so the agent cannot stop on a question
+            # nobody can answer.
+            "-s",
+            "--no-ask-user",
+            "--no-color",
+            "--log-level",
+            "none",
+        ]
+        if request.model:
+            command.extend(("--model", self.normalize_model_format(request.model)))
+        for path in request.trusted_dirs:
+            command.extend(self.plan_dir_args(str(path)))
+        if request.command_policy is not None:
+            command.extend(
+                self.allowed_commands_args(list(request.command_policy.allowed_commands))
+            )
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended Copilot prompt turn and normalize its text response."""
+        from crossby.ai_tools.headless_cli import (
+            capture_failure_warnings,
+            complete_session,
+            run_managed_command,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+        )
+        warnings = capture_failure_warnings(output)
+        # --allow-all-tools is deliberately never emitted, so any tool call
+        # outside the session's explicit --allow-tool entries is refused by
+        # Copilot rather than escalated to a prompt.
+        warnings = (
+            *warnings,
+            "Copilot ran without --allow-all-tools, so tool calls outside the session command "
+            "policy are denied natively.",
+        )
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text=output.stdout.strip() or None,
+            warnings=warnings,
+        )
+
     def scene_launch_concerns(self) -> set[str]:
         """Copilot scopes only MCP at launch (per-server disable + allow filter)."""
         return {"mcp"}
 
+    def allow_tools_args(
+        self,
+        allow_tools: list[str],
+        scene: SceneLaunchContext | None,
+    ) -> list[str]:
+        """Render Copilot-native profile approvals without canonical translation.
+
+        Profile values already use Copilot's ``--allow-tool`` grammar, such as
+        ``shell(git:*)`` or ``github(create_issue)``. A scene contributes only
+        the MCP servers it excludes; entries naming those servers are removed
+        while surviving values retain their source ordering and spelling.
+        """
+        excluded = scene.deselected_mcp() if scene is not None else set()
+        args: list[str] = []
+        for entry in allow_tools:
+            if not _allow_entry_excluded(entry, excluded):
+                args += ["--allow-tool", entry]
+        return args
+
     def scene_launch_args(self, scene: SceneLaunchContext) -> SceneLaunchArgs:
-        """Scope a scene for one session via Copilot's two independent layers.
+        """Render Copilot scene visibility as server-disable flags only.
 
-        - **Visibility** — a repeated ``--disable-mcp-server <name>`` for each
-          deselected MCP server. A server hidden here cannot be re-exposed by the
-          approval layer, so this is authoritative.
-        - **Approval** — any profile-supplied ``--allow-tool`` entry that names a
-          scene-excluded server is dropped before the surviving entries are
-          re-emitted, so a profile can never re-allow a tool the scene removed.
-          crossby resolves this itself rather than relying on Copilot's internal
-          precedence between the two layers.
-
-        Writes no artefact files — Copilot's scene is entirely flag-driven.
+        Native profile approvals are independent of scene rendering and are
+        emitted by :meth:`allow_tools_args`, where the same excluded-server set
+        filters them before subprocess dispatch. Copilot's scene is entirely
+        flag-driven and writes no artefact files.
         """
         from crossby.scenes.launch import SceneLaunchArgs
 
@@ -166,9 +316,6 @@ class CopilotAdapter(AbstractAITool):
         args: list[str] = []
         for name in sorted(excluded):
             args += ["--disable-mcp-server", name]
-        for entry in scene.allow_tools:
-            if not _allow_entry_excluded(entry, excluded):
-                args += ["--allow-tool", entry]
         return SceneLaunchArgs(args=tuple(args))
 
 

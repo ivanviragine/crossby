@@ -11,12 +11,12 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         easy="claude-haiku-4.5",
         medium="claude-sonnet-5",
         complex="claude-sonnet-5",
-        very_complex="claude-opus-5",
+        very_complex="claude-opus-5.5",
     ),
     AIToolID.COPILOT: ComplexityModelMapping(
         easy="claude-haiku-4.5",
-        medium="claude-sonnet-4.6",
-        complex="claude-sonnet-4.6",
+        medium="claude-sonnet-5",
+        complex="claude-sonnet-5",
         very_complex="gpt-5.4",
     ),
     AIToolID.ANTIGRAVITY_CLI: ComplexityModelMapping(
@@ -35,7 +35,7 @@ TOOL_DEFAULTS: dict[str, ComplexityModelMapping] = {
         easy="composer-2.5-fast",
         medium="composer-2.5",
         complex="composer-2.5",
-        very_complex="claude-opus-5-high",
+        very_complex="claude-opus-5-5-high",
     ),
     AIToolID.OPENCODE: ComplexityModelMapping(
         easy="anthropic/claude-haiku-4.5",

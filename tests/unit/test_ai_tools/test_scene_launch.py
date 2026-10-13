@@ -54,7 +54,6 @@ def _context(
     selected_mcp: tuple[str, ...] = (),
     selected_skills: tuple[str, ...] = (),
     selected_agents: tuple[str, ...] = (),
-    allow_tools: tuple[str, ...] = (),
 ) -> SceneLaunchContext:
     servers = {n: MCPServerConfig(command="run", args=[n]) for n in all_mcp}
     sync_data = SyncData(
@@ -68,7 +67,6 @@ def _context(
         resolved=resolved,
         project_root=project_root,
         sync_data=sync_data,
-        allow_tools=allow_tools,
     )
 
 
@@ -131,6 +129,40 @@ class TestClaudeSceneLaunch:
         settings_path = Path(result.args[result.args.index("--settings") + 1])
         body = json.loads(settings_path.read_text())
         assert body == {"skillOverrides": {"deploy": "off"}}
+
+    def test_plan_output_and_skill_scene_use_one_merged_settings_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _make_skills(tmp_path, ("review", "deploy"))
+        monkeypatch.setattr(
+            "crossby.scenes.versioning.detect_tool_version", lambda _tool: (2, 1, 263)
+        )
+        monkeypatch.setattr(
+            "crossby.utils.versioning.detect_binary_version", lambda _binary: (2, 1, 263)
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], transcript_path: object, cwd: object, env: object) -> int:
+            captured["cmd"] = cmd
+            return 0
+
+        monkeypatch.setattr("crossby.utils.process.run_with_transcript", fake_run)
+        ctx = _context(tmp_path, selected_skills=("review",))
+
+        ClaudeAdapter().launch(
+            working_dir=tmp_path,
+            plan_mode=True,
+            plan_output_dir=tmp_path / ".wade" / "plans",
+            scene=ctx,
+        )
+
+        cmd = captured["cmd"]
+        assert cmd.count("--settings") == 1
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        assert settings == {
+            "plansDirectory": "./.wade/plans",
+            "skillOverrides": {"deploy": "off"},
+        }
 
     def test_skill_overrides_gated_on_old_claude(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -280,16 +312,10 @@ class TestCodexSceneLaunch:
         with pytest.raises(FileExistsError):
             scene_launch.write_codex_profile(tmp_path, "pr-review", {"linear"})
 
-    def test_profile_collision_falls_back_to_persistent(
+    def test_profile_collision_signals_orchestrator_without_mutating(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A namespaced-profile collision degrades to persistent activation.
-
-        Rather than let ``FileExistsError`` abort ``crossby launch --scene``, the
-        adapter warns, applies the scene persistently for Codex, and emits no
-        ``--profile`` — leaving the hand-written profile untouched.
-        """
-        import crossby.scenes.engine as engine
+        """A collision returns control before any persistent mutation or spawn."""
 
         home = tmp_path / "codex_home"
         home.mkdir()
@@ -297,18 +323,12 @@ class TestCodexSceneLaunch:
         path = scene_launch.codex_profile_path(tmp_path, "pr-review")
         path.write_text("model = 'gpt-5'\n")  # hand-written, no crossby header
 
-        calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            engine, "apply_scene", lambda _resolved, _root, **kw: calls.append(kw) or []
-        )
-
         ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("github",))
-        with pytest.warns(UserWarning, match="Falling back to persistent"):
-            result = CodexAdapter().scene_launch_args(ctx)
+        with pytest.raises(scene_launch.SceneLaunchFallbackError, match="hand-written"):
+            CodexAdapter().scene_launch_args(ctx)
 
-        assert result.args == ()  # no --profile emitted
         assert path.read_text() == "model = 'gpt-5'\n"  # collision left intact
-        assert calls and calls[0]["tools"] == (AIToolID.CODEX,)
+        assert not (tmp_path / ".crossby" / "scene-state.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -324,31 +344,27 @@ class TestCopilotSceneLaunch:
         assert result.args.count("--disable-mcp-server") == 2
         assert "linear" in result.args
         assert "sentry" in result.args
+        assert "--allow-tool" not in result.args
 
     def test_profile_allow_of_excluded_tool_is_dropped(self, tmp_path: Path) -> None:
         # The scene excludes `github`; the profile allows both `github` and an
         # unrelated shell tool. The emitted argv must resolve this unambiguously:
         # github is disabled and NOT re-allowed, git shell survives.
-        ctx = _context(
-            tmp_path,
-            all_mcp=("github", "linear"),
-            selected_mcp=("linear",),
-            allow_tools=(
+        ctx = _context(tmp_path, all_mcp=("github", "linear"), selected_mcp=("linear",))
+        result = CopilotAdapter().allow_tools_args(
+            [
                 "github",
                 "github__create_issue",
                 "github(create_issue)",
                 "shell(git:*)",
-            ),
+            ],
+            ctx,
         )
-        result = CopilotAdapter().scene_launch_args(ctx)
 
-        assert list(result.args[:2]) == ["--disable-mcp-server", "github"]
-        assert "--allow-tool" in result.args
+        assert CopilotAdapter().scene_launch_args(ctx).args == ("--disable-mcp-server", "github")
         # The unrelated tool is still allowed; neither the excluded server nor
         # either per-tool spelling (documented `(...)` or `__` namespacing) is.
-        allow_values = [
-            result.args[i + 1] for i, a in enumerate(result.args) if a == "--allow-tool"
-        ]
+        allow_values = [result[i + 1] for i, a in enumerate(result) if a == "--allow-tool"]
         assert allow_values == ["shell(git:*)"]
 
 

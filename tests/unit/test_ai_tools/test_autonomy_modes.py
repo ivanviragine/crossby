@@ -1,16 +1,18 @@
 """Accept-edits and auto (classifier) autonomy tiers.
 
 Covers per-adapter ``accept_edits_args()`` / ``auto_args()``, capability flags,
-``build_launch_command()`` composition, the precedence chain
-(``yolo > auto > accept_edits > plan``), and the downgrade/fallback warning
-paths.
+``build_launch_command()`` composition, the autonomy precedence chain, native
+plan-mode approval composition, and the downgrade/fallback warning paths.
 """
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import PlanModeConflictError
 
 
 def _permission_mode(cmd: list[str]) -> str | None:
@@ -62,13 +64,13 @@ class TestAcceptEditsArgs:
 
 
 class TestAutoArgs:
-    """Only Claude exposes a real launch-time classifier auto mode."""
+    """Claude and Cursor expose native classifier approval modes."""
 
     def test_claude(self) -> None:
         assert AbstractAITool.get("claude").auto_args() == ["--permission-mode", "auto"]
 
     def test_other_tools_return_empty(self) -> None:
-        for tool in ("codex", "cursor", "copilot", "antigravity-cli", "opencode"):
+        for tool in ("codex", "copilot", "antigravity-cli", "opencode"):
             assert AbstractAITool.get(tool).auto_args() == []
 
 
@@ -81,9 +83,10 @@ class TestCapabilityFlags:
         for tool in ("opencode", "vscode", "antigravity"):
             assert AbstractAITool.get(tool).capabilities().supports_accept_edits is False
 
-    def test_auto_is_claude_only(self) -> None:
+    def test_auto_supported_tools(self) -> None:
         assert AbstractAITool.get("claude").capabilities().supports_auto is True
-        for tool in ("codex", "cursor", "copilot", "antigravity-cli", "opencode", "vscode"):
+        assert AbstractAITool.get("cursor").capabilities().supports_auto is True
+        for tool in ("codex", "copilot", "antigravity-cli", "opencode", "vscode"):
             assert AbstractAITool.get(tool).capabilities().supports_auto is False
 
 
@@ -134,7 +137,7 @@ class TestAutoComposition:
 
 
 class TestAutoDowngrade:
-    """``auto`` is Claude-only and downgrades to accept-edits, then default."""
+    """Unsupported classifier approval downgrades only outside Plan mode."""
 
     def test_codex_downgrades_to_accept_edits(self) -> None:
         adapter = AbstractAITool.get("codex")
@@ -147,12 +150,12 @@ class TestAutoDowngrade:
         assert cmd.count("workspace-write") == 1
         assert cmd.index("on-request") < cmd.index("--sandbox")
 
-    def test_cursor_downgrades_to_accept_edits_no_flag(self) -> None:
+    def test_cursor_uses_native_auto_review(self) -> None:
         adapter = AbstractAITool.get("cursor")
         base = adapter.build_launch_command(model="sonnet-4.6")
-        with pytest.warns(UserWarning, match="downgrading to accept-edits"):
-            cmd = adapter.build_launch_command(model="sonnet-4.6", auto=True)
-        assert cmd == base
+        cmd = adapter.build_launch_command(model="sonnet-4.6", auto=True)
+        assert "--auto-review" in cmd
+        assert [arg for arg in cmd if arg != "--auto-review"] == base
 
     def test_opencode_downgrades_to_default_prompting(self) -> None:
         adapter = AbstractAITool.get("opencode")
@@ -179,35 +182,23 @@ class TestAcceptEditsFallback:
         with pytest.warns(UserWarning, match="does not support accept-edits"):
             adapter.build_launch_command(accept_edits=True)
 
-    def test_explicit_plan_is_honored_as_lower_fallback(self) -> None:
-        # accept_edits unsupported + explicit plan requested → warn about plan.
+    def test_explicit_plan_conflicts_instead_of_becoming_a_fallback(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        with pytest.warns(UserWarning, match="falling back to plan mode"):
+        with pytest.raises(PlanModeConflictError, match="--accept-edits"):
             adapter.build_launch_command(accept_edits=True, plan_mode=True)
 
 
 class TestPrecedence:
-    """yolo > auto > accept_edits > plan (most permissive wins)."""
+    """Plan stays selected while compatible approval modes compose."""
 
-    def test_yolo_supersedes_all(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(
-            yolo=True, auto=True, accept_edits=True, plan_mode=True
-        )
-        assert "--dangerously-skip-permissions" in cmd
-        assert _permission_mode(cmd) is None  # no acceptEdits/auto/plan value
-
-    def test_auto_supersedes_accept_edits_and_plan(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(
-            auto=True, accept_edits=True, plan_mode=True
-        )
-        assert _permission_mode(cmd) == "auto"
-
-    def test_accept_edits_supersedes_plan(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(accept_edits=True, plan_mode=True)
-        assert _permission_mode(cmd) == "acceptEdits"
+    @pytest.mark.parametrize("flag", ["accept_edits"])
+    def test_autonomy_conflicts_with_plan(self, flag: str) -> None:
+        with pytest.raises(PlanModeConflictError, match=flag.replace("_", "-")):
+            AbstractAITool.get("claude").build_launch_command(plan_mode=True, **{flag: True})
 
     def test_plan_alone(self) -> None:
-        cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(2, 1, 263)):
+            cmd = AbstractAITool.get("claude").build_launch_command(plan_mode=True)
         assert _permission_mode(cmd) == "plan"
 
     def test_no_autonomy_flags_is_bare(self) -> None:
@@ -234,17 +225,21 @@ class TestCapabilityInvariants:
                 )
 
 
-class TestYoloFallbackUnchangedTools:
-    """Yolo-unsupported tools still degrade the same way (regression guard)."""
+class TestOpenCodeYolo:
+    """OpenCode's native auto flag skips approvals and preserves the agent."""
 
-    def test_opencode_yolo_default_prompting(self) -> None:
+    def test_opencode_yolo_uses_native_auto(self) -> None:
         adapter = AbstractAITool.get("opencode")
         base = adapter.build_launch_command()
-        with pytest.warns(UserWarning, match="using default prompting"):
-            cmd = adapter.build_launch_command(yolo=True)
-        assert cmd == base
+        cmd = adapter.build_launch_command(yolo=True)
+        assert cmd == [*base, "--auto"]
 
-    def test_opencode_yolo_with_plan_falls_back_to_plan(self) -> None:
+    def test_opencode_yolo_keeps_plan_agent(self) -> None:
         adapter = AbstractAITool.get("opencode")
-        with pytest.warns(UserWarning, match="falling back to plan mode"):
-            adapter.build_launch_command(yolo=True, plan_mode=True)
+        with patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 18, 29)):
+            assert adapter.build_launch_command(yolo=True, plan_mode=True) == [
+                "opencode",
+                "--agent",
+                "plan",
+                "--auto",
+            ]

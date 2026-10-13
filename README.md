@@ -28,8 +28,9 @@ Any of the five direct-sync tools can be the source — `crossby sync --from cur
 | Give my other tools the same rules/agents/skills/MCP/hooks I already wrote | **Sync** | `crossby sync --plan --from claude` |
 | Run a tool with only the capabilities one task needs | **Scenes** | `crossby scene list` / `crossby launch --scene <name>` |
 | Continue my current session in a different tool | **Handoff** | `crossby handoff --from claude --to codex` |
+| Launch a tool and drive it from a browser instead of a shell | **Browser terminal** | `crossby ui` |
 
-Everything else in this README expands one of these three. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
+Everything else in this README expands one of these. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
 
 ## Install
 
@@ -236,9 +237,9 @@ crossby scene status
 
 Key behaviours:
 
-- **Switching restores the true baseline.** `use B` while `A` is active reverts `A` first, then applies `B` from the original pre-`A` state — so a later `clear` restores your settings, not `A`'s (or `B`'s) output.
-- **Reverting is ledger-driven.** `clear` only undoes what crossby wrote (tracked in `.crossby/owned.json`); a `skillOverrides`, `deny`, or MCP-`disabled` entry you authored by hand is left untouched. `clear` works even after the active scene is renamed or deleted from `.crossby.yml`. One exception: a scene that *narrows* hooks or permissions removes those crossby-synced entries through the revocable-sync channel, and `clear` does **not** put them back — `use` warns when this happens; re-run `crossby sync` to restore them.
-- **A corrupt ledger fails closed.** If `.crossby/owned.json` can't be parsed as the expected structure — invalid JSON, a non-object root, a symlink, or a malformed scene-tracking section (the authority for a revert) — both `use` and `clear`, including `--plan`, refuse (exit 1) rather than revert from an empty view. (A valid ledger that simply owns nothing is fine, as is a genuinely absent one on a fresh per-machine clone.) Restore it from backup or revert the applied settings by hand; **never delete it** — a *missing* ledger reads as "crossby owns nothing," which re-opens the exact gap.
+- **Switching restores the true baseline.** `use B` while `A` is active reverts `A` first, then applies `B` from the original pre-`A` state — so a later `clear` restores your settings, not `A`'s (or `B`'s) output. For each physical skills/agents target, `.crossby/owned.json` records whether it was absent, its exact literal symlink target, the exact Crossby-allocated backup holding a displaced real directory, or a canonical source that a scene deliberately left untouched. Shared targets such as `.agents/skills` have one baseline record. Clear and switch use that record directly; they never rediscover an original source or choose a backup by scanning `.bak*` names, so unrelated user backups stay untouched.
+- **Reverting is ledger-driven.** `clear` only undoes what crossby wrote (tracked in `.crossby/owned.json`); a `skillOverrides`, `deny`, or MCP-`disabled` entry you authored by hand is left untouched. Path-baseline records survive partial apply/clear failures and are removed only after the exact path is restored. `clear` works even after the active scene is renamed or deleted from `.crossby.yml`. One exception: a scene that *narrows* hooks or permissions removes those crossby-synced entries through the revocable-sync channel, and `clear` does **not** put them back — `use` warns when this happens, and `clear` repeats the warning before discarding its recovery state; re-run `crossby sync` to restore them.
+- **Missing or corrupt recovery authority fails closed.** If `.crossby/owned.json` can't be parsed as the expected structure — invalid JSON, a non-object root, a symlink, malformed scene tracking, an unsafe target/backup path, or an unknown descriptor — both `use` and `clear`, including `--plan`, refuse (exit 1) rather than revert from an empty view. Ordinary `sync` leaves the ledger bytes untouched and refuses hooks, permissions, and MCP writes before they can create ownership that cannot be persisted. An active PROJECT scene created by an older Crossby without a path-baseline record also refuses clear/switch with manual-recovery guidance; Crossby will not infer a source or claim a neighboring backup. (A valid ledger that simply owns nothing is fine, as is a genuinely absent one on a fresh per-machine clone.) Restore the ledger from backup or restore the applied paths/settings by hand; **never delete it** — a *missing* ledger reads as "crossby owns nothing," which re-opens the exact gap.
 - **Drift is detected, not clobbered.** `status` compares a per-tool content hash captured at apply time against the current file (normalised, so a semantically-neutral reformat is not flagged). `use` and `clear` refuse to revert a scene whose managed files have drifted — pass `--force` to proceed anyway.
 - **`--tool`** scopes `list` / `show` / `use` / `clear` / `status` (output for the read commands, effect for the write ones); `--plan` previews `use` / `clear` without writing.
 
@@ -279,7 +280,9 @@ Writes are **surgical**: only the edited `scenes.<name>` entry is rewritten, loc
 
 ### Session-scoped scenes — `crossby launch --scene`
 
-`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only** — touching nothing tracked and needing no `clear` afterward — pass `--scene` to `crossby launch`. This session-scoped guarantee holds only for tools that expose a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot); a tool without one doesn't get session isolation. crossby warns and does what it can: a CLI tool with no launch lever falls back to persistent `scene use` activation — needing a later `clear` for whatever that actually writes, though for a tool like OpenCode whose every concern is unsupported it writes nothing and the deselected capabilities stay enabled — and a GUI tool just launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
+`crossby scene use` **persists** a scene into each tool's config files. When you instead want a scene to apply to **one launch only**, pass `--scene` to `crossby launch`. Tools with a launch-time lever (Claude, Codex ≥ 0.134.0, Copilot) use untracked launch artefacts and need no later `clear`. A terminal tool without one falls back to persistent activation; crossby warns, records successful or partial activation in `scene status`, and tells you to run `scene clear` afterward. A concern with no persistent mechanism remains a true no-op (and crossby warns that it was not narrowed), while a GUI tool launches without the scene. Narrowing can therefore be partial — see the per-tool table below.
+
+Persistent launch fallback follows the same lifecycle as `scene use`: a shared skills directory expands only the recorded skills scope, active-scene switches cannot strand another tool, and corrupt ownership provenance fails closed before mutation. A scoped reapply checks every recorded path for the launch tool plus the shared skills path for a skills-only co-sharer; drift in an unrelated co-sharer concern is left untouched and does not block the launch. Launch has no `--force` escape hatch, so an applicable drift or another failed precondition aborts before the child process starts. Error rows are recorded as `status: partial` and launch continues with a prominent recovery warning; an apply exception or inability to record recoverable state aborts launch instead. If writing the state record fails after mutation, crossby reverts reversible changes, removes stale state for the rolled-back scope, and retains recovery state for any untouched active tools rather than start a child with untracked restrictions. Hook or permission removals cannot be restored by `scene clear`; clear repeats the `crossby sync` guidance before discarding their recovery record. An apply exception records completed removals and directs you to clear the scene, then run `crossby sync`. A state-write failure after such a removal directs you to run `crossby sync`, then fix the state path.
 
 ```bash
 # Launch Claude with the pr-review scene for this session only.
@@ -292,10 +295,10 @@ crossby launch --scene pr-review
 
 # Precedence is explicit flags > scene > profile > ai: defaults, so an explicit
 # --profile or --model still wins over the scene's profile.
-crossby launch --scene pr-review --tool codex --model gpt-5.2
+crossby launch --scene pr-review --tool codex --model gpt-6-sol
 ```
 
-`--scene` targets exactly **one** tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`); it does not fan out — that's what `crossby scene use` is for. Rendered artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one.
+`--scene` selects exactly **one** launch tool (resolved from `--tool`, the scene's `profile:`, or `ai.default_tool`). A persistent fallback may additionally record another installed tool that shares the same physical capability directory (currently Codex and Antigravity CLI share `.agents/skills`), because re-pointing that directory necessarily affects both. Rendered session artefacts live under `.crossby/scene/<name>/launch/`, written atomically and kept out of git via `.git/info/exclude`. **One exception:** Codex's `--profile` reads only from `$CODEX_HOME` (usually `~/.codex`, shared across projects), so its generated profile is written there as `crossby-<project-slug>-<scene>.config.toml` — namespaced by a project-root hash and carrying a generated-by header, so pruning stale profiles never touches a hand-written one. If that exact path contains a hand-written profile, crossby preserves it byte-for-byte and routes the launch through the recoverable persistent fallback instead.
 
 **Not every tool has a session-scoped lever.** Where a tool can't scope a scene (or a specific concern) at launch, crossby warns rather than applying nothing silently — but the outcome varies: a CLI tool without a launch lever falls back to persistent activation, a concern with no lever at all can be left wide open, and a GUI tool just launches without the scene:
 
@@ -303,9 +306,9 @@ crossby launch --scene pr-review --tool codex --model gpt-5.2
 | --- | --- |
 | Claude | `--mcp-config <file> --strict-mcp-config`, a `--settings` file of `skillOverrides` (needs `claude ≥ 2.1.129`), and `--disallowedTools "Agent(<name>)"` per deselected agent |
 | Codex | `--profile <name>` layering a generated `$CODEX_HOME/<name>.config.toml` (needs `codex ≥ 0.134.0`) |
-| Copilot | `--disable-mcp-server <name>` per deselected server; a profile's `--allow-tool` entries naming an excluded tool are dropped |
+| Copilot | `--disable-mcp-server <name>` per deselected server; profile `allow_tools` approvals are rendered independently and entries naming an excluded MCP server are dropped |
 | Cursor | none — falls back to persistent activation (its only knob relocates the whole config base including auth) |
-| OpenCode | none — persistent-activation fallback writes nothing (no sync writer for any concern), so deselected servers stay enabled and there's nothing to `clear` |
+| OpenCode | none — persistent fallback records the lifecycle but has no tool-config mechanism, so deselected servers stay enabled; `scene clear` removes the fallback state |
 | Antigravity CLI | none — falls back to persistent activation, warning that config was written |
 | VS Code / Antigravity IDE | none (GUI) — warns that the scene cannot apply, and launches without it |
 
@@ -341,7 +344,9 @@ The default preset produces a structured six-section handoff (current task, key 
 
 ## Launch options
 
-`crossby launch` runs any supported tool with one unified set of flags — crossby translates each into the target's native syntax (or degrades gracefully when the tool lacks it).
+`crossby launch` runs any supported tool with one unified set of flags. Ordinary
+autonomy options may degrade when a tool lacks an exact equivalent; native plan
+mode is stricter and fails before launch when Crossby cannot guarantee it.
 
 ### Programmatic sandbox selection
 
@@ -355,30 +360,495 @@ Library consumers can choose sandbox confinement independently from autonomy by 
 
 The setting never changes approval behavior: Codex `danger-full-access` does not imply `-a never`, and yolo does not imply an unrestricted sandbox. Cursor now explicitly enables its sandbox on the default adapter path instead of inheriting a potentially disabled user setting. The static `sandboxes_writes` capability still describes an adapter's normal confinement; it is not a guarantee for a particular invocation made with `sandbox=False`.
 
-### Autonomy modes
+### Managed headless sessions
 
-`crossby launch` exposes a four-tier **autonomy ladder** — how much the agent may do without asking. These are *permission* modes, not model selection:
+Library consumers have a typed boundary for an ordinary, non-Plan agent
+session, implemented by every terminal adapter:
 
-```text
---plan  <  --accept-edits  <  --auto  <  --yolo
-read-only   auto-edit,        classifier-       skip all
-            ask shell         guarded           prompts
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessSessionRequest,
+    preflight_headless_session,
+)
+
+request = HeadlessSessionRequest(
+    prompt="Implement the approved change",
+    working_dir=Path.cwd(),
+    native_output=HeadlessNativeOutput.TEXT,
+    interaction_mode=HeadlessInteractionMode.UNATTENDED,
+    timeout_seconds=600,
+    idle_timeout_seconds=120,
+)
+adapter = AbstractAITool.get("codex")
+if adapter.capabilities().supports_managed_headless_session:
+    preflight = preflight_headless_session("codex", request)
+    result = adapter.run_headless_session(request)
 ```
 
-- `--plan` — read-only planning; the agent proposes but doesn't act.
+`HeadlessSessionRequest`, `HeadlessSessionPreflight`, `HeadlessEvent`, and
+`HeadlessSessionResult` are frozen models that reject unknown fields. Native
+text/JSON/JSONL selection is independent from an optional caller-provided JSON
+Schema. One absolute monotonic deadline covers validation, version probing,
+startup, callbacks, output parsing, and collection; idle and interaction
+timeouts can only shorten it. `UNATTENDED` fails an unexpected question and
+denies unresolved permissions. `BROKERED` requires an explicit interaction
+handler. Expected cancellation, timeout, native failure, and invalid output are
+terminal result statuses; unrecoverable spawn, protocol, or handler failures
+raise `HeadlessTransportError` with a bounded, prompt-free partial result.
+`final_json_present` distinguishes an explicit JSON `null` result from missing
+structured output.
+
+Existing `supports_headless` / `headless_flag` command construction, interactive
+`launch()`, collected Plan sessions, and handoff summarization are unchanged.
+
+#### Verified unattended support matrix
+
+Every row was verified against the exact CLI build named in `verified_version`,
+which is also the runtime floor: an older install fails preflight with the
+adapter's remediation rather than running with a guessed contract.
+
+| Tool | Verified build | Native command | Prompt | Native outputs | Response schema | Unattended policy |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | 2.1.263 | `claude --print` | stdin | text, json, stream-json | `--json-schema` | `--permission-prompts none` denies anything that would prompt; `permission_denials` are reported |
+| Codex CLI | 0.154.0 | `codex exec --json` | stdin (`-`) | text, jsonl | `--output-schema` | no approval channel exists in `exec`; the requested `--sandbox` and pinned `network_access` are the whole policy |
+| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
+| GitHub Copilot CLI | 1.0.83 | `copilot --prompt -s` | argument | text | not supported | `--no-ask-user` removes `ask_user`; `--allow-all-tools` is never emitted, so tools outside the session command policy are denied |
+| OpenCode | 1.18.31 | `opencode run --format json` | stdin | text, jsonl | not supported | `--auto` is never emitted, so OpenCode's own noninteractive permission behavior stands |
+| Antigravity CLI | 1.2.6 | `agy --print` | argument | text, json, stream-json | `--json-schema` | `--print-timeout` carries the session's overall Crossby deadline (it bounds the whole run, not one idle stretch); a native waiting state fails the session instead of stalling |
+
+Unattended behavior is uniform above the adapters. An unattended run never
+inherits parent stdin — a prompt is written to a pipe that is then closed, and
+every other adapter gets `/dev/null`. A failed or short prompt write is a
+transport failure, never an eligible native success. An unexpected native
+question fails the session; an unresolved permission is denied. A native
+terminal error, waiting state, or missing, repeated, or conflicting terminal
+evidence is never reported as success just because the exit status was `0`.
+For framed output, Claude Code, Cursor, Antigravity CLI, and OpenCode reject
+every later frame after their terminal result or stop; Codex rejects every later
+typed frame. A timeout or cancellation kills the whole owned process group and returns
+a bounded, prompt-free result that keeps the session, thread, or conversation
+ID observed before the deadline. Native stderr is reported only as a fixed
+diagnostic, so caller-visible warnings cannot echo session content. Codex native
+error and failed-turn messages are likewise summarized without copying native
+text.
+
+Only Claude Code, Codex CLI, and Antigravity CLI accept `response_schema`; the
+other three reject it before spawning anything. Claude and Antigravity also
+require JSON or streaming-JSON output for a schema, because that is the only
+wire on which each exposes structured output. With a schema, `final_json` is
+the validated structured output; otherwise `TEXT` returns the final response
+text and `JSON`/`JSONL` return the native object that carried it, exactly as
+the CLI emitted it. Brokered sessions use separate native transports, selected
+only when `interaction_mode=BROKERED` and an interaction handler is supplied:
+
+| Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | exact thread | exact `turn/interrupt` |
+| Cursor | ACP | 2026.09.10-fd3934a | text | questions and permissions | exact session via `session/load` | exact `session/cancel` |
+| OpenCode | authenticated loopback server | 1.19.0 | text | session questions and permissions | exact session | session abort for newly created sessions |
+| Antigravity CLI | JSON/stream-JSON continuation | 1.2.6 | JSON, JSONL | questions only | exact conversation ID | no native abort |
+
+Brokered requests reject unsupported output, schema, resume, approval, sandbox,
+and command policy combinations during preflight. Codex and Cursor preserve
+native request and option IDs; OpenCode binds assistant completion and pending
+interactions to the submitted user message ID through each assistant's native
+`parentID`, and replies through the pending request ID;
+Antigravity permits at most nine invocations under one deadline.
+Each Antigravity continuation is checked against native command-size limits;
+an oversized answer or option label fails the session before another process starts.
+Antigravity exposes no authoritative permission channel, so it never advertises
+permission brokering. Codex, Cursor, and OpenCode accept only text in brokered
+mode; Antigravity accepts JSON or JSONL, including schema-constrained output.
+Cursor rejects model or effort overrides on a loaded session, and OpenCode
+rejects new command rules on a resumed session. OpenCode does not send a
+session-wide abort for resumed sessions because another client may be using
+the same session; cancellation still cleans up this run's server process.
+See [brokered verification](docs/brokered-headless-verification.md) for terminal
+bindings and limitations.
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import AbstractAITool
+from crossby.models.ai import (
+    AIToolID,
+    HeadlessInteractionMode,
+    HeadlessSessionRequest,
+    PlanInteractionOutcome,
+    SessionInteractionResponse,
+)
+
+
+def answer_native_request(interaction):
+    # Replace this with your application's question and permission decisions.
+    return SessionInteractionResponse(
+        outcome=PlanInteractionOutcome.CANCELLED,
+    )
+
+tool = AbstractAITool.get(AIToolID.CODEX)
+request = HeadlessSessionRequest(
+    prompt="Review this module and summarize the changes",
+    working_dir=Path.cwd(),
+    interaction_mode=HeadlessInteractionMode.BROKERED,
+)
+result = tool.run_headless_session(request, interaction_handler=answer_native_request)
+```
+
+The handler receives a `SessionInteraction` with native IDs and returns a
+`SessionInteractionResponse`. It should choose an offered option ID or provide
+an allowed free-form answer. Permission decisions require an explicit native
+option or approval of a structured built-in request. A denied or skipped Codex
+built-in permission sends an empty turn-scoped grant; a missing, late, or invalid
+answer never becomes a native approval. Cursor and Antigravity CLI encode
+`effort` in the model argument, so a headless request that specifies `effort`
+must also specify `model`. Cursor accepts the request only when the model encodes the requested
+tier exactly: matching `[effort=…]` overrides and registered bare-medium
+families are preserved, while `auto`, malformed or conflicting overrides,
+unknown models, and unavailable tiers fail before spawning. For Antigravity,
+the model must be a Gemini family with the requested native tier, and an
+already-suffixed ID must encode the same effort. Otherwise the request fails
+before spawning. With no separate `effort`, a suffixed Antigravity model must
+still be a known valid native tier (apart from the fixed provider ID
+`gpt-oss-120b-medium`); Crossby rejects a suffix it would otherwise normalize
+or drop rather than launch a different model.
+
+`docs/unattended-headless-verification.md` records exactly what was probed on
+each build, including the two places where a live capture was unavailable and a
+documented contract was used instead.
+
+### Native plan mode
+
+Native planning has two deliberately separate surfaces:
+
+- `launch(..., plan_mode=True)` enters native plan mode for a human and keeps the
+  historical exit-code return value. `supports_plan_mode` is this
+  **activation-only** compatibility view.
+- `run_plan_session(PlanSessionRequest(...))` owns activation, interaction,
+  exact-session collection, validation, and cleanup, then returns normalized
+  Markdown plus provenance. `supports_plan_session` is true only when that full
+  lifecycle is deterministic.
+
+A positional prompt containing `/plan` is still ordinary text. Codex interactive
+startup instead submits the native slash command separately through its terminal. Plan mode,
+sandbox confinement, and approval policy are independent request dimensions; a
+collector either preserves a supported choice or rejects it. Static unsupported
+requests fail before spawning; native model-availability checks finish before
+the first planning prompt.
+Unknown and below-floor CLI versions also fail before a harness process starts.
+`PlanSessionRequest` rejects unknown fields instead of silently applying a
+default. An optional `command_policy=PlanCommandPolicy(...)` preauthorizes only
+the named commands for that collected session. It accepts exact simple commands
+and the existing canonical `command:arguments:*` form (a trailing ` *` is also
+accepted); compound shell syntax, expansions, internal wildcards, blank entries,
+and duplicates fail Pydantic validation. Preauthorization suppresses permission
+prompts for matched operations. It is not a sandbox and does not claim that an
+unmatched command can never run.
+
+Command policy, sandbox, network access, trusted directories, and approval policy
+compose independently. Sandbox/network select the execution environment;
+`trusted_dirs` extends the directories explicitly available to a collector and,
+for callback matching, the valid execution roots; command policy handles only
+command preauthorization; `approval_policy` controls unmatched permission
+requests. A match never grants file, network, MCP, or extra filesystem targets.
+Explicit conflicts fail instead of selecting a broader mode. `tool-managed` in
+the matrix describes native harness behavior, not guaranteed confinement.
+
+Cursor and Antigravity CLI require an explicit `model` with explicit
+`effort`. Cursor opts into ACP's parameterized model picker, selects the exact
+advertised base model, applies the advertised reasoning-effort and optional
+thinking/fast variant options, and verifies all returned values before prompting;
+`auto`, unavailable models/tiers, and conflicting model-encoded tiers are rejected.
+Antigravity
+requires a compatible Gemini model whose native effort tier matches the request;
+missing, non-Gemini, unavailable, or conflicting model tiers are rejected before
+the collector launches. OpenCode collection accepts only `low`, `medium`, and
+`high` and passes the exact provider/model and variant to its native session API:
+interactive launches retain the legacy `xhigh`/`max` → `high` normalization, but
+a collected session rejects tiers the adapter cannot preserve exactly.
+OpenCode also requires that the selected model advertise the requested variant
+through its native provider API. Disabled or missing variants fail before
+prompting. With effort but no explicit model, Crossby uses the native plan
+agent's configured model, then the configured default model, and pins the model
+it validated. If neither is configured, supply `model="provider/model"`;
+Crossby does not guess from private recent-model state. Omitting effort keeps
+OpenCode's native default selection unchanged.
+
+Support matrix (contracts verified against the listed builds through 2026-09-14):
+
+| Tool | Native selector | Collector / exact binding | Interaction | Sandbox / approval | Command preauthorization | Verified floor | Remediation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | Interactive CLI; one `.md` in a fresh UUID `plansDirectory` | Native terminal | Tool-managed / tool-managed | Native per-invocation `--allowedTools`; user/project/local settings sources excluded | 2.1.263 | Use a project-contained `plan_output_dir`; replaced directories/files are rejected, and partial artifacts are retained on failure |
+| Codex CLI | `collaborationMode.mode = "plan"` | Headerless app-server JSONL; exact thread + turn + completed plan-item IDs, successful turn completion, and zero process exit | Callback | Preserved / preserved (`on-request`, `never`) | Callback matching of authoritative simple commands; approve once only | 0.153.4 | Collection returns only after the bound turn completes successfully, its background terminals are cleaned, and app-server exits cleanly; interactive launch uses the separate terminal startup adapter described below |
+| Cursor CLI | ACP `session/set_mode` → `plan` | ACP; configured model + thought level + thinking/fast state, exact session + blocking `cursor/create_plan` request ID + successful `end_turn` + zero process exit | Callback, including separate final plan outcome | Preserved / preserved (`on-request`, `never`) | Unsupported; verified permission requests omit authoritative command input | 2026.09.02-c22c1a3 | Supply an ACP-advertised model and effort plus a handler for questions and the non-executing final outcome; remove explicit command policy or choose another collector |
+| GitHub Copilot CLI | Interactive `--plan` | Collected sessions unsupported | Native terminal for interactive launch only | No collected-session policy | Unsupported | 1.0.83 (interactive activation) | Use interactive `launch(..., plan_mode=True)` or another collector; the verified headless transport omits `ask_user`, so native question callbacks and continuation are unavailable |
+| OpenCode | Native session API `agent="plan"` | Authenticated loopback server; fresh session ID + completed plan-message ID + `export <exact-id>` | Live question/permission callbacks, including multi-select and separate plan approval | Tool-managed / tool-managed | Native session rules: catch-all ask, then scoped shell allows | 1.18.29 | Exported directories and terminal message must match the launched session; collection uses the native server because `run --format json` disables questions |
+| Antigravity CLI | `--mode plan` | Headless JSON; case-insensitive terminal status + exact conversation ID + requested schema echo + `structured_output.plan` | Resumable callback | Tool-managed / tool-managed | Unsupported; no authoritative permission channel | 1.2.0 | Free text and private brain storage are not artifact fallbacks; remove explicit command policy or choose another collector |
+| VS Code | Unsupported | None | None | Unsupported | Unsupported | 1.136.1 | Select plan mode manually or use a complete terminal collector |
+| Antigravity IDE | Unsupported | None | None | Unsupported | Unsupported | — | Select plan mode manually or use a complete terminal collector |
+
+`tool-managed` means the harness's native plan posture owns that dimension; only
+its safe default is accepted.
+`preserved` means Crossby enforces the listed caller choices explicitly; an
+unlisted approval policy is rejected before collection. Codex explicitly replaces
+configured extra writable roots with `trusted_dirs`, including an empty list,
+so ambient configuration cannot add unrequested directories.
+Copilot reports `supports_plan_session=False` and rejects collection before
+spawning, while its interactive native plan selector remains available.
+Protocol and resumable collectors never invent an answer or auto-approve
+implementation. A missing handler produces
+`PlanInteractionRequiredError`, including when the caller's stdin is a TTY. A
+caller that intentionally wants terminal input must explicitly pass the
+exported `terminal_interaction_handler`. Final plan approval is represented
+separately and an `APPROVED` response is refused by collectors where it would
+transition into execution. Native option lists are parsed without discarding
+malformed entries, and callback option IDs must match those exact choices;
+explicit denied, cancelled, or skipped outcomes take precedence over stale
+selections. Option-only permission callbacks reject free text before sending an
+approval. `PlanInteraction.allow_other` preserves a native free-form-answer
+affordance (including Codex `isOther`); callers must not return `answer` text
+when it is false.
+
+Permission interactions may include `interaction.operation`. The typed operation
+separates authoritative `argv` from an authoritative `shell_expression`, and can
+also carry its execution directory, permission targets, operation kind, and
+native binding IDs. Missing fields stay missing: display prompts and labels are
+never parsed into executable evidence. Consequently, a missing or ambiguous
+operation cannot automatically match a callback-backed command policy. Compound
+shell expressions also fail closed rather than being split on whitespace or
+matched by string prefix.
+
+Consumers that must decide before creating a future worktree can use the public
+preflight helper (or the equivalent adapter method):
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    PlanCommandPolicy,
+    PlanSessionRequest,
+    preflight_plan_session,
+)
+
+future_worktree = Path.cwd() / ".future-plan-worktree"
+request = PlanSessionRequest(
+    prompt="Plan the change",
+    working_dir=future_worktree,
+    command_policy=PlanCommandPolicy(
+        allowed_commands=("git status", "python:-m pytest:*"),
+    ),
+)
+preflight = preflight_plan_session("codex", request, timeout_seconds=5)
+print(preflight.detected_version, preflight.checked, preflight.deferred)
+
+# Only after preflight succeeds does the consumer create/configure its worktree.
+future_worktree.mkdir()
+result = AbstractAITool.get("codex").run_plan_session(request)
+```
+
+Preflight validates complete-session capability, statically knowable request and
+command-policy compatibility, and a bounded exact CLI version against the
+adapter's published floor. It does not start a planning session or create files,
+directories, or configuration; `timeout_seconds` must be positive and finite. Its
+result explicitly lists what was checked and what remains deferred: filesystem
+state, authentication, model availability, protocol negotiation, and artifact
+collection. Runtime repeats static validation and version detection; callers must
+not treat a prior result as an authorization token or assume model/effort
+availability from static success.
+
+The collected API is the automation surface:
+
+```python
+from pathlib import Path
+
+from crossby.ai_tools import (
+    AbstractAITool,
+    PlanCommandPolicy,
+    PlanInteractionKind,
+    PlanInteractionOutcome,
+    PlanInteractionRequiredError,
+    PlanInteractionResponse,
+    PlanSessionError,
+    PlanSessionRequest,
+)
+
+
+def answer(interaction):
+    if interaction.kind is PlanInteractionKind.PLAN_APPROVAL:
+        return PlanInteractionResponse(outcome=PlanInteractionOutcome.DENIED)
+    # A real integration should obtain this from its user or workflow.
+    if interaction.options:
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            option_id=interaction.options[0].option_id,
+        )
+    if interaction.allow_other:
+        return PlanInteractionResponse(
+            outcome=PlanInteractionOutcome.ANSWERED,
+            answer="Use the existing public API",
+        )
+    return PlanInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED)
+
+
+adapter = AbstractAITool.get("codex")
+try:
+    result = adapter.run_plan_session(
+        PlanSessionRequest(
+            prompt="Plan issue #176",
+            working_dir=Path.cwd(),
+            command_policy=PlanCommandPolicy(allowed_commands=("git status",)),
+        ),
+        answer,
+    )
+except PlanInteractionRequiredError as exc:
+    print(f"Waiting for {exc.interaction.question_id}: {exc.interaction.prompt}")
+except PlanSessionError as exc:
+    print(f"Plan collection failed: {exc}")
+else:
+    Path("PLAN.md").write_text(result.plan, encoding="utf-8")
+    print(result.session_id, result.artifact_source, result.artifact_id)
+```
+
+Crossby returns Markdown and the available session, turn, item, conversation,
+or path evidence. It does not impose WADE validation and does not require the
+harness itself to create `PLAN.md`. `timeout_seconds` is one collector deadline
+shared by the version probe, initial invocation, question continuations,
+protocol waits, file-backed artifact collection, and subprocess-backed export.
+Caller-visible timeout errors omit subprocess command arguments because those
+arguments can contain prompts or continuation answers.
+Callback-based collectors also bound the time spent waiting for the interaction
+handler. Handlers run on daemon worker threads; timeout unwinds collection and
+closes the native process, and a late callback result is never forwarded.
+Python cannot forcibly stop caller code, so integrations must make external
+input waits cancellable or independently bounded and must not assume callback
+execution on the main thread. Claude's explicit native-terminal consent remains
+unchanged.
+Headless subprocess capture is also bounded to 8 MiB of stdout and 1 MiB of
+stderr. Captured, interactive, and protocol POSIX children use isolated process
+groups; cleanup kills remaining group members even if the server has already
+exited. Worker joins are bounded, and cleanup never closes a pipe while a reader
+or writer still holds its lock. Codex and Cursor also require a zero process exit
+after their successful protocol event before reporting success. Protocol writes
+share the session deadline.
+Each JSON-RPC frame is capped before queueing and an oversized frame terminates
+the owned protocol group. OpenCode interrupts status/header parsing at the
+absolute deadline and reads response bodies incrementally against that same
+deadline; like Claude file-backed plan artifacts, bodies are capped at
+8 MiB. Claude anchors POSIX artifact reads to a directory handle
+opened before launch, validates file identity, and removes only empty run
+directories after failure.
+OpenCode selects the unique exported record matching the completed native message
+ID. Earlier progress and clarification messages are not competing plan artifacts;
+duplicate records of the completed message are rejected even when identical.
+Caller-supplied artifact-location failures remain `PlanArtifactLocationError`
+and are also caught by the collected API's `PlanSessionError` integration
+boundary.
+
+For activation-only CLI use, continue calling `adapter.launch(...,
+plan_mode=True)` or `adapter.build_launch_command(..., plan_mode=True)` and
+handle `PlanModeLaunchError`. Interactive planning composes with native approval
+options listed below. Unsupported combinations fail before launch instead of
+replacing Plan mode or silently downgrading. `--plan-output-dir <dir>` remains a
+launch option only for Claude. The collected Claude API also accepts a
+project-contained `plan_output_dir`, but creates a unique run-owned child
+directory within it so a concurrent or newer artifact cannot be selected.
+Existing callers that omit `command_policy` keep the prior collected-session
+behavior. Ordinary `launch(..., allowed_commands=...)` also remains unchanged;
+new collected-session consumers should use `PlanCommandPolicy`, inspect
+`capabilities().plan_mode.command_policy_support`, and handle the exported
+`PlanCommandPolicyUnsupportedError` instead of translating private flags or
+writing persistent tool permissions.
+
+When a Claude scene also narrows skills, Crossby combines `plansDirectory` and
+the scene's `skillOverrides` into one `--settings` JSON source. Claude treats
+repeated `--settings` occurrences as replacement, so emitting two would discard
+the requested plan destination.
+
+### Interactive planning and approvals
+
+`crossby launch --tool <tool> --plan --yolo` opens the real terminal UI in
+native Plan mode on all six CLIs below. Planning and tool approvals are
+separate dimensions; Crossby uses native flags/settings, with a temporary
+terminal startup adapter for Codex.
+
+| CLI | Native Plan selector | With Crossby `--yolo` | With Crossby `--auto` |
+| --- | --- | --- | --- |
+| Claude Code | `--permission-mode plan` | `--allow-dangerously-skip-permissions` | `--settings '{"useAutoModeDuringPlan":true}'` |
+| Cursor | `--mode plan` | `--force` | `--auto-review` |
+| GitHub Copilot | `--plan` | `--yolo` | Unsupported |
+| OpenCode | `--agent plan` | `--auto` | Unsupported |
+| Antigravity CLI | `--mode plan` | `--dangerously-skip-permissions` | Unsupported |
+| Codex CLI (POSIX) | Terminal `/plan`, then the task | `-a never` | `-a on-request -c approvals_reviewer='"auto_review"'` |
+
+Verified startup versions: Claude 2.1.263, Cursor 2026.09.02-c22c1a3,
+Copilot 1.0.83, OpenCode 1.18.29, and Antigravity CLI 1.2.3.
+Codex terminal startup is verified on 0.154.0 and 0.157.0 and requires 0.154.0
+or newer; there is no upper bound. GUI activation remains unsupported.
+`capabilities().plan_mode.supported_launch_approval_modes` declares the supported
+combinations; collected-session approval policies are independent and unchanged.
+These combinations are interactive-only (`initial_message`, not the builder's
+headless `prompt`).
+
+Claude's ordinary `--dangerously-skip-permissions` replaces Plan mode, so its
+Plan launch uses `--allow-dangerously-skip-permissions`: the native interactive
+CLI keeps Plan selected and makes bypass available during planning. Native
+Plan instructions still guide the model; bypass is not filesystem confinement.
+Claude's classifier requires an eligible account/model; native policy and any
+`useAutoModeDuringPlan: false` setting can prevent classifier approval. Cursor's
+classifier is likewise controlled by its native account and organization policy.
+OpenCode calls its skip-approval flag `--auto`; Crossby maps it to `--yolo`,
+not to Crossby's classifier-based `--auto`. Explicit native denials still apply.
+Folder trust and plan/implementation decisions remain native user interactions.
+
+Copilot additionally supports `--plan --accept-edits` through `--allow-tool write`,
+subject to its Plan restrictions. Codex supports it through `-a on-request` with
+its existing sandbox composition. Other CLIs reject that combination. In
+particular, Claude and Antigravity use one selector for Plan and accept-edits;
+Crossby never emits competing selectors. Multiple approval flags retain the
+usual `yolo > auto > accept-edits` precedence while keeping Plan selected.
+
+To exercise a real interactive session through the public API, using your
+normal native authentication:
+
+```bash
+uv run python scripts/probe_native_plan.py --tool claude --approval yolo
+uv run python scripts/probe_native_plan.py --tool cursor --model auto --approval yolo
+```
+
+The probe uses a temporary workspace and a read-only shell command, saves the
+launch argv and terminal transcript, and reports whether the command's unique
+output appeared. Inspect the native Plan/approval indicators and actual shell
+call; token presence alone is not proof of execution. Exit normally without
+approving implementation. See [verification notes](docs/native-plan-launch-verification.md)
+for the tested scope and remaining limits.
+
+### Autonomy modes
+
+The remaining flags form the autonomy ladder (how much the agent may do without
+asking). They are permission modes, not model selection:
+
 - `--accept-edits` — auto-approve file edits, still prompt for shell/commands. Broadly portable (5 of the 6 CLIs support it at launch; OpenCode falls back to default prompting). *(Codex is the exception — its accept-edits is sandbox-confined rather than per-command-prompted; see the note below the table.)*
-- `--auto` — Claude Code's classifier-mediated guarded autonomy (a separate model reviews each non-read action). **Claude-only** among the CLIs crossby drives; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
+- `--auto` — Classifier-mediated guarded autonomy, supported by **Claude Code and Cursor CLI**; on other tools it **downgrades to that tool's accept-edits**, then to default prompting — never to `--yolo`.
 - `--yolo` — skip all permission prompts.
 
-**Precedence (most permissive wins):** `yolo > auto > accept-edits > plan`. If you pass several, the highest applies. A requested tier a tool doesn't support downgrades to the next lower *autonomy* tier it does support (emitting a `UserWarning`), stopping at default prompting — it never escalates.
+**Precedence (most permissive wins):** `yolo > auto > accept-edits`. If you pass
+several of these three, the highest applies. A requested tier a tool doesn't
+support downgrades to the next lower autonomy tier it does support (emitting a
+`UserWarning`), stopping at default prompting — it never escalates. With `--plan`, only the explicitly supported native combinations above are accepted.
 
-Per-tool mapping (verified against official docs, July 2026; CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
+Per-tool mapping (Cursor updated September 2026; other entries verified July 2026;
+CLI flags can drift between versions, so treat the table as a point-in-time snapshot):
 
 | Tool            | `--accept-edits`                      | `--auto` (classifier)                     |
 | --------------- | ------------------------------------- | ----------------------------------------- |
 | Claude          | `--permission-mode acceptEdits`       | `--permission-mode auto`                  |
 | Codex           | `-a on-request --sandbox workspace-write` | ↓ downgrades to accept-edits              |
-| Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | ↓ downgrades to accept-edits |
+| Cursor CLI      | *(none — its default Agent mode already **is** accept-edits)* | `--auto-review` |
 | Copilot         | `--allow-tool write`                  | ↓ downgrades to accept-edits              |
 | Antigravity CLI | `--mode accept-edits`                 | ↓ downgrades to accept-edits              |
 | OpenCode        | ↓ default prompting (config-only)     | ↓ default prompting                       |
@@ -391,12 +861,69 @@ Per-tool mapping (verified against official docs, July 2026; CLI flags can drift
 `crossby launch` translates model ids across families when the target tool wouldn't accept the source family natively:
 
 ```bash
-# Pass a Claude model id to Codex — translated to gpt-5.4-mini under the hood
-crossby launch --tool codex --model claude-sonnet-4.6 --effort high
-# → codex --model gpt-5.4-mini -c model_reasoning_effort=xhigh
+# Pass a Claude model id to Codex — translated to gpt-6-luna under the hood
+crossby launch --tool codex --model claude-sonnet-5 --effort high
+# → codex --model gpt-6-luna -c model_reasoning_effort=xhigh
 ```
 
-Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-5.4` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
+Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for coding-agent behavior. The reverse direction (`gpt-6-sol` → Claude) picks the lowest source tier so users don't accidentally over-bill. A `UserWarning` fires whenever a translation happens; pass a native id to silence it.
+
+The GPT-6 targets need a current Codex CLI: with ChatGPT sign-in, Codex 0.154 rejects `gpt-6-sol` as unsupported, while 0.156.1 accepts it. Run `npm i -g @openai/codex@latest` if a translated launch fails that way.
+
+### Codex interactive Plan startup and events
+
+Codex has no native `--plan` launch flag. Crossby opens the real Codex UI
+in an inline terminal, submits `/plan` by itself, waits for its rendered Plan
+indicator, and then submits the initial message. Long prompts use bracketed
+paste after activation. The user then interacts with Codex normally, including
+native questions and approvals. No conversation text is turned into a plan file
+by this adapter.
+
+This temporary adapter requires a POSIX terminal (macOS/Linux), Codex 0.154.0 or newer,
+and the main Python thread. It rejects headless/detached launches and older
+versions; newer versions are not pinned, because an unrecognized UI already fails
+closed. Startup has a 120-second deadline; unexpected input, an unrecognized
+screen, or early exit fails without resubmitting the task. Trust/login screens
+remain interactive. Startup messages must be ordinary nonblank text, at most
+100,000 UTF-8 bytes, without terminal control characters (newline/tab allowed).
+
+Callers can pass `prompt=` as usual or own deferred delivery through the public
+startup callback:
+
+```python
+from pathlib import Path
+from crossby.ai_tools import (
+    AbstractAITool, InteractiveLaunchEvent, InteractiveLaunchEventKind,
+    InteractiveSession,
+)
+
+prompt = "Inspect this project and propose a plan."
+
+def on_event(event: InteractiveLaunchEvent, session: InteractiveSession) -> None:
+    if event.kind is InteractiveLaunchEventKind.PLAN_READY:
+        session.send_message(prompt)
+
+exit_code = AbstractAITool.get("codex").launch(
+    Path.cwd(), plan_mode=True, on_event=on_event,
+)
+```
+
+`capabilities().plan_mode.supports_ready_event` declares this optional API.
+`PLAN_READY` allows exactly one synchronous `send_message()` call; omitting it
+opens an empty Plan session. `MESSAGE_SUBMITTED` reports the observed start of
+the first native Plan turn. These are Crossby startup events derived from the
+terminal display, not Codex app-server events. Callbacks must return promptly
+and must not read/write the terminal. They cannot be combined with `prompt=`;
+subsequent conversation belongs to the native UI. `build_launch_command()`
+returns a Python module wrapper for this mode, so executing the built command
+performs the same startup handshake.
+
+The app-server collected API remains available independently, with its existing
+0.153.4 version floor and exact artifact binding. Terminal startup does not
+promise a custom plan-file destination. Plan `--auto` uses Codex's native
+`approvals_reviewer="auto_review"` setting; ordinary non-Plan auto behavior stays
+as documented above. Plan effort is applied to Codex's separate
+`plan_mode_reasoning_effort` setting as well as ordinary model effort.
 
 ### Codex sandbox: linked worktrees & `--network`
 
@@ -405,6 +932,132 @@ Codex can confine writes with an OS sandbox (`--sandbox workspace-write` — Sea
 - **Linked worktrees & submodules just work when sandboxed.** In a linked worktree the working tree's `.git` is a *file* pointing at metadata that lives **outside** the working directory, which the sandbox would otherwise block. crossby detects this and grants only the real git-metadata dirs outside the root to the sandbox with `--add-dir` — which *adds* to the writable roots, preserving any `sandbox_workspace_write.writable_roots` you configured — so sandboxed git operations succeed while the sandbox stays on. A normal checkout grants nothing. This applies to launch, `--resume` (approval-neutral: no `-a` injected), and the headless handoff summarizer.
 - **`--network` (Codex only).** `crossby launch --network` allows network access inside the sandbox (package installs, remote fetch/push). It is **security-sensitive** and off by default. On tools without a sandbox network opt-in it is **warned and ignored** on every path (launch, resume, GUI).
 - **Explicit network pin.** Whenever crossby forces `workspace-write` (a worktree, `--network`, `--accept-edits`, or `--trusted-dir`), it also emits an explicit `-c sandbox_workspace_write.network_access=<true|false>` (`true` only with `--network`) so an ambient `network_access = true` in your Codex config can never silently enable networking in a crossby-managed sandbox. A plain, unmanaged launch emits no sandbox flag and stays byte-identical.
+
+## Browser terminal — `crossby ui`
+
+Run an AI tool from a web page instead of a shell:
+
+```sh
+crossby ui                 # serve the current directory, open a browser
+crossby ui --path ~/work/api --port 7420 --no-open
+```
+
+Pick a tool, model, effort, autonomy and initial message in the form, hit
+**Launch**, and the tool appears in an embedded terminal. It is a **real terminal**, not a log
+view: the tool runs on a server-side pseudo-terminal, so its full-screen
+interface, colours, keybindings, `Ctrl-C` and resize behaviour all work exactly
+as they do in your shell.
+
+**Multiple sessions, in tabs.** Launch again for another session — each gets its
+own tab, its own terminal and its own PTY, and they run side by side. Every
+session streams over a single connection, so the tab count is not limited by the
+browser's per-origin connection cap.
+
+**Each session picks its own folder.** The **Folder** control browses the
+directories the server allows and launches the tool there, so one UI can drive
+several projects at once. When sessions span more than one folder, the tabs say
+which is which. Your last choice is remembered between visits.
+
+By default that is `--path` and everything beneath it. `--allow-dir` adds more
+trees:
+
+```sh
+crossby ui --path ~/work --allow-dir ~/oss --allow-dir ~/scratch
+```
+
+Only the operator sets those roots. The page browses and launches **within** them
+and cannot reach outside — a request for anything else is refused, symlinks
+included, because containment is checked against the resolved path.
+
+**Reloading the page does not lose your work.** Sessions live on the server, so
+a refresh reattaches to everything still running and repaints each tab from its
+scrollback.
+
+**Stop vs close.** *Stop this session* ends the tool but keeps the tab so you can
+read the final output; the tab's **×** closes it (stopping it first if it is
+still running).
+
+The form is generated from each adapter's declared capabilities, so a tool only
+ever offers what it actually supports — no effort selector on Copilot, no YOLO
+rung on OpenCode, no plan mode on Codex, and the sandbox and network controls
+only where a tool honours them.
+
+**Autonomy** is one choice rather than a row of checkboxes, matching
+`crossby launch`: plan mode is exclusive, and the rest form a ladder.
+
+| Rung | What the tool may do |
+| --- | --- |
+| Ask before acting | Prompts for edits and commands (default). |
+| Plan only | Native plan mode — proposes, changes nothing. |
+| Auto-accept edits | Edits apply without asking; commands still prompt. |
+| Auto | The tool's own classifier decides what needs asking (Claude only). |
+| YOLO | No permission prompts at all. |
+
+**Closing a tab asks first** when the session is still running — the **×** sits
+next to the label, and ending a live tool by a stray click is not a good trade.
+Tabs of the same tool are numbered so two Claude sessions are distinguishable.
+
+**Switching tabs:** `Cmd`/`Ctrl` + `1`–`9` (9 is the last tab). Each tab shows
+its number.
+
+`Cmd` is the right modifier for a terminal UI: macOS never delivers it to the
+tool, so it cannot collide with the tool's own bindings the way `Ctrl-` and
+`Option-` would. This is confirmed working in ordinary Chrome on macOS.
+
+Some browsers do claim `Cmd`/`Ctrl` + a digit for their own tab strip, so a
+second binding is registered for those: `Cmd`/`Ctrl` + `Alt` + `1`–`9`, which
+nothing reserves. Use whichever your browser leaves free.
+
+Installing the page as an app window (Chrome ▸ **Cast, save and share** ▸
+**Install page as app**) drops the browser chrome and removes any doubt, which
+is worth doing if you use the UI regularly.
+
+**Scope in this release.** The UI launches sessions and lets you interact with
+them. Scene selection, profiles, resume and transcript capture are not wired into
+it yet; use the CLI for those.
+
+### Security
+
+The server spawns AI tools with access to your filesystem, so it is locked down
+by default:
+
+| Control | Behaviour |
+| --- | --- |
+| Binding | Loopback only. A non-loopback `--host` is refused outright. |
+| Token | The printed URL carries a random access token; every request needs it. **Treat the URL as a secret.** |
+| DNS rebinding | Requests whose `Host` header is not loopback are rejected. |
+| Cross-origin | Any request carrying a foreign `Origin` is rejected. |
+| Static assets | The page shell (HTML/CSS/JS) is served unauthenticated — it holds no secrets and does nothing without a token — but still only same-origin. |
+| Working directory | Sessions run only at or below `--path` and any `--allow-dir`, checked against the resolved path so symlinks cannot escape. |
+| Concurrency | Capped at 16 live sessions per server. |
+
+There is no multi-user mode, no remote access, and no authentication beyond the
+token. Do not expose it through a tunnel or reverse proxy.
+
+**Platform.** Requires POSIX pseudo-terminal support (macOS, Linux, WSL).
+Windows would need a ConPTY backend, which crossby does not ship yet — the
+command fails with a clear message rather than degrading silently.
+
+### What has been verified
+
+Verified against the real CLIs — **Claude Code** and **Codex**, signed in as
+usual — covering startup, trust prompts driven by arrow keys, streamed answers
+with syntax highlighting, `Ctrl-C` interrupting a reply, resize with the tool
+re-wrapping its output, and clean exit.
+
+Also exercised against real full-screen TUIs (`vim`, `top`, `less`) for
+alternate-screen rendering, self-driven repaint, mouse reporting, and resize
+confirmed against the running program's own `columns`/`lines`.
+
+**Not yet exercised: first-run sign-in.** Interactive login, OAuth browser
+redirects and device-code prompts have not been tested through the browser
+terminal. Authenticate the tool once in a normal shell first. If a tool opens a
+browser during login, it opens on the machine running the server.
+
+**Reattaching forces a redraw.** Replayed scrollback is a cushion, not a
+transcript: a tool with an idle animation (Codex emits ~10.8 KB/s doing nothing)
+pushes real output out of the buffer within seconds. On reattach the page nudges
+the terminal size, which makes the tool repaint from its own state.
 
 ## Update installed tools
 
@@ -446,7 +1099,7 @@ models:                           # per-tool, per-complexity-tier overrides
     complex_effort: high          # …and raise effort to `high` for that tier
     very_complex_effort: xhigh
   codex:
-    complex: gpt-5.4
+    complex: gpt-6-sol
     complex_effort: xhigh
 
 profiles:
@@ -459,6 +1112,12 @@ profiles:
     tool: cursor
     model: haiku
     effort: low
+  cop:                            # → crossby launch cop
+    tool: copilot
+    allow_tools:                  # Copilot-native approval entries
+      - shell(git:*)
+      - github
+      - github(create_issue)
 
 scenes:                           # task-shaped bundles of capabilities
   base:
@@ -490,7 +1149,9 @@ handoff_defaults:                 # fed into `crossby handoff`
   token_budget: 32000
 ```
 
-Profiles are named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
+Profiles are named bundles of `--tool` / `--model` / `--effort` / `--accept-edits` / `--auto` / `--yolo`, plus Copilot-only `allow_tools`. Run them by name (`crossby launch ccyolo`) or with `--profile ccyolo`. Explicit flags on the command line still override the profile.
+
+Copilot profiles may also set `allow_tools`. Each value uses Copilot's native `--allow-tool` syntax and is passed through unchanged on every Copilot launch, with or without `--scene`; it is not Crossby's canonical `command:arguments` permission format. A scene only filters entries that name MCP servers it excludes, so `shell(git:*)` remains independent of scene visibility.
 
 The `models:` section maps a tool + complexity tier to a model id. Each tier (`easy` / `medium` / `complex` / `very_complex`) also takes an optional `<tier>_effort` override. Effort resolution order is `--effort` flag → `CROSSBY_EFFORT` env → per-command `ai.<command>.effort` → per-tier `<tier>_effort` → global `ai.effort`. Values must be one of `low` / `medium` / `high` / `xhigh` / `max`.
 

@@ -76,6 +76,21 @@ CODEX_PROFILE_MIN = (0, 134, 0)
 
 
 @dataclass(frozen=True)
+class SceneLaunchFallbackError(Exception):
+    """Signal that a session artefact cannot be used but persistence may work.
+
+    Adapters raise this before spawning a child.  The top-level launch
+    orchestrator owns the persistent lifecycle and decides whether it is safe to
+    retry once without the unusable session-scoped scene.
+    """
+
+    reason: str
+
+    def __str__(self) -> str:
+        return self.reason
+
+
+@dataclass(frozen=True)
 class SceneLaunchArgs:
     """Extra argv and environment one adapter contributes for a scene launch.
 
@@ -90,19 +105,12 @@ class SceneLaunchArgs:
 
 @dataclass(frozen=True)
 class SceneLaunchContext:
-    """Everything an adapter needs to render a scene for one launch.
-
-    ``allow_tools`` carries the resolved profile's approval-layer allow entries
-    (Copilot ``--allow-tool``); an adapter filters out any that name a
-    scene-excluded tool before re-emitting them, so a profile can't re-allow
-    what the scene excluded.
-    """
+    """Everything an adapter needs to render a scene for one launch."""
 
     name: str
     resolved: ResolvedScene
     project_root: Path
     sync_data: SyncData
-    allow_tools: tuple[str, ...] = ()
 
     # -- selections -------------------------------------------------------
     def selected(self, concern: str) -> set[str]:

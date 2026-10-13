@@ -1,10 +1,12 @@
-"""Scene activation state — the CLI-layer record of what scene is active.
+"""Scene activation state — the lifecycle record of what scene is active.
 
 ``.crossby/scene-state.json`` is a per-machine, gitignored bookkeeping file the
-``crossby scene`` command writes on ``use`` and reads on ``status`` / ``clear``
-/ a switch. It records the active scene name, when it was applied, the per-tool
-mechanism, an applied/partial flag, and a normalised content hash per
-scene-managed file so ``status`` can detect drift.
+persistent activation service writes for ``scene use`` and launch fallbacks,
+and ``scene status`` / ``scene clear`` read. It records the active scene name,
+when it was applied, an applied/partial scene flag, and each tool's mechanism,
+status, and normalised content hash per scene-managed file so ``status`` can
+detect drift. A recovery-only tool record retains irreversible hook/permission
+removals after that tool is no longer an installed activation candidate.
 
 It is deliberately **not** the revert authority: :func:`clear_scene
 <crossby.scenes.engine.clear_scene>` reverts from the ownership ledger
@@ -51,15 +53,19 @@ class SceneToolRecord:
     """What one tool carried under the active scene.
 
     ``mechanisms`` maps each participating concern to the mechanism used
-    (``declare`` / ``project`` / ``unsupported``); ``status`` is ``applied`` or
-    ``failed`` (the tool produced an ``error`` row during apply). ``hashes`` maps
+    (``declare`` / ``project`` / ``unsupported``); ``status`` is ``applied``,
+    ``failed`` (the tool produced an ``error`` row during apply), or ``recovery``
+    when only irreversible-removal recovery remains. ``hashes`` maps
     each file this tool wrote to a normalised content hash — kept per-tool so a
     scoped clear that drops a tool also drops exactly its drift baseline.
+    ``revoked_concerns`` records hook/permission removals that ``clear`` cannot
+    restore, so a later failed switch can direct the user to ``crossby sync``.
     """
 
     mechanisms: dict[str, str] = field(default_factory=dict)
     status: str = "applied"
     hashes: dict[str, str] = field(default_factory=dict)
+    revoked_concerns: tuple[str, ...] = ()
 
 
 @dataclass
@@ -186,7 +192,12 @@ def _to_json(state: SceneState) -> dict[str, Any]:
         "applied_at": state.applied_at,
         "status": state.status,
         "tools": {
-            tool: {"mechanisms": rec.mechanisms, "status": rec.status, "hashes": rec.hashes}
+            tool: {
+                "mechanisms": rec.mechanisms,
+                "status": rec.status,
+                "hashes": rec.hashes,
+                "revoked_concerns": list(rec.revoked_concerns),
+            }
             for tool, rec in state.tools.items()
         },
     }
@@ -204,6 +215,7 @@ def _parse_tools(raw: object) -> dict[str, SceneToolRecord]:
             mechanisms=_str_map(rec.get("mechanisms")),
             status=status if isinstance(status, str) else "applied",
             hashes=_str_map(rec.get("hashes")),
+            revoked_concerns=_revoked_concerns(rec.get("revoked_concerns")),
         )
     return out
 
@@ -212,6 +224,12 @@ def _str_map(raw: object) -> dict[str, str]:
     if not isinstance(raw, dict):
         return {}
     return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _revoked_concerns(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(sorted({item for item in raw if item in ("hooks", "permissions")}))
 
 
 def _ensure_gitignored(project_root: Path) -> None:

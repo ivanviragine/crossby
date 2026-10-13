@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
+import subprocess
+import time
+import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import structlog
 
 from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.plan_mode import (
+    PlanInteractionHandler,
+    PlanInteractionRequiredError,
+    terminal_interaction_handler,
+)
 from crossby.handoff.models import ConversationTranscript, SessionRef
 from crossby.handoff.readers import claude as claude_reader
 from crossby.models.ai import (
@@ -17,15 +28,40 @@ from crossby.models.ai import (
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessInteractionMode,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanCommandPolicySupport,
+    PlanInteraction,
+    PlanInteractionKind,
+    PlanInteractionSupport,
+    PlanLaunchApprovalMode,
+    PlanModeActivation,
+    PlanModeCapability,
+    PlanRequestBehavior,
+    PlanSessionBinding,
+    PlanSessionRequest,
+    PlanSessionResult,
+    PlanSessionTransport,
     TokenUsage,
 )
 
 if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 logger = structlog.get_logger()
+
+_CLAUDE_STREAM_EVENT_KINDS = frozenset({"system", "assistant", "result"})
 
 
 def _encode_claude_path(path: Path) -> str:
@@ -34,6 +70,40 @@ def _encode_claude_path(path: Path) -> str:
     Claude Code replaces ``/`` with ``-`` **and** ``.`` with ``-``.
     """
     return str(path).replace("/", "-").replace(".", "-")
+
+
+def _open_posix_directory(path: Path) -> int:
+    """Open an absolute directory without following any path component."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(path.anchor, flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    except OSError:
+        os.close(current_fd)
+        raise
+    return current_fd
+
+
+def _open_or_create_posix_directories(parent_fd: int, components: tuple[str, ...]) -> int:
+    """Create and open descendants relative to one anchored directory descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.dup(parent_fd)
+    try:
+        for component in components:
+            if component in {"", ".", ".."}:
+                raise OSError(f"unsafe plan-root path component: {component!r}")
+            with suppress(FileExistsError):
+                os.mkdir(component, dir_fd=current_fd)
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+    except OSError:
+        os.close(current_fd)
+        raise
+    return current_fd
 
 
 class ClaudeAdapter(AbstractAITool):
@@ -58,7 +128,60 @@ class ClaudeAdapter(AbstractAITool):
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
-            supports_plan_mode=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                native_outputs=(
+                    HeadlessNativeOutput.TEXT,
+                    HeadlessNativeOutput.JSON,
+                    HeadlessNativeOutput.JSONL,
+                ),
+                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                supports_response_schema=True,
+                # Claude owns approvals itself; ``--print`` has no writable-root
+                # selector, so a sandbox=False request cannot be preserved.
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.PRESERVED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                version_requirement=(
+                    "Claude Code exposing --print with --permission-prompts none, "
+                    "--output-format text|json|stream-json, and --json-schema."
+                ),
+                verified_version="2.1.263",
+                remediation=(
+                    "Upgrade Claude Code to 2.1.263 or newer; older builds have no "
+                    "--permission-prompts selector, so an unattended run could stall on a "
+                    "permission request nobody can answer."
+                ),
+            ),
+            plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(
+                    PlanLaunchApprovalMode.YOLO,
+                    PlanLaunchApprovalMode.AUTO,
+                ),
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Passes --permission-mode plan before the first user turn.",
+                version_requirement="Claude Code exposing --permission-mode plan.",
+                verified_version="2.1.263",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.REQUESTED_PATH,
+                artifact_location_detail=(
+                    "Claude defaults to ~/.claude/plans and supports a per-launch plansDirectory "
+                    "setting for a requested path inside the project."
+                ),
+                artifact_path_template="~/.claude/plans/<generated-name>.md",
+                transport=PlanSessionTransport.INTERACTIVE_CLI,
+                artifact_source=PlanArtifactSource.REQUESTED_PATH,
+                binding=PlanSessionBinding.ISOLATED_RUN_PATH,
+                interaction=PlanInteractionSupport.TERMINAL,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                command_policy_detail=(
+                    "Uses per-invocation --allowedTools while excluding user, project, and "
+                    "local settings sources so ambient allowlists cannot widen the request."
+                ),
+            ),
             supports_accept_edits=True,
             supports_auto=True,
             supports_stop_hook=True,
@@ -118,6 +241,638 @@ class ClaudeAdapter(AbstractAITool):
     def plan_mode_args(self) -> list[str]:
         """Claude supports --permission-mode plan."""
         return ["--permission-mode", "plan"]
+
+    def plan_approval_args(self, mode: PlanLaunchApprovalMode) -> list[str]:
+        if mode is PlanLaunchApprovalMode.YOLO:
+            # --dangerously-skip-permissions replaces Plan with bypassPermissions.
+            # In an interactive terminal, making bypass available preserves Plan
+            # while natively bypassing its tool permission checks.
+            return ["--allow-dangerously-skip-permissions"]
+        if mode is PlanLaunchApprovalMode.AUTO:
+            return ["--settings", '{"useAutoModeDuringPlan":true}']
+        return super().plan_approval_args(mode)
+
+    def plan_output_args(self, plan_output_dir: Path, *, working_dir: Path) -> list[str]:
+        """Select Claude's documented project-relative ``plansDirectory``."""
+        relative = plan_output_dir.resolve().relative_to(working_dir.resolve())
+        value = "." if relative == Path(".") else f"./{relative}"
+        settings = json.dumps({"plansDirectory": value}, separators=(",", ":"))
+        return ["--settings", settings]
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        """Reject schema requests Claude cannot answer with structured output."""
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        if (
+            request.response_schema is not None
+            and request.native_output is HeadlessNativeOutput.TEXT
+        ):
+            raise HeadlessUnsupportedError(
+                "Claude Code exposes schema-constrained structured_output only through its JSON "
+                "or streaming-JSON result envelope.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
+        """Return Claude's complete command, including any serialized schema."""
+        return self._headless_command(request)
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``claude --print`` invocation."""
+        native_formats = {
+            HeadlessNativeOutput.TEXT: "text",
+            HeadlessNativeOutput.JSON: "json",
+            HeadlessNativeOutput.JSONL: "stream-json",
+        }
+        command = [
+            "claude",
+            "--print",
+            "--output-format",
+            native_formats[request.native_output],
+            # Nobody is available to answer, so anything that would prompt is
+            # denied natively instead of waiting on a terminal that is not there.
+            "--permission-prompts",
+            "none",
+        ]
+        if request.native_output is HeadlessNativeOutput.JSONL:
+            # Verified on 2.1.263: --print rejects stream-json without --verbose.
+            command.append("--verbose")
+        if request.response_schema is not None:
+            command.extend(
+                ("--json-schema", json.dumps(request.response_schema, separators=(",", ":")))
+            )
+        if request.model:
+            command.extend(("--model", self.normalize_model_format(request.model)))
+        if request.effort is not None:
+            command.extend(self.effort_args(request.effort))
+        for path in request.trusted_dirs:
+            command.extend(("--add-dir", str(path)))
+        if request.command_policy is not None:
+            command.extend(
+                self.allowed_commands_args(list(request.command_policy.allowed_commands))
+            )
+            # Exclude ambient settings sources so no user, project, or local
+            # allowlist can widen the session-scoped command policy.
+            command.extend(("--setting-sources", ""))
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        """Run one unattended ``claude --print`` turn and normalize its result."""
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            parse_json_object,
+            recognized_frame_kind,
+            run_managed_command,
+            usage_from,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
+            on_stdout_lines=(
+                frame_streamer(
+                    context,
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="type", recognized=_CLAUDE_STREAM_EVENT_KINDS
+                    ),
+                    provenance_of=lambda frame: {
+                        "session_id": non_blank_text(frame.get("session_id"))
+                    },
+                )
+                if streaming
+                else None
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        if request.native_output is HeadlessNativeOutput.TEXT:
+            return complete_session(
+                context,
+                request,
+                status=(
+                    HeadlessTerminalStatus.SUCCEEDED
+                    if output.returncode == 0
+                    else HeadlessTerminalStatus.FAILED
+                ),
+                exit_code=output.returncode,
+                response_text=output.stdout.strip() or None,
+                warnings=warnings,
+            )
+
+        session_id: str | None = None
+        envelope: dict[str, Any] | None = None
+        if request.native_output is HeadlessNativeOutput.JSON:
+            envelope = parse_json_object(output.stdout)
+            if envelope is not None and envelope.get("type") != "result":
+                envelope = None
+        else:
+            frames = parse_json_lines(output.stdout)
+            if frames is None:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    warnings=(*warnings, "Claude Code emitted malformed streaming JSON."),
+                )
+            # Progress and provenance were already emitted live by the streamer.
+            result_count = 0
+            saw_result = False
+            for frame in frames:
+                observed_session_id = non_blank_text(frame.get("session_id"))
+                context.validate_provenance(session_id=observed_session_id)
+                session_id = session_id or observed_session_id
+                if saw_result:
+                    warning = (
+                        "Claude Code emitted multiple final result envelopes."
+                        if non_blank_text(frame.get("type")) == "result"
+                        else "Claude Code emitted a frame after its final result envelope."
+                    )
+                    return context.complete(
+                        HeadlessTerminalStatus.INVALID_OUTPUT,
+                        exit_code=output.returncode,
+                        session_id=session_id,
+                        warnings=(*warnings, warning),
+                    )
+                if non_blank_text(frame.get("type")) == "result":
+                    result_count += 1
+                    envelope = frame
+                    saw_result = True
+            if result_count > 1:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    session_id=session_id,
+                    warnings=(*warnings, "Claude Code emitted multiple final result envelopes."),
+                )
+        if envelope is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "Claude Code did not emit its final result envelope."),
+            )
+
+        session_id = session_id or non_blank_text(envelope.get("session_id"))
+        denials = envelope.get("permission_denials")
+        denials = denials if isinstance(denials, list) else []
+        # Native denial entries include untrusted tool names and proposed input;
+        # keep only their locally computed count in caller-visible diagnostics.
+        if denials:
+            context.add_denial(
+                f"Claude Code reported {len(denials)} permission denials under "
+                "--permission-prompts none"
+            )
+        response_text = non_blank_text(envelope.get("result"))
+        # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so
+        # ``is_error`` is the only authoritative native failure signal.
+        native_error = envelope.get("is_error")
+        if not isinstance(native_error, bool):
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(
+                    *warnings,
+                    "Claude Code omitted its authoritative boolean is_error marker.",
+                ),
+            )
+        if native_error:
+            warnings = (
+                *warnings,
+                "Claude Code reported a native error result.",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.FAILED
+                if native_error or output.returncode != 0
+                else HeadlessTerminalStatus.SUCCEEDED
+            ),
+            exit_code=output.returncode,
+            response_text=response_text,
+            native_object=envelope,
+            structured_output=envelope.get("structured_output", MISSING),
+            native_status=non_blank_text(envelope.get("terminal_reason"))
+            or non_blank_text(envelope.get("subtype")),
+            session_id=session_id,
+            usage=usage_from(
+                envelope.get("usage"),
+                input_tokens="input_tokens",
+                output_tokens="output_tokens",
+                cached="cache_read_input_tokens",
+                session_id=session_id,
+            ),
+            warnings=warnings,
+        )
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Collect exactly one plan from a unique Claude ``plansDirectory``."""
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactAmbiguousError,
+            PlanArtifactMalformedError,
+            PlanArtifactMissingError,
+            PlanBindingMismatchError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import read_text_bounded, run_interactive
+
+        deadline = time.monotonic() + request.timeout_seconds
+        capability = self.capabilities().plan_mode
+        working_dir = request.working_dir.resolve()
+        session_id = str(uuid.uuid4())
+
+        def remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "Claude Code plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            return remaining
+
+        if interaction_handler is not terminal_interaction_handler:
+            interaction = PlanInteraction(
+                kind=PlanInteractionKind.QUESTION,
+                question_id="terminal-interaction-consent",
+                prompt=(
+                    "Pass terminal_interaction_handler to allow Claude Code to use the attached "
+                    "terminal during plan collection."
+                ),
+                session_id=session_id,
+            )
+            raise PlanInteractionRequiredError(
+                "Claude Code collection requires explicit terminal interaction consent; pass "
+                "terminal_interaction_handler.",
+                interaction=interaction,
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        root = (
+            request.plan_output_dir
+            if request.plan_output_dir is not None
+            else working_dir / ".crossby" / "plan-sessions"
+        ).resolve()
+        if not root.is_relative_to(working_dir):
+            from crossby.ai_tools.plan_mode import PlanArtifactLocationError
+
+            raise PlanArtifactLocationError.for_tool(
+                tool_id=self.TOOL_ID,
+                display_name=self.capabilities().display_name,
+                capability=capability,
+                requested_dir=root,
+            )
+        root_fd: int | None = None
+        root_stat: os.stat_result | None = None
+        workspace_fd: int | None = None
+        try:
+            if os.name == "posix":
+                workspace_fd = _open_posix_directory(working_dir)
+                workspace_stat = os.fstat(workspace_fd)
+                if not os.path.samestat(workspace_stat, working_dir.lstat()):
+                    raise OSError("working directory was replaced while opening it")
+                relative_root = root.relative_to(working_dir)
+                root_fd = _open_or_create_posix_directories(workspace_fd, relative_root.parts)
+                root_stat = os.fstat(root_fd)
+                if not os.path.samestat(root_stat, root.lstat()):
+                    raise OSError("plan root was replaced while creating or opening it")
+            else:
+                root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            if root_fd is not None:
+                os.close(root_fd)
+            raise PlanTransportError(
+                f"Claude Code plan root could not be created or opened safely: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                paths=(root,),
+            ) from exc
+        finally:
+            if workspace_fd is not None:
+                os.close(workspace_fd)
+        run_dir = root / session_id
+        try:
+            if root_fd is not None:
+                os.mkdir(session_id, dir_fd=root_fd)
+            else:
+                run_dir.mkdir(parents=False, exist_ok=False)
+        except OSError as exc:
+            if root_fd is not None:
+                os.close(root_fd)
+            raise PlanTransportError(
+                f"Claude Code isolated plan directory could not be created: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(run_dir,),
+            ) from exc
+
+        succeeded = False
+        run_fd: int | None = None
+        try:
+            run_stat = (
+                os.stat(session_id, dir_fd=root_fd, follow_symlinks=False)
+                if root_fd is not None
+                else run_dir.lstat()
+            )
+            if not stat.S_ISDIR(run_stat.st_mode):
+                raise OSError("isolated plan directory was replaced before launch")
+            if os.name == "posix":
+                run_fd = os.open(
+                    session_id if root_fd is not None else run_dir,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=root_fd,
+                )
+                if not os.path.samestat(run_stat, os.fstat(run_fd)):
+                    raise OSError("isolated plan directory was replaced before launch")
+
+            def validate_run_directory() -> None:
+                try:
+                    current = run_dir.lstat()
+                    anchored = (
+                        os.stat(session_id, dir_fd=root_fd, follow_symlinks=False)
+                        if root_fd is not None
+                        else current
+                    )
+                    current_root = root.lstat() if root_stat is not None else None
+                except OSError:
+                    current = None
+                    anchored = None
+                    current_root = None
+                if (
+                    current is None
+                    or anchored is None
+                    or not stat.S_ISDIR(current.st_mode)
+                    or not os.path.samestat(run_stat, current)
+                    or not os.path.samestat(run_stat, anchored)
+                    or (
+                        root_stat is not None
+                        and (current_root is None or not os.path.samestat(root_stat, current_root))
+                    )
+                ):
+                    raise PlanBindingMismatchError(
+                        "Claude Code's plan root or isolated plan directory was replaced during "
+                        "collection.",
+                        tool_id=self.TOOL_ID,
+                        capability=capability,
+                        session_id=session_id,
+                        paths=(run_dir,),
+                    )
+
+            validate_run_directory()
+            command = self.build_launch_command(
+                model=request.model,
+                initial_message=request.prompt,
+                plan_mode=True,
+                allowed_commands=(
+                    list(request.command_policy.allowed_commands)
+                    if request.command_policy is not None
+                    else None
+                ),
+                trusted_dirs=[str(path) for path in request.trusted_dirs] or None,
+                effort=request.effort,
+                working_dir=working_dir,
+                plan_output_dir=run_dir,
+                sandbox=request.sandbox,
+                _skip_plan_version_check=True,
+            )
+            if request.command_policy is not None:
+                command.extend(("--setting-sources", ""))
+            try:
+                exit_code = run_interactive(
+                    command,
+                    cwd=working_dir,
+                    timeout=remaining_timeout(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlanTransportError(
+                    f"Claude Code planning process timed out after {exc.timeout} seconds.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                ) from None
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PlanTransportError(
+                    f"Claude Code planning process failed: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                ) from exc
+
+            if exit_code != 0:
+                raise PlanTransportError(
+                    f"Claude Code planning process exited with status {exit_code}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                )
+
+            remaining_timeout()
+            validate_run_directory()
+            remaining_timeout()
+            entries = (
+                [run_dir / name for name in os.listdir(run_fd)]
+                if run_fd is not None
+                else list(run_dir.iterdir())
+            )
+            entry_stats = {
+                path: os.stat(
+                    path.name if run_fd is not None else path,
+                    dir_fd=run_fd,
+                    follow_symlinks=False,
+                )
+                for path in entries
+            }
+            remaining_timeout()
+            symlinks = tuple(
+                path for path, info in entry_stats.items() if stat.S_ISLNK(info.st_mode)
+            )
+            if symlinks:
+                raise PlanArtifactMalformedError(
+                    "Claude Code produced a symlink in the isolated plan directory; refusing it.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=symlinks,
+                )
+            candidates = [
+                path
+                for path, info in entry_stats.items()
+                if stat.S_ISREG(info.st_mode) and path.suffix == ".md"
+            ]
+            if not candidates:
+                raise PlanArtifactMissingError(
+                    "Claude Code exited successfully without a Markdown plan in its isolated "
+                    "plansDirectory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(run_dir,),
+                )
+            if len(candidates) != 1 or len(entries) != 1:
+                raise PlanArtifactAmbiguousError(
+                    "Claude Code produced multiple or unexpected artifacts in the isolated plan "
+                    "directory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=tuple(entries),
+                )
+            artifact = candidates[0]
+            try:
+                plan = read_text_bounded(
+                    Path(artifact.name) if run_fd is not None else artifact,
+                    dir_fd=run_fd,
+                    expected_stat=entry_stats[artifact],
+                )
+            except (OSError, UnicodeError) as exc:
+                raise PlanArtifactMalformedError(
+                    f"Claude Code plan artifact violated the bounded UTF-8 contract: {exc}",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(artifact,),
+                ) from exc
+            remaining_timeout()
+            validate_run_directory()
+            remaining_timeout()
+            if not plan.strip():
+                raise PlanArtifactMalformedError(
+                    "Claude Code produced a blank plan artifact.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exit_code,
+                    session_id=session_id,
+                    paths=(artifact,),
+                )
+            result = PlanSessionResult(
+                tool=self.TOOL_ID,
+                version=version,
+                plan=plan,
+                session_id=session_id,
+                native_mode="--permission-mode plan",
+                artifact_source=PlanArtifactSource.REQUESTED_PATH,
+                binding=PlanSessionBinding.ISOLATED_RUN_PATH,
+                exit_code=exit_code,
+                artifact_id=artifact.name,
+                artifact_path=artifact,
+            )
+            succeeded = True
+            return result
+        except (OSError, ValueError) as exc:
+            raise PlanTransportError(
+                f"Claude Code plan session failed after creating its isolated directory: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                paths=(run_dir,),
+            ) from exc
+        finally:
+            if run_fd is not None:
+                os.close(run_fd)
+            if not succeeded:
+                # Retain failed/partial artifacts for inspection. Removing only
+                # an empty directory cannot destroy a replacement run's files.
+                with suppress(OSError):
+                    if root_fd is not None:
+                        os.rmdir(session_id, dir_fd=root_fd)
+                    else:
+                        run_dir.rmdir()
+            if root_fd is not None:
+                os.close(root_fd)
+
+    def _finalize_launch_command(self, cmd: list[str]) -> list[str]:
+        """Collapse Crossby's Claude settings fragments into one settings source.
+
+        Claude treats repeated ``--settings`` options as replacement, not a
+        merge. Plan-output routing is emitted before scene arguments, so keep
+        earlier keys authoritative while folding a generated scene settings
+        file (for example ``skillOverrides``) into the same inline JSON value.
+        """
+        settings_flag = self.capabilities().scene_settings_flag or "--settings"
+        settings_pairs = [
+            (index, cmd[index + 1])
+            for index, token in enumerate(cmd[:-1])
+            if token == settings_flag
+            and (cmd[index + 1].lstrip().startswith("{") or Path(cmd[index + 1]).is_file())
+        ]
+        if len(settings_pairs) < 2:
+            return cmd
+
+        sources: list[dict[str, Any]] = []
+        try:
+            for _, value in settings_pairs:
+                raw = value if value.lstrip().startswith("{") else Path(value).read_text()
+                parsed = json.loads(raw)
+                if not isinstance(parsed, dict):
+                    raise TypeError("Claude settings must be a JSON object")
+                sources.append(parsed)
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            from crossby.ai_tools.plan_mode import PlanModeAdapterContractError
+
+            raise PlanModeAdapterContractError(
+                f"Claude Code could not combine plan and scene settings: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            ) from exc
+
+        merged: dict[str, Any] = {}
+        for source in sources:
+            for key, value in source.items():
+                merged.setdefault(key, value)
+
+        combined = json.dumps(merged, separators=(",", ":"), sort_keys=True)
+        result: list[str] = []
+        emitted = False
+        settings_indexes = {index for index, _ in settings_pairs}
+        index = 0
+        while index < len(cmd):
+            if index in settings_indexes:
+                if not emitted:
+                    result.extend((settings_flag, combined))
+                    emitted = True
+                index += 2
+                continue
+            result.append(cmd[index])
+            index += 1
+        return result
 
     def plan_dir_args(self, plan_dir: str) -> list[str]:
         """Claude uses --add-dir for plan directory access."""

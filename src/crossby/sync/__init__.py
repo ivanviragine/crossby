@@ -207,11 +207,14 @@ def run_sync(
     # Ownership ledger — revocation is computed *here*, never inferred by a
     # writer. For each hooks/permissions/MCP writer we diff what crossby wrote
     # last time (the ledger) against the current sync data and hand the writer an
-    # explicit, provenance-bounded removal set. A missing/malformed ledger loads
-    # empty, so this degrades to purely additive behaviour.
-    from crossby.sync.ownership import LEDGER_PATH, load_ledger, save_ledger
+    # explicit, provenance-bounded removal set. A missing ledger degrades to
+    # purely additive behaviour. A corrupt ledger still permits the individual
+    # writers to run, but is never rewritten: its scene provenance could be the
+    # only record of a recoverable activation.
+    from crossby.sync.ownership import LEDGER_PATH, load_ledger_checked, save_ledger
 
-    ledger = load_ledger(project_root)
+    loaded_ledger = load_ledger_checked(project_root)
+    ledger = loaded_ledger.ledger
     current_hooks = {(h.event, h.command) for h in data.hooks}
     current_perms = set(data.allowed_commands)
     disabled_mcp = {name for name, s in data.mcp_servers.items() if not s.enabled}
@@ -220,6 +223,7 @@ def run_sync(
     pending_hooks: dict[AIToolID, set[tuple[str, str]]] = {}
     pending_perms: dict[AIToolID, set[str]] = {}
     pending_mcp: dict[AIToolID, set[str]] = {}
+    ownership_concerns = frozenset((SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP))
 
     results: list[SyncResult] = []
     agents_writers_ran = False
@@ -265,6 +269,24 @@ def run_sync(
         hooks_owned: frozenset[tuple[str, str]] = frozenset()
         perms_owned: frozenset[str] = frozenset()
         mcp_owned: frozenset[str] = frozenset()
+        if loaded_ledger.corrupt and writer.concern in ownership_concerns:
+            # These writers can both add and revoke target entries, but each
+            # successful mutation must be paired with a durable ownership update
+            # so a later sync can revoke only what Crossby created. A corrupt
+            # scene section makes that persistence unsafe; refuse before invoking
+            # the writer rather than leave untracked target mutations behind.
+            results.append(
+                SyncResult(
+                    tool_id=writer.tool_id,
+                    concern=writer.concern,
+                    action="error",
+                    message=(
+                        f"{LEDGER_PATH.as_posix()} has corrupt scene provenance; "
+                        "refusing to sync because ownership cannot be persisted"
+                    ),
+                )
+            )
+            continue
         if writer.concern == SyncConcern.HOOKS:
             hooks_owned = ledger.hooks(writer.tool_id)
             writer_data = replace(
@@ -377,8 +399,7 @@ def run_sync(
         # The ledger is advisory: a persistence failure (read-only dir, no
         # permission, full disk) must not discard the SyncResults for writes
         # that already succeeded, so mirror run_sync's per-writer isolation
-        # here. load_ledger already degrades to "own nothing" on a missing or
-        # malformed file, so a dropped save simply retries next run.
+        # here. A dropped save simply retries next run.
         try:
             save_ledger(project_root, ledger)
             # Ensure the ledger is gitignored whenever the file exists on disk —
@@ -402,10 +423,7 @@ def run_sync(
             # A symlinked ``.crossby/owned.json`` or ``.gitignore`` on the
             # post-writer path: surface as an ``error`` row (the writes already
             # succeeded) rather than escaping run_sync. Attribute the failure to
-            # the concern(s) whose ownership actually failed to persist — a
-            # hooks-only or permissions-only sync must not mis-report a ledger
-            # containment failure under MCP (the ledger holds all three, but only
-            # the concerns with pending ownership were being recorded this run).
+            # concern(s) whose ownership actually failed to persist.
             logger.warning("ownership.persist_refused", path=str(project_root), error=str(exc))
             for affected_concern, pending in (
                 (SyncConcern.HOOKS, pending_hooks),

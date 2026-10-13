@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import math
 from enum import StrEnum
 from pathlib import Path
+from typing import Any, Self, cast
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_HEADLESS_EVENT_LIMIT = 4096
+_HEADLESS_EVENT_MESSAGE_LIMIT = 64 * 1024
+_HEADLESS_EVENT_PAYLOAD_LIMIT = 256 * 1024
+_HEADLESS_FINAL_PAYLOAD_LIMIT = 8 * 1024 * 1024
+_HEADLESS_DIAGNOSTIC_LIMIT = 16 * 1024
 
 
 class EffortLevel(StrEnum):
@@ -36,6 +45,238 @@ class AIToolType(StrEnum):
 
     TERMINAL = "terminal"
     GUI = "gui"
+
+
+class PlanModeActivation(StrEnum):
+    """How an adapter activates a harness's native planning mode."""
+
+    CLI_ARGUMENT = "cli_argument"
+    TERMINAL_INPUT = "terminal_input"
+    CODEX_APP_SERVER = "codex_app_server"
+    OPENCODE_SERVER = "opencode_server"
+    ACP = "acp"
+    UNSUPPORTED = "unsupported"
+
+
+class PlanLaunchApprovalMode(StrEnum):
+    """Approval options that can coexist with native interactive planning."""
+
+    YOLO = "yolo"
+    AUTO = "auto"
+    ACCEPT_EDITS = "accept_edits"
+
+
+class InteractiveLaunchEventKind(StrEnum):
+    """Startup milestones, independent of a tool's terminal rendering."""
+
+    PLAN_READY = "plan_ready"
+    MESSAGE_SUBMITTED = "message_submitted"
+
+
+class InteractiveLaunchEvent(BaseModel):
+    """An observed startup milestone; not a model turn or plan artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: InteractiveLaunchEventKind
+    tool_id: AIToolID
+
+
+class PlanArtifactLocation(StrEnum):
+    """Where a harness can persist artifacts created by native plan mode."""
+
+    REQUESTED_PATH = "requested_path"
+    WORKSPACE_MANAGED = "workspace_managed"
+    PRIVATE = "private"
+    SESSION = "session"
+    UNAVAILABLE = "unavailable"
+
+
+class PlanArtifactSource(StrEnum):
+    """Authoritative source from which Crossby collected a native plan."""
+
+    REQUESTED_PATH = "requested_path"
+    STRUCTURED_OUTPUT = "structured_output"
+    SESSION_EXPORT = "session_export"
+    PROTOCOL_EVENT = "protocol_event"
+
+
+class PlanSessionBinding(StrEnum):
+    """Evidence that binds an artifact to the run Crossby launched."""
+
+    ISOLATED_RUN_PATH = "isolated_run_path"
+    SESSION_ID = "session_id"
+    CONVERSATION_ID = "conversation_id"
+    THREAD_TURN_IDS = "thread_turn_ids"
+
+
+class PlanSessionTransport(StrEnum):
+    """Transport used for a complete, collected planning session."""
+
+    INTERACTIVE_CLI = "interactive_cli"
+    HEADLESS_CLI = "headless_cli"
+    OPENCODE_SERVER = "opencode_server"
+    CODEX_APP_SERVER = "codex_app_server"
+    ACP = "acp"
+    UNAVAILABLE = "unavailable"
+
+
+class PlanInteractionSupport(StrEnum):
+    """How native planning questions are surfaced to a caller."""
+
+    TERMINAL = "terminal"
+    CALLBACK = "callback"
+    RESUMABLE_CALLBACK = "resumable_callback"
+    NONE = "none"
+
+
+class PlanRequestBehavior(StrEnum):
+    """How a collector treats a sandbox or approval request dimension."""
+
+    PRESERVED = "preserved"
+    TOOL_MANAGED = "tool_managed"
+    UNSUPPORTED = "unsupported"
+
+
+class PlanCommandPolicySupport(StrEnum):
+    """How a collector preserves session-scoped command preauthorization."""
+
+    NATIVE = "native"
+    CALLBACK = "callback"
+    UNSUPPORTED = "unsupported"
+
+
+class PlanApprovalPolicy(StrEnum):
+    """Portable approval posture for collected planning sessions."""
+
+    ON_REQUEST = "on-request"
+    UNTRUSTED = "untrusted"
+    NEVER = "never"
+
+
+class PlanInteractionKind(StrEnum):
+    """Kind of native elicitation surfaced during a plan session."""
+
+    QUESTION = "question"
+    PERMISSION = "permission"
+    PLAN_APPROVAL = "plan_approval"
+
+
+class PlanInteractionOutcome(StrEnum):
+    """Caller-selected outcome for a native elicitation."""
+
+    ANSWERED = "answered"
+    APPROVED = "approved"
+    DENIED = "denied"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+
+
+class PlanOperationKind(StrEnum):
+    """Authoritative native operation category, when a provider supplies one."""
+
+    COMMAND = "command"
+    FILE_CHANGE = "file_change"
+    NETWORK = "network"
+    MCP = "mcp"
+    WRITE_STDIN = "write_stdin"
+    OTHER = "other"
+
+
+class PlanPermissionTargetKind(StrEnum):
+    """Kind of resource covered by a native permission request."""
+
+    COMMAND_PATTERN = "command_pattern"
+    FILESYSTEM_READ = "filesystem_read"
+    FILESYSTEM_WRITE = "filesystem_write"
+    FILESYSTEM_DENY = "filesystem_deny"
+    NETWORK_HOST = "network_host"
+    RESOURCE = "resource"
+
+
+class HeadlessInteractionMode(StrEnum):
+    """How an ordinary managed session resolves native elicitation."""
+
+    UNATTENDED = "unattended"
+    BROKERED = "brokered"
+
+
+class HeadlessNativeTransport(StrEnum):
+    """Native transport owned by an adapter's managed-session hook."""
+
+    SUBPROCESS = "subprocess"
+    HEADLESS_CLI = "headless_cli"
+    JSON_RPC = "json_rpc"
+    SERVER = "server"
+    HTTP_SERVER = "http_server"
+    APP_SERVER = "app_server"
+    ACP = "acp"
+    SDK = "sdk"
+    UNAVAILABLE = "unavailable"
+
+
+class HeadlessNativeOutput(StrEnum):
+    """Native output stream selected independently from response validation."""
+
+    TEXT = "text"
+    JSON = "json"
+    JSONL = "jsonl"
+
+
+class HeadlessPromptTransport(StrEnum):
+    """How a prompt is delivered without transferring process ownership."""
+
+    STDIN = "stdin"
+    PROTOCOL = "protocol"
+    API = "api"
+    ARGUMENT = "argument"
+
+
+class HeadlessEventKind(StrEnum):
+    """Small normalized event vocabulary exposed to session consumers."""
+
+    STARTED = "started"
+    PROGRESS = "progress"
+    OUTPUT = "output"
+    ASSISTANT_MESSAGE = "assistant_message"
+    TOOL_STARTED = "tool_started"
+    TOOL_COMPLETED = "tool_completed"
+    USAGE = "usage"
+    CLARIFICATION = "clarification"
+    PERMISSION = "permission"
+    INTERACTION = "interaction"
+    WARNING = "warning"
+    ERROR = "error"
+    TERMINAL = "terminal"
+
+
+class HeadlessTerminalStatus(StrEnum):
+    """Normalized terminal outcomes for managed headless sessions."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    INVALID_OUTPUT = "invalid_output"
+
+
+class HeadlessPreflightCheck(StrEnum):
+    """Request facts established before a managed transport starts."""
+
+    SESSION_CAPABILITY = "session_capability"
+    REQUEST_COMPATIBILITY = "request_compatibility"
+    RESPONSE_SCHEMA = "response_schema"
+    CLI_VERSION = "cli_version"
+
+
+class HeadlessPreflightDeferredCheck(StrEnum):
+    """Facts that must be repeated or established by the live transport."""
+
+    FILESYSTEM = "filesystem"
+    AUTHENTICATION = "authentication"
+    MODEL_AVAILABILITY = "model_availability"
+    TRANSPORT_STARTUP = "transport_startup"
+    PROTOCOL_NEGOTIATION = "protocol_negotiation"
+    OUTPUT_COLLECTION = "output_collection"
 
 
 class ModelTier(StrEnum):
@@ -144,8 +385,903 @@ class AIModel(BaseModel, frozen=True):
         return self.id
 
 
-class AIToolCapabilities(BaseModel, frozen=True):
+class SessionQuestionOption(BaseModel):
+    """One native option presented by a managed session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    option_id: str
+    label: str
+    description: str | None = None
+
+    @field_validator("option_id", "label")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("plan question options must have non-blank identifiers and labels")
+        return value
+
+
+class SessionPermissionTarget(BaseModel):
+    """One authoritative resource named by a native permission request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: PlanPermissionTargetKind
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def _value_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("permission targets must be non-blank")
+        return value
+
+
+class SessionNativeBindingID(BaseModel):
+    """One provider-defined identifier binding operation evidence to a session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    value: str
+
+    @field_validator("name", "value")
+    @classmethod
+    def _binding_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("native binding names and values must be non-blank")
+        return value
+
+
+class SessionOperation(BaseModel):
+    """Structured native evidence for an operation awaiting permission.
+
+    ``argv`` and ``shell_expression`` are deliberately distinct. Providers that
+    only supply display prose leave both unset; callers must never reconstruct
+    executable input from :attr:`PlanInteraction.prompt`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: PlanOperationKind
+    argv: tuple[str, ...] | None = None
+    shell_expression: str | None = None
+    execution_dir: Path | None = None
+    permission_targets: tuple[SessionPermissionTarget, ...] = ()
+    native_binding_ids: tuple[SessionNativeBindingID, ...] = ()
+
+    @model_validator(mode="after")
+    def _command_representation_is_unambiguous(self) -> Self:
+        if self.argv is not None and self.shell_expression is not None:
+            raise ValueError("an operation cannot contain both argv and a shell expression")
+        if self.argv is not None and (not self.argv or not self.argv[0].strip()):
+            raise ValueError("authoritative argv requires a non-blank executable")
+        if self.shell_expression is not None and not self.shell_expression.strip():
+            raise ValueError("authoritative shell expressions must be non-blank")
+        return self
+
+
+class SessionInteraction(BaseModel):
+    """A session-bound native question or approval request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: PlanInteractionKind
+    question_id: str
+    prompt: str
+    options: tuple[SessionQuestionOption, ...] = ()
+    allow_multiple: bool = False
+    allow_other: bool = False
+    session_id: str
+    thread_id: str | None = None
+    turn_id: str | None = None
+    conversation_id: str | None = None
+    artifact_id: str | None = None
+    request_id: str | None = None
+    form_schema: dict[str, Any] | None = None
+    url: str | None = None
+    operation: SessionOperation | None = None
+
+    @field_validator("question_id", "prompt", "session_id")
+    @classmethod
+    def _required_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("plan interactions require non-blank identifiers and prompt text")
+        return value
+
+    @field_validator("request_id", "url")
+    @classmethod
+    def _optional_text(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or len(value.encode("utf-8")) > 4096):
+            raise ValueError("interaction metadata must be non-blank and bounded")
+        return value
+
+    @field_validator("form_schema")
+    @classmethod
+    def _bounded_form_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("form schema must be finite JSON") from exc
+        if len(encoded) > _HEADLESS_EVENT_PAYLOAD_LIMIT:
+            raise ValueError("form schema exceeded the fixed size limit")
+        return cast(dict[str, Any], json.loads(encoded))
+
+
+class SessionInteractionResponse(BaseModel):
+    """A caller's explicit response to one native interaction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: PlanInteractionOutcome
+    answer: str | None = None
+    option_id: str | None = None
+    option_ids: tuple[str, ...] = ()
+    content: Any | None = None
+
+    @field_validator("option_ids")
+    @classmethod
+    def _option_ids_are_not_blank(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not option_id.strip() for option_id in value):
+            raise ValueError("native option IDs must be non-blank")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def _bounded_content(cls, value: Any | None) -> Any | None:
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("structured response content must be finite JSON") from exc
+        if len(encoded) > _HEADLESS_EVENT_PAYLOAD_LIMIT:
+            raise ValueError("structured response content exceeded the fixed size limit")
+        return json.loads(encoded)
+
+    @model_validator(mode="after")
+    def _answer_matches_outcome(self) -> Self:
+        if self.outcome is PlanInteractionOutcome.ANSWERED and not (
+            (self.answer and self.answer.strip())
+            or (self.option_id and self.option_id.strip())
+            or self.option_ids
+            or self.content is not None
+        ):
+            raise ValueError("an answered interaction requires answer text or a native option ID")
+        if self.content is not None and self.outcome is not PlanInteractionOutcome.ANSWERED:
+            raise ValueError("structured content requires an answered interaction")
+        return self
+
+
+# Plan-prefixed names remain source-compatible aliases for collected plans.
+PlanQuestionOption = SessionQuestionOption
+SessionOption = SessionQuestionOption
+PlanPermissionTarget = SessionPermissionTarget
+SessionTarget = SessionPermissionTarget
+PlanNativeBindingID = SessionNativeBindingID
+SessionBinding = SessionNativeBindingID
+PlanOperation = SessionOperation
+PlanInteraction = SessionInteraction
+PlanInteractionResponse = SessionInteractionResponse
+SessionInteractionKind = PlanInteractionKind
+SessionInteractionOutcome = PlanInteractionOutcome
+SessionOperationKind = PlanOperationKind
+SessionPermissionTargetKind = PlanPermissionTargetKind
+
+
+class HeadlessSessionRequest(BaseModel):
+    """Portable inputs for one complete, managed ordinary agent session.
+
+    ``native_output`` selects the adapter's wire/output dialect.  It does not
+    imply structured response validation; ``response_schema`` is an independent
+    caller requirement and may be supported over any declared native output.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    prompt: str
+    working_dir: Path
+    model: str | None = None
+    effort: EffortLevel | None = None
+    trusted_dirs: tuple[Path, ...] = ()
+    sandbox: bool = True
+    network_access: bool = False
+    approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.ON_REQUEST
+    command_policy: PlanCommandPolicy | None = None
+    interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED
+    native_output: HeadlessNativeOutput = Field(
+        default=HeadlessNativeOutput.TEXT,
+        validation_alias=AliasChoices(
+            "native_output",
+            "native_output_mode",
+            "output_mode",
+            "output",
+        ),
+    )
+    response_schema: dict[str, Any] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("response_schema", "json_schema"),
+    )
+    resume_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("resume_id", "resume_session_id"),
+    )
+    timeout_seconds: float = 600.0
+    idle_timeout_seconds: float | None = None
+    interaction_timeout_seconds: float = 60.0
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a headless session requires a non-blank prompt")
+        return value
+
+    @field_validator("model", "resume_id")
+    @classmethod
+    def _optional_text_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provided headless-session identifiers must be non-blank")
+        return value
+
+    @field_validator("timeout_seconds", "interaction_timeout_seconds")
+    @classmethod
+    def _required_timeout_is_positive_and_finite(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("headless-session timeouts must be positive and finite")
+        return value
+
+    @field_validator("idle_timeout_seconds")
+    @classmethod
+    def _optional_timeout_is_positive_and_finite(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise ValueError("headless-session idle timeout must be positive and finite")
+        return value
+
+    @property
+    def native_output_mode(self) -> HeadlessNativeOutput:
+        """Compatibility spelling for callers that include ``mode``."""
+        return self.native_output
+
+    @property
+    def output_mode(self) -> HeadlessNativeOutput:
+        """Concise compatibility spelling for ``native_output``."""
+        return self.native_output
+
+    @property
+    def json_schema(self) -> dict[str, Any] | None:
+        return self.response_schema
+
+    @property
+    def resume_session_id(self) -> str | None:
+        return self.resume_id
+
+
+class HeadlessEvent(BaseModel):
+    """One bounded, normalized event emitted in deterministic sequence order."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    kind: HeadlessEventKind
+    message: str | None = None
+    payload: dict[str, Any] | None = None
+    terminal_status: HeadlessTerminalStatus | None = None
+    elapsed_seconds: float = Field(default=0.0, ge=0)
+    session_id: str | None = None
+    thread_id: str | None = None
+    turn_id: str | None = None
+    conversation_id: str | None = None
+
+    @field_validator("message", "session_id", "thread_id", "turn_id", "conversation_id")
+    @classmethod
+    def _provided_text_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provided headless-event text must be non-blank")
+        if value is not None and len(value.encode("utf-8")) > _HEADLESS_EVENT_MESSAGE_LIMIT:
+            raise ValueError("headless event text exceeded the fixed size limit")
+        return value
+
+    @field_validator("elapsed_seconds")
+    @classmethod
+    def _elapsed_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("headless event elapsed time must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def _terminal_status_matches_kind(self) -> Self:
+        if (self.kind is HeadlessEventKind.TERMINAL) != (self.terminal_status is not None):
+            raise ValueError("only terminal events carry terminal_status")
+        if self.payload is not None:
+            try:
+                encoded = json.dumps(self.payload, allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("headless event payloads must be finite JSON objects") from exc
+            if len(encoded) > _HEADLESS_EVENT_PAYLOAD_LIMIT:
+                raise ValueError("headless event payload exceeded the fixed size limit")
+        return self
+
+
+class PlanSessionRequest(BaseModel):
+    """Portable inputs for one complete native planning lifecycle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt: str
+    working_dir: Path
+    model: str | None = None
+    effort: EffortLevel | None = None
+    trusted_dirs: tuple[Path, ...] = ()
+    plan_output_dir: Path | None = None
+    sandbox: bool = True
+    network_access: bool = False
+    approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.ON_REQUEST
+    command_policy: PlanCommandPolicy | None = None
+    timeout_seconds: float = Field(default=600.0, gt=0, le=3600.0)
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a collected plan session requires a non-blank prompt")
+        return value
+
+
+class PlanCommandPolicy(BaseModel):
+    """Canonical commands preauthorized for one collected planning session.
+
+    Patterns use Crossby's existing command grammar. This contract accepts
+    exact commands and a single trailing ``:*`` or `` *`` wildcard. Compound
+    shell syntax and other wildcard placements are rejected because they do not
+    have portable, safe semantics across the supported collectors.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_commands: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("allowed_commands")
+    @classmethod
+    def _commands_are_portable(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        from crossby.ai_tools.plan_policy import validate_plan_command_pattern
+
+        if len(set(value)) != len(value):
+            raise ValueError("command policy patterns must be unique")
+        for pattern in value:
+            validate_plan_command_pattern(pattern)
+        return value
+
+
+SessionApprovalPolicy = PlanApprovalPolicy
+SessionCommandPolicy = PlanCommandPolicy
+SessionCommandPolicySupport = PlanCommandPolicySupport
+
+
+class PlanPreflightCheck(StrEnum):
+    """Statically validated part of a collected-session request."""
+
+    SESSION_CAPABILITY = "session_capability"
+    REQUEST_COMPATIBILITY = "request_compatibility"
+    COMMAND_POLICY = "command_policy"
+    CLI_VERSION = "cli_version"
+
+
+class PlanPreflightDeferredCheck(StrEnum):
+    """Runtime fact that successful static preflight does not promise."""
+
+    FILESYSTEM = "filesystem"
+    AUTHENTICATION = "authentication"
+    MODEL_AVAILABILITY = "model_availability"
+    PROTOCOL_NEGOTIATION = "protocol_negotiation"
+    ARTIFACT_COLLECTION = "artifact_collection"
+
+
+class PlanSessionPreflight(BaseModel, frozen=True):
+    """Evidence returned after bounded, non-mutating session preflight."""
+
+    tool: AIToolID
+    detected_version: str
+    normalized_version: tuple[int, int, int]
+    capability: PlanModeCapability
+    checked: tuple[PlanPreflightCheck, ...]
+    deferred: tuple[PlanPreflightDeferredCheck, ...]
+
+
+class PlanSessionResult(BaseModel, frozen=True):
+    """Normalized Markdown plan plus exact native provenance."""
+
+    tool: AIToolID
+    version: str
+    plan: str
+    session_id: str
+    native_mode: str
+    artifact_source: PlanArtifactSource
+    binding: PlanSessionBinding
+    exit_code: int
+    thread_id: str | None = None
+    turn_id: str | None = None
+    artifact_id: str | None = None
+    artifact_path: Path | None = None
+
+    @field_validator("version", "plan", "session_id", "native_mode")
+    @classmethod
+    def _non_blank_result_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("successful plan-session text and provenance must be non-blank")
+        return value
+
+    @field_validator("thread_id", "turn_id", "artifact_id")
+    @classmethod
+    def _optional_provenance_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provided plan-session provenance IDs must be non-blank")
+        return value
+
+    @model_validator(mode="after")
+    def _provenance_is_consistent(self) -> Self:
+        if self.exit_code != 0:
+            raise ValueError("a successful plan-session result requires exit_code=0")
+        if self.binding is PlanSessionBinding.THREAD_TURN_IDS and not (
+            self.thread_id and self.turn_id
+        ):
+            raise ValueError("thread/turn binding requires both thread_id and turn_id")
+        if self.binding is PlanSessionBinding.ISOLATED_RUN_PATH and self.artifact_path is None:
+            raise ValueError("isolated-path binding requires artifact_path")
+        if self.artifact_source is PlanArtifactSource.REQUESTED_PATH and self.artifact_path is None:
+            raise ValueError("requested-path artifact provenance requires artifact_path")
+        if self.artifact_source is PlanArtifactSource.PROTOCOL_EVENT and self.artifact_id is None:
+            raise ValueError("protocol-event provenance requires artifact_id")
+        expected_bindings = {
+            PlanArtifactSource.REQUESTED_PATH: {PlanSessionBinding.ISOLATED_RUN_PATH},
+            PlanArtifactSource.STRUCTURED_OUTPUT: {PlanSessionBinding.CONVERSATION_ID},
+            PlanArtifactSource.SESSION_EXPORT: {PlanSessionBinding.SESSION_ID},
+            PlanArtifactSource.PROTOCOL_EVENT: {
+                PlanSessionBinding.SESSION_ID,
+                PlanSessionBinding.THREAD_TURN_IDS,
+            },
+        }
+        if self.binding not in expected_bindings[self.artifact_source]:
+            raise ValueError(
+                f"{self.artifact_source.value} is inconsistent with {self.binding.value} binding"
+            )
+        return self
+
+
+class PlanModeCapability(BaseModel, frozen=True):
+    """Truthful contract for activation and complete plan collection.
+
+    ``version_requirement`` deliberately accepts a human-readable selector
+    requirement instead of pretending every upstream publishes a reliable
+    numeric introduction version. ``verified_version`` records the oldest
+    concrete CLI build Crossby verified and is the conservative runtime floor.
+    ``collector_verified_version`` overrides that floor for a separate collector
+    transport when its verified version differs from interactive startup.
+    Activation-only launches remain available through :attr:`supported`; a
+    complete collected session additionally requires ``artifact_source`` and an
+    exact ``binding``.
+    """
+
+    activation: PlanModeActivation
+    activation_detail: str
+    version_requirement: str
+    verified_version: str | None = None
+    collector_verified_version: str | None = None
+    initial_prompt_after_activation: bool
+    artifact_location: PlanArtifactLocation
+    artifact_location_detail: str
+    artifact_path_template: str | None = None
+    export_command: tuple[str, ...] | None = None
+    import_command: tuple[str, ...] | None = None
+    remediation: str | None = None
+    supported_launch_approval_modes: tuple[PlanLaunchApprovalMode, ...] = ()
+    supports_ready_event: bool = False
+    collector_activation: PlanModeActivation | None = None
+    transport: PlanSessionTransport = PlanSessionTransport.UNAVAILABLE
+    artifact_source: PlanArtifactSource | None = None
+    binding: PlanSessionBinding | None = None
+    interaction: PlanInteractionSupport = PlanInteractionSupport.NONE
+    sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
+    approval_behavior: PlanRequestBehavior = PlanRequestBehavior.UNSUPPORTED
+    supported_approval_policies: tuple[PlanApprovalPolicy, ...] = (PlanApprovalPolicy.ON_REQUEST,)
+    command_policy_support: PlanCommandPolicySupport = PlanCommandPolicySupport.UNSUPPORTED
+    command_policy_detail: str = (
+        "No verified session-scoped command preauthorization mechanism is declared."
+    )
+
+    @property
+    def activation_supported(self) -> bool:
+        """Whether Crossby can select native mode before the first turn."""
+        return self.activation is not PlanModeActivation.UNSUPPORTED
+
+    @property
+    def supported(self) -> bool:
+        """Compatibility alias for activation-only native plan support."""
+        return self.activation_supported
+
+    @property
+    def session_activation(self) -> PlanModeActivation:
+        """Activation used by collection, which may differ from ``launch``."""
+        return self.collector_activation or self.activation
+
+    @property
+    def session_supported(self) -> bool:
+        """Whether Crossby can return an artifact bound to the launched run."""
+        return (
+            self.session_activation is not PlanModeActivation.UNSUPPORTED
+            and self.transport is not PlanSessionTransport.UNAVAILABLE
+            and self.artifact_source is not None
+            and self.binding is not None
+        )
+
+
+_UNSUPPORTED_PLAN_MODE = PlanModeCapability(
+    activation=PlanModeActivation.UNSUPPORTED,
+    activation_detail="No native plan-mode activation strategy is declared.",
+    version_requirement="No supported version is declared.",
+    initial_prompt_after_activation=False,
+    artifact_location=PlanArtifactLocation.UNAVAILABLE,
+    artifact_location_detail="Native plan artifacts are unavailable.",
+    remediation="Use an adapter that declares native plan-mode support.",
+)
+
+
+class HeadlessModeCapability(BaseModel):
+    """Verified transport and policy profile for one managed interaction mode."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    transport: HeadlessNativeTransport
+    prompt_transport: HeadlessPromptTransport
+    native_outputs: tuple[HeadlessNativeOutput, ...]
+    supports_response_schema: bool = False
+    supports_resume: bool = False
+    supports_native_abort: bool = False
+    terminal_event_required: bool = False
+    terminal_event_authoritative: bool = False
+    successful_native_statuses: tuple[str, ...] = ()
+    sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.PRESERVED
+    approval_behavior: PlanRequestBehavior = PlanRequestBehavior.PRESERVED
+    supported_approval_policies: tuple[PlanApprovalPolicy, ...] = (PlanApprovalPolicy.ON_REQUEST,)
+    command_policy_support: PlanCommandPolicySupport = PlanCommandPolicySupport.UNSUPPORTED
+    supported_interaction_kinds: tuple[PlanInteractionKind, ...] = ()
+    version_requirement: str
+    verified_version: str
+    limitation: str
+
+    @model_validator(mode="after")
+    def _coherent(self) -> Self:
+        if self.transport is HeadlessNativeTransport.UNAVAILABLE or not self.native_outputs:
+            raise ValueError("a mode profile needs a transport and native output")
+        if self.terminal_event_authoritative and not self.terminal_event_required:
+            raise ValueError("authoritative terminal events must be required")
+        if any(
+            len(set(items)) != len(items)
+            for items in (
+                self.native_outputs,
+                self.successful_native_statuses,
+                self.supported_approval_policies,
+                self.supported_interaction_kinds,
+            )
+        ):
+            raise ValueError("mode profile declarations must be unique")
+        if not all(
+            (
+                self.version_requirement.strip(),
+                self.verified_version.strip(),
+                self.limitation.strip(),
+            )
+        ):
+            raise ValueError("a mode profile needs version and limitation details")
+        return self
+
+
+class HeadlessCapability(BaseModel):
+    """Truthful declaration for the managed ordinary-session boundary.
+
+    A declaration is unavailable unless it names a transport, prompt channel,
+    and at least one native output.  Legacy ``supports_headless`` and
+    ``headless_flag`` remain independent until each concrete adapter has a
+    verified managed transport.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    transport: HeadlessNativeTransport = HeadlessNativeTransport.UNAVAILABLE
+    prompt_transport: HeadlessPromptTransport | None = None
+    native_outputs: tuple[HeadlessNativeOutput, ...] = Field(
+        default=(),
+        validation_alias=AliasChoices("native_outputs", "output_modes"),
+    )
+    interaction_modes: tuple[HeadlessInteractionMode, ...] = Field(
+        default=(HeadlessInteractionMode.UNATTENDED,),
+        validation_alias=AliasChoices("interaction_modes", "supported_interaction_modes"),
+    )
+    supports_response_schema: bool = False
+    supports_resume: bool = False
+    supports_native_abort: bool = False
+    terminal_event_required: bool = False
+    terminal_event_authoritative: bool = False
+    successful_native_statuses: tuple[str, ...] = ()
+    sandbox_behavior: PlanRequestBehavior = PlanRequestBehavior.PRESERVED
+    approval_behavior: PlanRequestBehavior = PlanRequestBehavior.PRESERVED
+    supported_approval_policies: tuple[PlanApprovalPolicy, ...] = (PlanApprovalPolicy.ON_REQUEST,)
+    command_policy_support: PlanCommandPolicySupport = PlanCommandPolicySupport.UNSUPPORTED
+    version_requirement: str = "No managed headless-session version is declared."
+    verified_version: str | None = None
+    remediation: str | None = None
+    brokered: HeadlessModeCapability | None = None
+
+    @field_validator("native_outputs", "interaction_modes")
+    @classmethod
+    def _declarations_are_unique(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("headless capability declarations must not contain duplicates")
+        return value
+
+    @field_validator("successful_native_statuses")
+    @classmethod
+    def _native_statuses_are_safe(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value) or any(not status.strip() for status in value):
+            raise ValueError("successful native statuses must be unique non-blank strings")
+        return value
+
+    @model_validator(mode="after")
+    def _declaration_is_coherent(self) -> Self:
+        if (HeadlessInteractionMode.BROKERED in self.interaction_modes) != (
+            self.brokered is not None
+        ):
+            raise ValueError("brokered mode and its profile must be declared together")
+        if self.transport is HeadlessNativeTransport.UNAVAILABLE:
+            if (
+                self.prompt_transport is not None
+                or self.native_outputs
+                or self.supports_response_schema
+                or self.supports_resume
+                or self.supports_native_abort
+                or self.terminal_event_required
+                or self.terminal_event_authoritative
+                or self.successful_native_statuses
+            ):
+                raise ValueError("an unavailable headless transport cannot declare I/O support")
+            return self
+        if self.prompt_transport is None or not self.native_outputs:
+            raise ValueError("a managed headless transport requires prompt and output declarations")
+        if not self.interaction_modes:
+            raise ValueError("a managed headless transport requires an interaction mode")
+        if self.terminal_event_authoritative and not self.terminal_event_required:
+            raise ValueError("authoritative terminal events must also be required")
+        return self
+
+    @property
+    def managed_supported(self) -> bool:
+        """Whether this declaration is complete enough to start a session."""
+        return (
+            self.transport is not HeadlessNativeTransport.UNAVAILABLE
+            and self.prompt_transport is not None
+            and bool(self.native_outputs)
+        )
+
+    @property
+    def supported(self) -> bool:
+        """Compatibility spelling for ``managed_supported``."""
+        return self.managed_supported
+
+    @property
+    def output_modes(self) -> tuple[HeadlessNativeOutput, ...]:
+        """Compatibility spelling for ``native_outputs``."""
+        return self.native_outputs
+
+    def profile_for(self, mode: HeadlessInteractionMode) -> HeadlessModeCapability:
+        """Return the exact selected transport profile for preflight and runtime."""
+        if mode not in self.interaction_modes:
+            raise ValueError(f"interaction mode {mode.value!r} is not declared")
+        if mode is HeadlessInteractionMode.BROKERED:
+            assert self.brokered is not None
+            return self.brokered
+        if not self.managed_supported:
+            raise ValueError("unattended mode has no managed transport")
+        if self.prompt_transport is None or self.verified_version is None:
+            raise ValueError("unattended mode has no verified managed version")
+        return HeadlessModeCapability(
+            transport=self.transport,
+            prompt_transport=self.prompt_transport,
+            native_outputs=self.native_outputs,
+            supports_response_schema=self.supports_response_schema,
+            supports_resume=self.supports_resume,
+            supports_native_abort=self.supports_native_abort,
+            terminal_event_required=self.terminal_event_required,
+            terminal_event_authoritative=self.terminal_event_authoritative,
+            successful_native_statuses=self.successful_native_statuses,
+            sandbox_behavior=self.sandbox_behavior,
+            approval_behavior=self.approval_behavior,
+            supported_approval_policies=self.supported_approval_policies,
+            command_policy_support=self.command_policy_support,
+            version_requirement=self.version_requirement,
+            verified_version=self.verified_version,
+            limitation=self.remediation or "Unattended sessions cannot broker native interactions.",
+        )
+
+
+_UNSUPPORTED_HEADLESS = HeadlessCapability()
+
+
+class HeadlessSessionPreflight(BaseModel):
+    """Evidence from bounded, non-mutating managed-session preflight."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool: AIToolID
+    detected_version: str
+    normalized_version: tuple[int, int, int]
+    capability: HeadlessCapability
+    mode_capability: HeadlessModeCapability | None = None
+    working_dir: Path
+    trusted_dirs: tuple[Path, ...] = ()
+    checked: tuple[HeadlessPreflightCheck, ...]
+    deferred: tuple[HeadlessPreflightDeferredCheck, ...]
+
+    @field_validator("detected_version")
+    @classmethod
+    def _version_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("headless preflight version must be non-blank")
+        return value
+
+
+class HeadlessSessionResult(BaseModel):
+    """Bounded public result for one managed ordinary headless session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    tool: AIToolID
+    version: str
+    status: HeadlessTerminalStatus
+    events: tuple[HeadlessEvent, ...] = ()
+    final_text: str | None = None
+    final_json: Any | None = None
+    final_json_present: bool = False
+    native_status: str | None = None
+    exit_code: int | None = None
+    session_id: str | None = None
+    thread_id: str | None = None
+    turn_id: str | None = None
+    conversation_id: str | None = None
+    usage: TokenUsage | None = None
+    duration_seconds: float = Field(ge=0)
+    denials: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    is_partial: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _record_json_null_presence(cls, value: Any) -> Any:
+        """Preserve an explicit JSON null separately from omitted output."""
+        if isinstance(value, dict):
+            normalized = dict(value)
+            normalized.setdefault("final_json_present", "final_json" in normalized)
+            return normalized
+        return value
+
+    @field_validator(
+        "version",
+        "final_text",
+        "native_status",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "conversation_id",
+    )
+    @classmethod
+    def _result_text_is_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("provided headless-session result text must be non-blank")
+        return value
+
+    @field_validator("denials", "warnings")
+    @classmethod
+    def _diagnostics_are_non_blank(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not item.strip() for item in value):
+            raise ValueError("headless-session diagnostics must be non-blank")
+        if any(len(item.encode("utf-8")) > _HEADLESS_DIAGNOSTIC_LIMIT for item in value):
+            raise ValueError("headless-session diagnostics exceeded the fixed size limit")
+        return value
+
+    @field_validator("duration_seconds")
+    @classmethod
+    def _duration_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("headless-session duration must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def _result_is_consistent(self) -> Self:
+        if len(self.events) > _HEADLESS_EVENT_LIMIT:
+            raise ValueError("headless result exceeded the fixed event count limit")
+        if (
+            self.final_text is not None
+            and len(self.final_text.encode("utf-8")) > _HEADLESS_FINAL_PAYLOAD_LIMIT
+        ):
+            raise ValueError("headless result text exceeded the fixed size limit")
+        if not self.final_json_present and self.final_json is not None:
+            raise ValueError("headless JSON output must be marked present")
+        if self.final_json_present:
+            try:
+                encoded = json.dumps(self.final_json, allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("headless result JSON must be a finite JSON value") from exc
+            if len(encoded) > _HEADLESS_FINAL_PAYLOAD_LIMIT:
+                raise ValueError("headless result JSON exceeded the fixed size limit")
+        if self.final_text is not None and self.final_json_present:
+            raise ValueError("a headless result cannot contain both text and JSON output")
+        expected = 1
+        terminal: HeadlessTerminalStatus | None = None
+        for event in self.events:
+            if event.sequence != expected:
+                raise ValueError("headless result events must have contiguous sequence numbers")
+            expected += 1
+            for name in ("session_id", "thread_id", "turn_id", "conversation_id"):
+                event_value = getattr(event, name)
+                if event_value is not None and event_value != getattr(self, name):
+                    raise ValueError("headless event provenance must match result provenance")
+            if event.kind is HeadlessEventKind.TERMINAL:
+                if terminal is not None:
+                    raise ValueError("headless results cannot contain multiple terminal events")
+                terminal = event.terminal_status
+        if terminal is not None and self.events[-1].kind is not HeadlessEventKind.TERMINAL:
+            raise ValueError("the terminal event must be the final normalized event")
+        if terminal is not None and terminal is not self.status:
+            raise ValueError("the terminal event and result status must agree")
+        if self.is_partial:
+            if terminal is not None or self.final_text is not None or self.final_json_present:
+                raise ValueError("safe partial results cannot contain terminal or final output")
+            if self.status is not HeadlessTerminalStatus.FAILED:
+                raise ValueError("safe partial results use failed status until reconciled")
+        elif terminal is None:
+            raise ValueError("a terminal headless result requires exactly one terminal event")
+        if self.status is HeadlessTerminalStatus.SUCCEEDED:
+            if self.exit_code not in (None, 0):
+                raise ValueError("a successful headless result cannot have a failing exit code")
+            if self.final_text is None and not self.final_json_present:
+                raise ValueError("a successful headless result requires final output")
+        return self
+
+    @property
+    def output_text(self) -> str | None:
+        return self.final_text
+
+    @property
+    def structured_output(self) -> Any | None:
+        return self.final_json
+
+    @property
+    def validated_json(self) -> Any | None:
+        return self.final_json
+
+    @property
+    def terminal_status(self) -> HeadlessTerminalStatus:
+        return self.status
+
+
+# Alternate public spellings kept deliberately small and explicit.  They make
+# the enum roles discoverable without coupling consumers to one naming style.
+HeadlessSessionTransport = HeadlessNativeTransport
+HeadlessTransport = HeadlessNativeTransport
+HeadlessOutputMode = HeadlessNativeOutput
+HeadlessNativeOutputMode = HeadlessNativeOutput
+HeadlessOutput = HeadlessNativeOutput
+HeadlessOutputFormat = HeadlessNativeOutput
+HeadlessSessionStatus = HeadlessTerminalStatus
+HeadlessTerminalState = HeadlessTerminalStatus
+
+
+class AIToolCapabilities(BaseModel):
     """What an AI tool can do — declared by each adapter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_id: AIToolID
     display_name: str
@@ -175,14 +1311,39 @@ class AIToolCapabilities(BaseModel, frozen=True):
     supports_yolo: bool = False
     supports_resume: bool = False
     supports_trusted_dirs: bool = False
-    supports_plan_mode: bool = False
+    headless: HeadlessCapability = _UNSUPPORTED_HEADLESS
+    """Managed ordinary-session contract.  The default is unavailable even
+    when the legacy command builder advertises ``supports_headless``."""
+    plan_mode: PlanModeCapability = _UNSUPPORTED_PLAN_MODE
+    """Typed native plan-mode contract. Adapters must explicitly declare this
+    for supported activation; the default fails closed."""
     supports_accept_edits: bool = False
     """Tool can auto-approve file edits at launch while still prompting for
     shell/commands (the accept-edits autonomy tier)."""
     supports_auto: bool = False
     """Tool exposes a classifier-mediated ``auto`` mode at launch (a separate
-    model reviews each non-read action). Claude-only among the CLIs crossby
-    drives; ``auto`` downgrades to accept-edits elsewhere."""
+    model reviews tool calls). Supported by Claude and Cursor; ordinary
+    launches downgrade elsewhere, while Plan launches require explicit support."""
+
+    @property
+    def supports_plan_mode(self) -> bool:
+        """Compatibility activation-only view over the typed capability."""
+        return self.plan_mode.supported
+
+    @property
+    def supports_plan_session(self) -> bool:
+        """Whether the adapter implements exact-session plan collection."""
+        return self.plan_mode.session_supported
+
+    @property
+    def supports_managed_headless_session(self) -> bool:
+        """Whether a protected adapter hook may own an ordinary session."""
+        return self.headless.managed_supported
+
+    @property
+    def supports_headless_session(self) -> bool:
+        """Compatibility view over managed headless support."""
+        return self.supports_managed_headless_session
 
     # --- Hook lifecycle & runtime I/O (consumed by crossby.hooks.runtime) ---
     supports_stop_hook: bool = False

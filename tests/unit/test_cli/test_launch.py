@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
+from crossby.ai_tools import AbstractAITool
+from crossby.ai_tools.claude import ClaudeAdapter
+from crossby.ai_tools.copilot import CopilotAdapter
+from crossby.ai_tools.plan_mode import PlanModeUnsupportedError
 from crossby.cli.main import app
+from crossby.models.ai import (
+    AIToolID,
+    PlanArtifactLocation,
+    PlanModeActivation,
+    PlanModeCapability,
+)
 
 runner = CliRunner()
 
@@ -502,6 +514,149 @@ class TestProfileFlag:
         adapter.launch.assert_called_once()
 
 
+class TestProfileNativeAllowTools:
+    """Real CLI-to-argv coverage for Copilot profile-native approvals."""
+
+    _ALLOW_TOOLS: ClassVar[list[str]] = ["shell(git:*)", "github", "github(create_issue)"]
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    @staticmethod
+    def _allow_values(cmd: list[str]) -> list[str]:
+        return [cmd[index + 1] for index, arg in enumerate(cmd) if arg == "--allow-tool"]
+
+    def _write_config(
+        self,
+        tmp_path: Path,
+        *,
+        tool: str = "copilot",
+        scenes: dict[str, Any] | None = None,
+    ) -> None:
+        config: dict[str, Any] = {
+            "version": 1,
+            "profiles": {"cop": {"tool": tool, "allow_tools": self._ALLOW_TOOLS}},
+        }
+        if scenes is not None:
+            config["scenes"] = scenes
+        (tmp_path / ".crossby.yml").write_text(yaml.dump(config), encoding="utf-8")
+
+    def test_profile_approvals_reach_real_copilot_plain_launch(self, tmp_path: Path) -> None:
+        self._write_config(tmp_path)
+        assert isinstance(AbstractAITool.get("copilot"), CopilotAdapter)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert self._allow_values(run.call_args.args[0]) == self._ALLOW_TOOLS
+
+    def test_positional_profile_approvals_reach_real_copilot_launch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_config(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert self._allow_values(run.call_args.args[0]) == self._ALLOW_TOOLS
+
+    def test_plain_and_noop_scene_launches_share_profile_approvals(self, tmp_path: Path) -> None:
+        self._write_config(
+            tmp_path,
+            scenes={"noop": {"profile": "cop", "mcp": {"include": ["github"]}}},
+        )
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            plain = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+            scene = runner.invoke(app, ["launch", str(tmp_path), "--scene", "noop"])
+
+        assert plain.exit_code == 0, plain.output
+        assert scene.exit_code == 0, scene.output
+        plain_cmd, scene_cmd = [call.args[0] for call in run.call_args_list]
+        assert self._allow_values(plain_cmd) == self._ALLOW_TOOLS
+        assert self._allow_values(scene_cmd) == self._ALLOW_TOOLS
+
+    def test_scene_filters_excluded_mcp_approvals_but_not_other_native_values(
+        self, tmp_path: Path
+    ) -> None:
+        self._write_config(
+            tmp_path,
+            scenes={"narrow": {"mcp": {"include": ["linear"]}}},
+        )
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"github": {"command": "gh"}, "linear": {"command": "lin"}}}),
+            encoding="utf-8",
+        )
+        # Add Copilot's alternate MCP spelling too; all github variants must go.
+        config = yaml.safe_load((tmp_path / ".crossby.yml").read_text(encoding="utf-8"))
+        config["profiles"]["cop"]["allow_tools"].insert(2, "github__create_issue")
+        (tmp_path / ".crossby.yml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        with (
+            patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=[]),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--profile", "cop", "--scene", "narrow"]
+            )
+
+        assert result.exit_code == 0, result.output
+        cmd = run.call_args.args[0]
+        disable_index = cmd.index("--disable-mcp-server")
+        assert cmd[disable_index : disable_index + 2] == ["--disable-mcp-server", "github"]
+        assert self._allow_values(cmd) == ["shell(git:*)"]
+
+    def test_non_copilot_adapter_ignores_profile_native_approvals(self, tmp_path: Path) -> None:
+        self._write_config(tmp_path, tool="claude")
+        assert isinstance(AbstractAITool.get("claude"), ClaudeAdapter)
+
+        with (
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--profile", "cop"])
+
+        assert result.exit_code == 0, result.output
+        assert "--allow-tool" not in run.call_args.args[0]
+
+
 class TestPlanFlag:
     """`--plan` forwards plan_mode=True to the adapter when supported."""
 
@@ -521,6 +676,21 @@ class TestPlanFlag:
             supports_trusted_dirs=False,
             supports_plan_mode=supports_plan_mode,
         )
+        if not supports_plan_mode:
+            capability = PlanModeCapability(
+                activation=PlanModeActivation.UNSUPPORTED,
+                activation_detail="No native selector is available.",
+                version_requirement="A CLI release exposing a native selector.",
+                initial_prompt_after_activation=False,
+                artifact_location=PlanArtifactLocation.UNAVAILABLE,
+                artifact_location_detail="Native plan artifacts are unavailable.",
+                remediation="Use a supported planning harness.",
+            )
+            adapter.validate_plan_mode_request.side_effect = PlanModeUnsupportedError.for_tool(
+                tool_id=AIToolID(tool),
+                display_name=tool.title(),
+                capability=capability,
+            )
         adapter.parse_transcript.return_value = MagicMock(total_tokens=None, session_id=None)
 
         with (
@@ -579,6 +749,122 @@ class TestPlanFlag:
         assert result.exit_code == 0, result.output
         _, kwargs = adapter.launch.call_args
         assert kwargs.get("plan_mode") is False
+
+
+class TestNativePlanContractCLI:
+    @pytest.mark.parametrize("tool", ["vscode", "antigravity"])
+    def test_unsupported_tools_fail_before_launch(self, tmp_path: Path, tool: str) -> None:
+        (tmp_path / ".crossby.yml").write_text(f"version: 1\nai:\n  default_tool: {tool}\n")
+        with (
+            patch("crossby.utils.process.run_with_transcript") as base_run,
+            patch("crossby.ai_tools.vscode.run_with_transcript") as vscode_run,
+            patch("crossby.ai_tools.antigravity.run_with_transcript") as antigravity_run,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", tool, "--plan", "--prompt", "Plan this"],
+            )
+        assert result.exit_code == 1, result.output
+        assert "cannot guarantee native plan mode" in result.output
+        assert "Remediation:" in result.output
+        base_run.assert_not_called()
+        vscode_run.assert_not_called()
+        antigravity_run.assert_not_called()
+
+    def test_unverified_installed_version_fails_before_launch(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 17, 0)),
+            patch("crossby.utils.process.run_with_transcript") as run,
+        ):
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "opencode", "--plan"],
+            )
+        assert result.exit_code == 1, result.output
+        assert "oldest release verified by this adapter is 1.18.29" in result.output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("flag", ["--accept-edits"])
+    def test_plan_conflicts_are_rejected_before_launch(self, tmp_path: Path, flag: str) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: claude\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app,
+                ["launch", str(tmp_path), "--tool", "claude", "--plan", flag],
+            )
+        assert result.exit_code == 1, result.output
+        assert "cannot be combined" in result.output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("tool", ["claude", "cursor", "copilot", "opencode", "antigravity-cli"])
+    def test_plan_and_yolo_are_both_displayed_and_launched(self, tmp_path: Path, tool: str) -> None:
+        (tmp_path / ".crossby.yml").write_text(f"version: 1\nai:\n  default_tool: {tool}\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(9999, 0, 0)),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", tool, "--plan", "--yolo"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "Plan mode" in result.output
+        assert "YOLO mode" in result.output
+        argv = run.call_args.args[0]
+        assert "plan" in argv or "--plan" in argv
+
+    def test_unsupported_plan_auto_is_not_silently_downgraded(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app, ["launch", str(tmp_path), "--tool", "opencode", "--plan", "--auto"]
+            )
+        assert result.exit_code == 1
+        assert "cannot be combined" in result.output
+        run.assert_not_called()
+
+    def test_opencode_summary_and_process_command_report_native_plan(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: opencode\n")
+        with (
+            patch("crossby.utils.versioning.detect_binary_version", return_value=(1, 18, 29)),
+            patch("crossby.utils.process.run_with_transcript", return_value=0) as run,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "opencode",
+                    "--plan",
+                    "--prompt",
+                    "Plan this",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Plan mode" in result.output
+        assert "on" in result.output
+        cmd = run.call_args.args[0]
+        assert cmd[:5] == ["opencode", "--prompt", "Plan this", "--agent", "plan"]
+
+    def test_antigravity_workspace_output_request_fails_before_launch(self, tmp_path: Path) -> None:
+        (tmp_path / ".crossby.yml").write_text("version: 1\nai:\n  default_tool: antigravity-cli\n")
+        with patch("crossby.utils.process.run_with_transcript") as run:
+            result = runner.invoke(
+                app,
+                [
+                    "launch",
+                    str(tmp_path),
+                    "--tool",
+                    "antigravity-cli",
+                    "--plan",
+                    "--plan-output-dir",
+                    "plans",
+                ],
+            )
+        assert result.exit_code == 1, result.output
+        assert "structured_output" in result.output
+        run.assert_not_called()
 
 
 class TestAcceptEditsAutoFlags:
@@ -792,3 +1078,62 @@ class TestComplexityEffort:
         result = self._run(tmp_path, self._CONFIG)
         assert result.exit_code == 0, result.output
         assert "Effort" not in result.output
+
+
+class TestLaunchedModelSummary:
+    """The post-confirmation summary shows the model the tool actually receives.
+
+    Cursor and Antigravity CLI bake effort into the model ID, so the adapter may
+    swap in a sibling ID at launch; the summary must show that ID rather than
+    the one the user typed. Real adapters are used; only the process launch is
+    stubbed.
+    """
+
+    @staticmethod
+    def _passthrough(tool: Any, model: Any, **kw: Any) -> tuple[Any, ...]:
+        return (
+            tool,
+            model,
+            kw.get("resolved_effort"),
+            kw.get("resolved_accept_edits", False),
+            kw.get("resolved_auto", False),
+            kw.get("resolved_yolo", False),
+        )
+
+    def _summary(self, tmp_path: Path, tool: str, *flags: str) -> str:
+        adapter = AbstractAITool.get(tool)
+        with (
+            patch.object(type(adapter), "launch", return_value=0),
+            patch(
+                "crossby.services.ai_resolution.confirm_ai_selection",
+                side_effect=self._passthrough,
+            ),
+        ):
+            result = runner.invoke(app, ["launch", str(tmp_path), "--tool", tool, *flags])
+        assert result.exit_code == 0, result.output
+        # Rich wraps long lines at the test console width; compare word-joined.
+        return " ".join(result.output.split())
+
+    def test_cursor_effort_shows_the_swapped_model(self, tmp_path: Path) -> None:
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-5-5-medium", "--effort", "high"
+        )
+        assert "claude-opus-5-5-high (from claude-opus-5-5-medium at high effort)" in summary
+
+    def test_antigravity_default_effort_is_shown(self, tmp_path: Path) -> None:
+        summary = self._summary(tmp_path, "antigravity-cli", "--model", "gemini-3.8-flash")
+        assert "gemini-3.8-flash-medium (from gemini-3.8-flash at its default effort)" in summary
+
+    def test_unchanged_model_is_shown_as_given(self, tmp_path: Path) -> None:
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-5-5-high", "--effort", "high"
+        )
+        assert "Model claude-opus-5-5-high" in summary
+        assert "(from" not in summary
+
+    def test_bracket_overrides_are_not_swallowed_as_markup(self, tmp_path: Path) -> None:
+        # Rich would otherwise read "[effort=high]" as a style tag and drop it.
+        summary = self._summary(
+            tmp_path, "cursor", "--model", "claude-opus-4-8[effort=high]", "--effort", "high"
+        )
+        assert "Model claude-opus-4-8[effort=high]" in summary

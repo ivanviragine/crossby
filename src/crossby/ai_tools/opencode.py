@@ -2,19 +2,52 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.model_utils import classify_tier_universal, has_date_suffix
+from crossby.ai_tools.plan_mode import PlanInteractionHandler
 from crossby.models.ai import (
     AIModel,
     AIToolCapabilities,
     AIToolID,
     AIToolType,
     EffortLevel,
+    HeadlessCapability,
+    HeadlessEventKind,
+    HeadlessInteractionMode,
+    HeadlessModeCapability,
+    HeadlessNativeOutput,
+    HeadlessNativeTransport,
+    HeadlessPromptTransport,
+    HeadlessSessionRequest,
+    HeadlessSessionResult,
+    HeadlessTerminalStatus,
+    PlanArtifactLocation,
+    PlanArtifactSource,
+    PlanCommandPolicySupport,
+    PlanInteractionKind,
+    PlanInteractionSupport,
+    PlanLaunchApprovalMode,
+    PlanModeActivation,
+    PlanModeCapability,
+    PlanRequestBehavior,
+    PlanSessionBinding,
+    PlanSessionRequest,
+    PlanSessionResult,
+    PlanSessionTransport,
     TokenUsage,
 )
+
+if TYPE_CHECKING:
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
+
+_OPENCODE_STREAM_EVENT_KINDS = frozenset({"step_start", "text", "step_finish"})
 
 
 class OpenCodeAdapter(AbstractAITool):
@@ -44,7 +77,85 @@ class OpenCodeAdapter(AbstractAITool):
             headless_flag="run",
             supports_headless=True,
             supports_effort=True,
+            supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
             supports_resume=True,
+            supports_yolo=True,
+            headless=HeadlessCapability(
+                transport=HeadlessNativeTransport.HEADLESS_CLI,
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                # Every managed run uses the --format json event wire; TEXT
+                # returns the joined assistant text parts from those events.
+                native_outputs=(HeadlessNativeOutput.TEXT, HeadlessNativeOutput.JSONL),
+                interaction_modes=(
+                    HeadlessInteractionMode.UNATTENDED,
+                    HeadlessInteractionMode.BROKERED,
+                ),
+                brokered=HeadlessModeCapability(
+                    transport=HeadlessNativeTransport.HTTP_SERVER,
+                    prompt_transport=HeadlessPromptTransport.API,
+                    native_outputs=(HeadlessNativeOutput.TEXT,),
+                    supports_resume=True,
+                    supports_native_abort=True,
+                    terminal_event_required=True,
+                    terminal_event_authoritative=True,
+                    successful_native_statuses=("stop",),
+                    sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                    command_policy_support=PlanCommandPolicySupport.NATIVE,
+                    supported_interaction_kinds=(
+                        PlanInteractionKind.QUESTION,
+                        PlanInteractionKind.PERMISSION,
+                    ),
+                    version_requirement="OpenCode with verified authenticated loopback APIs.",
+                    verified_version="1.19.0",
+                    limitation=(
+                        "Only text and exact session resumption are verified; structured "
+                        "response schemas and command-policy changes on resume are unavailable."
+                    ),
+                ),
+                supports_response_schema=False,
+                successful_native_statuses=("stop",),
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
+                version_requirement="OpenCode exposing opencode run --format json raw events.",
+                verified_version="1.18.31",
+                remediation=(
+                    "Upgrade OpenCode to 1.18.31 or newer. OpenCode exposes no final-response "
+                    "JSON Schema flag, so schema-constrained sessions must use Claude Code, "
+                    "Codex CLI, or Antigravity CLI."
+                ),
+            ),
+            plan_mode=PlanModeCapability(
+                supported_launch_approval_modes=(PlanLaunchApprovalMode.YOLO,),
+                activation=PlanModeActivation.CLI_ARGUMENT,
+                activation_detail="Selects OpenCode's built-in plan agent with --agent plan.",
+                version_requirement="OpenCode exposing the built-in plan agent and --agent.",
+                verified_version="1.18.29",
+                initial_prompt_after_activation=True,
+                artifact_location=PlanArtifactLocation.SESSION,
+                artifact_location_detail=(
+                    "Crossby captures the session ID emitted by this invocation and exports only "
+                    "that exact OpenCode session."
+                ),
+                export_command=("opencode", "export", "<session-id>"),
+                remediation=(
+                    "Use run_plan_session() to normalize the exact session export, or use Claude "
+                    "when a requested filesystem output directory is required."
+                ),
+                collector_activation=PlanModeActivation.OPENCODE_SERVER,
+                transport=PlanSessionTransport.OPENCODE_SERVER,
+                artifact_source=PlanArtifactSource.SESSION_EXPORT,
+                binding=PlanSessionBinding.SESSION_ID,
+                interaction=PlanInteractionSupport.CALLBACK,
+                sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
+                command_policy_support=PlanCommandPolicySupport.NATIVE,
+                command_policy_detail=(
+                    "Pins a session permission catch-all to ask, then appends scoped native shell "
+                    "allow rules without changing project or global configuration."
+                ),
+            ),
             # No session-scoped scene lever. OpenCode loads the OPENCODE_CONFIG
             # file *between* its global and project config layers, so a project
             # opencode.json can re-enable an MCP server the scene deselected —
@@ -85,6 +196,413 @@ class OpenCodeAdapter(AbstractAITool):
         """OpenCode uses --prompt for the initial message."""
         return ["--prompt", prompt]
 
+    def plan_mode_args(self) -> list[str]:
+        """Select OpenCode's built-in, read-only ``plan`` agent."""
+        return ["--agent", "plan"]
+
+    def yolo_args(self) -> list[str]:
+        """OpenCode's --auto skips approvals, retaining explicit native denials.
+
+        This is not Crossby's classifier-mediated --auto tier.
+        """
+        return ["--auto"]
+
+    def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
+        if request.interaction_mode is not HeadlessInteractionMode.BROKERED:
+            return
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+
+        if request.resume_id is not None and request.command_policy is not None:
+            raise HeadlessUnsupportedError(
+                "OpenCode cannot replace native command rules on a resumed session.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+
+        if request.effort is not None and request.model is None:
+            raise HeadlessRequestError(
+                "OpenCode brokered effort requires an explicit provider/model ID.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if request.model is not None:
+            provider, separator, model = request.model.partition("/")
+            if not separator or not provider.strip() or not model.strip():
+                raise HeadlessRequestError(
+                    "OpenCode brokered sessions require a provider/model ID.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+
+    def _headless_argv_for_validation(
+        self, request: HeadlessSessionRequest, **_kwargs: object
+    ) -> list[str]:
+        """Return OpenCode's complete command, including model and effort arguments."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            return ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"]
+        return self._headless_command(request)
+
+    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
+        """Build the exact unattended ``opencode run`` invocation.
+
+        ``--auto`` is deliberately never emitted: OpenCode's own noninteractive
+        permission behavior stays in force, so a permission it cannot resolve is
+        refused natively instead of being auto-approved.
+        """
+        command = ["opencode", "run", "--format", "json", "--log-level", "ERROR"]
+        if request.model:
+            command.extend(("--model", request.model))
+        if request.effort is not None:
+            command.extend(self.effort_args(request.effort))
+        return command
+
+    def _run_headless_session(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        context: HeadlessRuntimeContext,
+    ) -> HeadlessSessionResult:
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.headless_cli import usage_from
+            from crossby.ai_tools.opencode_server import run_native_session
+
+            brokered_session_id, _message_id, brokered_text, tokens, native_status = (
+                run_native_session(request, context, self.capabilities().plan_mode)
+            )
+            status = (
+                HeadlessTerminalStatus.SUCCEEDED
+                if native_status == "stop"
+                else HeadlessTerminalStatus.FAILED
+            )
+            context.emit(
+                HeadlessEventKind.TERMINAL,
+                terminal_status=status,
+            )
+            return context.complete(
+                status,
+                final_text=brokered_text,
+                native_status=native_status,
+                session_id=brokered_session_id,
+                usage=usage_from(
+                    tokens,
+                    input_tokens="input",
+                    output_tokens="output",
+                    cached="cache_read",
+                    session_id=brokered_session_id,
+                ),
+            )
+        """Run one unattended ``opencode run`` turn and normalize its raw events."""
+        from crossby.ai_tools.headless_cli import (
+            MISSING,
+            capture_failure_warnings,
+            complete_session,
+            frame_streamer,
+            non_blank_text,
+            parse_json_lines,
+            recognized_frame_kind,
+            run_managed_command,
+        )
+        from crossby.ai_tools.plan_process import child_environment
+
+        output = run_managed_command(
+            context,
+            argv=self._headless_command(request),
+            cwd=request.working_dir,
+            env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
+            on_stdout_lines=frame_streamer(
+                context,
+                kind_of=lambda frame: recognized_frame_kind(
+                    frame, field="type", recognized=_OPENCODE_STREAM_EVENT_KINDS
+                ),
+                provenance_of=lambda frame: {"session_id": non_blank_text(frame.get("sessionID"))},
+            ),
+        )
+        warnings = capture_failure_warnings(output)
+        if output.overflowed or output.undecodable:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=warnings,
+            )
+        frames = parse_json_lines(output.stdout)
+        if frames is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "OpenCode emitted malformed raw JSON events."),
+            )
+
+        # Progress and provenance were already emitted live by the streamer.
+        session_id: str | None = None
+        text_parts: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+        usage: TokenUsage | None = None
+        saw_terminal_stop = False
+        for frame in frames:
+            observed_session_id = non_blank_text(frame.get("sessionID"))
+            context.validate_provenance(session_id=observed_session_id)
+            session_id = session_id or observed_session_id
+            kind = non_blank_text(frame.get("type"))
+            if saw_terminal_stop:
+                return context.complete(
+                    HeadlessTerminalStatus.INVALID_OUTPUT,
+                    exit_code=output.returncode,
+                    session_id=session_id,
+                    warnings=(
+                        *warnings,
+                        "OpenCode emitted a frame after its terminal stop event.",
+                    ),
+                )
+            part = frame.get("part")
+            if kind == "text" and isinstance(part, dict):
+                text_parts.append(part)
+            elif kind == "step_finish" and isinstance(part, dict):
+                step_reason = non_blank_text(part.get("reason"))
+                finish_reason = step_reason or finish_reason
+                step_usage = _opencode_usage(part.get("tokens"), session_id)
+                if step_usage is not None:
+                    usage = (
+                        step_usage
+                        if usage is None
+                        else _combine_opencode_usage(usage, step_usage, session_id)
+                    )
+                saw_terminal_stop = step_reason == "stop"
+
+        if not saw_terminal_stop:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "OpenCode ended without a terminal stop event."),
+            )
+        texts = [text for part in text_parts if (text := non_blank_text(part.get("text")))]
+        if len(text_parts) > 1 and request.native_output is HeadlessNativeOutput.JSONL:
+            warnings = (
+                *warnings,
+                "Only the final native text part is returned; request text output for the "
+                "complete response.",
+            )
+        return complete_session(
+            context,
+            request,
+            status=(
+                HeadlessTerminalStatus.SUCCEEDED
+                if output.returncode == 0
+                else HeadlessTerminalStatus.FAILED
+            ),
+            exit_code=output.returncode,
+            response_text="\n".join(texts) or None,
+            native_object=text_parts[-1] if text_parts else MISSING,
+            native_status=finish_reason,
+            session_id=session_id,
+            usage=usage,
+            warnings=warnings,
+        )
+
+    def _validate_collected_plan_requirements(self, request: PlanSessionRequest) -> None:
+        """Validate a caller-supplied public model identifier without server I/O."""
+        if request.model is None:
+            return
+        provider, separator, model = request.model.partition("/")
+        if not separator or not provider.strip() or not model.strip():
+            from crossby.ai_tools.plan_mode import PlanSessionUnsupportedError
+
+            raise PlanSessionUnsupportedError(
+                "OpenCode requires a provider/model identifier for collected plan sessions.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().plan_mode,
+            )
+
+    def _run_plan_session(
+        self,
+        request: PlanSessionRequest,
+        version: str,
+        interaction_handler: PlanInteractionHandler | None,
+    ) -> PlanSessionResult:
+        """Run the native plan agent with live questions and export its exact session."""
+        from crossby.ai_tools.opencode_server import run_native_plan
+        from crossby.ai_tools.plan_mode import (
+            PlanArtifactAmbiguousError,
+            PlanArtifactMalformedError,
+            PlanArtifactMissingError,
+            PlanBindingMismatchError,
+            PlanTransportError,
+        )
+        from crossby.ai_tools.plan_process import run_captured
+
+        capability = self.capabilities().plan_mode
+        working_dir = request.working_dir.resolve()
+        deadline = time.monotonic() + request.timeout_seconds
+        session_id, terminal_message_id = run_native_plan(
+            request, interaction_handler, capability, deadline=deadline
+        )
+
+        def remaining_timeout(*, session_id: str) -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PlanTransportError(
+                    "OpenCode plan session exceeded its timeout.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    session_id=session_id,
+                )
+            return remaining
+
+        try:
+            exported = run_captured(
+                ["opencode", "export", session_id],
+                cwd=working_dir,
+                timeout=remaining_timeout(session_id=session_id),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PlanTransportError(
+                f"OpenCode export timed out after {exc.timeout} seconds.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+            ) from None
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PlanTransportError(
+                f"OpenCode export failed for session {session_id}: {exc}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+            ) from exc
+        if exported.returncode != 0:
+            raise PlanTransportError(
+                f"OpenCode export exited with status {exported.returncode}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+                stderr=exported.stderr,
+            )
+        try:
+            payload = json.loads(exported.stdout)
+        except json.JSONDecodeError as exc:
+            raise PlanArtifactMalformedError(
+                f"OpenCode export was not valid JSON: {exc.msg}",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise PlanArtifactMalformedError(
+                "OpenCode export root was not an object.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            )
+        exported_ids = set(_export_session_ids(payload))
+        export_info = payload.get("info")
+        if not exported_ids or exported_ids != {session_id}:
+            raise PlanBindingMismatchError(
+                "OpenCode export session IDs did not match the launched session.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            )
+        exported_directory = export_info.get("directory") if isinstance(export_info, dict) else None
+        if not isinstance(exported_directory, str) or not exported_directory.strip():
+            raise PlanArtifactMalformedError(
+                "OpenCode export omitted its working directory.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            )
+        exported_directories = [exported_directory]
+        for message in payload.get("messages") or []:
+            message_info = message.get("info") if isinstance(message, dict) else None
+            path_info = message_info.get("path") if isinstance(message_info, dict) else None
+            if not isinstance(path_info, dict):
+                continue
+            message_cwd = path_info.get("cwd")
+            if isinstance(message_cwd, str) and message_cwd.strip():
+                exported_directories.append(message_cwd)
+        for directory in exported_directories:
+            exported_path = Path(directory)
+            if not exported_path.is_absolute():
+                raise PlanArtifactMalformedError(
+                    "OpenCode export contained a relative working directory.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exported.returncode,
+                    session_id=session_id,
+                )
+            if exported_path.resolve() != working_dir:
+                raise PlanBindingMismatchError(
+                    "OpenCode export working directory did not match the requested workspace.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    exit_code=exported.returncode,
+                    session_id=session_id,
+                )
+        messages = payload.get("messages")
+        matching = (
+            [
+                message
+                for message in messages
+                if isinstance(message, dict)
+                and isinstance(message.get("info"), dict)
+                and message["info"].get("id") == terminal_message_id
+            ]
+            if isinstance(messages, list)
+            else []
+        )
+        if not matching:
+            raise PlanBindingMismatchError(
+                "OpenCode export did not contain the completed planning message.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                artifact_id=terminal_message_id,
+            )
+        if len(matching) != 1:
+            raise PlanArtifactAmbiguousError(
+                "OpenCode export contained multiple records for the completed planning message.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                session_id=session_id,
+                artifact_id=terminal_message_id,
+            )
+        # Progress and question/tool-call messages belong to the session, but
+        # only the exact terminal message observed through the API is a plan.
+        plans = _opencode_plans({"info": export_info, "messages": matching})
+        if not plans:
+            raise PlanArtifactMissingError(
+                "OpenCode's exact session export contained no assistant plan.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+            )
+        plan, artifact_id = plans[0]
+        if not plan.strip():
+            raise PlanArtifactMalformedError(
+                "OpenCode's exact session export contained a blank plan.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+                exit_code=exported.returncode,
+                session_id=session_id,
+                artifact_id=artifact_id,
+            )
+        return PlanSessionResult(
+            tool=self.TOOL_ID,
+            version=version,
+            plan=plan,
+            session_id=session_id,
+            native_mode="OpenCode native API agent=plan",
+            artifact_source=PlanArtifactSource.SESSION_EXPORT,
+            binding=PlanSessionBinding.SESSION_ID,
+            exit_code=0,
+            artifact_id=artifact_id,
+        )
+
     def parse_transcript(self, transcript_path: Path) -> TokenUsage:
         return TokenUsage()
 
@@ -98,6 +616,105 @@ class OpenCodeAdapter(AbstractAITool):
         return raw_model_id
 
     def effort_args(self, effort: EffortLevel) -> list[str]:
-        """OpenCode uses ``--variant <level>`` (xhigh/max both map to high)."""
+        """OpenCode uses ``--variant <level>`` (xhigh/max map to high for launches)."""
         mapped = "high" if effort in (EffortLevel.XHIGH, EffortLevel.MAX) else effort.value
         return ["--variant", mapped]
+
+
+def _opencode_usage(tokens: Any, session_id: str | None) -> TokenUsage | None:
+    """Normalize one OpenCode ``step_finish`` token object, cache included."""
+    from crossby.ai_tools.headless_cli import optional_int
+
+    if not isinstance(tokens, Mapping):
+        return None
+    cache = tokens.get("cache")
+    usage = TokenUsage(
+        total_tokens=optional_int(tokens.get("total")),
+        input_tokens=optional_int(tokens.get("input")),
+        output_tokens=optional_int(tokens.get("output")),
+        cached_tokens=optional_int(cache.get("read")) if isinstance(cache, Mapping) else None,
+        session_id=session_id,
+    )
+    if all(
+        value is None for value in (usage.total_tokens, usage.input_tokens, usage.output_tokens)
+    ):
+        return None
+    return usage
+
+
+def _combine_opencode_usage(
+    previous: TokenUsage, step: TokenUsage, session_id: str | None
+) -> TokenUsage:
+    """Accumulate per-step OpenCode token usage without inventing absent counts."""
+    return TokenUsage(
+        total_tokens=_sum_token_counts(previous.total_tokens, step.total_tokens),
+        input_tokens=_sum_token_counts(previous.input_tokens, step.input_tokens),
+        output_tokens=_sum_token_counts(previous.output_tokens, step.output_tokens),
+        cached_tokens=_sum_token_counts(previous.cached_tokens, step.cached_tokens),
+        session_id=session_id or previous.session_id or step.session_id,
+    )
+
+
+def _sum_token_counts(first: int | None, second: int | None) -> int | None:
+    """Add native counts while retaining ``None`` when neither step supplied one."""
+    if first is None and second is None:
+        return None
+    return (first or 0) + (second or 0)
+
+
+def _export_session_ids(payload: dict[str, Any]) -> list[str]:
+    """Collect IDs from exact documented OpenCode export envelope fields."""
+    found: list[str] = []
+    info = payload.get("info")
+    if isinstance(info, dict) and isinstance(info.get("id"), str):
+        found.append(info["id"])
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return found
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        message_info = message.get("info")
+        if isinstance(message_info, dict) and isinstance(message_info.get("sessionID"), str):
+            found.append(message_info["sessionID"])
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict) and isinstance(part.get("sessionID"), str):
+                    found.append(part["sessionID"])
+    return found
+
+
+def _opencode_plans(payload: dict[str, Any]) -> list[tuple[str, str | None]]:
+    """Return all nonblank assistant responses explicitly bound to plan mode."""
+    info = payload.get("info")
+    messages = payload.get("messages")
+    if not isinstance(info, dict) or not isinstance(messages, list):
+        return []
+    plans: list[tuple[str, str | None]] = []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        message_info = message.get("info")
+        if (
+            not isinstance(message_info, dict)
+            or message_info.get("role") != "assistant"
+            or (message_info.get("mode") != "plan" and message_info.get("agent") != "plan")
+        ):
+            continue
+        parts = message.get("parts")
+        if not isinstance(parts, list):
+            continue
+        plan_parts = [
+            str(part.get("text"))
+            for part in parts
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            and str(part.get("text")).strip()
+        ]
+        artifact_id = message_info.get("id")
+        candidate_id = (str(artifact_id).strip() or None) if artifact_id is not None else None
+        if plan_parts:
+            plans.append(("\n".join(plan_parts), candidate_id))
+    return plans
