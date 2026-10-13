@@ -8,6 +8,7 @@ MCP, permissions, hooks) and returns what it found.  The results feed into
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -281,7 +282,8 @@ def discover_permissions(
         except SourceReadError as exc:
             if errors is None:
                 raise
-            errors.append(f"{tool_id}: {exc}")
+            detail = str(exc).replace(str(project_root) + os.sep, "")
+            errors.append(f"{tool_id}: {detail}")
             continue
         for pattern in patterns:
             if pattern not in seen:
@@ -370,7 +372,128 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return raw
 
 
-def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
+# Non-agy readers recover every recognized canonical event, including ones
+# their source tool's writer cannot emit. Validate all such imported identities
+# so a passthrough read cannot establish ownership and later revoke it on a skip.
+_KNOWN_HOOK_EVENTS = frozenset(_REVERSE_EVENTS.values())
+
+
+def _is_command_handler(entry: dict[str, Any]) -> bool:
+    # Older Crossby/native files omit type. Explicit native prompt, agent,
+    # HTTP, and future handler types are outside the command reader's scope.
+    kind = entry.get("type", "command")
+    return isinstance(kind, str) and kind == "command"
+
+
+def _validate_command_handler(entry: dict[str, Any], location: str, key: str = "command") -> None:
+    kind = entry.get("type", "command")
+    if not isinstance(kind, str) or not kind:
+        raise SourceReadError(f"{location}.type must be a non-empty string")
+    if not _is_command_handler(entry):
+        return
+    # Copilot supports a legitimate Windows-only command that this Bash reader
+    # cannot translate. A present malformed Bash field is still an error.
+    if (
+        key == "bash"
+        and key not in entry
+        and isinstance(entry.get("powershell"), str)
+        and entry["powershell"]
+    ):
+        return
+    command = entry.get(key)
+    if not isinstance(command, str) or not command:
+        raise SourceReadError(f"{location}.{key} must be a non-empty string")
+
+
+def _validate_hook_events(events: dict[str, Any], tool: AIToolID, location: str) -> None:
+    """Validate fields whose silent omission could revoke or weaken a guard.
+
+    Unknown events and explicit non-command handlers remain native extensions,
+    not evidence of malformed supported data. Optional display/timeout fields
+    that the reader does not use to select or scope hooks are left untouched.
+    """
+    for event_name, entries in events.items():
+        canonical = _reverse_event_name(event_name)
+        supported_events = (
+            _ANTIGRAVITY_CLI_SUPPORTED_EVENTS
+            if tool == AIToolID.ANTIGRAVITY_CLI
+            else _KNOWN_HOOK_EVENTS
+        )
+        if canonical not in supported_events:
+            continue
+        event_location = f"{location}.{event_name}"
+        if not isinstance(entries, list):
+            raise SourceReadError(f"{event_location} must be a list")
+        for index, entry in enumerate(entries):
+            entry_location = f"{event_location}[{index}]"
+            if not isinstance(entry, dict):
+                raise SourceReadError(f"{entry_location} must be an object")
+            kind = entry.get("type", "command")
+            if not isinstance(kind, str) or not kind:
+                raise SourceReadError(f"{entry_location}.type must be a non-empty string")
+            if not _is_command_handler(entry):
+                continue
+            if tool == AIToolID.COPILOT:
+                _validate_command_handler(entry, entry_location, "bash")
+                continue
+            if tool == AIToolID.CURSOR:
+                _validate_command_handler(entry, entry_location)
+                if _matcher_is_malformed(entry):
+                    raise SourceReadError(f"{entry_location}.matcher must be a string")
+                # Match the reader's precedence: a plain matcher overrides the
+                # legacy tools field; otherwise tools supplies the recovered scope.
+                if not _matcher_tools(entry.get("matcher")) and "tools" in entry:
+                    tools = entry["tools"]
+                    if not isinstance(tools, list) or any(
+                        not isinstance(t, str) or not t for t in tools
+                    ):
+                        raise SourceReadError(
+                            f"{entry_location}.tools must be a list of tool names"
+                        )
+                if "failClosed" in entry and not isinstance(entry["failClosed"], bool):
+                    raise SourceReadError(f"{entry_location}.failClosed must be a boolean")
+                continue
+            # Stop ignores matcher/hooks metadata; a tool event also has a
+            # legacy bare-command form when neither key is present.
+            if tool == AIToolID.ANTIGRAVITY_CLI and (
+                canonical not in _ANTIGRAVITY_CLI_MATCHER_EVENTS
+                or ("matcher" not in entry and "hooks" not in entry and "command" in entry)
+            ):
+                _validate_command_handler(entry, entry_location)
+                continue
+            if _matcher_is_malformed(entry):
+                raise SourceReadError(f"{entry_location}.matcher must be a string")
+            handlers = entry.get("hooks")
+            if not isinstance(handlers, list):
+                raise SourceReadError(f"{entry_location}.hooks must be a list")
+            for handler_index, handler in enumerate(handlers):
+                handler_location = f"{entry_location}.hooks[{handler_index}]"
+                if not isinstance(handler, dict):
+                    raise SourceReadError(f"{handler_location} must be an object")
+                _validate_command_handler(handler, handler_location)
+
+
+def _read_hooks_json(path: Path, tool: AIToolID, *, validate: bool) -> dict[str, Any] | None:
+    data = _read_json(path)
+    if data is None or not validate:
+        return data
+    if tool == AIToolID.ANTIGRAVITY_CLI:
+        for name, container in data.items():
+            if not isinstance(container, dict):
+                raise SourceReadError(f"{path}: container {name!r} must be an object")
+            _validate_hook_events(container, tool, f"{path}:{name}")
+    else:
+        # Cursor also has a legacy flat event layout.
+        events = data if tool == AIToolID.CURSOR and "hooks" not in data else data.get("hooks", {})
+        if not isinstance(events, dict):
+            raise SourceReadError(f"{path}: hooks must be an object")
+        _validate_hook_events(events, tool, f"{path}:hooks")
+    return data
+
+
+def _read_claude_shape_hooks(
+    path: Path, tool: AIToolID, *, validate: bool = False
+) -> list[HookEntry]:
     """Parse the Claude-shaped hooks layout at *path* into canonical entries.
 
     Both Claude (``.claude/settings.json``) and Codex (``.codex/hooks.json``)
@@ -390,7 +513,7 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     :func:`_matcher_is_malformed` — since silently falling through to
     ``_matcher_tools``'s ``[]`` would broaden the hook to all tools.
     """
-    data = _read_json(path)
+    data = _read_hooks_json(path, tool, validate=validate)
     if not data:
         return []
     hooks_section = data.get("hooks", {})
@@ -402,7 +525,7 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not _is_command_handler(entry):
                 continue
             if _matcher_is_malformed(entry):
                 continue
@@ -411,7 +534,7 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
             if not isinstance(inner_hooks, list):
                 continue
             for inner in inner_hooks:
-                if not isinstance(inner, dict):
+                if not isinstance(inner, dict) or not _is_command_handler(inner):
                     continue
                 command = inner.get("command")
                 if not isinstance(command, str) or not command:
@@ -426,12 +549,14 @@ def _read_claude_shape_hooks(path: Path) -> list[HookEntry]:
     return result
 
 
-def _read_claude_hooks(project_root: Path) -> list[HookEntry]:
+def _read_claude_hooks(project_root: Path, *, validate: bool = False) -> list[HookEntry]:
     """Read hooks from .claude/settings.json (Claude-shaped)."""
-    return _read_claude_shape_hooks(project_root / ".claude" / "settings.json")
+    return _read_claude_shape_hooks(
+        project_root / ".claude" / "settings.json", AIToolID.CLAUDE, validate=validate
+    )
 
 
-def _read_codex_hooks(project_root: Path) -> list[HookEntry]:
+def _read_codex_hooks(project_root: Path, *, validate: bool = False) -> list[HookEntry]:
     """Read hooks from .codex/hooks.json.
 
     Codex writes the Claude-shaped nested-handler JSON (the same structure
@@ -440,10 +565,12 @@ def _read_codex_hooks(project_root: Path) -> list[HookEntry]:
     (``SessionStart``/``UserPromptSubmit``/``Stop``/``PreToolUse``/``PostToolUse``)
     all reverse-map via ``_REVERSE_EVENTS``, so no map changes are needed.
     """
-    return _read_claude_shape_hooks(project_root / ".codex" / "hooks.json")
+    return _read_claude_shape_hooks(
+        project_root / ".codex" / "hooks.json", AIToolID.CODEX, validate=validate
+    )
 
 
-def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
+def _read_cursor_hooks(project_root: Path, *, validate: bool = False) -> list[HookEntry]:
     """Read hooks from .cursor/hooks.json.
 
     Reads the real Cursor shape — ``{"version": 1, "hooks": {"<event>": [...]}}``
@@ -481,7 +608,7 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
     to everything is worse than dropping it (see :func:`_cursor_entry_tools`).
     """
     path = project_root / ".cursor" / "hooks.json"
-    data = _read_json(path)
+    data = _read_hooks_json(path, AIToolID.CURSOR, validate=validate)
     if not data:
         return []
     hooks_section = data.get("hooks")
@@ -501,7 +628,7 @@ def _read_cursor_hooks(project_root: Path) -> list[HookEntry]:
         canonical_event = _reverse_event_name(event_name)
         is_fanout_event = event_name == _CURSOR_SHELL_EVENT
         for entry in entries:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not _is_command_handler(entry):
                 continue
             command = entry.get("command")
             if not isinstance(command, str) or not command:
@@ -665,7 +792,7 @@ def _cursor_entry_tools(entry: dict[str, Any]) -> list[str] | None:
     return valid if valid else None
 
 
-def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
+def _read_copilot_hooks(project_root: Path, *, validate: bool = False) -> list[HookEntry]:
     """Read hooks from .github/hooks/hooks.json.
 
     Data-type hardening: a handler whose ``bash`` is not a non-empty ``str`` is
@@ -675,7 +802,7 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
     Copilot hook has no per-tool scope, so ``tools`` is always ``[]``.
     """
     path = project_root / ".github" / "hooks" / "hooks.json"
-    data = _read_json(path)
+    data = _read_hooks_json(path, AIToolID.COPILOT, validate=validate)
     if not data:
         return []
     hooks_section = data.get("hooks", {})
@@ -687,7 +814,7 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
             continue
         canonical_event = _reverse_event_name(event_name)
         for entry in entries:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not _is_command_handler(entry):
                 continue
             command = entry.get("bash")
             if not isinstance(command, str) or not command:
@@ -706,7 +833,7 @@ def _read_copilot_hooks(project_root: Path) -> list[HookEntry]:
     return result
 
 
-def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
+def _read_agy_hooks(project_root: Path, *, validate: bool = False) -> list[HookEntry]:
     """Read hooks from .agents/hooks.json (Antigravity CLI's container map).
 
     agy's file maps arbitrary *container* names to ``{agy_event: [entries]}``.
@@ -754,7 +881,9 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
     slug — and ``fail_closed``/``timeout`` are dropped for every tool today
     (#88 §5).
     """
-    data = _read_json(project_root / ".agents" / "hooks.json")
+    data = _read_hooks_json(
+        project_root / ".agents" / "hooks.json", AIToolID.ANTIGRAVITY_CLI, validate=validate
+    )
     if not data:
         return []
     result: list[HookEntry] = []
@@ -768,7 +897,7 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
             if not isinstance(entries, list):
                 continue
             for entry in entries:
-                if not isinstance(entry, dict):
+                if not isinstance(entry, dict) or not _is_command_handler(entry):
                     continue
                 # Bare handler: {"type", "command"} with the command directly on
                 # the entry. Whether a stray matcher/hooks key disqualifies it
@@ -812,7 +941,7 @@ def _read_agy_hooks(project_root: Path) -> list[HookEntry]:
                     continue
                 tools = _matcher_tools(entry.get("matcher"))
                 for inner in inner_hooks:
-                    if not isinstance(inner, dict):
+                    if not isinstance(inner, dict) or not _is_command_handler(inner):
                         continue
                     command = inner.get("command")
                     if not isinstance(command, str) or not command:
@@ -872,6 +1001,8 @@ def discover_hooks(
 
     Invalid sources raise unless an *errors* collector is provided; collected
     errors make the merged data incomplete and must block this concern's writes.
+    Unlike permissive low-level extraction, this validates supported nested
+    identity/scope fields before any skipped entry can authorize a revocation.
 
     When the same ``(event, command)`` is defined by multiple tools, tool
     scopes are unioned — an empty ``tools`` list means "all tools" and wins.
@@ -889,11 +1020,12 @@ def discover_hooks(
     )
     for tool_id, reader_fn in readers.items():
         try:
-            hooks = reader_fn(project_root)
+            hooks = reader_fn(project_root, validate=True)
         except SourceReadError as exc:
             if errors is None:
                 raise
-            errors.append(f"{tool_id}: {exc}")
+            detail = str(exc).replace(str(project_root) + os.sep, "")
+            errors.append(f"{tool_id}: {detail}")
             continue
         for hook in hooks:
             key = (hook.event, hook.command)

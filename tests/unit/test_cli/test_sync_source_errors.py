@@ -166,7 +166,10 @@ def test_unaffected_concerns_still_run_and_keep_hook_ownership(tmp_path: Path) -
     hook_target = tmp_path / TARGETS["hooks"]
     before_target = hook_target.read_bytes()
     owned = load_ledger(tmp_path).hooks(AIToolID.CURSOR)
-    write_source(tmp_path, {"hooks": [], "permissions": {"allow": ["Bash(other:*)"]}})
+    write_source(
+        tmp_path,
+        {"hooks": {"PreToolUse": {}}, "permissions": {"allow": ["Bash(other:*)"]}},
+    )
     (tmp_path / "CLAUDE.md").write_text("Project rules\n", encoding="utf-8")
     result = sync(tmp_path, None, "--from", "claude", "--to", "cursor")
     assert result.exit_code == 1, result.output
@@ -224,3 +227,251 @@ def test_scene_filter_preserves_invalid_source_concern(tmp_path: Path, concern: 
     after = load_ledger(tmp_path)
     assert after.hooks(AIToolID.CURSOR) == ledger.hooks(AIToolID.CURSOR)
     assert after.permissions(AIToolID.CURSOR) == ledger.permissions(AIToolID.CURSOR)
+
+
+HOOK_SOURCES = {
+    "claude": Path(".claude/settings.json"),
+    "codex": Path(".codex/hooks.json"),
+    "cursor": Path(".cursor/hooks.json"),
+    "copilot": Path(".github/hooks/hooks.json"),
+    "antigravity-cli": Path(".agents/hooks.json"),
+}
+
+
+def native_hook_entry(tool: str) -> dict:
+    if tool == "copilot":
+        return {"type": "command", "bash": "./guard.sh"}
+    handler = {"type": "command", "command": "./guard.sh"}
+    if tool == "cursor":
+        return {**handler, "matcher": "Shell", "failClosed": True}
+    matcher = "run_command" if tool == "antigravity-cli" else "Bash"
+    return {"matcher": matcher, "hooks": [handler]}
+
+
+def native_hook_config(tool: str, entries: object) -> dict:
+    event = "preToolUse" if tool in {"cursor", "copilot"} else "PreToolUse"
+    events = {event: entries}
+    return {"guard": events} if tool == "antigravity-cli" else {"hooks": events}
+
+
+def hook_source_and_target(root: Path, tool: str) -> tuple[Path, Path, tuple[str, ...]]:
+    source = root / HOOK_SOURCES[tool]
+    source.parent.mkdir(parents=True, exist_ok=True)
+    target_tool = "claude" if tool == "cursor" else "cursor"
+    target = root / (SOURCE if target_tool == "claude" else TARGETS["hooks"])
+    return source, target, ("--from", tool, "--to", target_tool)
+
+
+NESTED_FAILURES = (
+    [
+        (tool, flaw)
+        for tool in HOOK_SOURCES
+        for flaw in (
+            "event",
+            "entry",
+            "command",
+            "empty-command",
+            "missing-command",
+            "handler-type",
+        )
+    ]
+    + [
+        (tool, flaw)
+        for tool in ("claude", "codex", "antigravity-cli")
+        for flaw in ("inner-hooks", "missing-hooks", "inner-entry", "matcher", "null-matcher")
+    ]
+    + [
+        ("cursor", flaw)
+        for flaw in ("matcher", "null-matcher", "tools", "mixed-tools", "empty-tool", "failClosed")
+    ]
+    + [("antigravity-cli", "container")]
+)
+
+
+@pytest.mark.parametrize("mode", ["write", "plan"])
+@pytest.mark.parametrize("tool,flaw", NESTED_FAILURES)
+def test_malformed_supported_hook_data_cannot_revoke(
+    tmp_path: Path, tool: str, flaw: str, mode: str
+) -> None:
+    source, target, options = hook_source_and_target(tmp_path, tool)
+    source.write_text(json.dumps(native_hook_config(tool, [native_hook_entry(tool)])))
+    first = sync(tmp_path, "hooks", *options)
+    assert first.exit_code == 0, first.output
+    before_target = target.read_bytes()
+    before_ledger = (tmp_path / LEDGER_PATH).read_bytes()
+
+    entry = native_hook_entry(tool)
+    handler = entry["hooks"][0] if "hooks" in entry else entry
+    command_key = "bash" if tool == "copilot" else "command"
+    entries: object = [entry]
+    if flaw == "event":
+        entries = entry  # Supervisor's P1: a valid JSON object in place of an event list.
+    elif flaw == "entry":
+        entries = ["not an object"]
+    elif flaw == "command":
+        handler[command_key] = ["./guard.sh"]
+    elif flaw == "empty-command":
+        handler[command_key] = ""
+    elif flaw == "missing-command":
+        handler.pop(command_key)
+    elif flaw == "handler-type":
+        handler["type"] = None
+    elif flaw == "inner-hooks":
+        entry["hooks"] = {"command": "./guard.sh"}
+    elif flaw == "missing-hooks":
+        entry.pop("hooks")
+    elif flaw == "inner-entry":
+        entry["hooks"] = ["./guard.sh"]
+    elif flaw in {"matcher", "null-matcher"}:
+        entry["matcher"] = 42 if flaw == "matcher" else None
+    elif flaw in {"tools", "mixed-tools", "empty-tool"}:
+        entry.pop("matcher")
+        entry["tools"] = {"tools": None, "mixed-tools": ["Shell", 42], "empty-tool": [""]}[flaw]
+    elif flaw == "failClosed":
+        entry["failClosed"] = "true"
+    config = native_hook_config(tool, entries)
+    if flaw == "container":
+        config = {"guard": [config["guard"]]}
+    source.write_text(json.dumps(config))
+
+    result = sync(tmp_path, "hooks", *options, *(("--plan",) if mode == "plan" else ()))
+    assert result.exit_code == 1, result.output
+    assert "Invalid source input" in result.output, result.output
+    assert str(HOOK_SOURCES[tool]) in result.output, result.output
+    assert target.read_bytes() == before_target
+    assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
+    assert "./guard.sh" in target.read_text()
+
+
+@pytest.mark.parametrize("tool", HOOK_SOURCES)
+def test_native_extensions_do_not_block_valid_hook_sync_or_explicit_deletion(
+    tmp_path: Path, tool: str
+) -> None:
+    source, target, options = hook_source_and_target(tmp_path, tool)
+    entry = native_hook_entry(tool)
+    # These fields do not determine whether the reader retains a command/scope.
+    entry.update({"description": 42, "timeout": {"future": "metadata"}})
+    unsupported = [
+        {"type": kind, "prompt": "native-only", "command": None, "bash": None, "matcher": None}
+        for kind in ("prompt", "agent", "http", "future-native-handler")
+    ]
+    if "hooks" in entry:
+        entry["hooks"].extend(unsupported)
+        entries = [entry]
+    else:
+        entries = [entry, *unsupported]
+    config = native_hook_config(tool, entries)
+    events = config["guard"] if tool == "antigravity-cli" else config["hooks"]
+    events["FutureNativeEvent"] = {"unknown": "layout"}
+    source.write_text(json.dumps(config))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert "./guard.sh" in target.read_text()
+
+    # Valid empty known events retain deletion authority even alongside extensions.
+    config = native_hook_config(tool, [])
+    events = config["guard"] if tool == "antigravity-cli" else config["hooks"]
+    events["FutureNativeEvent"] = {"unknown": "layout"}
+    source.write_text(json.dumps(config))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert "./guard.sh" not in target.read_text()
+    assert not load_ledger(tmp_path).hooks(AIToolID(options[-1]))
+
+
+@pytest.mark.parametrize("tool", ["claude", "codex", "antigravity-cli"])
+def test_explicit_empty_nested_handler_list_still_revokes(tmp_path: Path, tool: str) -> None:
+    source, target, options = hook_source_and_target(tmp_path, tool)
+    source.write_text(json.dumps(native_hook_config(tool, [native_hook_entry(tool)])))
+    assert sync(tmp_path, "hooks", *options).exit_code == 0
+    entry = native_hook_entry(tool)
+    entry["hooks"] = []
+    source.write_text(json.dumps(native_hook_config(tool, [entry])))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert "./guard.sh" not in target.read_text()
+    assert not load_ledger(tmp_path).hooks(AIToolID(options[-1]))
+
+
+def test_copilot_powershell_only_is_valid_unsupported_input(tmp_path: Path) -> None:
+    source, target, options = hook_source_and_target(tmp_path, "copilot")
+    source.write_text(
+        json.dumps(native_hook_config("copilot", [{"type": "command", "powershell": "echo ok"}]))
+    )
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert not target.exists()
+
+
+def test_cursor_plain_matcher_ignores_unused_legacy_tools(tmp_path: Path) -> None:
+    source, target, options = hook_source_and_target(tmp_path, "cursor")
+    entry = native_hook_entry("cursor")
+    entry["tools"] = None  # Native matcher already fully defines the recovered scope.
+    source.write_text(json.dumps(native_hook_config("cursor", [entry])))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert "./guard.sh" in target.read_text()
+
+
+def test_nested_malformation_blocks_partial_multisource_wizard(tmp_path: Path) -> None:
+    source = write_source(tmp_path)
+    assert sync(tmp_path, "hooks", "--from", "claude", "--to", "cursor").exit_code == 0
+    target = tmp_path / TARGETS["hooks"]
+    before_target = target.read_bytes()
+    before_ledger = (tmp_path / LEDGER_PATH).read_bytes()
+    # Exact supervisor reproduction, alongside the valid Cursor discovery.
+    malformed = {"hooks": {"PreToolUse": {"hooks": [{"command": "./guard.sh"}]}}}
+    source.write_text(json.dumps(malformed))
+    result = sync(tmp_path, "hooks")
+    assert result.exit_code == 1, result.output
+    assert target.read_bytes() == before_target
+    assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
+    assert json.loads(source.read_text()) == malformed
+
+
+@pytest.mark.parametrize("tool,event", [("codex", "Notification"), ("copilot", "UserPromptSubmit")])
+def test_known_imported_event_is_validated_even_if_source_writer_cannot_emit_it(
+    tmp_path: Path, tool: str, event: str
+) -> None:
+    source = tmp_path / HOOK_SOURCES[tool]
+    source.parent.mkdir(parents=True)
+    entry = native_hook_entry(tool)
+    source.write_text(json.dumps({"hooks": {event: [entry]}}))
+    options = ("--from", tool, "--to", "claude")
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    target = tmp_path / SOURCE
+    before_target = target.read_bytes()
+    before_ledger = (tmp_path / LEDGER_PATH).read_bytes()
+    source.write_text(json.dumps({"hooks": {event: entry}}))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 1, result.output
+    assert target.read_bytes() == before_target
+    assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
+
+
+@pytest.mark.parametrize("tool", ["claude", "codex", "cursor", "antigravity-cli"])
+def test_unrepresentable_native_matcher_still_syncs(tmp_path: Path, tool: str) -> None:
+    source, target, options = hook_source_and_target(tmp_path, tool)
+    entry = native_hook_entry(tool)
+    entry["matcher"] = "(Write|Shell)"
+    source.write_text(json.dumps(native_hook_config(tool, [entry])))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    assert "./guard.sh" in target.read_text()
+
+
+def test_agy_stop_ignores_scope_metadata_but_refuses_bad_command(tmp_path: Path) -> None:
+    source, target, options = hook_source_and_target(tmp_path, "antigravity-cli")
+    entry = {"command": "./guard.sh", "matcher": None, "hooks": {"ignored": "metadata"}}
+    source.write_text(json.dumps({"guard": {"Stop": [entry]}}))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 0, result.output
+    before_target = target.read_bytes()
+    before_ledger = (tmp_path / LEDGER_PATH).read_bytes()
+    entry["command"] = None
+    source.write_text(json.dumps({"guard": {"Stop": [entry]}}))
+    result = sync(tmp_path, "hooks", *options)
+    assert result.exit_code == 1, result.output
+    assert target.read_bytes() == before_target
+    assert (tmp_path / LEDGER_PATH).read_bytes() == before_ledger
