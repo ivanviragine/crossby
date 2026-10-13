@@ -7,26 +7,29 @@ project:
   merge_strategy: PR
 ai:
   default_tool: codex
-  default_model: gpt-5.6-terra
-  effort: xhigh
+  default_model: gpt-6.1-sol
+  effort: high
   permission_mode: yolo
   plan:
     tool: codex
-    model: gpt-5.6-sol
+    model: gpt-6.1-sol
     effort: high
   deps:
     mode: headless
     timeout: 900
+    tool: codex
+    model: gpt-6.1-sol
+    effort: high
   review_plan:
-    tool: antigravity-cli
-    model: gemini-3.8-flash
+    tool: codex
+    model: gpt-6.1-sol
     mode: headless
     effort: high
     enabled: true
     timeout: 900
   review_implementation:
-    tool: antigravity-cli
-    model: gemini-3.8-flash
+    tool: codex
+    model: gpt-6.1-sol
     mode: headless
     effort: high
     enabled: true
@@ -34,22 +37,28 @@ ai:
   review_batch:
     mode: interactive
     enabled: true
+    tool: codex
+    model: gpt-6.1-sol
+    effort: high
   review_pr_comments:
     enabled: true
+    tool: codex
+    model: gpt-6.1-sol
+    effort: high
 models:
   codex:
     easy:
-      model: gpt-5.6-terra
-      effort: xhigh
+      model: gpt-6.1-sol
+      effort: high
     medium:
-      model: gpt-5.6-terra
-      effort: xhigh
+      model: gpt-6.1-sol
+      effort: high
     complex:
-      model: gpt-5.6-sol
+      model: gpt-6.1-sol
       effort: high
     very_complex:
-      model: gpt-5.6-sol
-      effort: xhigh
+      model: gpt-6.1-sol
+      effort: high
 provider:
   name: github
 bot_review:
@@ -71,3 +80,5 @@ hooks:
 knowledge:
   enabled: true
   path: KNOWLEDGE.md
+done:
+  max_review_passes: 10

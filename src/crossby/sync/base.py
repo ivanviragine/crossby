@@ -63,6 +63,10 @@ class SyncData:
     # Hooks concern
     hooks: list[HookEntry] = field(default_factory=list)
 
+    # Incomplete source discovery cannot authorize writes or ownership changes.
+    # Errors are concern-scoped so unrelated writers can still run.
+    source_errors: dict[SyncConcern, list[str]] = field(default_factory=dict)
+
     # --- Revocation channels ------------------------------------------------
     # Computed *exclusively* by ``run_sync()`` from the ownership ledger
     # (``sync/ownership.py``) and handed to writers explicitly. These are the
