@@ -741,14 +741,20 @@ class JsonRpcProcess:
         *,
         timeout: float | None = None,
         write_guard: Callable[[], AbstractContextManager[None]] | None = None,
+        before_stop: Callable[[], None] | None = None,
     ) -> None:
+        """Write once; an optional bounded hook precedes forced writer teardown."""
         deadline = self._deadline
         if timeout is not None:
             deadline = min(deadline, time.monotonic() + timeout)
         if not self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise TimeoutError("timed out waiting to write a JSON-RPC message")
         try:
-            if write_guard is None:
+            if before_stop is not None:
+                self._send_locked(
+                    payload, deadline=deadline, write_guard=write_guard, before_stop=before_stop
+                )
+            elif write_guard is None:
                 self._send_locked(payload, deadline=deadline)
             else:
                 self._send_locked(payload, deadline=deadline, write_guard=write_guard)
@@ -761,6 +767,7 @@ class JsonRpcProcess:
         *,
         deadline: float,
         write_guard: Callable[[], AbstractContextManager[None]] | None = None,
+        before_stop: Callable[[], None] | None = None,
     ) -> None:
         cancel_event = getattr(self, "_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
@@ -787,19 +794,29 @@ class JsonRpcProcess:
             raise TimeoutError("timed out writing a JSON-RPC message")
         self._write_thread = threading.Thread(target=write, daemon=True)
         self._write_thread.start()
+
+        def stop_writer() -> None:
+            try:
+                if before_stop is not None:
+                    # The transport owns/bounds its native interruption hook.
+                    before_stop()
+            finally:
+                # Hook failure must never leave a partial writer/child alive.
+                _kill_process_group(self._proc)
+                assert self._write_thread is not None
+                self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+
         while self._write_thread.is_alive():
             cancel_event = getattr(self, "_cancel_event", None)
             if cancel_event is not None and cancel_event.is_set():
-                _kill_process_group(self._proc)
-                self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+                stop_writer()
                 raise SessionProcessCancelledError("JSON-RPC child was cancelled")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             self._write_thread.join(timeout=min(_QUEUE_PUT_TIMEOUT_SECONDS, remaining))
         if self._write_thread.is_alive():
-            _kill_process_group(self._proc)
-            self._write_thread.join(timeout=_CAPTURE_CLEANUP_GRACE_SECONDS)
+            stop_writer()
             raise TimeoutError("timed out writing a JSON-RPC message")
         if errors:
             raise errors[0]

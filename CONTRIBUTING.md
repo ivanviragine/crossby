@@ -389,6 +389,12 @@ handler remains isolated in its daemon worker; a late answer cannot re-enter dis
 accepts an optional `write_guard` which commits response rights inside the actual
 writer, after send-lock/executor waits. Existing callers retain their prior
 behavior. Claude synchronizes that guard with native withdrawal and closure.
+`send()` also accepts an optional `before_stop` hook for a bounded native abort
+attempt before cancellation or expiry forces a partial writer's process teardown.
+The transport must bound that hook; hard kill/join still run if it raises. Claude
+uses its existing once-owned interruption with a separate 0.2-second cleanup
+budget for both ordinary and approval writes. Other callers retain their prior
+stop behavior, and partial frames are never retried.
 
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget

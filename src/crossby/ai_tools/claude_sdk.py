@@ -14,6 +14,7 @@ import math
 import os
 import subprocess
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager, suppress
 from importlib import metadata
@@ -569,7 +570,19 @@ class SDKTransport:
                 # Its reader and the outer runtime monitor enforce the moving
                 # idle deadline; a stale idle snapshot would kill a healthy
                 # backpressured child while native progress is still arriving.
-                await asyncio.to_thread(self.controller.process.send, frame)
+                await asyncio.to_thread(
+                    self.controller.process.send, frame, before_stop=self._before_write_stop
+                )
+
+    def _before_write_stop(self) -> None:
+        """Attempt native interruption before a partial writer kills the child."""
+        assert self.controller is not None
+        self.controller._abort(
+            HeadlessCleanupContext(
+                deadline=time.monotonic() + 0.2,
+                cancel_event=threading.Event(),
+            )
+        )
 
     def _reply(self, request_id: str, frame: dict[str, Any]) -> None:
         assert self.controller is not None
@@ -577,6 +590,7 @@ class SDKTransport:
         self.controller.process.send(
             frame,
             write_guard=lambda: self._commit_reply(request_id),
+            before_stop=self._before_write_stop,
         )
 
     @contextmanager
@@ -865,8 +879,10 @@ def run_sdk_session(
                 ):
                     finishing = asyncio.create_task(transport.finish())
                 if finishing is not None and finishing.done():
-                    code = finishing.result()
-                    break
+                    # EOF/process exit is not SDK validation. Keep draining the
+                    # consumer through its end marker; its parser can still
+                    # reject a frame already observed by the raw transport.
+                    finishing.result()
                 await asyncio.wait({pending}, timeout=0.01)
                 if pending.done():
                     if pending.result() is None:

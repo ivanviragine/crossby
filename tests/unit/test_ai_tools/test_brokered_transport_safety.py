@@ -540,3 +540,26 @@ def test_cursor_permission_labels_cannot_change_the_native_decision(
             else [{"outcome": {"outcome": "cancelled"}}]
         )
         assert responses == expected
+
+
+def test_writer_stop_hook_error_still_kills_and_joins_owned_writer(tmp_path: Path) -> None:
+    rpc = plan_process.JsonRpcProcess(
+        [sys.executable, "-c", "import time; print('ready',flush=True); time.sleep(30)"],
+        cwd=tmp_path,
+        timeout=2,
+    )
+    calls = []
+
+    def before_stop() -> None:
+        calls.append(rpc._proc.poll())
+        raise RuntimeError("native interruption failed")
+
+    try:
+        assert rpc.read_line(timeout=1).strip() == "ready"
+        with pytest.raises(RuntimeError, match="native interruption failed"):
+            rpc.send({"large": "x" * 200000}, timeout=0.05, before_stop=before_stop)
+        assert calls == [None]
+        assert rpc._proc.wait(timeout=1) < 0
+        assert rpc._write_thread is not None and not rpc._write_thread.is_alive()
+    finally:
+        rpc.close()

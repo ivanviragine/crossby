@@ -74,10 +74,16 @@ while the reader and runtime monitor enforce the current idle deadline as native
 progress arrives. Partially written frames are never retried; neither read nor
 write progress extends the overall deadline. Cleanup attempts SDK interruption
 once before process-group termination, killing descendants
-even after the parent exits. The pinned SDK distinguishes a turn result from
+even after the parent exits. A blocked physical writer routes cancellation or
+expiry through that same bounded interruption owner before forced teardown.
+An unread partial frame can prevent an interrupt from reaching the CLI; the
+bridge attempts the native API while the child is alive, bounds that attempt,
+and then kills/joins without interleaving or retrying partial bytes. The pinned SDK distinguishes a turn result from
 run completion. The bridge retains the submitted prompt's native result,
 including output/schema and usage, while consuming background turns and keeping
-their permission/question callbacks live. Only `local_agent` and
+their permission/question callbacks live. Process exit and raw transport EOF do
+not prove SDK message validity: the SDK consumer drains through its end marker
+and parser errors propagate before Crossby accepts completion. Only `local_agent` and
 `local_workflow` tasks defer input closure: `task_started` adds them;
 `task_notification` or terminal `task_updated` removes them. Background snapshots
 do not replace this ledger, and long-lived shells/monitors do not defer closure.

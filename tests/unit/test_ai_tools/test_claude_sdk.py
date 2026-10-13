@@ -60,6 +60,8 @@ def result():
              'result': 'Completed', 'usage': {'input_tokens': 5, 'output_tokens': 7},
              'total_cost_usd': 0.25}
     frame.update(config.get('result', {}))
+    for field in config.get('omit_result_fields', []):
+        frame.pop(field, None)
     if mode == 'background_shell':
         emit({'type':'system', 'subtype':'task_started', 'task_id':'shell-exact',
               'task_type':config.get('task_type', 'local_bash'), 'description':'Long lived work',
@@ -1477,3 +1479,139 @@ def test_native_denials_retained_from_each_result(sdk_child: Any, source: str) -
     assert result.denials == ("Claude reported native permission denials",)
     assert result.usage.input_tokens == 5  # background accounting cannot replace prompt usage
     assert "private command" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("ordering", ["finish_first", "pending_first"])
+def test_sdk_parser_errors_survive_both_completion_orderings(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, ordering: str
+) -> None:
+    import asyncio
+
+    import claude_agent_sdk
+    from claude_agent_sdk._errors import MessageParseError
+
+    from crossby.ai_tools.claude_sdk import SDKTransport
+
+    run, _ = sdk_child
+    native_receive = claude_agent_sdk.ClaudeSDKClient.receive_messages
+    native_finish = SDKTransport.finish
+    native_wait = asyncio.wait
+    gates: dict[str, Any] = {}
+
+    async def receive(client: Any) -> Any:
+        if ordering == "finish_first":
+            gates["consumer_release"] = asyncio.Event()
+            await gates["consumer_release"].wait()
+        try:
+            async for message in native_receive(client):
+                yield message
+        except MessageParseError:
+            gates["sdk_rejected"] = True
+            raise
+
+    async def finish(transport: Any) -> int:
+        code = await native_finish(transport)
+        gates["finisher_done"] = True
+        if ordering == "pending_first":
+            await asyncio.Event().wait()  # cannot win before the real parser error
+        return code
+
+    async def wait(*args: Any, **kwargs: Any) -> Any:
+        if ordering == "finish_first" and gates.get("finisher_done"):
+            # Only a loop that continues draining after finish can reach this
+            # wait. The old early break cancels the still-blocked consumer.
+            gates["consumer_release"].set()
+        return await native_wait(*args, **kwargs)
+
+    monkeypatch.setattr(claude_agent_sdk.ClaudeSDKClient, "receive_messages", receive)
+    monkeypatch.setattr(SDKTransport, "finish", finish)
+    monkeypatch.setattr(asyncio, "wait", wait)
+    with pytest.raises(HeadlessTransportError) as error:
+        run({"omit_result_fields": ["duration_ms"]})
+    assert gates.get("sdk_rejected")
+    assert error.value.partial.session_id == "session-exact"
+    assert error.value.partial.usage.input_tokens == 5
+
+
+@pytest.mark.parametrize("path", ["query", "approval"])
+def test_blocked_write_cancellation_attempts_native_abort_before_kill(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    from crossby.ai_tools.claude_sdk import SDKTransport
+    from crossby.ai_tools.plan_process import JsonRpcProcess
+
+    run, _ = sdk_child
+    writer_stopped = threading.Event()
+    writer_id = []
+    sdk_loop_id = []
+
+    class Cancellation(threading.Event):
+        def is_set(self) -> bool:
+            stopped = super().is_set()
+            if stopped and writer_id and threading.get_ident() != writer_id[0]:
+                # Delay other stop owners until the sender handles cancellation,
+                # but never block the SDK loop that must run native interrupt.
+                if sdk_loop_id and threading.get_ident() == sdk_loop_id[0]:
+                    return writer_stopped.is_set()
+                writer_stopped.wait(2)
+            return stopped
+
+    cancelled = Cancellation()
+    native_send = JsonRpcProcess._send_locked
+    native_observe = SDKTransport._observe
+    native_connect = SDKTransport.connect
+    attempts = []
+    transports = []
+
+    def send(process: Any, frame: Any, **kwargs: Any) -> None:
+        target = "user" if path == "query" else "control_response"
+        if frame["type"] != target:
+            return native_send(process, frame, **kwargs)
+        writer_id.append(threading.get_ident())
+        try:
+            native_send(process, frame, **kwargs)
+        finally:
+            writer_stopped.set()
+
+    def observe(transport: Any, frame: Any) -> None:
+        native_observe(transport, frame)
+        if frame["type"] == "stream_event" and writer_id:
+            assert transport.controller.process._write_thread.is_alive()
+            cancelled.set()
+
+    async def connect(transport: Any) -> None:
+        sdk_loop_id.append(threading.get_ident())
+        await native_connect(transport)
+        transports.append(transport)
+        native_interrupt = transport.client.interrupt
+
+        async def interrupt() -> None:
+            attempts.append(transport.controller.process._proc.poll())
+            await native_interrupt()
+
+        transport.client.interrupt = interrupt
+
+    monkeypatch.setattr(JsonRpcProcess, "_send_locked", send)
+    monkeypatch.setattr(SDKTransport, "_observe", observe)
+    monkeypatch.setattr(SDKTransport, "connect", connect)
+    values = {"mode": f"{path}_backpressure", "drain_delay": 2}
+    request_values = {"idle_timeout_seconds": 0.3, "timeout_seconds": 3}
+    if path == "query":
+        request_values["prompt"] = "x" * 200000
+    else:
+        values.update({"tool": "Bash", "request": {"command": "x" * 200000}})
+    try:
+        result = run(
+            values,
+            lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+            request_values=request_values,
+            cancel_event=cancelled,
+        )
+    finally:
+        writer_stopped.set()
+    assert result.status is HeadlessTerminalStatus.CANCELLED
+    assert result.session_id == "session-exact"
+    assert attempts == [None]
+    process = transports[0].controller.process
+    assert process._proc.poll() is not None
+    assert not process._write_thread.is_alive()
