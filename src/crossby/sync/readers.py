@@ -171,6 +171,17 @@ _MCP_SOURCE_TOOLS: frozenset[AIToolID] = frozenset(
 )
 
 
+def discover_mcp_names(project_root: Path) -> set[str]:
+    """Inventory native declarations, including servers sync cannot port.
+
+    Scenes restrict existing native servers by name. Portability must never
+    decide whether a server appears in that access-control inventory.
+    """
+    from crossby.sync.mcp_discovery import discover_mcp_servers
+
+    return set(discover_mcp_servers(project_root).servers)
+
+
 def discover_mcp(
     project_root: Path,
     from_tool: AIToolID | None = None,

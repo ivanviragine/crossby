@@ -41,6 +41,8 @@ MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model
 
 `SyncData.mcp_sources` records each validated server's winning source. `run_sync()` uses it to preserve Codex-source entries with restored references on targets whose current writers cannot render them faithfully (Cursor, Copilot, Antigravity CLI). This guard covers both explicit source selection and wizard discovery; it does not change the preexisting interpolation behavior of other sources or claim ownership of preserved target entries.
 
+Scenes use `discover_mcp_names()` to inventory native declarations independently of portable sync definitions. Unsupported Codex fields must never hide a server from launch or persistent scene restrictions. A strict launch config that would omit a selected native-only definition requests the existing persistent fallback instead of rendering a partial config.
+
 ## Wade execution defaults
 
 The repository's `.wade.yml` selects Codex with `gpt-6.1-sol` and `high`
