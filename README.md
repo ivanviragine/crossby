@@ -177,8 +177,7 @@ Codex MCP sync preserves environment **references** without reading their values
 
 MCP discovery preserves native disables: Antigravity CLI's `disabled: true`, Codex's `enabled = false`, Claude's project rejection lists and per-project toggle list, and Cursor CLI's per-project `mcp-disabled.json`. A disabled source is never provisioned as enabled on a fresh target. Refreshing an existing target also retains its native user- or scene-authored disable. Malformed activation files, booleans, or name lists refuse MCP sync and MCP-scoped scene launch, preserving target files and ownership; a losing source name conflict does not bypass validation. VS Code keeps its toggle in private profile state outside `.vscode/mcp.json`; that state is not imported. See the [activation audit and limitations](docs/mcp-activation-discovery.md).
 
-Restored Codex environment references can be written to Claude and Codex. The current Cursor, Copilot, and Antigravity CLI writers cannot faithfully render those references, so Codex-source servers using them are skipped for these targets with a manual-fix report, preserving existing entries. Literal-only Codex servers still sync. Cursor and the Copilot `.vscode/mcp.json` format require `${env:NAME}` syntax; Antigravity's MCP documentation does not establish an equivalent interpolation mechanism.
-Native Cursor reference rendering and normalization are tracked separately in [#213](https://github.com/ivanviragine/crossby/issues/213).
+Cursor MCP sync translates Claude `${NAME}` and restored Codex references into native `${env:NAME}` syntax without reading environment values. Native Cursor references normalize back to Claude syntax, retaining prefixes, suffixes and multiple references in `command`, `args`, `env`, `url`, and `headers`; the narrower Codex reverse path supports self env references, whole header references and exact Bearer headers. Defaults, other Cursor interpolation, interpolation-shaped literals, and unsupported native fields produce manual-fix reports and preserve affected target entries. Copilot and Antigravity CLI remain conservative for restored Codex/Cursor references. See the [supported subset and native-format audit](docs/mcp-environment-references.md).
 
 ### Preview before you write
 
@@ -186,7 +185,7 @@ crossby is built to be inspected before it touches a file:
 
 - `crossby sync --plan` shows a stage-by-concern dry-run summary and writes nothing.
 - `--doctor` adds a readiness rating (`high` / `medium` / `low`) plus the target-validation checks that would run afterward.
-- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`).
+- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`). Cursor command checks temporarily look up supported `${env:NAME}` references once; unset references warn, and `$NAME` / `${NAME}` stay literal. Validation never executes commands or persists expanded values, and diagnostics retain the original references. See the [validation distinction](docs/mcp-environment-references.md#explicit-command-validation).
 - `--dry-run` runs a real sync in shadow mode.
 
 After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR. A row can be `Added`, `Removed` (a revocation), `Check before using` (a lossy translation), or `Not Added`. Pass `--no-persist-report` to skip it, or `--report-format markdown-table` to render the same shape on stdout.

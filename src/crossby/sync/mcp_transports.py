@@ -1,6 +1,6 @@
 """Parse env-var indirection out of MCP server header/env values.
 
-Claude and Cursor MCP configs use literal ``"${VAR}"`` values inside the
+Canonical MCP configs use Claude-shaped ``"${VAR}"`` references inside the
 ``headers`` and ``env`` tables. Codex's ``.codex/config.toml`` has dedicated
 fields that name the env var without interpolation:
 
@@ -10,14 +10,14 @@ fields that name the env var without interpolation:
 - ``env: {NAME: "${NAME}"}``       → ``env_vars = ["NAME"]``  (passthrough)
 - ``env: {KEY: "literal"}``        → ``env = { KEY = "literal" }``
 
-Crossby keeps the original Claude/Cursor shape internally (under the
+Crossby keeps the canonical Claude shape internally (under the
 ``MCPServerConfig.headers``/``env`` fields), and only the Codex writer
-applies these rewrites at render time. Other writers preserve the literal
-``${VAR}`` form because the source tools interpret it themselves.
+applies these rewrites at render time. Cursor discovery/writing bridges
+its native ``${env:VAR}`` syntax separately in :mod:`crossby.sync.mcp_cursor`.
 
-``${VAR:-default}`` fallbacks are intentionally not preserved — neither the
-Claude nor Codex schemas have first-class support for them. The literal is
-written out and a manual-fix note is emitted by the caller.
+``${VAR:-default}`` fallbacks are intentionally not preserved — Codex has no equivalent
+field. Rewritten defaults are dropped with a manual-fix note from the caller;
+expressions that do not match these rewrites stay literal.
 """
 
 from __future__ import annotations
