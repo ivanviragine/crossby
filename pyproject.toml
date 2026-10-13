@@ -37,6 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+claude-sdk = ["claude-agent-sdk==0.2.165"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

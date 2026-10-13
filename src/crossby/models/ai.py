@@ -450,6 +450,21 @@ class SessionOperation(BaseModel):
     execution_dir: Path | None = None
     permission_targets: tuple[SessionPermissionTarget, ...] = ()
     native_binding_ids: tuple[SessionNativeBindingID, ...] = ()
+    native_input: dict[str, Any] | None = None
+
+    @field_validator("native_input")
+    @classmethod
+    def _bounded_native_input(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Keep authoritative tool arguments detached and bounded for the handler."""
+        if value is None:
+            return None
+        try:
+            encoded = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("native operation input must be finite JSON") from exc
+        if len(encoded) > _HEADLESS_EVENT_PAYLOAD_LIMIT:
+            raise ValueError("native operation input exceeded the fixed size limit")
+        return cast(dict[str, Any], json.loads(encoded))
 
     @model_validator(mode="after")
     def _command_representation_is_unambiguous(self) -> Self:

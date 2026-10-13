@@ -1014,3 +1014,28 @@ def test_preflight_normalizes_paths_and_runtime_repeats_checks(tmp_path: Path) -
     result = adapter.run_headless_session(request)
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert adapter.version_probes == 2
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        HeadlessTerminalStatus.TIMED_OUT,
+        HeadlessTerminalStatus.CANCELLED,
+        HeadlessTerminalStatus.INVALID_OUTPUT,
+    ],
+)
+def test_forced_outcome_does_not_require_native_terminal(
+    tmp_path: Path, status: HeadlessTerminalStatus
+) -> None:
+    from crossby.ai_tools.headless import _HeadlessStopError
+
+    def stop(_context: HeadlessRuntimeContext) -> None:
+        raise _HeadlessStopError(status, "Managed stop")
+
+    adapter = FakeHeadlessAdapter(
+        stop,
+        capability=_capability(terminal_event_required=True, terminal_event_authoritative=True),
+    )
+    result = adapter.run_headless_session(_request(tmp_path))
+    assert result.status is status
+    assert len([e for e in result.events if e.kind is HeadlessEventKind.TERMINAL]) == 1

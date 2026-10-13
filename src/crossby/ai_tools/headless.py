@@ -864,7 +864,7 @@ class HeadlessRuntimeContext:
                 elif native_terminal.terminal_status is not status:
                     status = HeadlessTerminalStatus.INVALID_OUTPUT
                     self.add_warning("The native terminal event conflicted with adapter status.")
-            elif self.mode_capability.terminal_event_required:
+            elif self.mode_capability.terminal_event_required and not forced_runtime_status:
                 status = HeadlessTerminalStatus.INVALID_OUTPUT
                 self.add_warning("The native transport omitted its required terminal event.")
 

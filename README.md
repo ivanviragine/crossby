@@ -450,6 +450,7 @@ only when `interaction_mode=BROKERED` and an interaction handler is supplied:
 
 | Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
 | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | optional Agent SDK | CLI 2.1.263; SDK 0.2.165 (deterministic fixtures) | text, JSON, JSONL; response schemas | `AskUserQuestion` and tool permissions | exact session | SDK `interrupt()` |
 | Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | exact thread | exact `turn/interrupt` |
 | Cursor | ACP | 2026.09.10-fd3934a | text | questions and permissions | exact session via `session/load` | exact `session/cancel` |
 | OpenCode | authenticated loopback server | 1.19.0 | text | session questions and permissions | exact session | session abort for newly created sessions |
@@ -472,6 +473,26 @@ session-wide abort for resumed sessions because another client may be using
 the same session; cancellation still cleans up this run's server process.
 See [brokered verification](docs/brokered-headless-verification.md) for terminal
 bindings and limitations.
+
+Install `pip install "crossby[claude-sdk]"` to enable Claude's brokered profile.
+The SDK is optional and pinned to `0.2.165`; a missing, broken, or incompatible
+install fails brokered preflight with remediation while unattended and
+interactive launches remain available. The installed `claude` CLI must also
+meet the version floor. SDK dispatch is tested with deterministic child-process
+fixtures; this is not a claim of live model verification.
+
+Claude preserves the native wire request ID separately from the tool-use ID.
+Question text is the native answer key, and option labels are the native option
+identities. Multi-select responses use arrays of labels; free text is forwarded
+verbatim. Permissions require explicit approval; `operation.native_input`
+contains detached authoritative tool arguments, including edit contents.
+Explicit command allowlists use native Bash rules and exclude ambient settings;
+Claude may execute pre-authorized tools without a permission callback.
+`AskUserQuestion` is always routed to the handler. Usage events retain native
+cost as `payload.cost_usd`; token counts and exact session ID are in the result.
+Claude's sandbox remains tool-managed; `sandbox=False` and
+`network_access=True` are unsupported. The shared headless request has no scene
+or arbitrary tool-list field, so those launch concerns cannot be forwarded here.
 
 ```python
 from pathlib import Path

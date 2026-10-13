@@ -24,10 +24,53 @@ backpressure without dropping frames. Its 1 MiB frame limit counts bytes.
 
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
+| Claude Code | CLI 2.1.263 and optional SDK 0.2.165 | SDK `ClaudeSDKClient` with owned custom transport, ordinary query or exact resume | text, JSON, JSONL and response schemas | exact wire request and tool-use IDs plus initialized session; question text and labels are native answer keys | SDK `interrupt()`, then owned process cleanup |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` notification for the active session, then process cleanup |
 | OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | session abort only for a newly created session, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
+
+Claude SDK verification uses the published Python SDK `0.2.165` and its actual
+control dispatcher with synthetic child processes; no paid/live model turn is
+claimed. The independent CLI floor retains the existing Claude native streaming
+contract. The custom transport and subprocess command builder are upstream
+unstable APIs, so the optional extra is exactly pinned and imports/API are
+checked before spawning. The owned process reads raw JSONL through Crossby's
+byte-bounded queue and deadlines, while the SDK owns initialization, permission
+dispatch and native response serialization. The installed CLI is used, never a
+different bundled executable.
+
+The [official user-input contract](https://code.claude.com/docs/en/agent-sdk/user-input)
+uses question text as the answer-map key and option labels as the values.
+Crossby preserves them exactly, supports descriptions, multi-select arrays and
+free text, and rejects ambiguous repeated keys/labels. The SDK callback omits
+wire request and session IDs; the custom transport binds them before dispatch.
+Duplicate IDs, missing session binding, cancelled requests, unresolved requests
+at terminal completion and late answers fail closed. Bash commands come only
+from native `input.command`; filesystem targets and detached `native_input`
+preserve other operation details. Permission suggestions never become persistent
+grants. Denied/skipped clarification ends the session without invented answers;
+denied permissions send native denial. Handler errors remain managed transport
+errors even though the SDK normally converts them into control errors.
+
+Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
+SDK interruption once before process-group termination, killing descendants
+even after the parent exits. Successful results close stdin and drain stdout
+through EOF, rejecting trailing frames and nonzero process exit. Native result
+subtype/error state, exact session ID, token usage, cost and permission-denial
+presence are retained. JSON/JSONL without a schema preserve the final native
+envelope (including native cost/metadata); schemas select `structured_output`
+and use the shared validator. Cost is also available in a bounded usage-event
+payload for text/schema results. Event/diagnostic content excludes prompts,
+answers and raw tool arguments.
+
+Claude remains tool-managed for sandbox policy. Unsupported network grants,
+sandbox disabling and approval policies fail preflight. Shared requests have
+no scene context or arbitrary tool-list selector; these are API capability gaps,
+not advertised support. Existing interactive, plan and unattended paths remain
+independent. See `test_claude_sdk.py` for real SDK dispatch, dependency failures,
+resume identity, structured output, native cancellation, startup/callback
+timeouts, terminal failures and owned-process tests.
 
 Codex's 0.162.1 app-server schema was generated with
 `codex app-server generate-json-schema --experimental`. It defines
