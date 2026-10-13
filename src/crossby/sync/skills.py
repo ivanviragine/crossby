@@ -207,6 +207,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
         # outside the project.
+        target_removed = False
         if data.skills_strategy in {"copy", "translate"} and target_dir.is_symlink():
             if not force:
                 return SyncResult(
@@ -221,6 +222,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 )
             if not dry_run:
                 target_dir.unlink()
+                target_removed = True
                 logger.info("skills.symlink_replaced", target=str(target_dir))
 
         # Existing real directory — may need to error, proceed, or back up.
@@ -257,16 +259,22 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 scope = ProjectScope(project_root)
                 safe_copy(scope, bak, target_dir)
                 safe_rmtree(scope, target_dir)
+                target_removed = True
                 logger.info("skills.dir_backed_up", original=str(target_dir), backup=str(bak))
 
         if data.skills_strategy == "translate":
-            return self._sync_translate(
+            result = self._sync_translate(
                 source_dir,
                 target_dir,
                 project_root=project_root,
                 dry_run=dry_run,
                 source_tools=data.skills_source_tools,
             )
+            if target_removed and result.action == "skipped":
+                result.action = "updated"
+                result.message = "target removed; no skills to translate"
+                result.revoked = 1
+            return result
 
         if data.skills_strategy == "copy":
             return self._sync_copy(
@@ -514,10 +522,19 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 rendered for _, rendered in command_skills
             ]
             manual_fix_count = sum(has_manual_fix_block(text) for text in rendered_skills)
+            if not rendered_skills:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="updated",
+                    file_path=target_dir,
+                    message="target removed (dry-run; no skills to translate)",
+                    revoked=1,
+                )
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
-                action="created" if rendered_skills else "skipped",
+                action="created",
                 file_path=target_dir,
                 message=f"translated (dry-run, {manual_fix_count} manual-fix)",
             )

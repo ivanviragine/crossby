@@ -555,3 +555,75 @@ def test_clean_identical_output_transfers_source_then_scoped_repeat_succeeds(
     assert writer.sync(scoped, tmp_path, dry_run=True).action == "updated"
     assert writer.sync(scoped, tmp_path).action == "updated"
     assert not (target / "shared").exists()
+
+
+@pytest.mark.parametrize("target_kind", ["directory", "symlink", "broken-symlink"])
+@pytest.mark.parametrize("source", ["claude", "cursor"])
+def test_forced_empty_source_reports_removal_in_plan_dry_run_and_execution(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+    source: str,
+) -> None:
+    import shutil
+
+    from crossby.sync.plan import summarize_plan
+    from crossby.sync.report import classify_status
+
+    # Keep distinguishable commands on the unselected tool. They must not turn
+    # an empty selected source's forced removal into an additive translation.
+    shutil.rmtree(project / f".{source}/skills")
+    (project / f".{source}/skills").mkdir()
+    (project / f".{source}/commands/deploy.md").unlink()
+    target = project / ".agents/skills"
+    original = project / "human-skills"
+    original.mkdir()
+    (original / "human.txt").write_text("Human instructions\n")
+    target.parent.mkdir()
+    if target_kind == "directory":
+        shutil.copytree(original, target)
+    elif target_kind == "symlink":
+        target.symlink_to(original, target_is_directory=True)
+    else:
+        target.symlink_to(project / "missing-skills", target_is_directory=True)
+    original_content = _snapshot(original)
+    target_content = _snapshot(target)
+    original_link = target.readlink() if target.is_symlink() else None
+    rows: list[SyncResult] = []
+    monkeypatch.setattr(
+        "crossby.cli.sync._display_results", lambda results, **kw: rows.extend(results)
+    )
+    plan = _sync(project, source, "--force", "--plan")
+    assert "1 updated" in plan
+    assert "1 entry removed" in plan
+    assert _snapshot(target) == target_content
+    assert target.is_symlink() == (original_link is not None)
+    assert not list(target.parent.glob("skills.bak*"))
+    _sync(project, source, "--force", "--dry-run")
+    dry = next(row for row in rows if row.concern == SyncConcern.SKILLS and row.tool_id)
+    assert dry.action == "updated"
+    assert dry.revoked == 1
+    assert summarize_plan([dry]).manual_fix_count == 0
+    assert _snapshot(target) == target_content
+    if original_link is not None:
+        assert target.readlink() == original_link
+    rows.clear()
+    _sync(project, source, "--force")
+    real = next(row for row in rows if row.concern == SyncConcern.SKILLS and row.tool_id)
+    assert real.action == dry.action
+    assert real.revoked == dry.revoked
+    assert classify_status(real) == "Removed"
+    assert not target.exists() and not target.is_symlink()
+    assert _snapshot(original) == original_content
+    backups = list(target.parent.glob("skills.bak*"))
+    if target_kind == "directory":
+        assert len(backups) == 1
+        assert _snapshot(backups[0]) == target_content
+    else:
+        assert not backups
+    rows.clear()
+    _sync(project, source, "--force")
+    repeat = next(row for row in rows if row.concern == SyncConcern.SKILLS and row.tool_id)
+    assert repeat.action == "skipped"
+    assert repeat.revoked == 0
+    assert not target.exists()
