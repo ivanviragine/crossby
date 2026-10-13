@@ -381,7 +381,9 @@ def _declare_agents(ctx: _Context) -> list[SyncResult]:
 
 
 def _declare_mcp(ctx: _Context) -> list[SyncResult]:
-    universe = set(ctx.base.mcp_servers)
+    from crossby.sync.readers import discover_mcp_names
+
+    universe = set(ctx.base.mcp_servers) | discover_mcp_names(ctx.project_root)
     disable = universe - ctx.selected["mcp"]
     results: list[SyncResult] = []
     for tool in ctx.installed:

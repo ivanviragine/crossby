@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from crossby.config.json_utils import PathContainmentError, assert_within, atomic_write_text
+from crossby.sync.base import SyncConcern
 from crossby.sync.file_utils import MANAGED_MARKER_NAME, write_managed_marker
 
 if TYPE_CHECKING:
@@ -90,6 +91,10 @@ class SceneLaunchFallbackError(Exception):
         return self.reason
 
 
+class SceneLaunchInputError(ValueError):
+    """Invalid native input forbids both launch and persistent fallback writes."""
+
+
 @dataclass(frozen=True)
 class SceneLaunchArgs:
     """Extra argv and environment one adapter contributes for a scene launch.
@@ -118,17 +123,52 @@ class SceneLaunchContext:
         return set(self.resolved.names(concern))
 
     def mcp_universe(self) -> dict[str, MCPServerConfig]:
-        """Every MCP server discovered for the project, keyed by name."""
+        """Portable MCP definitions; native-only names remain in ``mcp_names``."""
         return dict(self.sync_data.mcp_servers)
+
+    def mcp_names(self) -> set[str]:
+        """Include native-only servers in the scene's restriction inventory."""
+        from crossby.sync.readers import discover_mcp_names
+
+        return set(self.sync_data.mcp_servers) | discover_mcp_names(self.project_root)
 
     def selected_mcp(self) -> dict[str, MCPServerConfig]:
         """The discovered MCP servers the scene keeps enabled, keyed by name."""
+        if self.sync_data.source_errors.get(SyncConcern.MCP):
+            raise SceneLaunchInputError(
+                "Invalid native MCP activation; cannot render a strict launch config."
+            )
         keep = self.selected("mcp")
-        return {name: cfg for name, cfg in self.sync_data.mcp_servers.items() if name in keep}
+        missing = (
+            (keep & self.mcp_names())
+            - set(self.sync_data.mcp_servers)
+            - self.sync_data.mcp_disabled
+        )
+        if missing:
+            raise SceneLaunchFallbackError(
+                "Selected native MCP servers cannot be ported into a strict launch config: "
+                + ", ".join(sorted(missing))
+                + "; use native persistent scene restrictions instead."
+            )
+        return {
+            name: cfg
+            for name, cfg in self.sync_data.mcp_servers.items()
+            if name in keep and cfg.enabled and name not in self.sync_data.mcp_disabled
+        }
 
     def deselected_mcp(self) -> set[str]:
         """Discovered MCP servers the scene drops (universe minus selected)."""
-        return set(self.sync_data.mcp_servers) - self.selected("mcp")
+        if (
+            self.resolved.configured_concerns is not None
+            and "mcp" not in self.resolved.configured_concerns
+        ):
+            # An omitted selector leaves the native runtime's project/user
+            # layers alone; no strict config or additional MCP flags are needed.
+            return set()
+        disabled = self.sync_data.mcp_disabled | {
+            name for name, cfg in self.sync_data.mcp_servers.items() if not cfg.enabled
+        }
+        return (self.mcp_names() - self.selected("mcp")) | disabled
 
     def narrows_mcp(self) -> bool:
         """True when the scene drops at least one discovered MCP server.
@@ -279,7 +319,11 @@ def mcp_json_config(servers: dict[str, MCPServerConfig]) -> str:
 
     from crossby.sync.mcp import _to_json_entry
 
-    body = {"mcpServers": {name: _to_json_entry(cfg) for name, cfg in sorted(servers.items())}}
+    body = {
+        "mcpServers": {
+            name: _to_json_entry(cfg) for name, cfg in sorted(servers.items()) if cfg.enabled
+        }
+    }
     return json.dumps(body, indent=2, sort_keys=True) + "\n"
 
 

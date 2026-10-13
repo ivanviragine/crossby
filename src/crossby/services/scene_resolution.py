@@ -32,7 +32,7 @@ from crossby.models.config import SCENE_CONCERNS, SceneConfig, SceneSelector
 from crossby.sync.readers import (
     ProjectScan,
     discover_hooks,
-    discover_mcp,
+    discover_mcp_names,
     discover_permissions,
 )
 
@@ -71,6 +71,10 @@ class ResolvedScene:
     tool_id: AIToolID | None
     groups: tuple[ResolvedGroup, ...]
     warnings: tuple[str, ...]
+    # None retains compatibility for callers constructing resolved scenes
+    # directly. The resolver records explicit scope even when a selector keeps
+    # every project item, which differs from omitting that concern entirely.
+    configured_concerns: frozenset[str] | None = None
 
     def groups_for(self, concern: str) -> tuple[ResolvedGroup, ...]:
         """Return the resolved groups for a single concern."""
@@ -168,7 +172,14 @@ def resolve_scene(
                 )
             )
 
-    return ResolvedScene(tool_id=tool_id, groups=tuple(groups), warnings=tuple(warnings))
+    return ResolvedScene(
+        tool_id=tool_id,
+        groups=tuple(groups),
+        warnings=tuple(warnings),
+        configured_concerns=frozenset(
+            concern for concern in SCENE_CONCERNS if getattr(scene, concern) is not None
+        ),
+    )
 
 
 def concern_universe(scan: ProjectScan, project_root: Path) -> dict[str, tuple[str, ...]]:
@@ -258,7 +269,7 @@ def _collect_groups(concern: str, scan: ProjectScan, project_root: Path) -> list
     if concern == "agents":
         return _dir_groups(scan.agents.found, project_root, _list_agent_names)
     if concern == "mcp":
-        return _global_group(sorted(discover_mcp(project_root)), scan)
+        return _global_group(sorted(discover_mcp_names(project_root)), scan)
     if concern == "permissions":
         # sorted() like mcp/hooks: discover_permissions preserves reader order,
         # so sort here to keep every concern's group.names deterministic.

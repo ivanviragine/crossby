@@ -217,7 +217,9 @@ def run_sync(
     ledger = loaded_ledger.ledger
     current_hooks = {(h.event, h.command) for h in data.hooks}
     current_perms = set(data.allowed_commands)
-    disabled_mcp = {name for name, s in data.mcp_servers.items() if not s.enabled}
+    disabled_mcp = data.mcp_disabled | {
+        name for name, s in data.mcp_servers.items() if not s.enabled
+    }
     # tool → the identity set crossby should own after a successful write.
     # Applied to the ledger only for writers that did not error.
     pending_hooks: dict[AIToolID, set[tuple[str, str]]] = {}
@@ -326,7 +328,48 @@ def run_sync(
             mcp_owned = ledger.mcp(writer.tool_id)
             # Only ledger-owned *and* explicitly-disabled servers may be removed,
             # so a same-named server crossby never wrote survives.
-            writer_data = replace(data, mcp_remove=frozenset(disabled_mcp & mcp_owned))
+            # The native disabled declaration itself stays configured. This is
+            # relevant in the wizard, which also writes to the winning source.
+            mcp_revoke = {
+                name
+                for name in disabled_mcp & mcp_owned
+                if data.mcp_sources.get(name) != str(writer.tool_id)
+            }
+            writer_data = replace(data, mcp_remove=frozenset(mcp_revoke))
+            # Newly restored Codex refs use Claude syntax. The other current
+            # writers copy those strings verbatim: Cursor/VS Code need
+            # ${env:NAME}, and Antigravity does not document interpolation.
+            # Preserve winning-source provenance and skip only affected
+            # Codex entries; never guess, resolve secrets, or overwrite auth
+            # with a syntactically plausible but nonworking approximation.
+            if writer.tool_id not in {AIToolID.CLAUDE, AIToolID.CODEX}:
+                refused = {
+                    name
+                    for name, server in data.mcp_servers.items()
+                    if data.mcp_sources.get(name) == "codex"
+                    and server.enabled
+                    and any("${" in v for v in (*server.env.values(), *server.headers.values()))
+                }
+                for name in sorted(refused):
+                    results.append(
+                        SyncResult(
+                            tool_id=writer.tool_id,
+                            concern=SyncConcern.MCP,
+                            action="skipped",
+                            message=(
+                                f"MCP server `{name}` (from codex) has environment references "
+                                f"the {writer.tool_id} MCP writer cannot faithfully render. "
+                                "The server was not synced; existing target entries are "
+                                "preserved. This is a manual-fix — configure environment "
+                                "references directly in the target's native config."
+                            ),
+                        )
+                    )
+                if refused:
+                    writer_data = replace(
+                        writer_data,
+                        mcp_servers={k: v for k, v in data.mcp_servers.items() if k not in refused},
+                    )
 
         try:
             result = writer.safe_sync(writer_data, project_root, dry_run=dry_run, force=force)
@@ -363,7 +406,7 @@ def run_sync(
                 pending_perms[writer.tool_id] = set(perms_owned & current_perms) | created_perms
             elif writer.concern == SyncConcern.MCP:
                 created_mcp = {c for c in result.created if isinstance(c, str)}
-                pending_mcp[writer.tool_id] = set(mcp_owned - disabled_mcp) | created_mcp
+                pending_mcp[writer.tool_id] = set(mcp_owned - writer_data.mcp_remove) | created_mcp
 
         if writer.concern == SyncConcern.AGENTS:
             agents_writers_ran = True
@@ -472,6 +515,19 @@ def run_sync(
         from crossby.sync.plugins import report_plugins
 
         results.extend(report_plugins(project_root))
+
+    if (concern is None or concern == SyncConcern.MCP) and (
+        not skip_concerns or SyncConcern.MCP not in skip_concerns
+    ):
+        results.extend(
+            SyncResult(
+                tool_id=None,
+                concern=SyncConcern.MCP,
+                action="skipped",
+                message=message,
+            )
+            for message in data.mcp_warnings
+        )
 
     # MCP oauth-config discovery — same detect-only shape as plugins above:
     # append manual-fix rows for source MCP servers with an `oauth` block

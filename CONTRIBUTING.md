@@ -37,6 +37,12 @@ Run `./scripts/check-all.sh` before opening a PR.
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
+MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model validation. Keep the reader matched to the Codex writer in `sync/mcp.py`: environment references must remain references, never resolved secrets. Codex `env` and `http_headers` values are literal, so a `${...}` literal cannot safely enter Crossby's interpolation-shaped canonical maps. Unrepresentable entries are excluded as a whole, with field-name-only diagnostics carried through `SyncData.mcp_warnings` to reports, including explicit `--to`, dry-run, and wizard paths; retain source precedence and ledger ownership rules.
+
+`SyncData.mcp_sources` records each validated server's winning source. `run_sync()` uses it to preserve Codex-source entries with restored references on targets whose current writers cannot render them faithfully (Cursor, Copilot, Antigravity CLI). This guard covers both explicit source selection and wizard discovery; it does not change the preexisting interpolation behavior of other sources or claim ownership of preserved target entries.
+
+Scenes use `discover_mcp_names()` to inventory native declarations independently of portable sync definitions. Unsupported Codex fields must never hide a server from launch or persistent scene restrictions. A strict launch config that would omit a selected native-only definition requests the existing persistent fallback instead of rendering a partial config.
+
 ## Wade execution defaults
 
 The repository's `.wade.yml` selects Codex with `gpt-6.1-sol` and `high`
@@ -75,6 +81,10 @@ src/crossby/
 ```
 
 ### Subagent format translation
+
+Definition translation neither implies nor is implied by
+[runtime subagent readiness](#runtime-subagent-readiness). Keep these contracts
+independent when auditing a new adapter.
 
 `src/crossby/subagents/` translates a single subagent definition between
 Claude Code, Cursor, Copilot, and Codex.  The architecture is a
@@ -702,7 +712,9 @@ The load-bearing rule when adding removal to a writer:
 - Hook and permission readers distinguish absent input (`None` / empty data) from a present unreadable or invalid JSON source (`SourceReadError`). Discovery can collect per-source diagnostics, and `build_sync_data()` carries them in `SyncData.source_errors`; `run_sync()` refuses every writer for an affected concern before computing revocations or changing ownership. The wizard carries scan errors into the same gate, including when no valid data or ownership exists. Partial multi-source results never authorize that concern's writes; unrelated concerns retain continue-on-error behavior. `discover_hooks()` always validates supported nested identity, scope, and protection fields before using the result as deletion authority. Low-level hook extractors retain a permissive mode for non-destructive extraction; callers must use discovery or `validate=True` when the output can drive revocation. Unknown events, non-command native handler types, and unused optional metadata are not schema errors; effective supported fields cannot be silently skipped. Active source failures also produce a concern-level error when target/writer filtering leaves no matching writer, so inspection cannot report high readiness from an empty result.
 - The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A truly missing `owned.json` degrades to "own nothing". A malformed ledger is never overwritten: ordinary sync refuses hooks, permissions, and MCP writers before mutation because their ownership could not be persisted, while unrelated whole-artifact writers may still run. Post-writer persistence remains best-effort: an `OSError` while saving a previously valid ledger or updating `.gitignore` is surfaced in result rows without discarding the writes that already succeeded.
 - **Scene mutate/revert operations fail *closed* on missing or corrupt recovery authority.** `load_ledger_checked()` marks an existing ledger corrupt when it is a symlink, directory, unparseable/non-object JSON, or contains malformed `scene` or `scene_paths` restore provenance. The `scene_paths` section accepts only registered project-relative targets and exact sibling `.bak[2…]` paths. Each descriptor records true absence, a literal symlink target, a deliberately unchanged canonical source, or a real directory's allocated backup. Directory descriptors also persist the captured device/inode and a pending/completed displacement phase, so a retry can authenticate the exact directory on either side of an interrupted rename and never adopt recreated managed output as the baseline. `use`, `clear`, and their `--plan` paths validate ancestors and descriptors before inspecting or mutating targets; legacy PROJECT output without exact provenance requires manual recovery.
-- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. `mcp_remove` bounds the existing `enabled=False` deletion so crossby can never delete a same-named server a human wrote. Hooks and permissions do revoke-on-absence.
+- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. Discovery separates native inventory, portable connection data, and activation. `SyncData.mcp_disabled` carries valid native disables even for nonportable configurations; `mcp_remove` bounds deletion by target ownership and excludes the winning native source itself. Successful writers release ownership only for authorized removals. A same-named server a human wrote is never deleted. Hooks and permissions do revoke-on-absence.
+- MCP activation readers validate native booleans and sidecar lists without resolving environment references or exposing configuration values. Present malformed files/sections and ambiguous activation refuse MCP through `source_errors`, including inspection and wizard paths. Codex and Antigravity writers retain existing native activation booleans when updating connections; Claude/Cursor sidecars remain untouched, and unreadable target activation refuses writes. The [activation audit](docs/mcp-activation-discovery.md) records the supported locations, native evidence, and limits; do not assign semantics to unaudited fields or private IDE state.
+- `ResolvedScene.configured_concerns` records explicit selector scope separately from selected item names. An omitted MCP selector applies no filter, even when discovery contains disabled project servers; an explicit MCP selector still excludes native-disabled entries from strict launch output. Directly constructed resolved scenes retain an optional default for compatibility.
 - A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
 - **The interactive wizard revokes on *environment-wide absence*.** Each revocable concern (hooks, permissions, MCP) dispatches on *data OR ownership*: the wizard loads the ledger once and runs `run_sync()` for a concern when the merged source data is non-empty **or** any installed target still owns entries for it. Because the wizard merges discovery across *all* installed tools (no `--from` scope), "revoke" here means the concern has emptied across the **whole environment** — an entry still present on any installed tool is rediscovered as current and is **not** stripped. This is *not* entry-for-entry `--from` parity (where an entry present only on other tools would be revoked). Two consequences to know: MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP dispatch removes nothing and just emits `skipped`/discovery rows; and declining a still-present port while the ledger owns entries leaves `data` empty for that concern, so the ownership arm fires and revokes the owned copies (a later confirm re-adds them). Hardening "decline ≠ revoke" (e.g. also requiring `not scan.<concern>.found`) is a possible follow-up, not current behavior.
 
@@ -1084,6 +1096,102 @@ Available on each adapter for programmatic use:
 | Sandbox toggle    | —                                        | —                   | —                | `workspace-write` / `danger-full-access` | — | `enabled` / `disabled` |
 
 The sandbox toggle is keyword-only on `launch()`, `build_launch_command()`, `build_resume_command()`, and `sandbox_config_args()`. It is a programmatic adapter contract, not a CLI/config option. Every resume override and GUI `launch()` override must accept the keyword even when it is inert, so polymorphic calls remain `TypeError`-free.
+
+### Runtime subagent readiness
+
+`adapter.subagent_spawning_status(working_dir=None, headless=True,
+launch_args=(), environment=None, request=None)` returns a frozen
+`SubagentSpawnStatus`. The five public types (`SubagentSpawnStatus`,
+`SubagentSpawnState`, `SubagentSpawnSupport`, `SubagentSpawnReason`, and
+`SubagentSpawnEvidence`) are exported from `crossby.ai_tools`.
+
+| State | Meaning | Consumer predicate |
+| --- | --- | --- |
+| `available` | Audited runtime and effective launch context permit spawning | `True` |
+| `disabled` | The selected launch's effective controls prevent spawning | `False` |
+| `unsupported` | Audited family or requested launch mode lacks support | `False` |
+| `unknown` | The adapter cannot safely establish effective readiness | `False` |
+
+Use `status.is_available` or `bool(status)`; never replace an unknown answer
+with a tool-name allowlist or `capabilities().subagent_spawning == "supported"`.
+The declaration defaults to `unaudited`. Even `supported` requires an effective
+runtime check. Serialize decisions with `status.model_dump(mode="json")` for
+prompt-free provenance: tool id, state, reason code/text, evidence, normalized
+cwd, headless mode, version and an opaque input-context fingerprint.
+
+A `HeadlessSessionRequest` supplies managed launch context. Do not mix it with
+extra native options, a different cwd or `headless=False`. For ordinary native
+CLI launches, `launch_args` is the exact option sequence excluding the binary,
+subcommand and prompt. `environment` replaces the entire child environment;
+when omitted it snapshots inheritance. Relative PATH entries resolve against
+the intended child cwd. Preserve scene/profile environment additions and native
+options if checking a manually assembled launch. The fingerprint omits the
+prompt and exposes no environment or credential values; it identifies inputs,
+not immutable files or binaries. There is no readiness cache. Recheck before
+launch when configuration, model metadata, environment or installation changes.
+
+Codex's audited native introspection floor is 0.162.1. One five-second shared
+subprocess deadline covers version detection and app-server initialization,
+`config/read` with the actual cwd, `configRequirements/read`,
+`experimentalFeature/list`, and `model/list`, including bounded pagination.
+Owned subprocess helpers bound output and clean up the process tree. Fixed
+cleanup grace may extend the subprocess budget slightly. These are read methods;
+no thread, model turn, tool invocation or config write/enablement request occurs.
+Startup may use existing native credentials, contact its usual service, and
+refresh native catalogs/caches. Do not copy a subset of config into a temporary
+CODEX_HOME: that would measure a different launch. Unit tests replace native
+processes; opt-in smoke tests use complete isolated fixture contexts and never
+perform paid model inference. Run the native read audit with
+`CROSSBY_SUBAGENT_READINESS_SMOKE=1 ./scripts/test.sh tests/unit/test_ai_tools/test_codex_subagent_readiness_smoke.py`;
+its fixture config bytes must remain unchanged.
+
+The resolver follows native precedence: an enabled `multi_agent_v2` selects v2;
+otherwise `agents.enabled=false` disables spawning; otherwise selected model
+metadata takes precedence over the legacy `multi_agent` flag. A model selected
+by name must have an unambiguous native catalog entry; no model-name guess is
+allowed. V1 depth zero or v2 concurrency with only the parent slot establishes
+disablement. Effective managed feature requirements must agree with feature
+metadata. Malformed, missing or incompatible evidence, unavailable binaries,
+unknown/older versions, failed reads and timeouts are `unknown`.
+
+`features list` alone is insufficient: it omits `agents.enabled` and model
+selection. The original #153 scaffold inferred that the key was ignored because
+its feature row stayed enabled; native runtime source and config introspection
+show that inference was wrong. With v2 off, effective `agents.enabled=false`
+correctly reports `disabled`. With v2 on, native v2 precedence applies. The
+[official subagent documentation](https://developers.openai.com/codex/subagents)
+and [app-server read contract](https://developers.openai.com/codex/app-server)
+describe the relevant controls and methods.
+
+Ordinary managed unattended requests preserve their model, effort, sandbox and
+network inputs, including the adapter's native effort mapping (`MAX` is `xhigh`
+for Codex). Fresh ordinary CLI checks audit a narrow option set; profiles,
+source-changing flags, local providers, cwd/worktree relocation, custom thread
+sources, brokered transports, resume and planning return `unknown`. Mixed feature
+toggles and config overrides return `unknown` because native precedence differs
+by launch mode; never translate toggles inline to fabricate an affirmative result.
+Contexts containing `CODEX_API_KEY` return `unknown`: native exec and standalone
+app-server select authentication differently, which can change catalog/default
+model selection. Credentials are never copied or translated to repair this.
+Headless contexts with managed approval, reviewer or sandbox constraints also
+remain `unknown`: exec's initial `never` approval selection and possible
+AutoReview rebuild differ from standalone config reads and can reject a launch
+that the reads accept. The probe does not approximate native permission fallback.
+Explicit Code Mode routing controls or `multi_agent_v2.non_code_mode_only=false`
+also remain `unknown` when they can hide the spawning surface. A child's denied
+sandbox/approval operation does not establish lack of spawning.
+Readiness does not verify authentication, every future child operation, or that a
+model complied with an instruction to delegate; actual delegation requires
+separate observed execution evidence.
+
+Claude declares audited family support, with its ordinary headless version floor
+2.1.263. Direct `--disallowedTools` or `--tools` exclusions can establish
+`disabled`; per-agent exclusions cannot establish a blanket denial. Otherwise
+its effective managed/remote policy and unattended permission behavior remain
+`unknown`. Local settings scans are insufficient: managed policy can ignore
+non-managed permission rules. Other adapters remain `unaudited`/`unknown` until
+their actual runtime contracts are checked. Adding a declaration without a
+runtime resolver must never produce `available`.
 
 ## Commit Conventions
 
