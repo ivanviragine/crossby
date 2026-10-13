@@ -45,6 +45,13 @@ save({'type':'fixture_environment', 'entrypoint':os.environ.get('CLAUDE_CODE_ENT
       'version':os.environ.get('CLAUDE_AGENT_SDK_VERSION'), 'nested':os.environ.get('CLAUDECODE'),
       'pwd':os.environ.get('PWD')})
 background_stage = 0
+def delay_drain():
+    end = time.monotonic() + config.get('drain_delay', 0.5)
+    while time.monotonic() < end:
+        time.sleep(0.04)
+        if config.get('write_progress', True):
+            emit({'type':'stream_event', 'uuid':'backpressure-progress', 'session_id':session,
+                  'event':{'type':'content_block_delta'}})
 def result():
     global background_stage
     frame = {'type': 'result', 'subtype': config.get('subtype', 'success'),
@@ -123,8 +130,11 @@ for line in sys.stdin:
             continue
         emit({'type': 'control_response', 'response': {
               'subtype': 'success', 'request_id': frame['request_id'], 'response': {}}})
+        if subtype == 'initialize' and mode == 'query_backpressure':
+            emit({'type':'system', 'subtype':'init', 'session_id':session})
+            delay_drain()
     elif frame['type'] == 'user':
-        if mode != 'no_session':
+        if mode not in {'no_session', 'query_backpressure'}:
             emit({'type': 'system', 'subtype': 'init', 'session_id': session})
         if mode == 'stall':
             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
@@ -140,6 +150,8 @@ for line in sys.stdin:
                   'tool_use_id': config.get('tool_id', 'tool-exact'), 'input': request,
                   'title': 'Display is not executable', 'blocked_path': '/blocked',
                   'agent_id': 'agent-exact', **config.get('native_context', {})}})
+            if mode == 'approval_backpressure':
+                delay_drain()
             if mode == 'native_cancel':
                 time.sleep(config.get('cancel_delay', 0))
                 emit({'type': 'control_cancel_request', 'request_id': 'wire-exact'})
@@ -197,7 +209,7 @@ def sdk_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             prompt=request_values.pop("prompt", "private task"),
             working_dir=tmp_path,
             interaction_mode=HeadlessInteractionMode.BROKERED,
-            timeout_seconds=5,
+            timeout_seconds=request_values.pop("timeout_seconds", 5),
             **request_values,
         )
         return ClaudeAdapter().run_headless_session(
@@ -1200,3 +1212,171 @@ def test_cost_redaction_matches_exported_json(sdk_child: Any, prompt: str, cost:
     assert prompt not in json.dumps(usage[0].model_dump(mode="json"))
     assert prompt not in json.dumps(usage[0].model_dump(mode="json"), separators=(",", ":"))
     assert result.usage.input_tokens == 5
+
+
+def test_sequential_questions_refresh_pending_read_idle_budget(
+    sdk_child: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crossby.ai_tools.plan_process import JsonRpcProcess
+
+    run, record = sdk_child
+    native = {
+        "questions": [
+            {**_questions()["questions"][0], "question": f"Question {index}?"} for index in range(3)
+        ]
+    }
+    native_read = JsonRpcProcess.read_line
+    read_timeouts = []
+
+    def read(process: Any, *, timeout: float | None = None) -> Any:
+        try:
+            return native_read(process, timeout=timeout)
+        except TimeoutError:
+            read_timeouts.append(timeout)
+            raise
+
+    def handler(_interaction: SessionInteraction) -> SessionInteractionResponse:
+        threading.Event().wait(0.11)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.ANSWERED, option_id="Two")
+
+    monkeypatch.setattr(JsonRpcProcess, "read_line", read)
+    result = run({"request": native}, handler, request_values={"idle_timeout_seconds": 0.25})
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert read_timeouts  # the old snapshot expires while current progress is valid
+    reply = next(
+        f["response"]["response"] for f in _records(record) if f["type"] == "control_response"
+    )
+    assert reply["updatedInput"]["answers"] == {f"Question {i}?": "Two" for i in range(3)}
+    assert result.session_id == "session-exact"
+
+
+def test_question_progress_cannot_extend_overall_deadline(sdk_child: Any) -> None:
+    run, record = sdk_child
+    native = {
+        "questions": [
+            {**_questions()["questions"][0], "question": f"Question {index}?"} for index in range(3)
+        ]
+    }
+
+    def handler(_interaction: SessionInteraction) -> SessionInteractionResponse:
+        threading.Event().wait(0.11)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.ANSWERED, option_id="Two")
+
+    result = run(
+        {"request": native},
+        handler,
+        request_values={"idle_timeout_seconds": 0.25, "timeout_seconds": 0.28},
+    )
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert result.session_id == "session-exact"
+    assert not any(f["type"] == "control_response" for f in _records(record))
+
+
+@pytest.mark.parametrize("path", ["query", "approval"])
+def test_native_progress_refreshes_backpressured_write_idle_budget(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    from crossby.ai_tools.plan_process import JsonRpcProcess
+
+    run, record = sdk_child
+    large = "x" * 200000  # exceeds the real pipe capacity, below native-input limit
+    values = {"mode": f"{path}_backpressure"}
+    request_values = {"idle_timeout_seconds": 0.2}
+    if path == "query":
+        request_values["prompt"] = large
+    else:
+        values.update({"tool": "Bash", "request": {"command": large}})
+    physical_writes = []
+    blocked_for = []
+    native_send = JsonRpcProcess._send_locked
+
+    def send(process: Any, frame: dict[str, Any], **kwargs: Any) -> None:
+        physical_writes.append(frame["type"])
+        start = time.monotonic()
+        native_send(process, frame, **kwargs)
+        if frame["type"] == ("user" if path == "query" else "control_response"):
+            blocked_for.append(time.monotonic() - start)
+
+    seen = []
+
+    def approve(interaction: SessionInteraction) -> SessionInteractionResponse:
+        seen.append(interaction)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    monkeypatch.setattr(JsonRpcProcess, "_send_locked", send)
+    result = run(values, approve, request_values=request_values)
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.session_id == "session-exact"
+    assert len(blocked_for) == 1 and blocked_for[0] > 0.4  # beyond the old idle snapshot
+    frames = _records(record)
+    if path == "query":
+        frame = next(f for f in frames if f["type"] == "user")
+        assert frame["message"]["content"] == large
+        assert physical_writes.count("user") == 1  # never retry a partial write
+    else:
+        assert len(seen) == 1
+        assert seen[0].request_id == "wire-exact"
+        assert seen[0].operation.native_input == {"command": large}
+        replies = [f for f in frames if f["type"] == "control_response"]
+        assert len(replies) == physical_writes.count("control_response") == 1
+        assert replies[0]["response"]["request_id"] == "wire-exact"
+        assert replies[0]["response"]["response"] == {
+            "behavior": "allow",
+            "updatedInput": {"command": large},
+        }
+
+
+@pytest.mark.parametrize("path", ["query", "approval"])
+@pytest.mark.parametrize("limit", ["idle", "overall"])
+def test_backpressured_write_obeys_current_runtime_deadlines(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, path: str, limit: str
+) -> None:
+    from crossby.ai_tools.claude_sdk import SDKTransport
+
+    run, record = sdk_child
+    values = {
+        "mode": f"{path}_backpressure",
+        "drain_delay": 2,
+        "write_progress": limit == "overall",
+    }
+    request_values = {
+        "idle_timeout_seconds": 0.2,
+        "timeout_seconds": 0.4 if limit == "overall" else 5,
+    }
+    if path == "query":
+        request_values["prompt"] = "x" * 200000
+    else:
+        values.update({"tool": "Bash", "request": {"command": "x" * 200000}})
+    attempted_abort = []
+    transports = []
+    native_connect = SDKTransport.connect
+
+    async def connect(transport: Any) -> None:
+        await native_connect(transport)
+        transports.append(transport)
+        client = transport.client
+        native_interrupt = client.interrupt
+
+        async def interrupt() -> None:
+            attempted_abort.append(transport.controller.process._proc.poll())
+            await native_interrupt()
+
+        client.interrupt = interrupt
+
+    monkeypatch.setattr(SDKTransport, "connect", connect)
+    result = run(
+        values,
+        lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+        request_values=request_values,
+    )
+    assert result.status is HeadlessTerminalStatus.TIMED_OUT
+    assert result.session_id == "session-exact"
+    assert attempted_abort == [None]  # native abort is attempted before hard teardown
+    process = transports[0].controller.process
+    assert process._proc.poll() is not None
+    assert not process._write_thread.is_alive()
+    # The child never consumed a complete user/approval frame before stop.
+    assert not any(
+        f["type"] == ("user" if path == "query" else "control_response") for f in _records(record)
+    )

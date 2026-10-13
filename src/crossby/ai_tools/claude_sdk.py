@@ -258,13 +258,21 @@ class SDKTransport:
 
     def _read(self) -> dict[str, Any] | None:
         assert self.controller is not None
-        self.context.checkpoint()
-        try:
-            line = self.controller.process.read_line(timeout=self.context.remaining_seconds())
-        except EOFError:
-            return None
-        finally:
+        while True:
             self.context.checkpoint()
+            try:
+                line = self.controller.process.read_line(timeout=self.context.remaining_seconds())
+            except TimeoutError:
+                # Sequential callbacks may have refreshed idle progress while
+                # this read waited on an older budget. Retry only if the current
+                # idle/overall/cancellation checkpoint still permits work.
+                self.context.checkpoint()
+                continue
+            except EOFError:
+                return None
+            finally:
+                self.context.checkpoint()
+            break
         frame = json.loads(line)
         if not isinstance(frame, dict):
             raise ValueError("Claude SDK emitted a non-object frame")
@@ -549,16 +557,17 @@ class SDKTransport:
                 # No await between checking liveness and the bounded write worker.
                 await asyncio.to_thread(self._reply, request_id, frame)
             else:
-                await asyncio.to_thread(
-                    self.controller.process.send, frame, timeout=self.context.remaining_seconds()
-                )
+                # The owned process bounds writes by the overall deadline.
+                # Its reader and the outer runtime monitor enforce the moving
+                # idle deadline; a stale idle snapshot would kill a healthy
+                # backpressured child while native progress is still arriving.
+                await asyncio.to_thread(self.controller.process.send, frame)
 
     def _reply(self, request_id: str, frame: dict[str, Any]) -> None:
         assert self.controller is not None
         self.context.checkpoint()
         self.controller.process.send(
             frame,
-            timeout=self.context.remaining_seconds(),
             write_guard=lambda: self._commit_reply(request_id),
         )
 

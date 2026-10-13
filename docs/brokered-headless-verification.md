@@ -63,8 +63,13 @@ queued behind a send lock or executor cannot revive a withdrawn request.
 After committing response rights, the writer releases the registry lock before
 pipe write/flush so backpressure cannot block native interruption or withdrawal.
 
-Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
-SDK interruption once before process-group termination, killing descendants
+Startup, callbacks, I/O and teardown share the Crossby deadline. Pending reads
+recheck the current idle budget when sequential question callbacks refresh
+semantic progress. Physical writes use the owned process's overall deadline,
+while the reader and runtime monitor enforce the current idle deadline as native
+progress arrives. Partially written frames are never retried; neither read nor
+write progress extends the overall deadline. Cleanup attempts SDK interruption
+once before process-group termination, killing descendants
 even after the parent exits. The pinned SDK distinguishes a turn result from
 run completion. The bridge retains the submitted prompt's native result,
 including output/schema and usage, while consuming background turns and keeping
