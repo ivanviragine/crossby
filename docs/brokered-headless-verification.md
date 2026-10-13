@@ -84,6 +84,12 @@ through EOF, checking process exit; active state at EOF cannot become success.
 Observed native failure/abort uses bounded interrupt and cleanup rather than
 waiting for idle, preserving terminal status, actual exit code and prompt usage.
 Native failure state and provenance are recorded before invoking usage observers.
+An observer/dispatch exception takes precedence over native completion, even if
+the cleanup task finishes before the SDK message consumer receives the error.
+Error teardown reserves remaining work time to deliver the exception rather
+than allowing an unacknowledged interrupt wait to turn it into an idle timeout.
+Numeric cost payloads are suppressed when their serialized form contains the
+protected prompt, while native token accounting remains available.
 Prompt usage/cost is recorded immediately when its result arrives, so later
 background timeout/cancellation retains observed accounting. An absent result
 origin means human; a second such result is rejected rather than attributed to

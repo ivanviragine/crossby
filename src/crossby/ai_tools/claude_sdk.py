@@ -22,6 +22,7 @@ from typing import Any
 from crossby.ai_tools.headless import (
     HeadlessCleanupContext,
     HeadlessRuntimeContext,
+    HeadlessTransportError,
     _HeadlessInteractionCancelledError,
     _HeadlessStopError,
 )
@@ -497,7 +498,7 @@ class SDKTransport:
             if isinstance(cost, (int, float))
             and not isinstance(cost, bool)
             and math.isfinite(cost)
-            and self.context.request.prompt not in "cost_usd"
+            and self.context.request.prompt not in json.dumps({"cost_usd": cost})
             else None
         )
         if usage is not None or payload is not None:
@@ -826,9 +827,11 @@ def run_sdk_session(
             pending = asyncio.create_task(anext(response, None))
             finishing: asyncio.Task[int] | None = None
             while True:
+                # A native result cannot erase a dispatch/observer exception.
+                # Check the recorded cause independently of which task wins.
+                if transport.failure is not None:
+                    raise transport.failure
                 if transport.failure_terminal is None:
-                    if transport.failure is not None:
-                        raise transport.failure
                     context.checkpoint()
                 if finishing is None and (
                     transport.terminal is not None or transport.failure_terminal
@@ -845,7 +848,7 @@ def run_sdk_session(
                         code = await finishing
                         break
                     pending = asyncio.create_task(anext(response, None))
-            if transport.failure_terminal is None and transport.failure is not None:
+            if transport.failure is not None:
                 raise transport.failure
             frame = transport.terminal or transport.failure_terminal
             if frame is None:
@@ -856,8 +859,15 @@ def run_sdk_session(
             # Same task owns SDK connect/disconnect (anyio task-group invariant).
             # Process operations are bounded even when SDK teardown is shielded.
             if not succeeded and transport.controller is not None:
+                budget = 0.2
+                if isinstance(transport.failure, HeadlessTransportError):
+                    # Reserve work time to deliver the dispatch exception. A
+                    # dead SDK reader cannot acknowledge interrupt; spending
+                    # the full cleanup grace here lets the monitor replace an
+                    # already-observed observer error with an idle timeout.
+                    budget = min(budget, context.remaining_seconds() / 4)
                 cleanup = HeadlessCleanupContext(
-                    deadline=asyncio.get_running_loop().time() + 0.2,
+                    deadline=asyncio.get_running_loop().time() + budget,
                     cancel_event=threading.Event(),
                 )
                 await asyncio.to_thread(transport.controller._abort, cleanup)
@@ -876,7 +886,7 @@ def run_sdk_session(
     try:
         frame, code = asyncio.run(run())
     except BaseException:
-        if isinstance(transport.failure, _HeadlessStopError):
+        if isinstance(transport.failure, (_HeadlessStopError, HeadlessTransportError)):
             raise transport.failure from None
         context.checkpoint()
         if (

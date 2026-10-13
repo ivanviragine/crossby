@@ -1111,3 +1111,71 @@ def test_native_failure_provenance_precedes_usage_callback(
         )
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("ordering", ["finish_first", "pending_first"])
+def test_observer_error_wins_both_sdk_completion_orderings(
+    sdk_child: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    ordering: str,
+) -> None:
+    import asyncio
+
+    import claude_agent_sdk
+
+    from crossby.ai_tools.claude_sdk import SDKTransport
+
+    run, record = sdk_child
+    original_receive = claude_agent_sdk.ClaudeSDKClient.receive_messages
+    original_finish = SDKTransport.finish
+    gates: dict[str, Any] = {}
+
+    async def receive(client: Any) -> Any:
+        gates["pending_hold"] = asyncio.Event()
+        try:
+            async for message in original_receive(client):
+                yield message
+        except HeadlessTransportError:
+            gates["pending_error_observed"] = True
+            if ordering == "finish_first":
+                # The SDK delivered its error, but the consumer task cannot
+                # complete until cancelled by teardown. The real finisher wins.
+                await gates["pending_hold"].wait()
+            raise
+
+    async def finish(transport: Any) -> int:
+        code = await original_finish(transport)
+        gates["native_finish_completed"] = True
+        if ordering == "pending_first":
+            # The native cleanup finished, but this task cannot publish its
+            # return before the consumer's exception. No sleeps choose a winner.
+            await asyncio.Event().wait()
+        return code
+
+    def observe(event: Any) -> None:
+        if event.kind is HeadlessEventKind.USAGE:
+            raise RuntimeError("Private observer failure")
+
+    monkeypatch.setattr(claude_agent_sdk.ClaudeSDKClient, "receive_messages", receive)
+    monkeypatch.setattr(SDKTransport, "finish", finish)
+    with pytest.raises(HeadlessTransportError, match="event handler") as error:
+        run(
+            {"subtype": "error_during_execution", "is_error": True},
+            event_handler=observe,
+            request_values={"idle_timeout_seconds": 0.15},
+        )
+    assert error.value.partial.native_status == "error_during_execution"
+    assert error.value.partial.session_id == "session-exact"
+    assert error.value.partial.usage.input_tokens == 5
+    assert any(f.get("request", {}).get("subtype") == "interrupt" for f in _records(record))
+
+
+@pytest.mark.parametrize("prompt", ["0.25", "25", "cost_usd"])
+def test_numeric_cost_cannot_reproduce_protected_prompt(sdk_child: Any, prompt: str) -> None:
+    run, _ = sdk_child
+    result = run({}, request_values={"prompt": prompt})
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    usage = [event for event in result.events if event.kind is HeadlessEventKind.USAGE]
+    assert len(usage) == 1
+    assert usage[0].payload is None
+    assert result.usage.input_tokens == 5
