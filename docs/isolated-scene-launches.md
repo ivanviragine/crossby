@@ -23,7 +23,10 @@ Git 2.50.1 was checked with real temporary repositories. HEAD-based
 [`check-attr --source`](https://git-scm.com/docs/git-check-attr) detects effective
 checkout filters without writing the original index or executing the filter.
 Regression cases cover committed, info and global attributes, modified local
-attributes, unused drivers and empty local overrides of global commands. Older
+attributes, unused drivers and empty local overrides of global commands.
+Target-worktree conditional includes are checked after owned registration and
+before population; tests cover both automatic cleanup and retained refusals,
+without executing the configured filter or post-checkout hook. Older
 Git lacking this option refuses the configured-driver preflight. Relative
 worktree bindings are validated by canonical identity, including after native
 `worktree repair`; cleanup remains conditional on duplicate ownership receipts.

@@ -70,6 +70,50 @@ def _git(
     return result.stdout if raw else result.stdout.strip()
 
 
+def _check_checkout_hook(repository: Path, commit: str) -> None:
+    hook_path = Path(_git(repository, "rev-parse", "--git-path", "hooks/post-checkout"))
+    if not hook_path.is_absolute():
+        committed_hook = _git(repository, "ls-tree", commit, "--", hook_path.as_posix())
+        if committed_hook.startswith(("100755 ", "120000 ")):
+            raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
+        hook_path = repository / hook_path
+    if hook_path.is_file() and os.access(hook_path, os.X_OK):
+        raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
+
+
+def _check_checkout_filters(
+    repository: Path, commit: str, checkout_paths: list[str] | tuple[str, ...]
+) -> None:
+    # Query effective HEAD attributes without modifying the original index
+    # or running any filter. Unused global drivers (e.g. LFS) are harmless.
+    drivers: set[str] = set()
+    effective_config: dict[str, str] = {}
+    for item in _git(repository, "config", "--null", "--list", raw=True).split("\0"):
+        key, _, value = item.partition("\n")
+        effective_config[key] = value
+    for key, value in effective_config.items():
+        if key.startswith("filter.") and value:
+            for suffix in (".smudge", ".process"):
+                if key.endswith(suffix):
+                    drivers.add(key[len("filter.") : -len(suffix)])
+    if drivers and checkout_paths:
+        attributes = _git(
+            repository,
+            "check-attr",
+            f"--source={commit}",
+            "-z",
+            "--stdin",
+            "filter",
+            input_text="\0".join(checkout_paths) + "\0",
+            raw=True,
+            timeout=_GIT_BULK_TIMEOUT,
+        ).split("\0")
+        if any(value in drivers for value in attributes[2::3]):
+            raise WorktreeError(
+                "Isolated v1 launches refuse active checkout smudge/process filters."
+            )
+
+
 def isolation_requested(scene: SceneConfig | None, flag: str | None, keep: bool) -> bool:
     """Reject contradictory modes before allocating anything."""
     if flag not in (None, "worktree", "none"):
@@ -97,6 +141,7 @@ class WorktreeRequest:
     skills_relative: Path | None
     bundles: dict[str, dict[Path, tuple[bytes, int]]]
     canonical_skills_relative: Path | None = None
+    checkout_paths: tuple[str, ...] = ()
 
     @classmethod
     def prepare(
@@ -105,16 +150,7 @@ class WorktreeRequest:
         repository = Path(_git(cwd, "rev-parse", "--show-toplevel")).resolve()
         common = Path(_git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         commit = _git(cwd, "rev-parse", "--verify", "HEAD^{commit}")
-        hook_path = Path(_git(repository, "rev-parse", "--git-path", "hooks/post-checkout"))
-        if not hook_path.is_absolute():
-            committed_hook = _git(repository, "ls-tree", commit, "--", hook_path.as_posix())
-            if committed_hook.startswith(("100755 ", "120000 ")):
-                raise WorktreeError(
-                    "Isolated v1 launches require no executable post-checkout hook."
-                )
-            hook_path = repository / hook_path
-        if hook_path.is_file() and os.access(hook_path, os.X_OK):
-            raise WorktreeError("Isolated v1 launches require no executable post-checkout hook.")
+        _check_checkout_hook(repository, commit)
         try:
             cwd_relative = cwd.resolve().relative_to(repository)
             scene_relative = scene_root.resolve().relative_to(repository)
@@ -167,34 +203,7 @@ class WorktreeRequest:
 
         for link_name in links:
             resolve_committed(Path(*link_name))
-        # Query effective HEAD attributes without modifying the original index
-        # or running any filter. Unused global drivers (e.g. LFS) are harmless.
-        drivers: set[str] = set()
-        effective_config: dict[str, str] = {}
-        for item in _git(repository, "config", "--null", "--list", raw=True).split("\0"):
-            key, _, value = item.partition("\n")
-            effective_config[key] = value
-        for key, value in effective_config.items():
-            if key.startswith("filter.") and value:
-                for suffix in (".smudge", ".process"):
-                    if key.endswith(suffix):
-                        drivers.add(key[len("filter.") : -len(suffix)])
-        if drivers and checkout_paths:
-            attributes = _git(
-                repository,
-                "check-attr",
-                f"--source={commit}",
-                "-z",
-                "--stdin",
-                "filter",
-                input_text="\0".join(checkout_paths) + "\0",
-                raw=True,
-                timeout=_GIT_BULK_TIMEOUT,
-            ).split("\0")
-            if any(value in drivers for value in attributes[2::3]):
-                raise WorktreeError(
-                    "Isolated v1 launches refuse active checkout smudge/process filters."
-                )
+        _check_checkout_filters(repository, commit, checkout_paths)
         sources = scene.inject.skills if scene.inject is not None else {}
         target = SKILLS_DIR.get(tool)
         if sources and target is None:
@@ -273,6 +282,7 @@ class WorktreeRequest:
             skills_relative,
             bundles,
             canonical,
+            tuple(checkout_paths),
         )
 
     @contextmanager
@@ -318,11 +328,20 @@ class WorktreeRequest:
                 "worktree",
                 "add",
                 "--detach",
+                "--no-checkout",
                 str(workspace),
                 self.commit,
                 timeout=_GIT_BULK_TIMEOUT,
             )
             owned = bind()
+            # Conditional includes (gitdir/onbranch) can differ in this worktree.
+            # Bind ownership and validate its actual configuration before Git
+            # populates files or can execute a checkout filter/hook.
+            _check_checkout_hook(workspace, self.commit)
+            _check_checkout_filters(workspace, self.commit, self.checkout_paths)
+            _git(
+                workspace, "checkout", "--force", "--detach", self.commit, timeout=_GIT_BULK_TIMEOUT
+            )
             directories = list(
                 dict.fromkeys((self.canonical_skills_relative, self.skills_relative))
             )

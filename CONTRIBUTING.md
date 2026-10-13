@@ -146,8 +146,11 @@ before allocation, resolving committed symlink chains without relying on lexical
 normalization. Inspect effective last-value Git filter configuration and HEAD
 attributes via `check-attr --source` before allocation; account for repository
 info/global attributes, preserve the original index, and allow unused or locally
-disabled drivers. Bulk Git operations have a finite 600-second deadline; metadata
-queries retain 30 seconds. Normalize reciprocal Gitlinks relative to their
+disabled drivers. Allocate with `worktree add --no-checkout`, establish ownership,
+then recheck effective filters and hooks in that worktree before populating it.
+Conditional includes can change configuration by Git directory or branch; the
+original checkout alone cannot authorize population. Bulk Git operations have a
+finite 600-second deadline; metadata queries retain 30 seconds. Normalize reciprocal Gitlinks relative to their
 containing directories, including after native relative-path repair.
 Frozen explicit payloads include executable file modes. Ownership
 lives outside the checkout in a private temporary

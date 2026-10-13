@@ -318,7 +318,10 @@ hooks. Active Git smudge/process filters for files in HEAD are also refused,
 including attributes from `.git/info/attributes` or global configuration. Unused
 filter drivers are allowed. Checking configured drivers requires Git 2.43 or
 newer (`git check-attr --source`); older Git refuses that preflight. These checks
-avoid running checkout setup commands before ownership is established.
+avoid running checkout setup commands before ownership is established. Crossby
+first registers an unpopulated worktree, records ownership, then rechecks its
+effective configuration before checkout, including conditional Git includes.
+A refused retained worktree may therefore contain only its Git binding.
 `crossby scene use` retains its existing persistent semantics and does not
 allocate a worktree or inject bundles.
 

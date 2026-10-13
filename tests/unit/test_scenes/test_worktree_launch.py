@@ -1161,3 +1161,69 @@ raise SystemExit(code)
         if proc.poll() is None:
             proc.send_signal(signal.SIGTERM)
             proc.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("driver_kind", ["smudge", "process"])
+@pytest.mark.parametrize("keep", [False, True])
+def test_new_worktree_conditional_filter_is_refused_before_population(
+    project: dict[str, Path], driver_kind: str, keep: bool
+) -> None:
+    import shlex
+
+    repo = project["repo"]
+    (repo / ".gitattributes").write_text("* filter=poison\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "conditional filter fixture")
+    sentinel = project["tmp"] / "conditional-outside-write"
+    config = project["tmp"] / "conditional-git-config"
+    git(
+        repo,
+        "config",
+        "--file",
+        str(config),
+        f"filter.poison.{driver_kind}",
+        "touch " + shlex.quote(str(sentinel)) + "; cat",
+    )
+    git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    initial_index = (repo / ".git/index").read_bytes()
+    original_head = git(repo, "rev-parse", "HEAD")
+    prepared = request(project)  # Driver is absent from the original checkout.
+    retained: list[Path] = []
+    with (
+        pytest.raises(WorktreeError, match=r"checkout.*filters"),
+        prepared.create(keep=keep, on_retained=retained.append),
+    ):
+        pytest.fail("Filtered checkout must never reach launch")
+    assert not sentinel.exists()
+    assert (repo / ".git/index").read_bytes() == initial_index
+    assert git(repo, "rev-parse", "HEAD") == original_head
+    if keep:
+        assert len(retained) == 1
+        assert (retained[0] / ".git").is_file()
+        assert not (retained[0] / "package/app.py").exists()
+        OwnedWorktree(retained[0]).cleanup(discard_changes=True)
+    assert not list(project["owners"].iterdir())
+    assert len(git(repo, "worktree", "list", "--porcelain").split("worktree ")) == 2
+
+
+def test_new_worktree_conditional_post_checkout_hook_is_refused(
+    project: dict[str, Path],
+) -> None:
+    repo = project["repo"]
+    sentinel = project["tmp"] / "conditional-hook-write"
+    hook_dir = repo / ".hooks"
+    hook_dir.mkdir()
+    import shlex
+
+    hook = hook_dir / "post-checkout"
+    hook.write_text("#!/bin/sh\ntouch " + shlex.quote(str(sentinel)) + "\n")
+    hook.chmod(0o755)
+    git(repo, "add", ".hooks")
+    git(repo, "commit", "-qm", "conditional hook fixture")
+    config = project["tmp"] / "conditional-hook-config"
+    git(repo, "config", "--file", str(config), "core.hooksPath", ".hooks")
+    git(repo, "config", "includeIf.gitdir:**/worktrees/**.path", str(config))
+    with pytest.raises(WorktreeError, match="post-checkout"), request(project).create():
+        pytest.fail("Conditional hook must not run")
+    assert not sentinel.exists()
+    assert not list(project["owners"].iterdir())
