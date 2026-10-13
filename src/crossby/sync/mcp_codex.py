@@ -34,8 +34,8 @@ def normalize_codex_mcp(entry: dict[str, Any]) -> tuple[dict[str, Any], tuple[st
     """Return canonical data and field names whose semantics cannot be ported.
 
     No values appear in diagnostics. Keep ``transport`` for compatibility with
-    Crossby-written TOML, and keep existing ``enabled`` behavior (#167 owns
-    disabled-state normalization). Native URL-only entries imply HTTP.
+    Crossby-written TOML. Activation is audited separately by discovery.
+    Native URL-only entries imply HTTP.
     """
     result = {k: v for k, v in entry.items() if k in _COMMON_FIELDS}
     is_http = "url" in entry and "command" not in entry

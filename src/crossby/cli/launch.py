@@ -436,11 +436,11 @@ def launch(
     # cleanly here rather than let it become a persistent-write fallback (the
     # adapters catch only their own errors, e.g. Codex's FileExistsError, so a
     # containment error already propagates untouched).
-    from crossby.scenes.launch import SceneLaunchFallbackError
+    from crossby.scenes.launch import SceneLaunchFallbackError, SceneLaunchInputError
 
     try:
         exit_code = _dispatch(scene_ctx)
-    except PathContainmentError as exc:
+    except (PathContainmentError, SceneLaunchInputError) as exc:
         console.error(f"Refusing to launch scene {scene!r}: {exc}")
         raise typer.Exit(1) from exc
     except SceneLaunchFallbackError as exc:
@@ -550,6 +550,7 @@ def _prepare_scene_launch(
         validate_scene_name,
     )
     from crossby.services.scene_resolution import resolve_scene
+    from crossby.sync.base import SyncConcern
     from crossby.sync.readers import build_sync_data, scan_project
 
     # A scene name is interpolated into artefact paths — reject an unsafe one
@@ -563,6 +564,15 @@ def _prepare_scene_launch(
     tool_id = AIToolID(resolved_tool)
     installed = AbstractAITool.detect_installed()
     scan = scan_project(scene_root, installed)
+    sync_data = build_sync_data(scene_root)
+    if (
+        scene_cfg.mcp is not None
+        and caps.tool_type != AIToolType.GUI
+        and sync_data.source_errors.get(SyncConcern.MCP)
+    ):
+        console.error("Refusing to launch scene: invalid native MCP activation configuration.")
+        console.hint("Fix the MCP source configuration; the AI tool was not started.")
+        raise typer.Exit(1)
     resolved = resolve_scene(scene_cfg, scan, scene_root, tool_id=None)
     for warning in resolved.warnings:
         console.warn(warning)
@@ -584,7 +594,7 @@ def _prepare_scene_launch(
             name=scene_name,
             resolved=resolved,
             project_root=scene_root,
-            sync_data=build_sync_data(scene_root),
+            sync_data=sync_data,
         )
 
     reason = (
@@ -607,7 +617,7 @@ def _prepare_scene_launch(
             name=scene_name,
             resolved=resolved,
             project_root=scene_root,
-            sync_data=build_sync_data(scene_root),
+            sync_data=sync_data,
         ),
         tool_id=tool_id,
         installed=installed,

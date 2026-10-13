@@ -253,14 +253,14 @@ class TestClaudeMCPWriter:
         assert mcp.read_text() == original_content
 
     def test_malformed_settings_leaves_it_intact(self, tmp_path: Path) -> None:
-        # A broken settings.json can't take the approval, but the servers still
-        # reach .mcp.json and the malformed file is left byte-for-byte intact.
+        # A broken activation sidecar cannot establish whether project servers
+        # are disabled. Refuse before provisioning or revoking anything.
         settings = self._settings(tmp_path)
         settings.parent.mkdir()
         settings.write_text("{broken", encoding="utf-8")
         result = self.writer.sync(_cfg({"context7": STDIO_SERVER}), tmp_path)
-        assert result.action == "created"
-        assert "context7" in _read_json(self._mcp(tmp_path))["mcpServers"]
+        assert result.action == "error"
+        assert not self._mcp(tmp_path).exists()
         assert settings.read_text() == "{broken"
 
     def test_sorted_keys_output(self, tmp_path: Path) -> None:

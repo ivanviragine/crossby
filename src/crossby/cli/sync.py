@@ -306,6 +306,7 @@ def sync(
     source_errors = {
         c: list(scan_result.errors)
         for c, scan_result in (
+            (SyncConcern.MCP, scan.mcp),
             (SyncConcern.PERMISSIONS, scan.permissions),
             (SyncConcern.HOOKS, scan.hooks),
         )
@@ -438,24 +439,40 @@ def sync(
                 skills_src_tool = source
 
     # MCP
-    if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
+    if (
+        scan.mcp.found
+        and not scan.mcp.errors
+        and (sync_concern is None or sync_concern == SyncConcern.MCP)
+    ):
         from crossby.sync.mcp_discovery import discover_mcp_servers
 
         scoped = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
+        native_disabled: set[str] = set()
+        mcp_errors: list[str] = []
         servers = discover_mcp(
             project_root,
             include_user_scope=include_user_scope,
             diagnostics=data.mcp_warnings,
             sources=data.mcp_sources,
+            disabled=native_disabled,
+            errors=mcp_errors,
         )
+        if mcp_errors:
+            data.source_errors[SyncConcern.MCP] = mcp_errors
         n_user = sum(
             1 for name, ds in scoped.servers.items() if ds.scope == "user" and name in servers
         )
         scope_note = f" ({len(servers) - n_user} project, {n_user} user)" if n_user else ""
-        if servers and prompts.confirm(
-            f"Port {len(servers)} MCP server(s){scope_note} to all tools?", default=True
+        count = len(set(servers) | native_disabled)
+        if (
+            count
+            and not mcp_errors
+            and prompts.confirm(
+                f"Port {count} MCP server(s){scope_note} to all tools?", default=True
+            )
         ):
             data.mcp_servers = servers
+            data.mcp_disabled = native_disabled
 
     # Permissions
     if (
@@ -501,6 +518,7 @@ def sync(
                 data.skills_source,
                 data.mcp_servers,
                 data.mcp_warnings,
+                data.mcp_disabled,
                 data.allowed_commands,
                 data.hooks,
             ]
@@ -559,9 +577,13 @@ def sync(
             force=force,
             installed_tools=skills_targets,
         )
-    if (data.mcp_servers or data.mcp_warnings or owns_mcp) and (
-        sync_concern is None or sync_concern == SyncConcern.MCP
-    ):
+    if (
+        data.mcp_servers
+        or data.mcp_warnings
+        or data.mcp_disabled
+        or owns_mcp
+        or data.source_errors.get(SyncConcern.MCP)
+    ) and (sync_concern is None or sync_concern == SyncConcern.MCP):
         results += run_sync(
             data,
             project_root,
