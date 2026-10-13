@@ -1290,6 +1290,7 @@ def build_sync_data(
         rules_source=rules_source,
         agents_source=agents_source,
         skills_source=skills_source,
+        skills_source_tools=(from_tool,) if from_tool is not None else None,
         mcp_servers=mcp_servers,
         mcp_warnings=mcp_warnings,
         mcp_sources=mcp_sources,

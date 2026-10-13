@@ -21,6 +21,7 @@ Strategies:
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from pathlib import Path
 from typing import Literal
@@ -48,6 +49,12 @@ from crossby.sync.file_utils import (
 )
 from crossby.sync.gitignore_utils import update_managed_block
 from crossby.sync.safe_write import ProjectScope, safe_copy, safe_rmtree, safe_write_text
+from crossby.sync.skills_provenance import (
+    PROVENANCE_NAME,
+    read_provenance,
+    skill_fingerprint,
+    write_provenance,
+)
 
 logger = structlog.get_logger()
 
@@ -217,7 +224,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 # so subsequent runs preserve translate/copy semantics.
                 if data.skills_strategy == "translate":
                     return self._sync_translate(
-                        source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                        source_dir,
+                        target_dir,
+                        project_root=project_root,
+                        dry_run=dry_run,
+                        source_tools=data.skills_source_tools,
                     )
                 return self._sync_copy(
                     source_dir, target_dir, project_root=project_root, dry_run=dry_run
@@ -232,7 +243,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
         if data.skills_strategy == "translate":
             return self._sync_translate(
-                source_dir, target_dir, project_root=project_root, dry_run=dry_run
+                source_dir,
+                target_dir,
+                project_root=project_root,
+                dry_run=dry_run,
+                source_tools=data.skills_source_tools,
             )
 
         if data.skills_strategy == "copy":
@@ -409,6 +424,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         *,
         project_root: Path,
         dry_run: bool,
+        source_tools: tuple[AIToolID, ...] | None = None,
     ) -> SyncResult:
         """Per-skill copy with target-aware SKILL.md rewriting.
 
@@ -420,8 +436,8 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         idempotency. Stale skill subdirectories whose source disappeared are
         removed.
 
-        When a source tool that has a slash-command primitive (Claude /
-        Cursor today) lives in the project and ``self.tool_id`` is
+        When a selected source tool has a slash-command primitive (Claude /
+        Cursor today) and lives in the project and ``self.tool_id`` is
         different, each of that tool's commands is wrapped as a single-file
         skill named ``<source>-command-<slug>`` so the prompt body survives
         the migration. See :mod:`crossby.sync.slash_commands` for the
@@ -430,18 +446,82 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         from crossby.sync.slash_commands import iter_command_skills
 
         command_skills: list[tuple[str, str]] = []
-        for _src_path, source_tool, definition in iter_command_skills(project_root):
+        owners: dict[str, str] = {}
+        for _src_path, source_tool, definition in iter_command_skills(
+            project_root, source_tools=source_tools
+        ):
             if source_tool == self.tool_id:
                 # Don't wrap a tool's own commands into skills for itself.
                 continue
             rendered = render_markdown_skill(definition)
+            if definition.name in owners:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=f"command skill name collision: {definition.name}",
+                )
             command_skills.append((definition.name, rendered))
+            owners[definition.name] = f"command:{source_tool}"
 
         skill_dirs = [
             child
             for child in sorted(source_dir.iterdir())
             if child.is_dir() and (child / "SKILL.md").is_file()
         ]
+        native_owner = f"skills:{Path(os.path.relpath(source_dir, project_root)).as_posix()}"
+        for skill_dir in skill_dirs:
+            if skill_dir.name in owners:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    message=f"native/command skill name collision: {skill_dir.name}",
+                )
+            owners[skill_dir.name] = native_owner
+        try:
+            provenance = read_provenance(target_dir)
+        except (OSError, ValueError) as exc:
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="error",
+                message=str(exc),
+            )
+
+        # The tree marker alone cannot prove which source owns a child. Scoped
+        # writes refuse collisions before cleanup or any target mutation.
+        if source_tools is not None:
+            for name, owner in owners.items():
+                child = target_dir / name
+                if not child.exists() and not child.is_symlink():
+                    continue
+                entry = provenance.get(name)
+                if (
+                    entry is None
+                    or entry["source"] != owner
+                    or skill_fingerprint(child) != entry["fingerprint"]
+                ):
+                    return SyncResult(
+                        tool_id=self.tool_id,
+                        concern=self.concern,
+                        action="error",
+                        message=f"skill target collision: {name}; preserving existing content",
+                    )
+
+        selected_owners = {native_owner} | {f"command:{tool}" for tool in (source_tools or ())}
+
+        def stale_in_scope(child: Path) -> bool:
+            if child.name in owners or child.name in {MANAGED_MARKER_NAME, PROVENANCE_NAME}:
+                return False
+            entry = provenance.get(child.name)
+            if entry is None:
+                # Preserve the legacy whole-tree cleanup for unscoped API flows.
+                return source_tools is None
+            return (
+                source_tools is None or entry["source"] in selected_owners
+            ) and skill_fingerprint(child) == entry["fingerprint"]
+
         target_existed = target_dir.is_dir()
         # Even when there's nothing to translate, an existing target may have
         # stale entries from a previous run; we still want to walk it once.
@@ -465,7 +545,6 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
             manual_fix_count = 0
             would_change = False
-            wanted_names = {sd.name for sd in skill_dirs} | {n for n, _ in command_skills}
             for skill_dir in skill_dirs:
                 definition = parse_markdown_skill(
                     (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
@@ -499,7 +578,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     would_change = True
             if target_dir.is_dir():  # stale skill *dirs* whose source is gone
                 for child in target_dir.iterdir():
-                    if child.name in wanted_names or child.name == MANAGED_MARKER_NAME:
+                    if not stale_in_scope(child):
                         continue
                     # Mirror the real stale-cleanup predicate: a real dir, a live
                     # dir-symlink, or a broken symlink is removed; a real file or
@@ -510,6 +589,10 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             would_change = True
                     elif child.is_dir():
                         would_change = True
+            would_change |= any(name not in provenance for name in owners)
+            would_change |= write_provenance(
+                target_dir, provenance, project_root=project_root, dry_run=True
+            )
             # The real run (re)writes the ``.crossby-managed`` marker; an existing
             # managed dir missing one is a change even when every SKILL.md matches.
             would_change |= write_managed_marker(
@@ -533,15 +616,12 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         # managed dir that lacked one is a real change, so an otherwise-idempotent
         # translate is reported ``updated`` (matching the dry-run's would-change).
         marker_wrote = write_managed_marker(target_dir, project_root=project_root)
-        wanted_names = {skill_dir.name for skill_dir in skill_dirs} | {
-            name for name, _ in command_skills
-        }
         # Stale cleanup — only stale skill *directories* are removed; unrelated
         # top-level files are left alone.
         removed_any = False
         if target_dir.is_dir():
             for child in target_dir.iterdir():
-                if child.name in wanted_names:
+                if not stale_in_scope(child):
                     continue
                 if child.is_symlink():
                     # A stale skill-dir symlink — live (points to a dir) or broken
@@ -555,6 +635,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     shutil.rmtree(child)
                 else:
                     continue  # a real file — out of scope
+                provenance.pop(child.name, None)
                 logger.info("skills.stale_removed", path=str(child))
                 removed_any = True
 
@@ -635,7 +716,19 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
             )
 
-        if skipped_all and target_existed and not removed_any and not marker_wrote:
+        for name, owner in owners.items():
+            provenance[name] = {
+                "source": owner,
+                "fingerprint": skill_fingerprint(target_dir / name),
+            }
+        provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
+        if (
+            skipped_all
+            and target_existed
+            and not removed_any
+            and not marker_wrote
+            and not provenance_wrote
+        ):
             return SyncResult(
                 tool_id=self.tool_id,
                 concern=self.concern,
