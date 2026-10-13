@@ -18,8 +18,12 @@ def approx_tokens(text: str) -> int:
 def turn_tokens(turn: ConversationTurn) -> int:
     """Approximate token cost of a single turn."""
     total = approx_tokens(turn.content)
+    if turn.tool_call_id is not None:
+        total += approx_tokens(turn.tool_call_id)
     for call in turn.tool_calls:
         total += approx_tokens(call.name)
+        if call.call_id is not None:
+            total += approx_tokens(call.call_id)
         for key, value in call.arguments.items():
             total += approx_tokens(key) + approx_tokens(str(value))
     return total
