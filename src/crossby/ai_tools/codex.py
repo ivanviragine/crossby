@@ -1436,6 +1436,15 @@ class CodexAdapter(AbstractAITool):
         if not scene.narrows_mcp():
             return SceneLaunchArgs()
 
+        if scene.isolated:
+            # Native overrides keep global CODEX_HOME and shared Git metadata intact.
+            args = tuple(
+                arg
+                for name in sorted(scene.deselected_mcp())
+                for arg in ("-c", f"mcp_servers.{json.dumps(name)}.enabled=false")
+            )
+            return SceneLaunchArgs(args=args)
+
         try:
             write_codex_profile(scene.project_root, scene.name, scene.deselected_mcp())
         except FileExistsError as exc:

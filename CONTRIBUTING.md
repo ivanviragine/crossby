@@ -137,6 +137,32 @@ CLI command
 
 Keep these separate when adding launch logic.
 
+### Owned isolated launches
+
+`scenes/worktree.py` freezes HEAD and validates source bundles and committed cwd
+before allocation. Ownership lives outside the checkout in a private temporary
+container and is repeated in Git's per-worktree directory. Cleanup must validate
+both receipts, registration and reciprocal `.git` links before asking Git to
+remove a disposable checkout; never fall back to recursive container deletion.
+This shares Git metadata and is not a security sandbox. Do not copy dirty or
+untracked project state, run setup hooks, commit, or push automatically.
+
+`cli/launch.py` maps the cwd and scene root into the checkout, injects explicit
+bundles, then reuses scene resolution and per-tool compilation. An isolated
+`SceneLaunchContext` skips shared `info/exclude` writes and global pruning;
+Codex renders native `-c` overrides instead of a global profile. Concern-scoped
+persistent fallback is allowed only inside the owned checkout, and partial
+activation errors prevent dispatch. Keep fatal `SceneLaunchInputError` behavior.
+
+`utils/owned_launch.py` owns the subprocess group/tree through exit and
+cancellation before checkout deletion. POSIX plain launches hand off and restore
+the controlling terminal's foreground group. Transcript launches own the CLI's
+PTY directly: BSD `script` puts the tool in another process group, so killing the
+wrapper's group alone leaks descendants. Observe the leader without reaping it
+until the last group signal, and retain the checkout on teardown failure.
+Regression tests use temporary Git repositories and local stub executables in
+`test_scenes/test_worktree_launch.py`; never substitute live paid agent turns.
+
 ### Browser terminal (`crossby ui`)
 
 `crossby/web/` serves a loopback page that runs one AI tool per pseudo-terminal.

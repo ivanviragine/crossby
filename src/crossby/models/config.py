@@ -220,6 +220,13 @@ class SceneSelector(BaseModel):
     exclude: list[str] = Field(default_factory=list)
 
 
+class SceneInjection(BaseModel):
+    """Explicit skill bundles, keyed by their isolated destination name."""
+
+    model_config = ConfigDict(extra="forbid")
+    skills: dict[str, str] = Field(default_factory=dict)
+
+
 class SceneConfig(BaseModel):
     """A named, task-shaped bundle of capabilities (stored under ``scenes``).
 
@@ -241,6 +248,8 @@ class SceneConfig(BaseModel):
     description: str | None = None
     extends: str | None = None
     profile: str | None = None
+    isolation: Literal["worktree", "none"] | None = None
+    inject: SceneInjection | None = None
 
     skills: SceneSelector | None = None
     agents: SceneSelector | None = None
@@ -254,6 +263,8 @@ class SceneConfig(BaseModel):
 _SCENE_INHERITABLE_FIELDS: tuple[str, ...] = (
     "description",
     "profile",
+    "isolation",
+    "inject",
     "skills",
     "agents",
     "mcp",
