@@ -536,6 +536,25 @@ class HeadlessRuntimeContext:
     ) -> SessionInteractionResponse:
         """Require an explicit live native choice before protocol helpers reply."""
         response = self.interact(interaction)
+        refused = response.outcome in {
+            PlanInteractionOutcome.DENIED,
+            PlanInteractionOutcome.SKIPPED,
+        }
+        can_decline = (
+            interaction.kind is PlanInteractionKind.PERMISSION and interaction.options
+        ) or (
+            interaction.kind is PlanInteractionKind.QUESTION
+            and (interaction.form_schema is not None or interaction.url is not None)
+        )
+        if (
+            refused
+            and can_decline
+            and response.answer is None
+            and response.option_id is None
+            and not response.option_ids
+            and response.content is None
+        ):
+            return response
         if interaction.kind is PlanInteractionKind.QUESTION:
             if response.outcome is not PlanInteractionOutcome.ANSWERED:
                 raise _HeadlessStopError(

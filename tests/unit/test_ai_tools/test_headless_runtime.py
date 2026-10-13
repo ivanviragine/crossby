@@ -161,6 +161,87 @@ def test_denied_permission_cannot_forward_selected_native_option(
     assert result.denials
 
 
+@pytest.mark.parametrize("outcome", [PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED])
+@pytest.mark.parametrize(
+    "interaction_updates",
+    [
+        {"kind": PlanInteractionKind.PERMISSION},
+        {"kind": PlanInteractionKind.QUESTION, "form_schema": {"type": "object"}},
+        {"kind": PlanInteractionKind.QUESTION, "url": "https://example.com/authorize"},
+    ],
+    ids=("permission", "mcp-form", "mcp-url"),
+)
+def test_native_refusal_reaches_protocol_helper(
+    tmp_path: Path,
+    outcome: PlanInteractionOutcome,
+    interaction_updates: dict[str, Any],
+) -> None:
+    interaction = SessionInteraction(
+        question_id="native-1",
+        prompt="Allow operation?",
+        options=(PlanQuestionOption(option_id="accept", label="Accept"),),
+        session_id="session-1",
+        **interaction_updates,
+    )
+
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        response = context.native_interaction_response(interaction)
+        assert response.outcome is outcome
+        assert response.option_id is None
+        return context.complete(final_text="declined", exit_code=0)
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED),
+        lambda _interaction: SessionInteractionResponse(outcome=outcome),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.denials
+
+
+@pytest.mark.parametrize("outcome", [PlanInteractionOutcome.DENIED, PlanInteractionOutcome.SKIPPED])
+def test_mcp_refusal_cannot_forward_accept_option(
+    tmp_path: Path, outcome: PlanInteractionOutcome
+) -> None:
+    interaction = SessionInteraction(
+        kind=PlanInteractionKind.QUESTION,
+        question_id="elicitation-1",
+        prompt="Provide credentials?",
+        options=(PlanQuestionOption(option_id="accept", label="Accept"),),
+        session_id="session-1",
+        form_schema={"type": "object"},
+    )
+
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.native_interaction_response(interaction)
+        pytest.fail("A denied elicitation acceptance was forwarded")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED),
+        lambda _interaction: SessionInteractionResponse(outcome=outcome, option_id="accept"),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+
+
+def test_ordinary_native_question_cannot_be_skipped(tmp_path: Path) -> None:
+    interaction = SessionInteraction(
+        kind=PlanInteractionKind.QUESTION,
+        question_id="question-1",
+        prompt="Which scope?",
+        options=(PlanQuestionOption(option_id="one", label="One"),),
+        session_id="session-1",
+    )
+
+    def run(context: HeadlessRuntimeContext) -> HeadlessSessionResult:
+        context.native_interaction_response(interaction)
+        pytest.fail("An unanswered clarification was forwarded")
+
+    result = FakeHeadlessAdapter(run).run_headless_session(
+        _request(tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.SKIPPED),
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+
+
 def test_success_dispatches_ordered_events_and_one_terminal(tmp_path: Path) -> None:
     observed: list[HeadlessEventKind] = []
 
