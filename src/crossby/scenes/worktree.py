@@ -23,6 +23,7 @@ from crossby.models.ai import AIToolID
 from crossby.models.config import SceneConfig
 
 _MARKER = "crossby-scene-owner.json"
+_GIT_BULK_TIMEOUT = 600
 _GIT_ENV = {
     "GIT_DIR",
     "GIT_COMMON_DIR",
@@ -40,7 +41,13 @@ class WorktreeError(RuntimeError):
     """An isolation request or owned cleanup cannot safely complete."""
 
 
-def _git(root: Path, *args: str, raw: bool = False) -> str:
+def _git(
+    root: Path,
+    *args: str,
+    raw: bool = False,
+    timeout: float = 30,
+    input_text: str | None = None,
+) -> str:
     env = {
         k: v
         for k, v in os.environ.items()
@@ -52,7 +59,8 @@ def _git(root: Path, *args: str, raw: bool = False) -> str:
             capture_output=True,
             text=True,
             env=env,
-            timeout=30,
+            timeout=timeout,
+            input=input_text,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -121,10 +129,13 @@ class WorktreeRequest:
         # Resolve HEAD symlink chains with filesystem semantics: a '..' after
         # traversing a link applies to its destination, not its lexical basename.
         links: dict[tuple[str, ...], str] = {}
-        entries = _git(repository, "ls-tree", "-rz", commit).split("\0")
+        entries = _git(repository, "ls-tree", "-rz", commit, timeout=_GIT_BULK_TIMEOUT).split("\0")
+        checkout_paths: list[str] = []
         for entry in filter(None, entries):
             header, name = entry.split("\t", 1)
             mode = header.split()[0]
+            if mode in ("100644", "100755"):
+                checkout_paths.append(name)
             if mode == "160000":
                 raise WorktreeError("Isolated v1 launches do not initialize Git submodules.")
             if mode == "120000":
@@ -156,6 +167,34 @@ class WorktreeRequest:
 
         for link_name in links:
             resolve_committed(Path(*link_name))
+        # Query effective HEAD attributes without modifying the original index
+        # or running any filter. Unused global drivers (e.g. LFS) are harmless.
+        drivers: set[str] = set()
+        effective_config: dict[str, str] = {}
+        for item in _git(repository, "config", "--null", "--list", raw=True).split("\0"):
+            key, _, value = item.partition("\n")
+            effective_config[key] = value
+        for key, value in effective_config.items():
+            if key.startswith("filter.") and value:
+                for suffix in (".smudge", ".process"):
+                    if key.endswith(suffix):
+                        drivers.add(key[len("filter.") : -len(suffix)])
+        if drivers and checkout_paths:
+            attributes = _git(
+                repository,
+                "check-attr",
+                f"--source={commit}",
+                "-z",
+                "--stdin",
+                "filter",
+                input_text="\0".join(checkout_paths) + "\0",
+                raw=True,
+                timeout=_GIT_BULK_TIMEOUT,
+            ).split("\0")
+            if any(value in drivers for value in attributes[2::3]):
+                raise WorktreeError(
+                    "Isolated v1 launches refuse active checkout smudge/process filters."
+                )
         sources = scene.inject.skills if scene.inject is not None else {}
         target = SKILLS_DIR.get(tool)
         if sources and target is None:
@@ -252,7 +291,7 @@ class WorktreeRequest:
             gitdir = Path(_git(workspace, "rev-parse", "--absolute-git-dir")).resolve()
             if gitdir.parent != self.common / "worktrees":
                 raise WorktreeError("New worktree has an unexpected private Git directory.")
-            if Path((gitdir / "gitdir").read_text().strip()) != workspace / ".git":
+            if (gitdir / (gitdir / "gitdir").read_text().strip()).resolve() != workspace / ".git":
                 raise WorktreeError("New worktree lacks its reciprocal Git binding.")
             if _git(workspace, "rev-parse", "HEAD") != self.commit:
                 raise WorktreeError("New worktree does not match the requested HEAD.")
@@ -274,11 +313,14 @@ class WorktreeRequest:
         try:
             _git(
                 self.repository,
+                "-c",
+                "worktree.useRelativePaths=false",
                 "worktree",
                 "add",
                 "--detach",
                 str(workspace),
                 self.commit,
+                timeout=_GIT_BULK_TIMEOUT,
             )
             owned = bind()
             directories = list(
@@ -390,9 +432,9 @@ class OwnedWorktree:
             if json.loads((gitdir / _MARKER).read_text()) != record:
                 raise ValueError("reciprocal ownership mismatch")
             gitlink = (workspace / ".git").read_text().strip()
-            if not gitlink.startswith("gitdir: ") or Path(gitlink[8:]).resolve() != gitdir:
+            if not gitlink.startswith("gitdir: ") or (workspace / gitlink[8:]).resolve() != gitdir:
                 raise ValueError("checkout Git binding mismatch")
-            if Path((gitdir / "gitdir").read_text().strip()) != workspace / ".git":
+            if (gitdir / (gitdir / "gitdir").read_text().strip()).resolve() != workspace / ".git":
                 raise ValueError("reciprocal Git binding mismatch")
             if (
                 Path(
@@ -408,7 +450,13 @@ class OwnedWorktree:
                 if path != workspace / ".git":
                     raise ValueError(f"nested repository preserved: {path}")
             if not discard_changes and (
-                _git(workspace, "status", "--porcelain", "--untracked-files=all")
+                _git(
+                    workspace,
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                    timeout=_GIT_BULK_TIMEOUT,
+                )
                 or _git(workspace, "rev-parse", "HEAD") != record["commit"]
             ):
                 raise WorktreeError(
@@ -420,7 +468,7 @@ class OwnedWorktree:
             raise WorktreeError(
                 f"Refusing ambiguous worktree cleanup for {workspace}: {exc}"
             ) from exc
-        _git(workspace, "worktree", "remove", "--force", str(workspace))
+        _git(workspace, "worktree", "remove", "--force", str(workspace), timeout=_GIT_BULK_TIMEOUT)
         (container / _MARKER).unlink()
         # Extra user files in the container are preserved; never rmtree it.
         with suppress(OSError):

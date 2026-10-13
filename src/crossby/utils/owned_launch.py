@@ -60,6 +60,9 @@ def run_owned(
             terminal = None
     proc: subprocess.Popen[bytes] | None = None
     stopped = False
+    already_exited = False
+    resize_installed = False
+    previous_resize: Any = None
     try:
         if transcript_path is not None:
             if os.name != "posix":
@@ -89,6 +92,17 @@ def run_owned(
                 size = os.get_terminal_size(terminal)
                 termios.tcsetwinsize(slave, (size.lines, size.columns))
                 tty.setraw(terminal)
+            if terminal is not None:
+
+                def resize(_signum: int, _frame: object) -> None:
+                    if master is not None and terminal is not None:
+                        with suppress(OSError):
+                            dimensions = os.get_terminal_size(terminal)
+                            termios.tcsetwinsize(master, (dimensions.lines, dimensions.columns))
+
+                previous_resize = signal.getsignal(signal.SIGWINCH)
+                signal.signal(signal.SIGWINCH, resize)
+                resize_installed = True
         proc = subprocess.Popen(command, cwd=cwd, env=env, **options)
         own_process_tree(proc)
         if slave is not None:
@@ -100,7 +114,7 @@ def run_owned(
         if os.name != "posix":
             return proc.wait()
         # Typeshed exposes kqueue only on BSD. Keep the actual waitid probe:
-        # macOS lacks it, while Linux uses it without touching BSD-only APIs.
+        # Some macOS builds lack it; Linux uses it without touching BSD-only APIs.
         if sys.platform != "linux" and sys.platform != "win32" and not hasattr(os, "waitid"):
             watcher = select.kqueue()
             event = select.kevent(
@@ -109,10 +123,16 @@ def run_owned(
                 flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
                 fflags=select.KQ_NOTE_EXIT,
             )
-            with suppress(ProcessLookupError):
+            try:
                 watcher.control([event], 0, 0)
+            except ProcessLookupError:
+                watcher.close()
+                watcher = None
+                already_exited = True
 
         def exited(block: bool) -> bool:
+            if already_exited:
+                return True
             if watcher is not None:
                 return bool(watcher.control([], 1, None if block else 0))
             flags = os.WEXITED | os.WNOWAIT | (0 if block else os.WNOHANG)
@@ -184,6 +204,8 @@ def run_owned(
                         "Owned tool teardown timed out; retain its worktree."
                     ) from exc
         finally:
+            if resize_installed:
+                signal.signal(signal.SIGWINCH, previous_resize)
             if watcher is not None:
                 watcher.close()
             if transcript is not None:

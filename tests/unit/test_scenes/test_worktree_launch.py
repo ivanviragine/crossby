@@ -425,7 +425,7 @@ def test_codex_isolated_projection_and_inline_mcp(
     workspace = Path(evidence["root"])
     assert "Review" in evidence["skill"]
     assert not (workspace / ".agents/skills/ordinary").exists()
-    assert 'mcp_servers."drop".enabled=false' in evidence["argv"]
+    assert "mcp_servers.drop.enabled=false" in evidence["argv"]
     assert "--profile" not in evidence["argv"]
     assert not list(home.iterdir())
     assert not (project["repo"] / ".agents").exists()
@@ -527,9 +527,9 @@ def test_interrupted_add_recovers_and_cleans(
 
     real_git = module._git
 
-    def interrupted(root: Path, *args: str) -> str:
-        result = real_git(root, *args)
-        if args[:2] == ("worktree", "add"):
+    def interrupted(root: Path, *args: str, **kwargs: Any) -> str:
+        result = real_git(root, *args, **kwargs)
+        if "worktree" in args and "add" in args:
             raise KeyboardInterrupt
         return result
 
@@ -739,9 +739,9 @@ def test_interrupted_add_keep_reports_recovered_path(
 
     real_git = module._git
 
-    def interrupted(root: Path, *args: str) -> str:
-        result = real_git(root, *args)
-        if args[:2] == ("worktree", "add"):
+    def interrupted(root: Path, *args: str, **kwargs: Any) -> str:
+        result = real_git(root, *args, **kwargs)
+        if "worktree" in args and "add" in args:
             raise KeyboardInterrupt
         return result
 
@@ -811,3 +811,353 @@ def test_scoped_isolation_still_refuses_malformed_requested_hooks(project: dict[
     assert not project["evidence"].exists()
     assert not list(project["owners"].iterdir())
     assert malformed.read_text() == "{bad requested hook settings"
+
+
+@pytest.mark.parametrize("source", ["head", "info", "global"])
+@pytest.mark.parametrize("driver_kind", ["smudge", "process"])
+def test_effective_checkout_filter_refused_before_allocation(
+    project: dict[str, Path], source: str, driver_kind: str
+) -> None:
+    repo = project["repo"]
+    sentinel = project["tmp"] / "outside-write"
+    script = project["tmp"] / "filter.py"
+    script.write_text(
+        "from pathlib import Path\nimport sys\nPath("
+        + repr(str(sentinel))
+        + ").write_text('outside')\nsys.stdout.write(sys.stdin.read())\n"
+    )
+    attrs = "* filter=poison\n"
+    if source == "head":
+        (repo / ".gitattributes").write_text(attrs)
+        git(repo, "add", ".gitattributes")
+        git(repo, "commit", "-qm", "filter attributes fixture")
+        # Local removal must not hide the committed checkout's active filter.
+        (repo / ".gitattributes").write_text("* -filter\n")
+    elif source == "info":
+        (repo / ".git/info/attributes").write_text(attrs)
+    else:
+        external = project["tmp"] / "global-attributes"
+        external.write_text(attrs)
+        git(repo, "config", "core.attributesFile", str(external))
+    import shlex
+
+    git(
+        repo,
+        "config",
+        f"filter.poison.{driver_kind}",
+        shlex.quote(sys.executable) + " " + shlex.quote(str(script)),
+    )
+    original_index = (repo / ".git/index").read_bytes()
+    with pytest.raises(WorktreeError, match=r"checkout.*filters"):
+        request(project)
+    assert not sentinel.exists()
+    assert not list(project["owners"].iterdir())
+    assert (repo / ".git/index").read_bytes() == original_index
+
+
+def test_unused_configured_filter_does_not_block_isolation(project: dict[str, Path]) -> None:
+    git(project["repo"], "config", "filter.unused.process", "must-not-run")
+    with request(project).create() as owned:
+        assert (owned.path / "package/app.py").read_text() == "committed\n"
+    assert not list(project["owners"].iterdir())
+
+
+def test_relative_worktree_config_and_repaired_bindings(project: dict[str, Path]) -> None:
+    repo = project["repo"]
+    git(repo, "config", "worktree.useRelativePaths", "true")
+    with request(project).create(keep=True) as owned:
+        workspace = owned.path
+        git(repo, "-c", "worktree.useRelativePaths=true", "worktree", "repair", str(workspace))
+    # Git's real repair command may change either binding to relative syntax.
+    assert Path(git(workspace, "rev-parse", "--absolute-git-dir")).is_absolute()
+    owned.cleanup(discard_changes=True)
+    assert not workspace.exists()
+
+
+def test_relative_reciprocal_links_cleanup(project: dict[str, Path]) -> None:
+    with request(project).create(keep=True) as owned:
+        record = json.loads((owned.path.parent / "crossby-scene-owner.json").read_text())
+        gitdir = Path(record["gitdir"])
+        (owned.path / ".git").write_text("gitdir: " + os.path.relpath(gitdir, owned.path) + "\n")
+        (gitdir / "gitdir").write_text(os.path.relpath(owned.path / ".git", gitdir) + "\n")
+    assert Path(git(owned.path, "rev-parse", "--absolute-git-dir")).resolve() == gitdir
+    owned.cleanup(discard_changes=True)
+    assert not owned.path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "linux" or sys.platform == "win32", reason="BSD kqueue race")
+def test_exited_before_kqueue_registration_never_waits(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import select
+
+    from crossby.utils.owned_launch import run_owned
+
+    real_queue = select.kqueue
+    # Exercise the fallback even on Python builds exposing waitid on macOS.
+    monkeypatch.delattr(os, "waitid", raising=False)
+    queues: list[Any] = []
+
+    class RegistrationRace:
+        def __init__(self) -> None:
+            self.observer = real_queue()
+            self.closed = False
+            queues.append(self)
+
+        def control(self, changes: Any, *_args: Any) -> Any:
+            if not changes:
+                raise AssertionError("Wait attempted on an unregistered process event")
+            from contextlib import suppress
+
+            with suppress(ProcessLookupError):
+                self.observer.control(changes, 1, 2)
+            raise ProcessLookupError("Child already exited at registration")
+
+        def close(self) -> None:
+            self.closed = True
+            self.observer.close()
+
+    monkeypatch.setattr(select, "kqueue", RegistrationRace)
+    with request(project).create() as owned:
+        assert run_owned([sys.executable, "-c", "pass"], owned.path, None) == 0
+    assert queues[0].closed
+    assert not list(project["owners"].iterdir())
+
+
+def test_codex_complex_names_use_parsed_inline_table(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tomllib
+
+    repo = project["repo"]
+    mcp = json.loads((repo / ".mcp.json").read_text())
+    mcp["mcpServers"]["dot.drop"] = {"command": "dot"}
+    (repo / ".mcp.json").write_text(json.dumps(mcp))
+    git(repo, "add", ".mcp.json")
+    git(repo, "commit", "-qm", "dotted MCP fixture")
+    codex = project["stub"].with_name("codex")
+    codex.write_text(
+        project["stub"]
+        .read_text()
+        .replace(".claude/skills/review/SKILL.md", ".agents/skills/review/SKILL.md")
+    )
+    codex.chmod(0o755)
+    home = project["tmp"] / "complex-codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    result = runner.invoke(app, ["launch", str(repo), "--tool", "codex", "--scene", "review"])
+    assert result.exit_code == 0, result.output
+    argv = json.loads(project["evidence"].read_text())["argv"]
+    override = next(arg for arg in argv if arg.startswith("mcp_servers="))
+    table = tomllib.loads(override)["mcp_servers"]
+    assert table == {"drop": {"enabled": False}, "dot.drop": {"enabled": False}}
+    assert "--profile" not in argv
+    assert not list(home.iterdir())
+
+
+def test_owned_transcript_forwards_resize_and_restores_handler(project: dict[str, Path]) -> None:
+    pexpect = pytest.importorskip("pexpect")
+    state = project["tmp"] / "resize-state"
+    state.mkdir()
+    child_script = state / "child.py"
+    child_script.write_text("""import json,os,signal,sys,tty
+from pathlib import Path
+state=Path(sys.argv[1]); tty.setraw(0)
+def resized(*_):
+    (state/'size').write_text(json.dumps(list(os.get_terminal_size(0))))
+    print('RESIZED',flush=True)
+signal.signal(signal.SIGWINCH,resized)
+print('CHILD_READY',flush=True)
+assert os.read(0,1)==b'q'
+sys.exit(7)
+""")
+    launcher = state / "launcher.py"
+    launcher.write_text("""import signal,sys
+from pathlib import Path
+from crossby.models.ai import AIToolID
+from crossby.models.config import SceneConfig
+from crossby.scenes.worktree import WorktreeRequest
+from crossby.utils.process import run_with_transcript
+repo,state=map(Path,sys.argv[1:])
+def previous(*_): pass
+signal.signal(signal.SIGWINCH,previous)
+with WorktreeRequest.prepare(repo,repo,SceneConfig(),AIToolID.CLAUDE).create() as owned:
+    code=run_with_transcript([sys.executable,str(state/'child.py'),str(state)],
+                            state/'transcript',cwd=owned.path,owned=True)
+    (state/'restored').write_text(str(signal.getsignal(signal.SIGWINCH) is previous))
+raise SystemExit(code)
+""")
+    outer = pexpect.spawn(
+        sys.executable,
+        [str(launcher), str(project["repo"]), str(state)],
+        encoding="utf-8",
+        dimensions=(32, 120),
+        timeout=10,
+        echo=False,
+    )
+    try:
+        outer.expect_exact("CHILD_READY")
+        outer.setwinsize(40, 100)
+        outer.expect_exact("RESIZED")
+        outer.send("q")
+        outer.expect(pexpect.EOF)
+        outer.close()
+        assert outer.exitstatus == 7, outer.before
+        assert json.loads((state / "size").read_text()) == [100, 40]
+        assert (state / "restored").read_text() == "True"
+        assert "RESIZED" in (state / "transcript").read_text()
+    finally:
+        outer.close(force=True)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_isolated_terminal_plan_already_owns_descendants(
+    project: dict[str, Path], cancel: bool
+) -> None:
+    pexpect = pytest.importorskip("pexpect")
+    state = project["tmp"] / "plan-state"
+    state.mkdir()
+    heartbeat = state / "heartbeat.py"
+    heartbeat.write_text(
+        "import sys,time\nfrom pathlib import Path\n"
+        "p=Path(sys.argv[1]); root=Path.cwd()\n"
+        "while True:\n n=p.with_suffix('.next')\n"
+        " n.write_text(str(time.time())+':'+str(root.exists()))\n"
+        " n.replace(p)\n time.sleep(.02)\n"
+    )
+    fake = Path(__file__).parents[2] / "fixtures/plan_sessions/codex_terminal.py"
+    codex = project["stub"].with_name("codex")
+    codex.write_text(
+        f"#!{sys.executable}\n" + "import runpy,subprocess,sys\n"
+        "if '--version' in sys.argv:\n print('codex-cli 0.162.1'); sys.exit(0)\n"
+        "state=" + repr(str(state)) + "\n"
+        "subprocess.Popen([sys.executable,state+'/heartbeat.py',state+'/heartbeat'],"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "sys.argv=['fake',state,'success']\n"
+        "runpy.run_path(" + repr(str(fake)) + ",run_name='__main__')\n"
+    )
+    codex.chmod(0o755)
+    launcher = state / "launcher.py"
+    launcher.write_text("""import sys
+from pathlib import Path
+from crossby.ai_tools import AbstractAITool
+from crossby.models.ai import AIToolID
+from crossby.models.config import SceneConfig
+from crossby.scenes.worktree import WorktreeRequest
+repo,state=map(Path,sys.argv[1:])
+def event(item,session):
+    if item.kind.value=='plan_ready': session.send_message('Plan fixture task')
+with WorktreeRequest.prepare(repo,repo,SceneConfig(),AIToolID.CODEX).create() as owned:
+    (state/'cwd').write_text(str(owned.path))
+    code=AbstractAITool.get('codex').launch(working_dir=owned.path,
+        plan_mode=True,owned_process=True,on_event=event)
+raise SystemExit(code)
+""")
+    outer = pexpect.spawn(
+        sys.executable,
+        [str(launcher), str(project["repo"]), str(state)],
+        encoding="utf-8",
+        dimensions=(32, 120),
+        timeout=10,
+        echo=False,
+    )
+    try:
+        outer.expect_exact("NATIVE INTERACTION")
+        deadline = time.monotonic() + 3
+        while not (state / "heartbeat").exists():
+            assert time.monotonic() < deadline, "Heartbeat descendant did not start"
+            time.sleep(0.01)
+        if cancel:
+            outer.kill(signal.SIGTERM)
+        else:
+            outer.send("q")
+        outer.expect(pexpect.EOF)
+        outer.close()
+        assert outer.exitstatus == (143 if cancel else 7), outer.before
+        assert not Path((state / "cwd").read_text()).exists()
+        last = (state / "heartbeat").read_text()
+        assert last.endswith(":True"), "Descendant ran after checkout removal"
+        time.sleep(0.15)
+        assert (state / "heartbeat").read_text() == last
+    finally:
+        outer.close(force=True)
+
+
+def test_bulk_checkout_keeps_a_finite_larger_deadline(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import crossby.scenes.worktree as module
+
+    real_run = module.subprocess.run
+
+    def slow_checkout(command: list[str], **kwargs: Any) -> Any:
+        if "worktree" in command and "add" in command:
+            timeout = kwargs.get("timeout")
+            assert timeout is not None, "Checkout must retain a finite deadline"
+            if timeout < 60:
+                raise subprocess.TimeoutExpired(command, 31)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", slow_checkout)
+    with request(project).create() as owned:
+        assert (owned.path / "package/app.py").read_text() == "committed\n"
+    assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.parametrize("driver_kind", ["smudge", "process"])
+def test_local_empty_filter_overrides_global_driver(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch, driver_kind: str
+) -> None:
+    repo = project["repo"]
+    (repo / ".gitattributes").write_text("* filter=poison\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "disabled filter fixture")
+    global_config = project["tmp"] / "global-git-config"
+    git(
+        repo, "config", "--file", str(global_config), f"filter.poison.{driver_kind}", "must-not-run"
+    )
+    git(repo, "config", f"filter.poison.{driver_kind}", "")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    with request(project).create() as owned:
+        assert (owned.path / "package/app.py").read_text() == "committed\n"
+    assert not list(project["owners"].iterdir())
+
+
+@pytest.mark.skipif(
+    sys.platform == "linux" or sys.platform == "win32", reason="Native BSD kqueue race"
+)
+def test_native_exited_child_kqueue_race_finishes_and_cleans(project: dict[str, Path]) -> None:
+    script = project["tmp"] / "native-kqueue-race.py"
+    state = project["tmp"] / "native-kqueue-state"
+    script.write_text("""import os,select,sys,time
+from pathlib import Path
+from crossby.models.ai import AIToolID
+from crossby.models.config import SceneConfig
+from crossby.scenes.worktree import WorktreeRequest,cancellation_cleanup
+from crossby.utils.owned_launch import run_owned
+repo,state=map(Path,sys.argv[1:])
+real=select.kqueue
+def delayed():
+    time.sleep(.1)
+    return real()
+select.kqueue=delayed
+if hasattr(os,'waitid'): del os.waitid
+request=WorktreeRequest.prepare(repo,repo,SceneConfig(),AIToolID.CLAUDE)
+with cancellation_cleanup(), request.create() as owned:
+    state.write_text(str(owned.path))
+    code=run_owned(['/usr/bin/true'],owned.path,None)
+raise SystemExit(code)
+""")
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(project["repo"]), str(state)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _, errors = proc.communicate(timeout=10)
+        assert proc.returncode == 0, errors.decode()
+        assert not Path(state.read_text()).exists()
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            proc.communicate(timeout=5)

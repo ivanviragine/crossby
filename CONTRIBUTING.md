@@ -143,7 +143,13 @@ Keep these separate when adding launch logic.
 
 `scenes/worktree.py` freezes HEAD and validates source bundles and committed cwd
 before allocation, resolving committed symlink chains without relying on lexical
-normalization. Frozen explicit payloads include executable file modes. Ownership
+normalization. Inspect effective last-value Git filter configuration and HEAD
+attributes via `check-attr --source` before allocation; account for repository
+info/global attributes, preserve the original index, and allow unused or locally
+disabled drivers. Bulk Git operations have a finite 600-second deadline; metadata
+queries retain 30 seconds. Normalize reciprocal Gitlinks relative to their
+containing directories, including after native relative-path repair.
+Frozen explicit payloads include executable file modes. Ownership
 lives outside the checkout in a private temporary
 container and is repeated in Git's per-worktree directory. Cleanup must validate
 both receipts, registration and reciprocal `.git` links before asking Git to
@@ -156,7 +162,11 @@ bundles into the same effective source used by projection (including safe
 committed source symlinks), then reuses scene resolution and per-tool compilation.
 Report recovered retained paths even when allocation never yields. An isolated
 `SceneLaunchContext` skips shared `info/exclude` writes and global pruning;
-Codex renders native `-c` overrides instead of a global profile. Concern-scoped
+Codex renders native `-c` overrides instead of a global profile. Its override
+parser splits keys on literal dots without parsing TOML key quotes: use bare
+paths for simple names, or one partial `mcp_servers` inline table for complex
+names. Native config-read evidence and preservation checks are recorded in
+[the isolated-launch audit](docs/isolated-scene-launches.md). Concern-scoped
 persistent fallback is allowed only inside the owned checkout, and partial
 activation errors prevent dispatch. Keep fatal `SceneLaunchInputError` behavior.
 Pass the explicit `concerns` scope through activation to the engine's declaration,
@@ -171,7 +181,12 @@ PTY directly: BSD `script` puts the tool in another process group, so killing th
 wrapper's group alone leaks descendants. Preserve actual redirected stdin and
 EOF rather than replacing a pipe with an un-fed PTY. Observe the leader without
 reaping it
-until the last group signal, and retain the checkout on teardown failure.
+until the last group signal, and retain the checkout on teardown failure. A
+failed kqueue registration with ESRCH means the leader already exited; close the
+unregistered watcher instead of blocking on it. Forward SIGWINCH to the owned
+transcript PTY and restore the prior handler. Terminal Plan launches reuse their
+existing managed PTY transport, which completes group teardown before returning;
+regressions cover actual adapter dispatch and cancellation with descendants.
 Keep BSD-only `kqueue` calls behind explicit platform narrowing as well as the
 runtime `waitid` capability check. Validate `uv run mypy --platform linux
 src/crossby/` when editing this fallback on macOS; native Mac typing alone misses

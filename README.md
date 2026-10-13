@@ -314,7 +314,11 @@ is an error. Injection requires effective worktree isolation. `--keep-worktree`
 requires isolation, and isolation requires `--scene`, a Git repository and a
 foreground CLI tool; it cannot resume an old session. V1 refuses submodules,
 committed symlink chains escaping the checkout and executable Git `post-checkout`
-hooks, rather than executing setup hooks against your original checkout.
+hooks. Active Git smudge/process filters for files in HEAD are also refused,
+including attributes from `.git/info/attributes` or global configuration. Unused
+filter drivers are allowed. Checking configured drivers requires Git 2.43 or
+newer (`git check-attr --source`); older Git refuses that preflight. These checks
+avoid running checkout setup commands before ownership is established.
 `crossby scene use` retains its existing persistent semantics and does not
 allocate a worktree or inject bundles.
 
@@ -325,7 +329,8 @@ launch error or cancellation. Crossby never commits or pushes child changes.
 Relative transcript and plan-output paths follow the isolated cwd and disappear
 with a disposable checkout; choose an explicit absolute output path or retain
 the worktree when you need the artifacts. Isolated transcript capture uses an
-owned POSIX PTY; redirected stdin and its EOF are preserved. Owned cleanup
+owned POSIX PTY; redirected stdin, its EOF and interactive terminal resizing
+are preserved. Owned cleanup
 refuses changed/missing ownership records,
 replaced Git bindings, symlinked ownership paths and nested repositories.
 Without `--discard-changes`, explicit cleanup also refuses dirty checkouts

@@ -437,6 +437,8 @@ class AbstractAITool(ABC):
             plan_mode
             and self.capabilities().plan_mode.activation is PlanModeActivation.TERMINAL_INPUT
         ):
+            # The terminal Plan transport already owns its PTY process group
+            # and completes group teardown before returning (including isolation).
             return self._run_terminal_plan_command(
                 cmd, working_dir, transcript_path, child_env, on_event
             )
