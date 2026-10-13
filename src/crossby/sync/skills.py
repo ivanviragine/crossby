@@ -186,6 +186,24 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         if ancestor_err is not None:
             return ancestor_err
 
+        if (
+            data.skills_strategy == "translate"
+            and force
+            and (target_dir.is_dir() or target_dir.is_symlink())
+        ):
+            # Validate/render the selected inventory before backing up or unlinking.
+            # A forced preview sees the same prospective empty target as execution.
+            preview = self._sync_translate(
+                source_dir,
+                target_dir,
+                project_root=project_root,
+                dry_run=True,
+                source_tools=data.skills_source_tools,
+                replacing_target=True,
+            )
+            if preview.action == "error" or dry_run:
+                return preview
+
         # For copy/translate strategies, guard against following a symlinked target
         # directory — writes would land in the symlink's destination, potentially
         # outside the project.
@@ -425,6 +443,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
         project_root: Path,
         dry_run: bool,
         source_tools: tuple[AIToolID, ...] | None = None,
+        replacing_target: bool = False,
     ) -> SyncResult:
         """Per-skill copy with target-aware SKILL.md rewriting.
 
@@ -479,6 +498,28 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     message=f"native/command skill name collision: {skill_dir.name}",
                 )
             owners[skill_dir.name] = native_owner
+
+        if replacing_target:
+            from crossby.sync.manual_fix import has_manual_fix_block
+
+            rendered_skills = [rendered for _, rendered in command_skills]
+            for skill_dir in skill_dirs:
+                definition = parse_markdown_skill(
+                    (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
+                    fallback_name=skill_dir.name,
+                )
+                rendered_skills.append(
+                    render_markdown_skill(translate_skill_for_target(definition, self.tool_id))
+                )
+            manual_fix_count = sum(has_manual_fix_block(text) for text in rendered_skills)
+            return SyncResult(
+                tool_id=self.tool_id,
+                concern=self.concern,
+                action="created" if rendered_skills else "skipped",
+                file_path=target_dir,
+                message=f"translated (dry-run, {manual_fix_count} manual-fix)",
+            )
+
         try:
             provenance = read_provenance(target_dir)
         except (OSError, ValueError) as exc:

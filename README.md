@@ -197,7 +197,7 @@ Default strategy is `symlink` (with content-aware copy fallback for rules). Pass
 crossby sync --from claude --strategy translate
 ```
 
-For skills, `--from` also scopes slash-command conversion: `--from claude` imports only Claude commands, and `--from cursor` imports only Cursor commands. A configured or wizard-selected source has the same boundary; sources without native slash commands import none. `--plan` and `--dry-run` use that same inventory.
+For skills, `--from` also scopes slash-command conversion: `--from claude` imports only Claude commands, and `--from cursor` imports only Cursor commands. A configured or wizard-selected source has the same boundary; sources without native slash commands import none. `--plan` and `--dry-run` use that same inventory, including the prospective replacement tree when `--force` is requested.
 
 Scoped translation records each output's source in `.crossby-translated-skills.json` inside the target skills directory. Switching sources preserves outputs from unselected sources. Cleanup removes only unchanged outputs recorded for the current source; human skills, edits, and added support files survive. A name collision with another source or human content reports an error before changing the target. Older translated trees without per-skill provenance are preserved; resolve collisions by moving the affected skill aside, or use `--force` to back up and replace the target tree deliberately.
 

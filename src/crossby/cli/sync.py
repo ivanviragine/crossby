@@ -161,6 +161,7 @@ def sync(
             concern=concern,
             mode="doctor" if doctor else "plan",
             strategy=strategy,
+            force=force,
             include_user_scope=include_user_scope,
         )
         return
@@ -870,6 +871,7 @@ def _run_inspection(
     concern: str | None,
     mode: Literal["plan", "doctor"],
     strategy: str | None = None,
+    force: bool = False,
     include_user_scope: bool = False,
 ) -> None:
     """Run a dry-run sync and print a plan or doctor summary."""
@@ -926,7 +928,7 @@ def _run_inspection(
         tool_id=target,
         concern=sync_concern,
         dry_run=True,
-        force=False,
+        force=force,
         installed_tools=target_tools,
         include_user_scope=include_user_scope,
         skip_concerns=skip_concerns,

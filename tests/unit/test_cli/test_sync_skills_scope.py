@@ -291,3 +291,96 @@ def test_invalid_provenance_cannot_authorize_cleanup(project: Path, broken_prove
     )
     assert result.exit_code == 1
     assert _snapshot(project) == before
+
+
+@pytest.mark.parametrize("collision", ["native-command", "nested-command"])
+@pytest.mark.parametrize("target_kind", ["directory", "symlink"])
+@pytest.mark.parametrize("preview", [[], ["--dry-run"], ["--plan"]])
+def test_forced_source_collision_preserves_target_without_backup(
+    project: Path,
+    collision: str,
+    target_kind: str,
+    preview: list[str],
+) -> None:
+    _sync(project, "cursor")
+    target = project / ".agents/skills"
+    if target_kind == "symlink":
+        target.rename(project / "existing-skills")
+        target.symlink_to(project / "existing-skills", target_is_directory=True)
+    if collision == "native-command":
+        _skill(project, "claude", "claude-command-deploy")
+    else:
+        _command(project, "claude", "release/cut")
+        _command(project, "claude", "release-cut")
+    before = _snapshot(project)
+    original_link = target.readlink() if target.is_symlink() else None
+    result = runner.invoke(
+        app,
+        [
+            "sync",
+            "skills",
+            "--from",
+            "claude",
+            "--to",
+            "codex",
+            "--strategy",
+            "translate",
+            "--path",
+            str(project),
+            "--force",
+            "--no-persist-report",
+            *preview,
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "collision" in result.output
+    assert _snapshot(project) == before
+    assert target.is_symlink() == (original_link is not None)
+    if original_link is not None:
+        assert target.readlink() == original_link
+    assert not list(target.parent.glob("skills.bak*"))
+
+
+@pytest.mark.parametrize("target_kind", ["human", "edited-generated", "symlink"])
+def test_forced_preview_and_execution_agree_on_replacement(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    target = project / ".agents/skills"
+    if target_kind == "human":
+        _skill(project, "codex", "native-claude")
+    else:
+        _sync(project, "claude")
+        if target_kind == "edited-generated":
+            (target / "native-claude/SKILL.md").write_text("Human edit\n")
+        else:
+            target.rename(project / "existing-skills")
+            target.symlink_to(project / "existing-skills", target_is_directory=True)
+    original = _snapshot(target)
+    rows: list[SyncResult] = []
+    monkeypatch.setattr(
+        "crossby.cli.sync._display_results", lambda results, **kw: rows.extend(results)
+    )
+    before = _snapshot(project)
+    plan = _sync(project, "claude", "--force", "--plan")
+    assert "1 manual-fix" in plan
+    assert _snapshot(project) == before
+    _sync(project, "claude", "--force", "--dry-run")
+    dry = next(row for row in rows if row.concern == SyncConcern.SKILLS and row.tool_id)
+    assert dry.action == "created"
+    assert "1 manual-fix" in (dry.message or "")
+    assert _snapshot(project) == before
+    rows.clear()
+    _sync(project, "claude", "--force")
+    real = next(row for row in rows if row.concern == SyncConcern.SKILLS and row.tool_id)
+    assert real.action == dry.action
+    assert not target.is_symlink()
+    assert "Native claude body" in (target / "native-claude/SKILL.md").read_text()
+    assert not (target / "cursor-command-deploy").exists()
+    if target_kind == "symlink":
+        assert _snapshot(project / "existing-skills") == original
+    else:
+        backups = list(target.parent.glob("skills.bak*"))
+        assert len(backups) == 1
+        assert _snapshot(backups[0]) == original
