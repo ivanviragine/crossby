@@ -118,17 +118,30 @@ class SceneLaunchContext:
         return set(self.resolved.names(concern))
 
     def mcp_universe(self) -> dict[str, MCPServerConfig]:
-        """Every MCP server discovered for the project, keyed by name."""
+        """Portable MCP definitions; native-only names remain in ``mcp_names``."""
         return dict(self.sync_data.mcp_servers)
+
+    def mcp_names(self) -> set[str]:
+        """Include native-only servers in the scene's restriction inventory."""
+        from crossby.sync.readers import discover_mcp_names
+
+        return set(self.sync_data.mcp_servers) | discover_mcp_names(self.project_root)
 
     def selected_mcp(self) -> dict[str, MCPServerConfig]:
         """The discovered MCP servers the scene keeps enabled, keyed by name."""
         keep = self.selected("mcp")
+        missing = (keep & self.mcp_names()) - set(self.sync_data.mcp_servers)
+        if missing:
+            raise SceneLaunchFallbackError(
+                "Selected native MCP servers cannot be ported into a strict launch config: "
+                + ", ".join(sorted(missing))
+                + "; use native persistent scene restrictions instead."
+            )
         return {name: cfg for name, cfg in self.sync_data.mcp_servers.items() if name in keep}
 
     def deselected_mcp(self) -> set[str]:
         """Discovered MCP servers the scene drops (universe minus selected)."""
-        return set(self.sync_data.mcp_servers) - self.selected("mcp")
+        return self.mcp_names() - self.selected("mcp")
 
     def narrows_mcp(self) -> bool:
         """True when the scene drops at least one discovered MCP server.
