@@ -44,6 +44,8 @@ class ConversationTurn(BaseModel):
     role: Role
     content: str
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    # Associates a tool-result turn with its originating ToolCall.call_id.
+    tool_call_id: str | None = None
     file_refs: list[Path] = Field(default_factory=list)
     timestamp: datetime | None = None
 
