@@ -443,7 +443,10 @@ def sync(
 
         scoped = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
         servers = discover_mcp(
-            project_root, include_user_scope=include_user_scope, diagnostics=data.mcp_warnings
+            project_root,
+            include_user_scope=include_user_scope,
+            diagnostics=data.mcp_warnings,
+            sources=data.mcp_sources,
         )
         n_user = sum(
             1 for name, ds in scoped.servers.items() if ds.scope == "user" and name in servers

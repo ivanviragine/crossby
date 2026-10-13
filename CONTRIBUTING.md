@@ -39,6 +39,8 @@ Run `./scripts/check-all.sh` before opening a PR.
 
 MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model validation. Keep the reader matched to the Codex writer in `sync/mcp.py`: environment references must remain references, never resolved secrets. Codex `env` and `http_headers` values are literal, so a `${...}` literal cannot safely enter Crossby's interpolation-shaped canonical maps. Unrepresentable entries are excluded as a whole, with field-name-only diagnostics carried through `SyncData.mcp_warnings` to reports, including explicit `--to`, dry-run, and wizard paths; retain source precedence and ledger ownership rules.
 
+`SyncData.mcp_sources` records each validated server's winning source. `run_sync()` uses it to preserve Codex-source entries with restored references on targets whose current writers cannot render them faithfully (Cursor, Copilot, Antigravity CLI). This guard covers both explicit source selection and wizard discovery; it does not change the preexisting interpolation behavior of other sources or claim ownership of preserved target entries.
+
 ## Wade execution defaults
 
 The repository's `.wade.yml` selects Codex with `gpt-6.1-sol` and `high`

@@ -177,6 +177,7 @@ def discover_mcp(
     *,
     include_user_scope: bool = False,
     diagnostics: list[str] | None = None,
+    sources: dict[str, str] | None = None,
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
@@ -228,6 +229,8 @@ def discover_mcp(
             servers[name] = MCPServerConfig(**discovered.data)
         except Exception:
             continue
+        if sources is not None:
+            sources[name] = discovered.source_tool
     return servers
 
 
@@ -1259,11 +1262,13 @@ def build_sync_data(
 
     # MCP, permissions, hooks
     mcp_warnings: list[str] = []
+    mcp_sources: dict[str, str] = {}
     mcp_servers = discover_mcp(
         project_root,
         from_tool=from_tool,
         include_user_scope=include_user_scope,
         diagnostics=mcp_warnings,
+        sources=mcp_sources,
     )
     perm_errors: list[str] = []
     hook_errors: list[str] = []
@@ -1276,6 +1281,7 @@ def build_sync_data(
         skills_source=skills_source,
         mcp_servers=mcp_servers,
         mcp_warnings=mcp_warnings,
+        mcp_sources=mcp_sources,
         allowed_commands=allowed_commands,
         hooks=hooks,
         source_errors={

@@ -172,6 +172,9 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 
 Codex MCP sync preserves environment **references** without reading their values. Native `env_vars` names (including structured `source = "local"` entries) become `${NAME}` references; explicit literal `env` values take precedence. Native literal `http_headers` and `env` values containing `${...}`, overlapping authentication/header sources with conditional fallbacks, remote environment sources, and other fields Crossby cannot represent are reported as `Not Added` with a manual-fix note. The entire affected server is skipped, preserving any existing target entry; configure it directly in each target's native file.
 
+Restored Codex environment references can be written to Claude and Codex. The current Cursor, Copilot, and Antigravity CLI writers cannot faithfully render those references, so Codex-source servers using them are skipped for these targets with a manual-fix report, preserving existing entries. Literal-only Codex servers still sync. Cursor and the Copilot `.vscode/mcp.json` format require `${env:NAME}` syntax; Antigravity's MCP documentation does not establish an equivalent interpolation mechanism.
+Native Cursor reference rendering and normalization are tracked separately in [#213](https://github.com/ivanviragine/crossby/issues/213).
+
 ### Preview before you write
 
 crossby is built to be inspected before it touches a file:

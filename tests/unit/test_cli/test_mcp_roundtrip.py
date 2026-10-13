@@ -306,3 +306,57 @@ def test_native_url_only_and_crossby_sse_metadata(tmp_path: Path) -> None:
     servers = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]
     assert servers["native"] == {"type": "http", "url": "https://native.test/mcp"}
     assert servers["generated"] == {"type": "sse", "url": "https://generated.test/sse"}
+
+
+@pytest.mark.parametrize(
+    ("target", "relative_path", "key"),
+    [
+        ("cursor", ".cursor/mcp.json", "mcpServers"),
+        ("copilot", ".vscode/mcp.json", "servers"),
+        ("antigravity-cli", ".agents/mcp_config.json", "mcpServers"),
+    ],
+)
+def test_reference_targets_preserve_native_auth_and_sync_literal_siblings(
+    tmp_path: Path, target: str, relative_path: str, key: str
+) -> None:
+    _codex(
+        tmp_path,
+        {
+            "remote": {"url": "https://example.test/mcp", "bearer_token_env_var": "API_TOKEN"},
+            "stdio": {"command": "mcp-server", "env_vars": ["API_TOKEN"]},
+            "literal": {"command": "literal-server", "env": {"MODE": "literal"}},
+        },
+    )
+    path = tmp_path / relative_path
+    path.parent.mkdir()
+    existing = {"url": "https://old.test/mcp", "headers": {"Authorization": "Bearer ${env:OLD}"}}
+    path.write_text(json.dumps({key: {"remote": existing}}), encoding="utf-8")
+    _sync(tmp_path, "codex", target)
+    servers = json.loads(path.read_text())[key]
+    assert servers["remote"] == existing
+    assert "stdio" not in servers
+    assert servers["literal"]["env"] == {"MODE": "literal"}
+    assert load_ledger(tmp_path).mcp(AIToolID(target)) == frozenset({"literal"})
+    report = (tmp_path / REPORT_PATH).read_text()
+    assert "manual-fix" in report
+    assert "Not Added" in report
+    assert "secret-that" not in report
+
+
+def test_wizard_preserves_codex_references_for_unsupported_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
+    monkeypatch.setattr(
+        "crossby.ai_tools.base.AbstractAITool.detect_installed",
+        lambda: [AIToolID.CODEX, AIToolID.CURSOR],
+    )
+    _codex(
+        tmp_path,
+        {"remote": {"url": "https://example.test/mcp", "bearer_token_env_var": "API_TOKEN"}},
+    )
+    result = runner.invoke(app, ["sync", "mcp", "--path", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".cursor/mcp.json").exists()
+    assert "manual-fix" in (tmp_path / REPORT_PATH).read_text()
+    assert load_ledger(tmp_path).mcp(AIToolID.CURSOR) == frozenset()
