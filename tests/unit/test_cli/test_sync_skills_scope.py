@@ -512,3 +512,46 @@ def test_unscoped_identical_human_output_is_not_claimed(project: Path) -> None:
     assert preview.action == result.action == "skipped"
     assert _snapshot(target) == before
     assert "native-claude" not in json.loads((target / PROVENANCE_NAME).read_text())["skills"]
+
+
+@pytest.mark.parametrize("first,second", [("claude", "cursor"), ("cursor", "claude")])
+def test_clean_identical_output_transfers_source_then_scoped_repeat_succeeds(
+    tmp_path: Path,
+    first: str,
+    second: str,
+) -> None:
+    original = _skill(tmp_path, first, "shared")
+    other = _skill(tmp_path, second, "shared")
+    (other / "SKILL.md").write_bytes((original / "SKILL.md").read_bytes())
+    writer = CodexSkillsWriter()
+    initial = SyncData(
+        skills_source=f".{first}/skills",
+        skills_strategy="translate",
+        skills_source_tools=(AIToolID(first),),
+    )
+    assert writer.sync(initial, tmp_path).action == "created"
+    target = tmp_path / ".agents/skills"
+    original_output = _snapshot(target / "shared")
+    before = _snapshot(target)
+    unscoped = SyncData(skills_source=f".{second}/skills", skills_strategy="translate")
+    preview = writer.sync(unscoped, tmp_path, dry_run=True)
+    assert preview.action == "updated"
+    assert _snapshot(target) == before
+    result = writer.sync(unscoped, tmp_path)
+    assert result.action == preview.action
+    assert _snapshot(target / "shared") == original_output
+    assert (
+        json.loads((target / PROVENANCE_NAME).read_text())["skills"]["shared"]["source"]
+        == f"skills:.{second}/skills"
+    )
+    scoped = SyncData(
+        skills_source=f".{second}/skills",
+        skills_strategy="translate",
+        skills_source_tools=(AIToolID(second),),
+    )
+    assert writer.sync(scoped, tmp_path, dry_run=True).action == "skipped"
+    assert writer.sync(scoped, tmp_path).action == "skipped"
+    (other / "SKILL.md").unlink()
+    assert writer.sync(scoped, tmp_path, dry_run=True).action == "updated"
+    assert writer.sync(scoped, tmp_path).action == "updated"
+    assert not (target / "shared").exists()

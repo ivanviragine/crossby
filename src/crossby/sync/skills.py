@@ -627,6 +627,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             would_change = True
                     elif child.is_dir():
                         would_change = True
+            would_change |= any(
+                entry["source"] != owner
+                and (target_dir / name).exists()
+                and skill_fingerprint(target_dir / name) == entry["fingerprint"]
+                for name, owner in owners.items()
+                if (entry := provenance.get(name)) is not None
+            )
             would_change |= write_provenance(
                 target_dir, provenance, project_root=project_root, dry_run=True
             )
@@ -678,6 +685,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
         skipped_all = True
         before_writes: dict[str, str | None] = {}
+        completed_names: set[str] = set()
         try:
             for skill_dir in skill_dirs:
                 target_skill = target_dir / skill_dir.name
@@ -722,6 +730,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                         skill_dir, target_skill, project_root=project_root
                     ):
                         skipped_all = False
+                    completed_names.add(target_skill.name)
                     continue
 
                 skipped_all = False
@@ -729,6 +738,7 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
                 )
                 _refresh_skill_support_dirs(skill_dir, target_skill, project_root=project_root)
+                completed_names.add(target_skill.name)
 
             for name, rendered in command_skills:
                 target_skill = target_dir / name
@@ -755,11 +765,13 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     ).hexdigest()
                     == hashlib.sha256(rendered.encode("utf-8")).hexdigest()
                 ):
+                    completed_names.add(name)
                     continue
                 skipped_all = False
                 safe_write_text(
                     ProjectScope(project_root), target_skill_md, rendered, leaf_policy="replace"
                 )
+                completed_names.add(name)
 
         finally:
             # Record actual mutations, including partial generated writes. An
@@ -774,7 +786,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     provenance.pop(name, None)
                     continue
                 after = skill_fingerprint(child)
-                if after != before:
+                if after != before or (
+                    name in completed_names
+                    and entry is not None
+                    and entry["source"] != owners[name]
+                ):
                     provenance[name] = {"source": owners[name], "fingerprint": after}
             provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
         if (
