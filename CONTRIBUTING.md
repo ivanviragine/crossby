@@ -1164,6 +1164,10 @@ by launch mode; never translate toggles inline to fabricate an affirmative resul
 Contexts containing `CODEX_API_KEY` return `unknown`: native exec and standalone
 app-server select authentication differently, which can change catalog/default
 model selection. Credentials are never copied or translated to repair this.
+Headless contexts with managed approval, reviewer or sandbox constraints also
+remain `unknown`: exec's initial `never` approval selection and possible
+AutoReview rebuild differ from standalone config reads and can reject a launch
+that the reads accept. The probe does not approximate native permission fallback.
 Explicit Code Mode routing controls or `multi_agent_v2.non_code_mode_only=false`
 also remain `unknown` when they can hide the spawning surface. A child's denied
 sandbox/approval operation does not establish lack of spawning.

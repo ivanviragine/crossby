@@ -288,6 +288,27 @@ def resolve_codex_readiness(
         return context.status(AIToolID.CODEX, state, reason, text, evidence, tool_version=version)
 
     config = native.config
+    # Exec first loads with `never` approvals, then may rebuild for AutoReview.
+    # Standalone config/read does neither. Managed permission constraints can
+    # make that intermediate load fail even when these native reads succeed.
+    # Do not approximate native permission-profile/reviewer fallback semantics.
+    if (
+        context.headless
+        and native.requirements is not None
+        and any(
+            native.requirements.get(key) is not None
+            for key in (
+                "allowedApprovalPolicies",
+                "allowedApprovalsReviewers",
+                "allowedSandboxModes",
+            )
+        )
+    ):
+        return status(
+            SubagentSpawnState.UNKNOWN,
+            SubagentSpawnReason.EFFECTIVE_CONTEXT_UNRESOLVED,
+            "Managed approval/sandbox requirements leave exec configuration loading unresolved.",
+        )
     if any(key not in config for key in ("agents", "features", "model")):
         raise _unknown()
     agents = _optional_table(config, "agents")

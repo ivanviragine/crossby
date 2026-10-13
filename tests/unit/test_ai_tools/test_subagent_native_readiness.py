@@ -210,6 +210,42 @@ def test_managed_feature_disagreement_fails_closed(native: dict[str, Any], tmp_p
     assert result.reason_code is SubagentSpawnReason.CONFIG_AMBIGUOUS
 
 
+@pytest.mark.parametrize(
+    "constraint", ["allowedApprovalPolicies", "allowedApprovalsReviewers", "allowedSandboxModes"]
+)
+def test_exec_managed_permission_constraints_are_unresolved(
+    native: dict[str, Any], tmp_path: Path, constraint: str
+) -> None:
+    native["config/read"]["config"].update(
+        {"approval_policy": "on-request", "approvals_reviewer": "user"}
+    )
+    native["configRequirements/read"]["requirements"] = {
+        "featureRequirements": None,
+        constraint: ["read-only"] if constraint == "allowedSandboxModes" else [],
+    }
+    request = HeadlessSessionRequest(prompt="private-prompt", working_dir=tmp_path, sandbox=False)
+    result = AbstractAITool.get("codex").subagent_spawning_status(request=request)
+    assert result.state is SubagentSpawnState.UNKNOWN
+    assert result.reason_code is SubagentSpawnReason.EFFECTIVE_CONTEXT_UNRESOLVED
+    assert "exec configuration loading" in result.reason
+    assert 'sandbox_mode="danger-full-access"' in native["launches"][0][0]
+    assert not any(method.startswith(("thread/", "turn/")) for method, _ in native["calls"])
+    # The guard belongs to exec; an ordinary interactive launch has no such override.
+    assert check_codex(tmp_path, headless=False).state is SubagentSpawnState.AVAILABLE
+
+
+def test_absent_managed_permission_constraints_do_not_block_exec(
+    native: dict[str, Any], tmp_path: Path
+) -> None:
+    native["configRequirements/read"]["requirements"] = {
+        "featureRequirements": None,
+        "allowedApprovalPolicies": None,
+        "allowedApprovalsReviewers": None,
+        "allowedSandboxModes": None,
+    }
+    assert check_codex(tmp_path).state is SubagentSpawnState.AVAILABLE
+
+
 def test_authentication_equivalence_guard_never_copies_credentials(
     native: dict[str, Any],
     tmp_path: Path,
