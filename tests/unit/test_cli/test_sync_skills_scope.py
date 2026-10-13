@@ -458,3 +458,57 @@ def test_failed_update_then_repaired_retry_preserves_output_provenance(
     complete = _snapshot(target)
     _sync(project, "claude")
     assert _snapshot(target) == complete
+
+
+@pytest.mark.parametrize("human_edit", ["utf16", "added-file"])
+def test_unscoped_update_never_adopts_preexisting_human_edits(
+    project: Path,
+    human_edit: str,
+) -> None:
+    source = _skill(project, "claude", "human-edited")
+    _sync(project, "claude")
+    target = project / ".agents/skills"
+    output = target / "human-edited"
+    original_provenance = json.loads((target / PROVENANCE_NAME).read_text())["skills"][
+        "human-edited"
+    ]
+    if human_edit == "utf16":
+        (output / "SKILL.md").write_text("Human instructions\n", encoding="utf-16")
+    else:
+        (output / "human-notes.txt").write_text("Human notes\n")
+        (source / "SKILL.md").write_text(
+            "---\nname: human-edited\ndescription: Changed.\n---\nChanged body.\n"
+        )
+    before = _snapshot(output)
+    data = SyncData(skills_source=".claude/skills", skills_strategy="translate")
+    if human_edit == "utf16":
+        with pytest.raises(UnicodeDecodeError):
+            CodexSkillsWriter().sync(data, project)
+        assert _snapshot(output) == before
+    else:
+        assert CodexSkillsWriter().sync(data, project).action == "updated"
+    recorded = json.loads((target / PROVENANCE_NAME).read_text())["skills"]["human-edited"]
+    assert recorded == original_provenance
+    (source / "SKILL.md").unlink()
+    _sync(project, "claude")
+    assert output.is_dir()
+    if human_edit == "utf16":
+        assert _snapshot(output) == before
+    else:
+        assert (output / "human-notes.txt").read_text() == "Human notes\n"
+
+
+def test_unscoped_identical_human_output_is_not_claimed(project: Path) -> None:
+    _sync(project, "claude")
+    target = project / ".agents/skills"
+    provenance = json.loads((target / PROVENANCE_NAME).read_text())
+    provenance["skills"].pop("native-claude")
+    (target / PROVENANCE_NAME).write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+    data = SyncData(skills_source=".claude/skills", skills_strategy="translate")
+    CodexSkillsWriter().sync(data, project)  # imports Cursor's command for unscoped callers
+    before = _snapshot(target)
+    preview = CodexSkillsWriter().sync(data, project, dry_run=True)
+    result = CodexSkillsWriter().sync(data, project)
+    assert preview.action == result.action == "skipped"
+    assert _snapshot(target) == before
+    assert "native-claude" not in json.loads((target / PROVENANCE_NAME).read_text())["skills"]

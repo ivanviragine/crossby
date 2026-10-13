@@ -627,7 +627,6 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                             would_change = True
                     elif child.is_dir():
                         would_change = True
-            would_change |= any(name not in provenance for name in owners)
             would_change |= write_provenance(
                 target_dir, provenance, project_root=project_root, dry_run=True
             )
@@ -678,10 +677,15 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 removed_any = True
 
         skipped_all = True
-        touched_names: set[str] = set()
+        before_writes: dict[str, str | None] = {}
         try:
             for skill_dir in skill_dirs:
                 target_skill = target_dir / skill_dir.name
+                before_writes[target_skill.name] = (
+                    skill_fingerprint(target_skill)
+                    if target_skill.exists() or target_skill.is_symlink()
+                    else None
+                )
                 # A symlinked target skill dir must be replaced, never written
                 # through: ``mkdir(exist_ok=True)`` silently succeeds on a
                 # symlink-to-a-directory (``is_dir()`` follows it) without replacing
@@ -694,7 +698,6 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     target_skill.unlink()
                     skipped_all = False
                 target_skill.mkdir(parents=True, exist_ok=True)
-                touched_names.add(target_skill.name)
 
                 target_skill_md = target_skill / "SKILL.md"
                 # A *leaf* SKILL.md symlink (inside an otherwise real dir) must be
@@ -729,6 +732,11 @@ class _BaseSkillsWriter(AbstractSyncWriter):
 
             for name, rendered in command_skills:
                 target_skill = target_dir / name
+                before_writes[name] = (
+                    skill_fingerprint(target_skill)
+                    if target_skill.exists() or target_skill.is_symlink()
+                    else None
+                )
                 # Same symlink guard as the translated-skill loop above — a
                 # symlinked target skill dir would redirect the SKILL.md write
                 # outside the project root.
@@ -736,7 +744,6 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                     target_skill.unlink()
                     skipped_all = False
                 target_skill.mkdir(parents=True, exist_ok=True)
-                touched_names.add(target_skill.name)
                 target_skill_md = target_skill / "SKILL.md"
                 # Same leaf-symlink guard as the translated-skill loop above.
                 if target_skill_md.is_symlink():
@@ -755,14 +762,20 @@ class _BaseSkillsWriter(AbstractSyncWriter):
                 )
 
         finally:
-            # A support-copy failure can follow successful SKILL.md writes. Save
-            # only outputs this run touched, including a partial generated tree,
-            # so a repaired retry doesn't mistake our writes for human edits.
-            for name in touched_names:
-                provenance[name] = {
-                    "source": owners[name],
-                    "fingerprint": skill_fingerprint(target_dir / name),
-                }
+            # Record actual mutations, including partial generated writes. An
+            # unscoped caller can encounter human content: never adopt that tree
+            # just because mkdir succeeded or a later read failed.
+            for name, before in before_writes.items():
+                entry = provenance.get(name)
+                if before is not None and (entry is None or entry["fingerprint"] != before):
+                    continue
+                child = target_dir / name
+                if not child.exists() and not child.is_symlink():
+                    provenance.pop(name, None)
+                    continue
+                after = skill_fingerprint(child)
+                if after != before:
+                    provenance[name] = {"source": owners[name], "fingerprint": after}
             provenance_wrote = write_provenance(target_dir, provenance, project_root=project_root)
         if (
             skipped_all
