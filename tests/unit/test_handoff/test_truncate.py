@@ -94,3 +94,22 @@ def test_truncate_rejects_non_positive_budget(bad_budget: int) -> None:
 
     with pytest.raises(ValueError, match="token_budget"):
         truncate_transcript(transcript, token_budget=bad_budget)
+
+
+def test_result_and_association_costs_affect_truncation() -> None:
+    call_id = "call_" + "x" * 80
+    call = ConversationTurn(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(name="shell", arguments={}, call_id=call_id)],
+    )
+    result = ConversationTurn(role="tool", content="output " * 100, tool_call_id=call_id)
+    latest = ConversationTurn(role="assistant", content="continue")
+    transcript = ConversationTranscript(session_ref=_ref(), turns=[call, result, latest])
+    assert turn_tokens(call) > turn_tokens(
+        call.model_copy(update={"tool_calls": [ToolCall(name="shell", arguments={})]})
+    )
+    assert turn_tokens(result) == approx_tokens(result.content) + approx_tokens(call_id)
+    budget = turn_tokens(result) + turn_tokens(latest)
+    assert truncate_transcript(transcript, budget).turns == [result, latest]
+    assert truncate_transcript(transcript, budget - 1).turns == [latest]

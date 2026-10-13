@@ -264,7 +264,8 @@ def handoff(
 
     # --- Write markdown --------------------------------------------------
     writer = HandoffWriter(project_root)
-    handoff_path = writer.write(doc, output_path=output)
+    # Relative outputs belong to the caller; the target runs in project_root.
+    handoff_path = writer.write(doc, output_path=output).resolve()
     console.success(f"Wrote handoff file: {handoff_path}")
 
     if no_launch:

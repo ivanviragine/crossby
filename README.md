@@ -333,7 +333,11 @@ crossby handoff --from claude --to codex --prompt-preset cc-compact
 crossby handoff --from claude --to codex --prompt ./my-prompt.md
 ```
 
+Codex handoffs preserve function and custom-tool calls plus their text results, with call IDs linking results to commands. Results count toward the transcript token budget; older turns can be dropped, and non-text output blocks are skipped.
+
 crossby reads the chosen session from the source tool, asks an LLM to summarize it into a structured handoff document, writes it to `.crossby/handoffs/HANDOFF-<timestamp>.md`, and — for a CLI target — launches the tool with the file **path** (not its contents) as the initial prompt, so it fits under OS argv limits regardless of transcript size.
+
+Use `--output <path>` to choose the destination. Relative output paths are resolved from your current directory, even when `--path` selects a different project; the target receives the absolute path to the written file.
 
 The default preset produces a structured six-section handoff (current task, key decisions, modified files, blockers, next steps, critical context). Pass `--prompt-preset cc-compact` to use Claude Code's partial-compaction prompt, or `--prompt <path>` to supply your own; both paths skip structured parsing and write the summarizer's output verbatim. The two flags are mutually exclusive.
 
