@@ -4,9 +4,9 @@ Codex stores rollouts under
 ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. Every rollout starts with
 a ``session_meta`` event that carries ``id``, ``timestamp``, and ``cwd``.
 Subsequent events are either ``response_item`` (``message`` / ``reasoning``
-/ ``function_call``) or ``event_msg`` (higher-level protocol events). We
-extract user/assistant messages and function calls; everything else is
-skipped.
+/ ``function_call`` / ``function_call_output`` / custom-tool variants) or
+``event_msg`` (higher-level protocol events). We extract messages, reasoning
+summaries, tool calls, and text results; other events and non-text blocks are skipped.
 """
 
 from __future__ import annotations
@@ -117,6 +117,10 @@ def _turn_from_event(event: dict[str, Any]) -> ConversationTurn | None:
         return _message_turn(payload, timestamp)
     if payload_type == "function_call":
         return _function_call_turn(payload, timestamp)
+    if payload_type == "custom_tool_call":
+        return _custom_tool_call_turn(payload, timestamp)
+    if payload_type in ("function_call_output", "custom_tool_call_output"):
+        return _tool_output_turn(payload, timestamp)
     if payload_type == "reasoning":
         return _reasoning_turn(payload, timestamp)
     return None
@@ -150,7 +154,42 @@ def _function_call_turn(payload: dict[str, Any], ts: datetime | None) -> Convers
     return ConversationTurn(
         role="assistant",
         content="",
-        tool_calls=[ToolCall(name=name, arguments=arguments, call_id=payload.get("call_id"))],
+        tool_calls=[ToolCall(name=name, arguments=arguments, call_id=_call_id(payload))],
+        timestamp=ts,
+    )
+
+
+def _call_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("call_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _custom_tool_call_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
+    raw_input = payload.get("input")
+    if not isinstance(raw_input, str):
+        return None
+    return ConversationTurn(
+        role="assistant",
+        content="",
+        tool_calls=[
+            ToolCall(
+                name=str(payload.get("name") or "unknown"),
+                arguments={"input": raw_input},
+                call_id=_call_id(payload),
+            )
+        ],
+        timestamp=ts,
+    )
+
+
+def _tool_output_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
+    text = _stringify_codex_content(payload.get("output"))
+    if not text.strip():
+        return None
+    return ConversationTurn(
+        role="tool",
+        content=text,
+        tool_call_id=_call_id(payload),
         timestamp=ts,
     )
 
