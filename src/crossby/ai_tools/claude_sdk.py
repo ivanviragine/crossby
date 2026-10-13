@@ -379,7 +379,10 @@ class SDKTransport:
             self.context.checkpoint()
             self.pending.pop(request_id)
             self.request_cancellations.pop(request_id, None)
-            yield
+        # Rights are committed immediately before the physical writer. Pipe I/O
+        # must not hold this lock: withdrawal/abort must remain able to run when
+        # a committed response encounters backpressure.
+        yield
 
     def cancel_request(self, request_id: str) -> None:
         with self.pending_lock:

@@ -638,3 +638,66 @@ def test_native_startup_error_is_failed_not_initialization_timeout(sdk_child: An
     assert result.status is HeadlessTerminalStatus.FAILED
     assert result.native_status == "error_during_execution"
     assert result.session_id == "session-exact"
+
+
+def test_backpressured_reply_interrupts_before_process_teardown(tmp_path: Path) -> None:
+    import asyncio
+    from contextlib import suppress
+
+    from crossby.ai_tools.claude_sdk import SDKTransport
+    from crossby.ai_tools.headless import HeadlessRuntimeContext
+    from crossby.models.ai import AIToolID
+
+    pytest.importorskip("claude_agent_sdk")
+    request = HeadlessSessionRequest(
+        prompt="task", working_dir=tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED
+    )
+    context = HeadlessRuntimeContext(
+        tool_id=AIToolID.CLAUDE,
+        version="2.1.263",
+        capability=ClaudeAdapter().capabilities().headless,
+        request=request,
+        started_at=time.monotonic(),
+        deadline=time.monotonic() + 3,
+        interaction_handler=None,
+        event_handler=None,
+        cancel_event=None,
+    )
+    transport = SDKTransport(
+        context, [sys.executable, "-c", "import time; print('ready',flush=True); time.sleep(60)"]
+    )
+    observed = []
+
+    class Client:
+        async def interrupt(self) -> None:
+            observed.append(transport.controller.process._proc.poll())
+
+    async def run() -> None:
+        transport.client = Client()
+        await transport.connect()
+        process = transport.controller.process
+        assert (await asyncio.to_thread(process.read_line, timeout=1)).strip() == "ready"
+        transport.pending["wire"] = ("tool", "Bash", {})
+        transport.request_cancellations["wire"] = threading.Event()
+        frame = {
+            "type": "control_response",
+            "response": {
+                "request_id": "wire",
+                "response": {"behavior": "allow", "updatedInput": {"large": "x" * 200000}},
+            },
+        }
+        writing = asyncio.create_task(transport.write(json.dumps(frame) + "\n"))
+        for _ in range(100):
+            if process._write_thread is not None and process._write_thread.is_alive():
+                break
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("writer did not reach the real unread pipe")
+        await asyncio.to_thread(context.cleanup, abort=True)
+        with suppress(BaseException):
+            await writing
+        assert observed == [None], "SDK interruption must precede killing the child"
+        assert process._proc.poll() is not None
+        assert not process._write_thread.is_alive()
+
+    asyncio.run(run())

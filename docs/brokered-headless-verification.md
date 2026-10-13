@@ -60,6 +60,8 @@ Native cancellation signals the bounded callback wait so executor shutdown does
 not delay a successful result until its idle deadline. Withdrawal and closure
 share a lock with response commitment inside the physical writer; a response
 queued behind a send lock or executor cannot revive a withdrawn request.
+After committing response rights, the writer releases the registry lock before
+pipe write/flush so backpressure cannot block native interruption or withdrawal.
 
 Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
 SDK interruption once before process-group termination, killing descendants
