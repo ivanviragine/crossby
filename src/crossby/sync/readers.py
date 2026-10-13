@@ -171,11 +171,24 @@ _MCP_SOURCE_TOOLS: frozenset[AIToolID] = frozenset(
 )
 
 
+def discover_mcp_names(project_root: Path) -> set[str]:
+    """Inventory native declarations, including servers sync cannot port.
+
+    Scenes restrict existing native servers by name. Portability must never
+    decide whether a server appears in that access-control inventory.
+    """
+    from crossby.sync.mcp_discovery import discover_mcp_servers
+
+    return set(discover_mcp_servers(project_root).servers)
+
+
 def discover_mcp(
     project_root: Path,
     from_tool: AIToolID | None = None,
     *,
     include_user_scope: bool = False,
+    diagnostics: list[str] | None = None,
+    sources: dict[str, str] | None = None,
 ) -> dict[str, MCPServerConfig]:
     """Discover MCP servers from tool config files.
 
@@ -188,6 +201,8 @@ def discover_mcp(
     ``~/.claude.json`` is only read when *include_user_scope* is set.
 
     Returns server name → MCPServerConfig (validated).
+    When *diagnostics* is supplied, append value-free manual-fix messages for
+    unsupported Codex entries there; direct discovery callers receive warnings.
     """
     from crossby.sync.mcp_discovery import discover_mcp_servers
 
@@ -209,10 +224,24 @@ def discover_mcp(
         )
     servers: dict[str, MCPServerConfig] = {}
     for name, discovered in discovery.servers.items():
+        if discovered.unsupported_fields:
+            message = (
+                f"MCP server `{name}` (from {discovered.source_tool}) uses fields "
+                f"Crossby cannot faithfully port: {', '.join(discovered.unsupported_fields)}. "
+                "This server was not synced; existing target entries are preserved. "
+                "This is a manual-fix — configure it directly in each target's native config."
+            )
+            if diagnostics is not None:
+                diagnostics.append(message)
+            else:
+                logger.warning("mcp.unsupported", message=message)
+            continue
         try:
             servers[name] = MCPServerConfig(**discovered.data)
         except Exception:
             continue
+        if sources is not None:
+            sources[name] = discovered.source_tool
     return servers
 
 
@@ -1243,8 +1272,14 @@ def build_sync_data(
             skills_source = skills_found[source_tool]
 
     # MCP, permissions, hooks
+    mcp_warnings: list[str] = []
+    mcp_sources: dict[str, str] = {}
     mcp_servers = discover_mcp(
-        project_root, from_tool=from_tool, include_user_scope=include_user_scope
+        project_root,
+        from_tool=from_tool,
+        include_user_scope=include_user_scope,
+        diagnostics=mcp_warnings,
+        sources=mcp_sources,
     )
     perm_errors: list[str] = []
     hook_errors: list[str] = []
@@ -1256,6 +1291,8 @@ def build_sync_data(
         agents_source=agents_source,
         skills_source=skills_source,
         mcp_servers=mcp_servers,
+        mcp_warnings=mcp_warnings,
+        mcp_sources=mcp_sources,
         allowed_commands=allowed_commands,
         hooks=hooks,
         source_errors={
