@@ -64,12 +64,15 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    SubagentSpawnStatus,
+    SubagentSpawnSupport,
 )
 from crossby.utils.git_worktree import outside_root_git_metadata_dirs
 
 if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.ai_tools.interactive import InteractiveLaunchHandler
+    from crossby.ai_tools.subagent_context import SubagentLaunchContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
 # Codex uses "xhigh" for both our XHIGH and MAX levels
@@ -189,6 +192,7 @@ class CodexAdapter(AbstractAITool):
             supports_model_flag=True,
             headless_flag="exec",
             supports_headless=True,
+            subagent_spawning=SubagentSpawnSupport.SUPPORTED,
             supports_effort=True,
             supports_yolo=True,
             supports_resume=True,
@@ -393,6 +397,11 @@ class CodexAdapter(AbstractAITool):
                 tool_id=self.TOOL_ID,
                 capability=self.capabilities().plan_mode,
             ) from exc
+
+    def _subagent_spawning_status(self, context: SubagentLaunchContext) -> SubagentSpawnStatus:
+        from crossby.ai_tools.codex_readiness import codex_readiness
+
+        return codex_readiness(self, context)
 
     def build_resume_command(
         self,

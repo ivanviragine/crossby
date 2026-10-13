@@ -17,6 +17,7 @@ import sys
 import threading
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from time import monotonic
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
         SessionInteractionHandler,
     )
     from crossby.ai_tools.interactive import InteractiveLaunchHandler
+    from crossby.ai_tools.subagent_context import SubagentLaunchContext
     from crossby.handoff.models import ConversationTranscript, SessionRef
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
     from crossby.utils.versioning import BinaryVersion
@@ -68,6 +70,11 @@ from crossby.models.ai import (
     PlanSessionPreflight,
     PlanSessionRequest,
     PlanSessionResult,
+    SubagentSpawnEvidence,
+    SubagentSpawnReason,
+    SubagentSpawnState,
+    SubagentSpawnStatus,
+    SubagentSpawnSupport,
     TokenUsage,
 )
 from crossby.models.config import ComplexityModelMapping
@@ -170,6 +177,82 @@ class AbstractAITool(ABC):
     def capabilities(self) -> AIToolCapabilities:
         """Declare what this tool can do."""
         raise NotImplementedError
+
+    def subagent_spawning_status(
+        self,
+        *,
+        working_dir: Path | None = None,
+        headless: bool = True,
+        launch_args: Sequence[str] = (),
+        environment: Mapping[str, str] | None = None,
+        request: HeadlessSessionRequest | None = None,
+    ) -> SubagentSpawnStatus:
+        """Check runtime spawning for a fresh ordinary launch, without running it.
+
+        ``launch_args`` contains the exact native options, excluding the binary,
+        subcommand and prompt. ``environment`` is the complete child environment
+        (omitting it snapshots inheritance). A managed ``request`` supplies its
+        own cwd and launch dimensions; do not mix it with extra native options.
+        Unmodeled transports, policies and configuration fail closed.
+        """
+        from crossby.ai_tools.subagent_context import SubagentLaunchContext
+
+        context = SubagentLaunchContext.normalize(
+            working_dir=working_dir,
+            headless=headless,
+            launch_args=launch_args,
+            environment=environment,
+            request=request,
+        )
+        caps = self.capabilities()
+        # Audit precedes headless support: both default to unknown/false, so
+        # checking mode first would misclassify every unaudited GUI adapter.
+        if caps.subagent_spawning is SubagentSpawnSupport.UNAUDITED:
+            return context.status(
+                self.TOOL_ID,
+                SubagentSpawnState.UNKNOWN,
+                SubagentSpawnReason.ADAPTER_NOT_AUDITED,
+                "This adapter has not been audited for runtime subagent spawning.",
+            )
+        if caps.subagent_spawning is SubagentSpawnSupport.UNSUPPORTED:
+            return context.status(
+                self.TOOL_ID,
+                SubagentSpawnState.UNSUPPORTED,
+                SubagentSpawnReason.ADAPTER_DECLARES_UNSUPPORTED,
+                "This adapter declares runtime subagent spawning unsupported.",
+            )
+        if context.conflicting_inputs:
+            return context.status(
+                self.TOOL_ID,
+                SubagentSpawnState.UNKNOWN,
+                SubagentSpawnReason.CONTEXT_UNSUPPORTED,
+                "The supplied managed request conflicts with other launch inputs.",
+            )
+        if headless and not caps.supports_headless:
+            return context.status(
+                self.TOOL_ID,
+                SubagentSpawnState.UNSUPPORTED,
+                SubagentSpawnReason.NO_HEADLESS_MODE,
+                "This audited adapter has no ordinary headless launch mode.",
+            )
+        if context.binary_path(caps.binary) is None:
+            return context.status(
+                self.TOOL_ID,
+                SubagentSpawnState.UNKNOWN,
+                SubagentSpawnReason.TOOL_NOT_INSTALLED,
+                "The intended child environment cannot locate the tool binary.",
+                SubagentSpawnEvidence.INSTALL_PROBE,
+            )
+        return self._subagent_spawning_status(context)
+
+    def _subagent_spawning_status(self, context: SubagentLaunchContext) -> SubagentSpawnStatus:
+        """An audited family alone cannot establish effective readiness."""
+        return context.status(
+            self.TOOL_ID,
+            SubagentSpawnState.UNKNOWN,
+            SubagentSpawnReason.EFFECTIVE_CONTEXT_UNRESOLVED,
+            "Family support is audited, but effective runtime readiness is unresolved.",
+        )
 
     def get_models(self) -> list[AIModel]:
         """Return known models from the static registry.
