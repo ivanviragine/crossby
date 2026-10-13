@@ -99,7 +99,9 @@ def run_owned(
             os.killpg(proc.pid, signal.SIGCONT)
         if os.name != "posix":
             return proc.wait()
-        if not hasattr(os, "waitid"):
+        # Typeshed exposes kqueue only on BSD. Keep the actual waitid probe:
+        # macOS lacks it, while Linux uses it without touching BSD-only APIs.
+        if sys.platform != "linux" and sys.platform != "win32" and not hasattr(os, "waitid"):
             watcher = select.kqueue()
             event = select.kevent(
                 proc.pid,

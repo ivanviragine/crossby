@@ -159,6 +159,10 @@ Report recovered retained paths even when allocation never yields. An isolated
 Codex renders native `-c` overrides instead of a global profile. Concern-scoped
 persistent fallback is allowed only inside the owned checkout, and partial
 activation errors prevent dispatch. Keep fatal `SceneLaunchInputError` behavior.
+Pass the explicit `concerns` scope through activation to the engine's declaration,
+projection and removal phases, and record only those concerns in persistent
+state. `concerns=None` preserves ordinary persistent scene behavior; changing
+only `ResolvedScene.configured_concerns` does not scope engine phases.
 
 `utils/owned_launch.py` owns the subprocess group/tree through exit and
 cancellation before checkout deletion. POSIX plain launches hand off and restore
@@ -168,6 +172,10 @@ wrapper's group alone leaks descendants. Preserve actual redirected stdin and
 EOF rather than replacing a pipe with an un-fed PTY. Observe the leader without
 reaping it
 until the last group signal, and retain the checkout on teardown failure.
+Keep BSD-only `kqueue` calls behind explicit platform narrowing as well as the
+runtime `waitid` capability check. Validate `uv run mypy --platform linux
+src/crossby/` when editing this fallback on macOS; native Mac typing alone misses
+Linux's narrower standard-library stubs.
 Regression tests use temporary Git repositories and local stub executables in
 `test_scenes/test_worktree_launch.py`; never substitute live paid agent turns.
 

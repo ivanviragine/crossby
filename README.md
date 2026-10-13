@@ -304,8 +304,9 @@ checkout. The launch's relative subdirectory must exist in HEAD. Injection goes
 to the selected tool's native skills directory and, when needed for existing
 scene projections, the checkout's canonical skills source, resolving safe
 committed source symlinks. Original files,
-skills, scene state, and ordinary launches remain unchanged. Persistent-only
-scene mechanisms may write files inside the temporary checkout. Codex uses
+skills, scene state, and ordinary launches remain unchanged. Only persistent
+scene mechanisms write native files inside the temporary checkout; concerns
+handled by launch flags remain per-launch. Codex uses
 native per-launch MCP overrides instead of a global scene profile.
 
 `--isolate` accepts `worktree` or `none`; a flag contradicting the scene setting

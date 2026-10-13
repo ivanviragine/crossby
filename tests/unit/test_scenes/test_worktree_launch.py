@@ -763,3 +763,51 @@ def test_cleanup_matches_git_directory_identity(project: dict[str, Path]) -> Non
     assert Path(git(owned.path, "rev-parse", "--absolute-git-dir")).resolve() == gitdir
     owned.cleanup(discard_changes=True)
     assert not owned.path.exists()
+
+
+def test_isolated_hooks_do_not_persist_launch_scoped_skills(
+    project: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = project["repo"]
+    config = yaml.safe_load((repo / ".crossby.yml").read_text())
+    config["scenes"]["review"].pop("mcp")
+    config["scenes"]["review"]["hooks"] = {"include": []}
+    config["scenes"]["review"]["skills"] = {"include": ["review"]}
+    (repo / ".crossby.yml").write_text(yaml.safe_dump(config))
+    settings = repo / ".claude/settings.json"
+    original = '{"env": {"UNCHANGED": "value"}}\n'
+    settings.write_text(original)
+    git(repo, "add", ".")
+    git(repo, "add", "-f", ".claude/settings.json")
+    git(repo, "commit", "-qm", "launch-scoped skill fixture")
+    monkeypatch.setattr("crossby.scenes.versioning.detect_tool_version", lambda *_: (2, 1, 300))
+    result = invoke(project, "--keep-worktree")
+    workspace = next(project["owners"].iterdir()) / "checkout"
+    try:
+        assert result.exit_code == 0, result.output
+        evidence = json.loads(project["evidence"].read_text())
+        assert "--settings" in evidence["argv"]
+        launch_settings = Path(evidence["argv"][evidence["argv"].index("--settings") + 1])
+        assert json.loads(launch_settings.read_text())["skillOverrides"] == {"ordinary": "off"}
+        assert (workspace / ".claude/settings.json").read_text() == original
+        assert settings.read_text() == original
+    finally:
+        OwnedWorktree(workspace).cleanup(discard_changes=True)
+
+
+def test_scoped_isolation_still_refuses_malformed_requested_hooks(project: dict[str, Path]) -> None:
+    repo = project["repo"]
+    config = yaml.safe_load((repo / ".crossby.yml").read_text())
+    config["scenes"]["review"].pop("mcp")
+    config["scenes"]["review"]["hooks"] = {"include": []}
+    (repo / ".crossby.yml").write_text(yaml.safe_dump(config))
+    malformed = repo / ".claude/settings.json"
+    malformed.write_text("{bad requested hook settings")
+    git(repo, "add", ".")
+    git(repo, "add", "-f", ".claude/settings.json")
+    git(repo, "commit", "-qm", "requested malformed hooks fixture")
+    result = invoke(project)
+    assert result.exit_code == 1, result.output
+    assert not project["evidence"].exists()
+    assert not list(project["owners"].iterdir())
+    assert malformed.read_text() == "{bad requested hook settings"

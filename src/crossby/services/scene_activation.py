@@ -16,7 +16,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from crossby.models.ai import AIToolID
 from crossby.models.config import SCENE_CONCERNS, SceneConfig
@@ -139,6 +139,7 @@ def activate_scene(
     installed_candidates: Iterable[AIToolID],
     force: bool = False,
     dry_run: bool = False,
+    concerns: frozenset[str] | None = None,
 ) -> SceneActivationOutcome:
     """Apply a persistent scene through the recoverable lifecycle.
 
@@ -149,6 +150,14 @@ def activate_scene(
     shared concern; they are deliberately not passed to the engine's whole-tool
     scope, which would also apply unrelated concerns to them.
     """
+    if concerns is not None:
+        if not concerns.issubset(SCENE_CONCERNS):
+            raise ValueError("Unknown persistent scene concern")
+        # State and shared-path scope must describe only phases actually applied.
+        scene = scene.model_copy(
+            update={key: None for key in SCENE_CONCERNS if key not in concerns}
+        )
+    apply_scope: dict[str, Any] = {"concerns": concerns} if concerns is not None else {}
     candidates = list(dict.fromkeys(installed_candidates))
     explicitly_scoped = requested_tools is not None
     initial_scope = candidates if requested_tools is None else list(requested_tools)
@@ -191,7 +200,7 @@ def activate_scene(
     # apply even while the outgoing scene has drifted.
     if dry_run:
         results = engine.apply_scene(
-            resolved, project_root, dry_run=True, force=force, tools=initial_scope
+            resolved, project_root, dry_run=True, force=force, tools=initial_scope, **apply_scope
         )
         return SceneActivationOutcome(tuple(scope), tuple(results), "preview", warnings)
 
@@ -292,7 +301,9 @@ def activate_scene(
     retained_revocations = _recorded_revocations(active)
 
     try:
-        results = engine.apply_scene(resolved, project_root, force=force, tools=initial_scope)
+        results = engine.apply_scene(
+            resolved, project_root, force=force, tools=initial_scope, **apply_scope
+        )
     except Exception as exc:
         partial_results = exc.results if isinstance(exc, engine.SceneApplyError) else ()
         recovery_revocations = retained_revocations | _revoked_concerns(partial_results)

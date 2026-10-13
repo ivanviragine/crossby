@@ -795,6 +795,7 @@ def _activate_persistent_scene(
             requested_tools=[tool_id],
             installed_candidates=installed,
             force=context.isolated,
+            concerns=context.resolved.configured_concerns if context.isolated else None,
         )
     except SceneActivationError as exc:
         for warning in exc.warnings:
