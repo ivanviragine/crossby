@@ -62,9 +62,10 @@ are checked independently without requesting unrestricted live execution.
 
 ## Scope
 
-Interactive startup is limited to Codex 0.154.x or 0.157.x on POSIX and must run on the
-main thread with terminal stdin/stdout. Unknown versions and unrecognized
-screens fail closed within the startup deadline. The real provider run was on
+Interactive startup requires Codex 0.154.0 or newer on POSIX and must run on the
+main thread with terminal stdin/stdout. Newer versions are not pinned:
+unrecognized screens fail closed within the startup deadline without
+submitting the task. The real provider run was on
 macOS; Linux PTY behavior is covered by the deterministic CI suite. Windows is
 unsupported for this adapter. App-server collection remains independent and
 retains its 0.153.4 floor.
