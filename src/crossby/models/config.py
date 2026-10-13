@@ -72,11 +72,11 @@ class MCPServerConfig(BaseModel):
     A server must have either ``command`` (stdio transport) or ``url``
     (http/sse transport) — not both, not neither.
 
-    ``headers`` is the source-shaped HTTP-header map (as Claude/Cursor
-    write it, with ``${VAR}`` literals preserved). The Codex writer
-    refactors this into ``bearer_token_env_var`` / ``http_headers`` /
-    ``env_http_headers`` at render time; other writers preserve the
-    literal shape.
+    ``headers`` is a Claude-shaped HTTP-header map with ``${VAR}``
+    references preserved. Cursor discovery normalizes its native references
+    to this shape, and its writer renders ``${env:VAR}``. The Codex writer
+    refactors representable references into ``bearer_token_env_var`` /
+    ``env_http_headers``; literals stay in ``http_headers``.
     """
 
     command: str | None = None
@@ -220,6 +220,13 @@ class SceneSelector(BaseModel):
     exclude: list[str] = Field(default_factory=list)
 
 
+class SceneInjection(BaseModel):
+    """Explicit skill bundles, keyed by their isolated destination name."""
+
+    model_config = ConfigDict(extra="forbid")
+    skills: dict[str, str] = Field(default_factory=dict)
+
+
 class SceneConfig(BaseModel):
     """A named, task-shaped bundle of capabilities (stored under ``scenes``).
 
@@ -241,6 +248,8 @@ class SceneConfig(BaseModel):
     description: str | None = None
     extends: str | None = None
     profile: str | None = None
+    isolation: Literal["worktree", "none"] | None = None
+    inject: SceneInjection | None = None
 
     skills: SceneSelector | None = None
     agents: SceneSelector | None = None
@@ -254,6 +263,8 @@ class SceneConfig(BaseModel):
 _SCENE_INHERITABLE_FIELDS: tuple[str, ...] = (
     "description",
     "profile",
+    "isolation",
+    "inject",
     "skills",
     "agents",
     "mcp",

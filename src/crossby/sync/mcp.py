@@ -182,11 +182,32 @@ class _JsonMCPWriter(AbstractSyncWriter):
             return containment_err
         enabled, _disabled = _split_servers(data.mcp_servers)
         updates = {name: self._to_entry(s) for name, s in enabled.items()}
+        if self.tool_id == AIToolID.CURSOR and (updates or data.mcp_remove):
+            from crossby.sync.mcp_activation import cursor_disabled_names
+
+            activation_errors: list[str] = []
+            cursor_disabled_names(project_root, activation_errors)
+            if activation_errors:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=path,
+                    message="Invalid target MCP activation; files preserved: "
+                    + "; ".join(activation_errors),
+                )
         # Only ledger-owned names may be removed (``data.mcp_remove``), so a
         # same-named server crossby never wrote survives even when a source
         # server of that name is disabled.
         action, message, written, created, removed = read_merge_write_json(
-            path, self._mcp_key, updates, set(data.mcp_remove), dry_run
+            path,
+            self._mcp_key,
+            updates,
+            set(data.mcp_remove),
+            dry_run,
+            preserve_entry_booleans=(
+                frozenset({"disabled"}) if self.tool_id == AIToolID.ANTIGRAVITY_CLI else frozenset()
+            ),
         )
         return SyncResult(
             tool_id=self.tool_id,
@@ -299,6 +320,22 @@ class ClaudeMCPWriter(_JsonMCPWriter):
         # Only ledger-owned names may be removed / de-approved.
         revoke = set(data.mcp_remove)
 
+        if updates or revoke:
+            from crossby.sync.mcp_activation import claude_disabled_names
+            from crossby.sync.mcp_discovery import _GLOBAL_CLAUDE_JSON_PATH
+
+            activation_errors: list[str] = []
+            claude_disabled_names(project_root, _GLOBAL_CLAUDE_JSON_PATH, activation_errors)
+            if activation_errors:
+                return SyncResult(
+                    tool_id=self.tool_id,
+                    concern=self.concern,
+                    action="error",
+                    file_path=settings_path,
+                    message="Invalid target MCP activation; files preserved: "
+                    + "; ".join(activation_errors),
+                )
+
         action, message, written, created, removed = read_merge_write_json(
             mcp_path, self._mcp_key, updates, revoke, dry_run
         )
@@ -348,6 +385,11 @@ class CursorMCPWriter(_JsonMCPWriter):
     """Merges MCP servers into .cursor/mcp.json → mcpServers."""
 
     tool_id = AIToolID.CURSOR
+
+    def _to_entry(self, server: MCPServerConfig) -> dict[str, Any]:
+        from crossby.sync.mcp_cursor import render_cursor_mcp
+
+        return render_cursor_mcp(_to_json_entry(server))
 
     @property
     def _config_path_parts(self) -> tuple[str, str]:
@@ -461,13 +503,31 @@ class CodexMCPWriter(AbstractSyncWriter):
 
         mcp_section: dict[str, Any] = existing.get("mcp_servers", {})
         if not isinstance(mcp_section, dict):
-            mcp_section = {}
+            return "error", f"{path}: mcp_servers must be a table", [], [], 0
+
+        for name in set(enabled) | revoke:
+            current = mcp_section.get(name)
+            if (
+                isinstance(current, dict)
+                and "enabled" in current
+                and not isinstance(current["enabled"], bool)
+            ):
+                return (
+                    "error",
+                    f"{path}: MCP server `{name}` enabled must be a boolean",
+                    [],
+                    [],
+                    0,
+                )
 
         written: list[str] = []
         created: list[str] = []
         removed: list[str] = []
         for name, server in enabled.items():
             entry = _to_toml_entry(server)
+            current = mcp_section.get(name)
+            if isinstance(current, dict) and "enabled" in current:
+                entry["enabled"] = current["enabled"]
             if mcp_section.get(name) != entry:
                 # Overwriting a same-named table applies the change but is never
                 # claimed as owned — only genuinely new tables enter ``created``.

@@ -24,10 +24,126 @@ backpressure without dropping frames. Its 1 MiB frame limit counts bytes.
 
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
+| Claude Code | CLI 2.1.263 and optional SDK 0.2.165 | SDK `ClaudeSDKClient` with owned custom transport, ordinary query or exact resume | text, JSON, JSONL and response schemas | exact wire request and tool-use IDs plus initialized session; question text and labels are native answer keys | SDK `interrupt()`, then owned process cleanup |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` notification for the active session, then process cleanup |
 | OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | session abort only for a newly created session, then process cleanup |
 | Antigravity CLI | 1.2.6 | `agy --print` JSON or stream-JSON without `--mode plan`; resume `WAITING` with the same conversation ID | JSON, JSONL | exact conversation and question IDs; at most nine invocations | owned process-group cleanup; **no native abort** |
+
+Claude SDK verification uses the published Python SDK `0.2.165` and its actual
+control dispatcher with synthetic child processes; no paid/live model turn is
+claimed. The independent CLI floor retains the existing Claude native streaming
+contract. The custom transport and subprocess command builder are upstream
+unstable APIs, so the optional extra is exactly pinned and imports/API are
+checked before spawning. The owned process reads raw JSONL through Crossby's
+byte-bounded queue and deadlines, while the SDK owns initialization, permission
+dispatch and native response serialization. The installed CLI is used, never a
+different bundled executable. Its SDK entrypoint/version and working-directory
+environment match the pinned SDK; its inherited nested-session marker is cleared
+as in upstream SDK startup.
+
+The [official user-input contract](https://code.claude.com/docs/en/agent-sdk/user-input)
+uses question text as the answer-map key and option labels as the values.
+Crossby preserves them exactly, supports descriptions, multi-select arrays and
+free text, and rejects ambiguous repeated keys/labels. The SDK callback omits
+wire request and session IDs; the custom transport binds them before dispatch.
+Duplicate IDs, missing session binding, cancelled requests, unresolved requests
+at terminal completion and late answers fail closed. Bash commands come only
+from native `input.command`; filesystem targets and detached `native_input`
+preserve other operation details. Permission suggestions never become persistent
+grants. Denied/skipped clarification ends the session without invented answers;
+denied permissions send native denial. Handler errors remain managed transport
+errors even though the SDK normally converts them into control errors.
+Execution directory remains unset: Claude's Bash working directory can persist
+across commands, and launch cwd is not authoritative execution evidence.
+Native cancellation signals the bounded interaction-handler and related
+event-observer waits so executor shutdown does not delay a successful result
+until its idle deadline. Observer callbacks remain isolated; their late return
+cannot revive withdrawn requests. Withdrawal and closure
+share a lock with response commitment inside the physical writer; a response
+queued behind a send lock or executor cannot revive a withdrawn request.
+After committing response rights, the writer releases the registry lock before
+pipe write/flush so backpressure cannot block native interruption or withdrawal.
+
+Startup, callbacks, I/O and teardown share the Crossby deadline. Pending reads
+recheck the current idle budget when sequential question callbacks refresh
+semantic progress, and poll transport closure so executor shutdown does not rely
+on an EOF record being queued after process closure begins. Physical writes use
+the owned process's overall deadline,
+while the reader and runtime monitor enforce the current idle deadline as native
+progress arrives. Partially written frames are never retried; neither read nor
+write progress extends the overall deadline. Cleanup attempts SDK interruption
+once before process-group termination, killing descendants
+even after the parent exits. A blocked physical writer routes cancellation or
+expiry through that same bounded interruption owner before forced teardown.
+An unread partial frame can prevent an interrupt from reaching the CLI; the
+bridge attempts the native API while the child is alive, bounds that attempt,
+and then kills/joins without interleaving or retrying partial bytes. The pinned SDK distinguishes a turn result from
+run completion. The bridge retains the submitted prompt's native result,
+including output/schema and usage, while consuming background turns and keeping
+their permission/question callbacks live. Process exit and raw transport EOF do
+not prove SDK message validity: the SDK consumer drains through its end marker
+and parser errors propagate before Crossby accepts completion. Pinned SDK
+`rate_limit_event` notifications remain valid during active background
+continuations. Their required session/UUID bindings and documented status are
+validated; normalization emits only content-free progress. Quota details and
+native reason/raw fields stay private, and notifications neither reopen a
+completed run nor replace prompt output/accounting. See the pinned
+[SDK notification types](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.165/src/claude_agent_sdk/types.py)
+and [native parser](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.165/src/claude_agent_sdk/_internal/message_parser.py).
+
+Only `local_agent` and
+`local_workflow` tasks defer input closure: `task_started` adds them;
+`task_notification` or terminal `task_updated` removes them. Background snapshots
+do not replace this ledger, and long-lived shells/monitors do not defer closure.
+
+A result or idle state settles the run only when tracked work has finished and
+no main-thread turn remains in progress. Native running/requires-action states
+reopen it. Defined task/state lifecycle frames remain valid after a result;
+response/control frames require an active continuation (interrupt replies are
+also valid during cleanup). Unbound trailing content, conflicting session IDs,
+and duplicate human results fail. Successful runs close stdin and drain stdout
+through EOF, checking process exit; active state at EOF cannot become success.
+
+Observed native failure/abort uses bounded interrupt and cleanup rather than
+waiting for idle, preserving terminal status, actual exit code and prompt usage.
+Native failure state and provenance are recorded before invoking usage observers.
+An observer/dispatch exception takes precedence over native completion, even if
+the cleanup task finishes before the SDK message consumer receives the error.
+Native permission denials from every result, including background turns, are
+recorded as safe generic diagnostics before any usage observer can stop dispatch;
+background accounting still cannot replace the submitted prompt's usage.
+Error teardown reserves remaining work time to deliver the exception rather
+than allowing an unacknowledged interrupt wait to turn it into an idle timeout.
+Numeric cost payloads are checked against Pydantic event-export JSON and
+standard/compact JSON serializations, including exponent notation. A matching
+protected prompt suppresses cost while native token accounting remains available.
+Prompt usage/cost is recorded immediately when its result arrives, so later
+background timeout/cancellation retains observed accounting. An absent result
+origin means human; a second such result is rejected rather than attributed to
+a background task. A background failure fails the run without replacing the
+submitted prompt's output/schema (failed results suppress output as usual).
+A reader-first startup stop completes the bounded SDK interruption attempt before SDK auto-disconnect can close its control channel; concurrent
+cleanup callers share that single attempt. Native-supplied AskUserQuestion
+`response` is removed before sending validated handler answers because Claude
+otherwise gives that field precedence over the answer map.
+Native result
+subtype/error state, exact session ID, token usage, cost and permission-denial
+presence are retained. JSON/JSONL without a schema preserve the final native
+envelope (including native cost/metadata); schemas select `structured_output`
+and use the shared validator. Cost is also available in a bounded usage-event
+payload for text/schema results (omitted when its key overlaps the protected
+prompt). Event/diagnostic content excludes prompts,
+answers and raw tool arguments.
+
+Claude remains tool-managed for sandbox policy. Unsupported network grants,
+sandbox disabling and approval policies fail preflight. Shared requests have
+no scene context or arbitrary tool-list selector; these are API capability gaps,
+not advertised support. Existing interactive, plan and unattended paths remain
+independent. See `test_claude_sdk.py` for real SDK dispatch, dependency failures,
+native-confirmed resume identity (requested IDs alone never enter result
+provenance), SDK dispatch-error propagation, structured output, native
+cancellation, startup/callback timeouts, terminal failures and owned-process tests.
 
 Codex's 0.162.1 app-server schema was generated with
 `codex app-server generate-json-schema --experimental`. It defines

@@ -82,6 +82,8 @@ def run_with_transcript(
     transcript_path: Path | None,
     cwd: Path | str | None = None,
     env: dict[str, str] | None = None,
+    *,
+    owned: bool = False,
 ) -> int:
     """Run a command, capturing terminal output to transcript_path via `script`.
 
@@ -98,6 +100,10 @@ def run_with_transcript(
     ``script --version`` probe is a pure capability check and deliberately keeps
     the ambient environment.
     """
+    if owned:
+        from crossby.utils.owned_launch import run_owned
+
+        return run_owned(cmd, cwd, env, transcript_path)
     if transcript_path is None or not shutil.which("script"):
         result = subprocess.run(cmd, cwd=cwd, env=env)
         return result.returncode

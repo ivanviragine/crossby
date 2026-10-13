@@ -217,7 +217,9 @@ def run_sync(
     ledger = loaded_ledger.ledger
     current_hooks = {(h.event, h.command) for h in data.hooks}
     current_perms = set(data.allowed_commands)
-    disabled_mcp = {name for name, s in data.mcp_servers.items() if not s.enabled}
+    disabled_mcp = data.mcp_disabled | {
+        name for name, s in data.mcp_servers.items() if not s.enabled
+    }
     # tool → the identity set crossby should own after a successful write.
     # Applied to the ledger only for writers that did not error.
     pending_hooks: dict[AIToolID, set[tuple[str, str]]] = {}
@@ -225,7 +227,28 @@ def run_sync(
     pending_mcp: dict[AIToolID, set[str]] = {}
     ownership_concerns = frozenset((SyncConcern.HOOKS, SyncConcern.PERMISSIONS, SyncConcern.MCP))
 
-    results: list[SyncResult] = []
+    def _source_error_result(affected_tool: AIToolID | None, affected: SyncConcern) -> SyncResult:
+        return SyncResult(
+            tool_id=affected_tool,
+            concern=affected,
+            action="error",
+            message="Invalid source input; target and ownership preserved: "
+            + "; ".join(data.source_errors[affected]),
+        )
+
+    # A failed source is still an error when the selected target has no writer
+    # (e.g. permissions to Codex), or installed-target filtering leaves none.
+    # Respect explicit concern exclusions without silently suppressing active
+    # failures in ordinary sync, --dry-run, --plan, or --doctor.
+    matched_concerns = {writer.concern for writer in writers}
+    results = [
+        _source_error_result(tool_id, affected)
+        for affected, errors in data.source_errors.items()
+        if errors
+        and (concern is None or concern == affected)
+        and affected not in (skip_concerns or ())
+        and affected not in matched_concerns
+    ]
     agents_writers_ran = False
     rules_writers_ran = False
     skills_writers_ran = False
@@ -265,6 +288,10 @@ def run_sync(
                 skills_writers_ran = True
             continue
 
+        if data.source_errors.get(writer.concern):
+            results.append(_source_error_result(writer.tool_id, writer.concern))
+            continue
+
         writer_data = data
         hooks_owned: frozenset[tuple[str, str]] = frozenset()
         perms_owned: frozenset[str] = frozenset()
@@ -301,7 +328,64 @@ def run_sync(
             mcp_owned = ledger.mcp(writer.tool_id)
             # Only ledger-owned *and* explicitly-disabled servers may be removed,
             # so a same-named server crossby never wrote survives.
-            writer_data = replace(data, mcp_remove=frozenset(disabled_mcp & mcp_owned))
+            # The native disabled declaration itself stays configured. This is
+            # relevant in the wizard, which also writes to the winning source.
+            mcp_revoke = {
+                name
+                for name in disabled_mcp & mcp_owned
+                if data.mcp_sources.get(name) != str(writer.tool_id)
+            }
+            writer_data = replace(data, mcp_remove=frozenset(mcp_revoke))
+            from crossby.sync.mcp_cursor import (
+                cursor_codex_unsupported,
+                cursor_target_unsupported,
+            )
+
+            refused: dict[str, tuple[str, ...]] = {}
+            for name, server in data.mcp_servers.items():
+                if not server.enabled:
+                    continue
+                source = data.mcp_sources.get(name)
+                fields: tuple[str, ...] = ()
+                if writer.tool_id == AIToolID.CURSOR:
+                    fields = cursor_target_unsupported(server)
+                    # Only audited source dialects may supply references.
+                    if source in {"copilot", "antigravity-cli"}:
+                        fields = tuple(
+                            key for key, value in server.model_dump().items() if "${" in str(value)
+                        )
+                elif source == "cursor" and writer.tool_id == AIToolID.CODEX:
+                    fields = cursor_codex_unsupported(server)
+                elif source in {"codex", "cursor"} and writer.tool_id not in {
+                    AIToolID.CLAUDE,
+                    AIToolID.CODEX,
+                }:
+                    # Keep unaudited target dialects conservative.
+                    fields = tuple(
+                        key for key, value in server.model_dump().items() if "${" in str(value)
+                    )
+                if fields:
+                    refused[name] = fields
+                    results.append(
+                        SyncResult(
+                            tool_id=writer.tool_id,
+                            concern=SyncConcern.MCP,
+                            action="skipped",
+                            message=(
+                                f"MCP server `{name}` (from {source or 'canonical config'}) "
+                                f"has interpolation in {', '.join(fields)} the "
+                                f"{writer.tool_id} MCP writer cannot faithfully render. "
+                                "The server was not synced; existing target entries are "
+                                "preserved. This is a manual-fix — configure environment "
+                                "references directly in the target's native config."
+                            ),
+                        )
+                    )
+            if refused:
+                writer_data = replace(
+                    writer_data,
+                    mcp_servers={k: v for k, v in data.mcp_servers.items() if k not in refused},
+                )
 
         try:
             result = writer.safe_sync(writer_data, project_root, dry_run=dry_run, force=force)
@@ -338,7 +422,7 @@ def run_sync(
                 pending_perms[writer.tool_id] = set(perms_owned & current_perms) | created_perms
             elif writer.concern == SyncConcern.MCP:
                 created_mcp = {c for c in result.created if isinstance(c, str)}
-                pending_mcp[writer.tool_id] = set(mcp_owned - disabled_mcp) | created_mcp
+                pending_mcp[writer.tool_id] = set(mcp_owned - writer_data.mcp_remove) | created_mcp
 
         if writer.concern == SyncConcern.AGENTS:
             agents_writers_ran = True
@@ -447,6 +531,19 @@ def run_sync(
         from crossby.sync.plugins import report_plugins
 
         results.extend(report_plugins(project_root))
+
+    if (concern is None or concern == SyncConcern.MCP) and (
+        not skip_concerns or SyncConcern.MCP not in skip_concerns
+    ):
+        results.extend(
+            SyncResult(
+                tool_id=None,
+                concern=SyncConcern.MCP,
+                action="skipped",
+                message=message,
+            )
+            for message in data.mcp_warnings
+        )
 
     # MCP oauth-config discovery — same detect-only shape as plugins above:
     # append manual-fix rows for source MCP servers with an `oauth` block

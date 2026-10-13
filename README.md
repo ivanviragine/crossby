@@ -119,6 +119,9 @@ crossby drives eight tools, but **not every tool does every job.** The tables be
 
 ### Direct sync targets
 
+The Agents checkmarks describe definition portability, independently of
+[runtime subagent readiness](#runtime-subagent-readiness).
+
 A sync **writer** exists for five tools. These are the only tools crossby writes configuration *into*:
 
 | Surface | Claude | Cursor | Copilot | Codex | Antigravity CLI |
@@ -164,11 +167,17 @@ Per-tool flag mappings and adapter internals live in [CONTRIBUTING.md](CONTRIBUT
 | ----------- | -------------------- | -------------------------------------------------------------------------------------------- |
 | Rules       | Symlink (auto-copy)  | `AGENTS.md` ↔ `CLAUDE.md` ↔ `.cursorrules` ↔ `.github/copilot-instructions.md` (`AGENTS.md` is shared by Codex and Antigravity CLI). Falls back to copy with a `<!-- crossby:manual-fix -->` block when the source mentions surfaces specific to a different tool (`/hooks`, `ExitPlanMode`, `permissionMode`, …). |
 | Agents      | Symlink / translate  | Markdown-shape tools (Claude / Cursor / Copilot / Antigravity CLI) symlink directories. Codex translates per file into `.codex/agents/<name>.toml` with `permissionMode → sandbox_mode`, `model + effort` family-mapped to GPT, lossy fields preserved as a manual-fix block. |
-| Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts Claude slash commands (`.claude/commands/*.md`) into `claude-command-<slug>` skills for every other tool. |
+| Skills      | Symlink / translate  | All five tools accept the same `SKILL.md` shape, so symlink is the default. `--strategy translate` rewrites per tool with manual-fix notes for Claude `allowed-tools` on non-Claude targets, and converts selected Claude/Cursor slash commands (`.<source>/commands/**/*.md`) into `<source>-command-<slug>` skills for other tools. |
 | Permissions | Convert              | Canonical `cmd:args` ↔ `Bash()` / `Shell()` per tool — **Claude and Cursor only** (see [above](#direct-sync-targets)). Revocable: a pattern crossby wrote is removed when the source drops it (see [Revocable sync](#revocable-sync)). |
 | Hooks       | Write                | Per-tool native hook schema; a crossby-written hook's matcher narrows as well as widens on re-runs, and the hook is revoked when the source drops it. |
-| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars`. |
+| MCP servers | Merge                | Source tool's MCP config → each target's; `Authorization: Bearer ${VAR}`, `${VAR}` headers, and env-var self-references are rewritten into Codex `bearer_token_env_var` / `env_http_headers` / `env_vars` and restored on reverse sync. Native Codex `url` entries imply HTTP. |
 | Plugins     | Detect (manual)      | `.claude/plugins/`, `.claude/plugin-marketplaces.json`, and `.claude-plugin/marketplace.json` are reported as `Not Added`; bundled commands/agents/MCP servers must be migrated by hand. |
+
+Codex MCP sync preserves environment **references** without reading their values. Native `env_vars` names (including structured `source = "local"` entries) become `${NAME}` references; explicit literal `env` values take precedence. Native literal `http_headers` and `env` values containing `${...}`, overlapping authentication/header sources with conditional fallbacks, remote environment sources, and other fields Crossby cannot represent are reported as `Not Added` with a manual-fix note. The affected connection configuration is skipped; configure it directly in each target's native file. A valid explicit source disable still revokes Crossby-owned target copies even when the connection is not portable.
+
+MCP discovery preserves native disables: Antigravity CLI's `disabled: true`, Codex's `enabled = false`, Claude's project rejection lists and per-project toggle list, and Cursor CLI's per-project `mcp-disabled.json`. A disabled source is never provisioned as enabled on a fresh target. Refreshing an existing target also retains its native user- or scene-authored disable. Malformed activation files, booleans, or name lists refuse MCP sync and MCP-scoped scene launch, preserving target files and ownership; a losing source name conflict does not bypass validation. VS Code keeps its toggle in private profile state outside `.vscode/mcp.json`; that state is not imported. See the [activation audit and limitations](docs/mcp-activation-discovery.md).
+
+Cursor MCP sync translates Claude `${NAME}` and restored Codex references into native `${env:NAME}` syntax without reading environment values. Native Cursor references normalize back to Claude syntax, retaining prefixes, suffixes and multiple references in `command`, `args`, `env`, `url`, and `headers`; the narrower Codex reverse path supports self env references, whole header references and exact Bearer headers. Defaults, other Cursor interpolation, interpolation-shaped literals, and unsupported native fields produce manual-fix reports and preserve affected target entries. Copilot and Antigravity CLI remain conservative for restored Codex/Cursor references. See the [supported subset and native-format audit](docs/mcp-environment-references.md).
 
 ### Preview before you write
 
@@ -176,7 +185,7 @@ crossby is built to be inspected before it touches a file:
 
 - `crossby sync --plan` shows a stage-by-concern dry-run summary and writes nothing.
 - `--doctor` adds a readiness rating (`high` / `medium` / `low`) plus the target-validation checks that would run afterward.
-- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`).
+- `--validate-target` re-parses already-synced files (TOML / JSON parseability, agent required fields, skill frontmatter, `AGENTS.md` size threshold, MCP `command` on `PATH`). Cursor command checks temporarily look up supported `${env:NAME}` references once; unset references warn, and `$NAME` / `${NAME}` stay literal. Validation never executes commands or persists expanded values, and diagnostics retain the original references. See the [validation distinction](docs/mcp-environment-references.md#explicit-command-validation).
 - `--dry-run` runs a real sync in shadow mode.
 
 After every real sync, the result table is also written to `.crossby/sync-report.md` — a portable `| Status | Item | Notes |` markdown table you can paste into a PR. A row can be `Added`, `Removed` (a revocation), `Check before using` (a lossy translation), or `Not Added`. Pass `--no-persist-report` to skip it, or `--report-format markdown-table` to render the same shape on stdout.
@@ -189,6 +198,10 @@ Default strategy is `symlink` (with content-aware copy fallback for rules). Pass
 crossby sync --from claude --strategy translate
 ```
 
+For skills, `--from` also scopes slash-command conversion: `--from claude` imports only Claude commands, and `--from cursor` imports only Cursor commands. A configured or wizard-selected source has the same boundary; sources without native slash commands import none. `--plan` and `--dry-run` use that same inventory, including the prospective replacement tree when `--force` is requested. For an empty selected source, forcing an existing target reports its removal in previews and the sync report; repeating with no target left reports no change.
+
+Scoped translation records each output's source in `.crossby-translated-skills.json` inside the target skills directory. Switching sources preserves outputs from unselected sources. Cleanup removes only unchanged outputs recorded for the current source; human skills, edits, and added support files survive. A name collision with another source or human content reports an error before changing the target. Source skill files are read and rendered before cleanup; if a support-file write fails later, changed outputs remain tracked so a repaired retry can proceed. Updates never grant cleanup ownership over pre-existing human additions. Older translated trees without per-skill provenance are preserved; resolve collisions by moving the affected skill aside, or use `--force` to back up and replace the target tree deliberately.
+
 When a field has no faithful equivalent on the target — e.g. Claude `permissionMode: plan` going to Codex, or `allowed-tools` going to a tool that doesn't enforce them — the rendered file gets a clearly-marked block:
 
 ```markdown
@@ -199,7 +212,7 @@ When a field has no faithful equivalent on the target — e.g. Claude `permissio
 <!-- crossby:manual-fix:end -->
 ```
 
-Re-running `crossby sync` replaces the block in lockstep with the source — no stacking. Removing the block once you've addressed the note is supported; the next sync only re-emits it if the source still triggers it.
+Re-running `crossby sync` replaces the block in lockstep with the source — no stacking. Removing the block once you've addressed the note is supported; the next sync only re-emits it if the source still triggers it. Scoped skill translation preserves such target edits and reports a collision until you resolve them.
 
 > Need to translate a single allowlist pattern by hand? `crossby convert "Bash(myapp:*)" --from claude --to cursor` prints the equivalent pattern for the target tool. To translate a single subagent file (Claude / Cursor / Copilot / Codex), use `crossby agents convert --from claude --to codex .claude/agents/researcher.md`.
 
@@ -207,7 +220,9 @@ Re-running `crossby sync` replaces the block in lockstep with the source — no 
 
 crossby never *removes* configuration you own — it only ever *revokes an entry it recorded writing*, tracked in a per-machine, gitignored `.crossby/owned.json` ledger. A hand-authored entry that merely shares a name with a source entry is never revoked, though a normal same-named merge can still overwrite its contents — this guarantee bounds *removal*, not additive or update writes.
 
-Within that boundary, hooks and permissions are *additive by default but revocable*: syncing `--from A` then `--from B` leaves each target reflecting B, not the union of both — a hook or permission pattern crossby wrote for A is taken back once it's gone from the source. MCP servers are narrower: crossby removes a server only when it wrote that server *and* the source marks it disabled (`enabled: false`); a server merely dropped from the source is left in place, so for MCP the two syncs leave the union. A same-named MCP server you wrote by hand is never deleted, though a normal MCP merge can still overwrite its config — the ledger bounds *removal*, not additive or update writes. A fresh clone starts with an empty ledger, so it never revokes until it has recorded writes of its own.
+Within that boundary, hooks and permissions are *additive by default but revocable*: syncing `--from A` then `--from B` leaves each target reflecting B, not the union of both — a hook or permission pattern crossby wrote for A is taken back once it's gone from the source. MCP servers are narrower: crossby removes a target copy only when it wrote that server *and* the source explicitly disables it in its native configuration; a server merely dropped from the source is left in place, so for MCP the two syncs leave the union. The disabled native source declaration remains configured, including during wizard sync. A same-named MCP server you wrote by hand is never deleted, though a normal MCP merge can still overwrite its connection config — the ledger bounds *removal*, not additive or update writes. A fresh clone starts with an empty ledger, so it never revokes until it has recorded writes of its own.
+
+If a hook or permission source cannot be read or parsed as a JSON object, crossby reports an error and exits 1 for that concern, preserving its targets and ownership. The diagnostic also appears when the selected target has no writer for the concern or no target tools are installed. Invalid `hooks`, `permissions`, or `permissions.allow` sections also refuse the affected concern. For supported hook events, malformed event lists, entries, nested handlers, commands, or scope/protection fields likewise refuse sync; they cannot stand in for an explicit removal. Unknown events and explicit non-command native handler types remain outside command sync and do not fail validation. Multi-source discovery refuses that concern if any scanned source fails; other concerns can still sync. Valid empty or absent source configurations still revoke crossby-owned hooks and permissions. `--dry-run`, `--plan`, and `--doctor` report the same source errors without writing.
 
 ## Scenes
 
@@ -244,6 +259,102 @@ Key behaviours:
 - **`--tool`** scopes `list` / `show` / `use` / `clear` / `status` (output for the read commands, effect for the write ones); `--plan` previews `use` / `clear` without writing.
 
 Activation state is recorded in `.crossby/scene-state.json` (gitignored) — the active scene, when it was applied, the per-tool mechanism, and the drift hashes. It is bookkeeping for `status`; the authority for reverting is the ownership ledger.
+
+### Isolated scene launches
+
+Use an owned temporary Git worktree to add a task-specific skill for one run:
+
+```bash
+crossby launch --scene pr-review --isolate worktree
+crossby launch --scene pr-review --isolate worktree --keep-worktree
+# Inspect the printed checkout path before explicitly discarding it:
+crossby scene cleanup-worktree /path/to/crossby-scene-.../checkout --discard-changes
+```
+
+A scene can request the same mode and declare explicit skill bundles:
+
+```yaml
+scenes:
+  pr-review:
+    isolation: worktree
+    inject:
+      skills:
+        review: /path/to/review-bundle
+        crossby-sync: catalog:crossby-sync
+    skills:
+      include: [review, crossby-sync]
+```
+
+Each source directory must contain `SKILL.md`; its regular files and resource
+subdirectories are copied with file permissions only into the isolated workspace.
+Relative sources
+resolve from the scene configuration directory. The bundled catalog currently
+contains only `crossby-sync`; Crossby does not search your other installed skills
+or download bundles. Destination names use letters, digits, underscores and
+hyphens, starting with a letter or digit. Symlinks, special files, Git metadata,
+collisions with committed skill destinations, and scene selectors excluding an
+injected skill are refused. `isolation` and `inject` inherit through `extends`
+with replacement semantics, like other scene fields.
+
+V1 creates a detached checkout of the original repository's **committed HEAD**.
+It does not copy modified files, untracked files, `.env`, dependencies, or local
+secrets automatically. The current launch configuration selects the request;
+project inventory and scene artifacts are then compiled inside the isolated
+checkout. The launch's relative subdirectory must exist in HEAD. Injection goes
+to the selected tool's native skills directory and, when needed for existing
+scene projections, the checkout's canonical skills source, resolving safe
+committed source symlinks. Original files,
+skills, scene state, and ordinary launches remain unchanged. Only persistent
+scene mechanisms write native files inside the temporary checkout; concerns
+handled by launch flags remain per-launch. Codex uses
+native per-launch MCP overrides instead of a global scene profile.
+
+`--isolate` accepts `worktree` or `none`; a flag contradicting the scene setting
+is an error. Injection requires effective worktree isolation. `--keep-worktree`
+requires isolation, and isolation requires `--scene`, a Git repository and a
+foreground CLI tool; it cannot resume an old session. V1 refuses submodules,
+committed symlink chains escaping the checkout, case-ambiguous symlink paths,
+and executable Git `post-checkout`
+hooks. Active Git smudge/process filters for files in HEAD are also refused,
+including attributes from `.git/info/attributes` or global configuration. Unused
+filter drivers are allowed. Checking configured drivers requires Git 2.43 or
+newer (`git check-attr --source`); older Git refuses that preflight. These checks
+avoid running checkout setup commands before ownership is established. Crossby
+first registers an unpopulated worktree, records ownership, then rechecks its
+effective configuration before checkout, including conditional Git includes.
+Hook paths are checked through committed symlink chains; relative hook paths
+resolving outside the checkout are refused. Git attribute-source environment
+and `attr.tree` configuration overrides cannot change the validated tree used
+for materialization. A refused retained worktree may therefore contain only its
+Git binding.
+`crossby scene use` retains its existing persistent semantics and does not
+allocate a worktree or inject bundles.
+
+Normal completion, launch errors and cancellation remove the owned disposable
+checkout, including changes made there by the tool. Use `--keep-worktree` to
+preserve those changes; it prints the retained checkout path even after a
+launch error or cancellation. Crossby never commits or pushes child changes.
+Relative transcript and plan-output paths follow the isolated cwd and disappear
+with a disposable checkout; choose an explicit absolute output path or retain
+the worktree when you need the artifacts. Isolated transcript capture uses an
+owned POSIX PTY; redirected stdin, its EOF and interactive terminal resizing
+are preserved. Owned cleanup
+refuses changed/missing ownership records,
+replaced Git bindings, symlinked ownership paths and nested repositories.
+Without `--discard-changes`, explicit cleanup also refuses dirty checkouts
+(including injected files) or a HEAD changed by child commits. Extra files outside the checkout in its container
+are preserved. If ownership cannot be established after an interrupted setup,
+Crossby retains the path for inspection instead of guessing what can be deleted.
+SIGKILL or a machine crash can leave an abandoned checkout; use the same owned
+cleanup command after inspecting it.
+
+This isolates **checkout state**, not access permissions. Git objects and
+repository metadata are shared with the original clone. Tools inherit their
+normal environment, credentials, global configuration, network policy and
+sandbox settings, and can access other paths when those settings permit it.
+Cleanup owns the launched process group/tree; deliberately detached processes
+are outside this guarantee. Choose the tool's own sandbox/approval policy for
+access restrictions. No native paid agent turns are needed to create a checkout.
 
 ### Authoring scenes
 
@@ -452,6 +563,7 @@ only when `interaction_mode=BROKERED` and an interaction handler is supplied:
 
 | Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
 | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | optional Agent SDK | CLI 2.1.263; SDK 0.2.165 (deterministic fixtures) | text, JSON, JSONL; response schemas | `AskUserQuestion` and tool permissions | exact session | SDK `interrupt()` |
 | Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | exact thread | exact `turn/interrupt` |
 | Cursor | ACP | 2026.09.10-fd3934a | text | questions and permissions | exact session via `session/load` | exact `session/cancel` |
 | OpenCode | authenticated loopback server | 1.19.0 | text | session questions and permissions | exact session | session abort for newly created sessions |
@@ -474,6 +586,27 @@ session-wide abort for resumed sessions because another client may be using
 the same session; cancellation still cleans up this run's server process.
 See [brokered verification](docs/brokered-headless-verification.md) for terminal
 bindings and limitations.
+
+Install `pip install "crossby[claude-sdk]"` to enable Claude's brokered profile.
+The SDK is optional and pinned to `0.2.165`; a missing, broken, or incompatible
+install fails brokered preflight with remediation while unattended and
+interactive launches remain available. The installed `claude` CLI must also
+meet the version floor. SDK dispatch is tested with deterministic child-process
+fixtures; this is not a claim of live model verification.
+
+Claude preserves the native wire request ID separately from the tool-use ID.
+Question text is the native answer key, and option labels are the native option
+identities. Multi-select responses use arrays of labels; free text is forwarded
+verbatim. Permissions require explicit approval; `operation.native_input`
+contains detached authoritative tool arguments, including edit contents.
+Explicit command allowlists use native Bash rules and exclude ambient settings;
+Claude may execute pre-authorized tools without a permission callback.
+`AskUserQuestion` is always routed to the handler. Usage events retain native
+cost as `payload.cost_usd`; cost payloads that reproduce the protected prompt
+are omitted. Token counts and exact session ID are in the result.
+Claude's sandbox remains tool-managed; `sandbox=False` and
+`network_access=True` are unsupported. The shared headless request has no scene
+or arbitrary tool-list field, so those launch concerns cannot be forwarded here.
 
 ```python
 from pathlib import Path
@@ -524,6 +657,37 @@ or drop rather than launch a different model.
 `docs/unattended-headless-verification.md` records exactly what was probed on
 each build, including the two places where a live capture was unavailable and a
 documented contract was used instead.
+
+### Runtime subagent readiness
+
+Agent-definition sync and conversion do not establish that a tool can spawn an
+independent agent context. Library callers can check the exact ordinary launch:
+
+```python
+from crossby.ai_tools import AbstractAITool, HeadlessSessionRequest
+
+adapter = AbstractAITool.get(selected_tool)
+request = HeadlessSessionRequest(prompt="Review the change", working_dir=project_dir)
+status = adapter.subagent_spawning_status(request=request)
+manifest["subagent_spawning"] = status.model_dump(mode="json")
+if status.is_available:
+    # The caller may request delegation in this context.
+    result = adapter.run_headless_session(request)
+```
+
+Only `available` is truthy. `disabled`, `unsupported`, and `unknown` all fail
+closed; an audited family declaration alone never grants readiness. This is
+capability/readiness evidence, not proof that a particular run actually delegated.
+
+Codex checks native effective configuration, managed requirements, feature state,
+and the selected model's delegation metadata through bounded read methods. It
+creates no thread, starts no model turn, invokes no tool, and does not edit or
+enable user configuration. Native startup can contact the installed tool's usual
+service and refresh its catalog/cache. Claude reports `unknown` when its effective
+managed policy cannot be established, or `disabled` for an explicit native tool-pool
+exclusion. Other unaudited adapters report `unknown`. Brokered, resumed, planning,
+and unmodeled launch contexts fail closed. See the [developer API contract](
+CONTRIBUTING.md#runtime-subagent-readiness) for supported contexts and probe bounds.
 
 ### Native plan mode
 

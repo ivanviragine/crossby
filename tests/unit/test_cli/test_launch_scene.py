@@ -1635,3 +1635,41 @@ class TestPersistentFallbackLifecycle:
         assert cleared.exit_code == 0, cleared.output
         assert "enabled = false" not in project_config.read_text(encoding="utf-8")
         assert not (tmp_path / SCENE_STATE_PATH).exists()
+
+
+@pytest.mark.parametrize("scene_ready", [True, False])
+def test_malformed_activation_is_fatal_before_launch_or_persistent_fallback(
+    tmp_path: Path, scene_ready: bool
+) -> None:
+    _write_config(tmp_path)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "github": {"command": "github-server"},
+                    "linear": {"command": "linear-server"},
+                }
+            }
+        )
+    )
+    settings = tmp_path / ".claude/settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"disabledMcpjsonServers":null}')
+    before = settings.read_bytes(), (tmp_path / ".mcp.json").read_bytes()
+    adapter = _scene_adapter(scene_ready=scene_ready)
+    with (
+        patch("crossby.ai_tools.base.AbstractAITool.get", return_value=adapter),
+        patch("crossby.ai_tools.base.AbstractAITool.detect_installed", return_value=["claude"]),
+        patch("crossby.services.ai_resolution.confirm_ai_selection", side_effect=_passthrough),
+        patch("crossby.services.scene_activation.activate_scene") as activate,
+    ):
+        result = runner.invoke(
+            app, ["launch", str(tmp_path), "--tool", "claude", "--scene", "pr-review"]
+        )
+    assert result.exit_code == 1, result.output
+    assert "invalid native MCP activation" in result.output
+    adapter.launch.assert_not_called()
+    activate.assert_not_called()
+    assert (settings.read_bytes(), (tmp_path / ".mcp.json").read_bytes()) == before
+    assert not (tmp_path / ".crossby/owned.json").exists()
+    assert not (tmp_path / SCENE_STATE_PATH).exists()

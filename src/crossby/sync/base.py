@@ -51,15 +51,29 @@ class SyncData:
     skills_source: str | None = None  # relative path to canonical skills directory
     skills_strategy: Literal["symlink", "copy", "translate"] = "symlink"
     skills_gitignore: bool = True
+    # Effective source boundary for secondary discovery (slash commands).
+    # None intentionally scans all sources; an empty tuple scans none.
+    skills_source_tools: tuple[AIToolID, ...] | None = None
 
     # MCP servers concern
     mcp_servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+    # Scoped source diagnostics; unsupported servers are excluded from writes.
+    mcp_warnings: list[str] = field(default_factory=list)
+    # Winning source per validated server, for target-specific fidelity checks.
+    mcp_sources: dict[str, str] = field(default_factory=dict)
+    # Valid native disables survive portability filtering; run_sync still
+    # bounds every removal by target ownership.
+    mcp_disabled: set[str] = field(default_factory=set)
 
     # Permissions concern
     allowed_commands: list[str] = field(default_factory=list)
 
     # Hooks concern
     hooks: list[HookEntry] = field(default_factory=list)
+
+    # Incomplete source discovery cannot authorize writes or ownership changes.
+    # Errors are concern-scoped so unrelated writers can still run.
+    source_errors: dict[SyncConcern, list[str]] = field(default_factory=dict)
 
     # --- Revocation channels ------------------------------------------------
     # Computed *exclusively* by ``run_sync()`` from the ownership ledger

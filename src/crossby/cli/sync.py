@@ -161,6 +161,7 @@ def sync(
             concern=concern,
             mode="doctor" if doctor else "plan",
             strategy=strategy,
+            force=force,
             include_user_scope=include_user_scope,
         )
         return
@@ -270,7 +271,11 @@ def sync(
             include_user_scope=include_user_scope,
             skip_concerns=skip_concerns,
         )
-        if needs_codex_hooks_migration and not main_runs_codex_hooks:
+        if (
+            needs_codex_hooks_migration
+            and not main_runs_codex_hooks
+            and not data.source_errors.get(SyncConcern.HOOKS)
+        ):
             # This is a config-key migration, not an empty hooks sync. Calling
             # run_sync(SyncData()) here would ownership-diff the empty hook set
             # and revoke every Codex hook crossby previously recorded.
@@ -298,6 +303,16 @@ def sync(
     console.detail(f"  Permissions: {scan.permissions.summary}")
     console.detail(f"  Plugins:     {scan.plugins.summary}")
     console.empty()
+
+    source_errors = {
+        c: list(scan_result.errors)
+        for c, scan_result in (
+            (SyncConcern.MCP, scan.mcp),
+            (SyncConcern.PERMISSIONS, scan.permissions),
+            (SyncConcern.HOOKS, scan.hooks),
+        )
+        if scan_result.errors and (sync_concern is None or sync_concern == c)
+    }
 
     # Ownership ledger — a revocable concern (hooks, permissions, MCP) that has
     # emptied *across the whole environment* (nothing discovered on any installed
@@ -337,6 +352,7 @@ def sync(
             ]
         )
         or owns_any
+        or source_errors
         or needs_codex_hooks_migration
     )
     if not has_data:
@@ -346,7 +362,7 @@ def sync(
     # Build SyncData from wizard selections
     from crossby.ui import prompts
 
-    data = SyncData()
+    data = SyncData(source_errors=source_errors)
     rules_src_tool: AIToolID | None = None
     agents_src_tool: AIToolID | None = None
     skills_src_tool: AIToolID | None = None
@@ -421,35 +437,77 @@ def sync(
             question = f"Port skills ({source_path}) to {', '.join(other_tools)}?"
             if other_tools and prompts.confirm(question, default=True):
                 data.skills_source = source_path
+                data.skills_source_tools = (source,)
                 skills_src_tool = source
 
     # MCP
-    if scan.mcp.found and (sync_concern is None or sync_concern == SyncConcern.MCP):
+    if (
+        scan.mcp.found
+        and not scan.mcp.errors
+        and (sync_concern is None or sync_concern == SyncConcern.MCP)
+    ):
         from crossby.sync.mcp_discovery import discover_mcp_servers
 
         scoped = discover_mcp_servers(project_root, include_user_scope=include_user_scope)
-        servers = discover_mcp(project_root, include_user_scope=include_user_scope)
+        native_disabled: set[str] = set()
+        mcp_errors: list[str] = []
+        servers = discover_mcp(
+            project_root,
+            include_user_scope=include_user_scope,
+            diagnostics=data.mcp_warnings,
+            sources=data.mcp_sources,
+            disabled=native_disabled,
+            errors=mcp_errors,
+        )
+        if mcp_errors:
+            data.source_errors[SyncConcern.MCP] = mcp_errors
         n_user = sum(
             1 for name, ds in scoped.servers.items() if ds.scope == "user" and name in servers
         )
         scope_note = f" ({len(servers) - n_user} project, {n_user} user)" if n_user else ""
-        if servers and prompts.confirm(
-            f"Port {len(servers)} MCP server(s){scope_note} to all tools?", default=True
+        count = len(set(servers) | native_disabled)
+        if (
+            count
+            and not mcp_errors
+            and prompts.confirm(
+                f"Port {count} MCP server(s){scope_note} to all tools?", default=True
+            )
         ):
             data.mcp_servers = servers
+            data.mcp_disabled = native_disabled
 
     # Permissions
-    if scan.permissions.found and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
-        patterns = discover_permissions(project_root)
-        if patterns and prompts.confirm(
-            f"Port {len(patterns)} permission pattern(s)?", default=True
+    if (
+        scan.permissions.found
+        and not scan.permissions.errors
+        and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS)
+    ):
+        errors: list[str] = []
+        patterns = discover_permissions(project_root, errors=errors)
+        if errors:
+            data.source_errors[SyncConcern.PERMISSIONS] = errors
+        if (
+            patterns
+            and not errors
+            and prompts.confirm(f"Port {len(patterns)} permission pattern(s)?", default=True)
         ):
             data.allowed_commands = patterns
 
     # Hooks
-    if scan.hooks.found and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
-        hooks = discover_hooks(project_root)
-        if hooks and prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True):
+    if (
+        scan.hooks.found
+        and not scan.hooks.errors
+        and (sync_concern is None or sync_concern == SyncConcern.HOOKS)
+    ):
+        errors = []
+        hooks = discover_hooks(project_root, errors=errors)
+        if errors:
+            data.source_errors[SyncConcern.HOOKS] = errors
+        if (
+            hooks
+            and not errors
+            and prompts.confirm(f"Port {len(hooks)} hook(s) to all tools?", default=True)
+        ):
             data.hooks = hooks
 
     # Continue when the user confirmed work, the ledger needs a revocation pass,
@@ -461,16 +519,21 @@ def sync(
                 data.agents_source,
                 data.skills_source,
                 data.mcp_servers,
+                data.mcp_warnings,
+                data.mcp_disabled,
                 data.allowed_commands,
                 data.hooks,
             ]
         )
         or owns_any
+        or source_errors
         or needs_codex_hooks_migration
     )
     if not has_sync:
         console.info("Nothing to sync.")
         return
+
+    _apply_strategy(data, strategy)
 
     # Execute per-concern to avoid writing back to the source tool.
     # Rules and agents have an explicit source; exclude it from their targets.
@@ -518,7 +581,13 @@ def sync(
             force=force,
             installed_tools=skills_targets,
         )
-    if (data.mcp_servers or owns_mcp) and (sync_concern is None or sync_concern == SyncConcern.MCP):
+    if (
+        data.mcp_servers
+        or data.mcp_warnings
+        or data.mcp_disabled
+        or owns_mcp
+        or data.source_errors.get(SyncConcern.MCP)
+    ) and (sync_concern is None or sync_concern == SyncConcern.MCP):
         results += run_sync(
             data,
             project_root,
@@ -528,9 +597,9 @@ def sync(
             installed_tools=installed_tools,
             include_user_scope=include_user_scope,
         )
-    if (data.allowed_commands or owns_perms) and (
-        sync_concern is None or sync_concern == SyncConcern.PERMISSIONS
-    ):
+    if (
+        data.allowed_commands or owns_perms or data.source_errors.get(SyncConcern.PERMISSIONS)
+    ) and (sync_concern is None or sync_concern == SyncConcern.PERMISSIONS):
         results += run_sync(
             data,
             project_root,
@@ -539,9 +608,12 @@ def sync(
             force=force,
             installed_tools=installed_tools,
         )
-    if (data.hooks or owns_hooks or needs_codex_hooks_migration) and (
-        sync_concern is None or sync_concern == SyncConcern.HOOKS
-    ):
+    if (
+        data.hooks
+        or owns_hooks
+        or data.source_errors.get(SyncConcern.HOOKS)
+        or needs_codex_hooks_migration
+    ) and (sync_concern is None or sync_concern == SyncConcern.HOOKS):
         results += run_sync(
             data,
             project_root,
@@ -821,6 +893,7 @@ def _run_inspection(
     concern: str | None,
     mode: Literal["plan", "doctor"],
     strategy: str | None = None,
+    force: bool = False,
     include_user_scope: bool = False,
 ) -> None:
     """Run a dry-run sync and print a plan or doctor summary."""
@@ -877,12 +950,15 @@ def _run_inspection(
         tool_id=target,
         concern=sync_concern,
         dry_run=True,
-        force=False,
+        force=force,
         installed_tools=target_tools,
         include_user_scope=include_user_scope,
         skip_concerns=skip_concerns,
     )
 
+    for result in results:
+        if result.action == "error":
+            console.error(result.message or f"{result.concern} sync failed")
     summary = summarize_plan(results)
     plan_text = render_plan(summary)
     console.out.print(plan_text)
@@ -894,3 +970,5 @@ def _run_inspection(
         console.out.print(render_doctor(report))
         if report.readiness == "low":
             raise typer.Exit(1)
+    if any(r.action == "error" for r in results):
+        raise typer.Exit(1)

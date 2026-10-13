@@ -37,6 +37,14 @@ Run `./scripts/check-all.sh` before opening a PR.
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
+MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model validation. Keep the reader matched to the Codex writer in `sync/mcp.py`: environment references must remain references, never resolved secrets. Codex `env` and `http_headers` values are literal, so a `${...}` literal cannot safely enter Crossby's interpolation-shaped canonical maps. Unrepresentable entries are excluded as a whole, with field-name-only diagnostics carried through `SyncData.mcp_warnings` to reports, including explicit `--to`, dry-run, and wizard paths; retain source precedence and ledger ownership rules.
+
+`SyncData.mcp_sources` records each validated server's winning source. `sync/mcp_cursor.py` bridges the bounded Claude/Cursor environment-reference grammar; discovery normalizes Cursor before model validation and its writer renders native `${env:NAME}` syntax. `run_sync()` preflights per-target portability for explicit source and wizard paths: refuse unsupported Cursor rendering/reverse Codex shapes while retaining the conservative Codex/Cursor-source guard for Copilot and Antigravity CLI. Refused servers preserve target entries and ownership, without resolving values or changing Claude-to-Codex's existing fallback reports. Cursor's unrepresentable native fields remain in scene inventory. See the [reference audit and limits](docs/mcp-environment-references.md).
+
+Explicit command validation is the separate environment-lookup boundary: `sync/validate.py` expands only supported Cursor `${env:NAME}` references once for `shutil.which`, keeps literal dollar forms and original diagnostic text, and warns when a reference is unset. Never reuse that lookup in discovery or writers.
+
+Scenes use `discover_mcp_names()` to inventory native declarations independently of portable sync definitions. Unsupported Codex fields must never hide a server from launch or persistent scene restrictions. A strict launch config that would omit a selected native-only definition requests the existing persistent fallback instead of rendering a partial config.
+
 ## Wade execution defaults
 
 The repository's `.wade.yml` selects Codex with `gpt-6.1-sol` and `high`
@@ -75,6 +83,10 @@ src/crossby/
 ```
 
 ### Subagent format translation
+
+Definition translation neither implies nor is implied by
+[runtime subagent readiness](#runtime-subagent-readiness). Keep these contracts
+independent when auditing a new adapter.
 
 `src/crossby/subagents/` translates a single subagent definition between
 Claude Code, Cursor, Copilot, and Codex.  The architecture is a
@@ -126,6 +138,76 @@ CLI command
 - `initial_message` — used for interactive sessions, placed as the first positional arg before any flags.
 
 Keep these separate when adding launch logic.
+
+### Owned isolated launches
+
+`scenes/worktree.py` freezes HEAD and validates source bundles and committed cwd
+before allocation, resolving committed symlink chains without relying on lexical
+normalization. Inspect effective last-value Git filter configuration and HEAD
+attributes via `check-attr --source` before allocation; account for repository
+info/global attributes, preserve the original index, and allow unused or locally
+disabled drivers. Allocate with `worktree add --no-checkout`, establish ownership,
+then recheck effective filters and hooks in that worktree before populating it.
+Conditional includes can change configuration by Git directory or branch; the
+original checkout alone cannot authorize population. Strip `GIT_ATTR_SOURCE`
+from Git subprocesses and pin `attr.tree` during population to keep validation
+and checkout on the same frozen tree, including conditional configuration.
+Resolve hook paths through committed symlink components before checking their
+mode in the unpopulated target; a filesystem existence check cannot do this.
+Use literal Git pathspecs for filenames from HEAD or configuration, including
+hook targets beginning with pathspec magic such as `:(literal)`. Refuse
+case/Unicode-normalization aliases of committed link components and duplicate
+link identities conservatively, so validation also holds on macOS filesystems.
+Check hook aliases against all committed paths, including regular directories
+and files. Git subprocess transport must preserve CR/LF and arbitrary filename
+bytes; text-mode universal-newline conversion changes attribute query inputs.
+Bulk Git operations have a finite 600-second deadline; metadata queries retain
+30 seconds. Normalize reciprocal Gitlinks relative to their
+containing directories, including after native relative-path repair.
+Frozen explicit payloads include executable file modes. Ownership
+lives outside the checkout in a private temporary
+container and is repeated in Git's per-worktree directory. Cleanup must validate
+both receipts, registration and reciprocal `.git` links before asking Git to
+remove a disposable checkout; never fall back to recursive container deletion.
+This shares Git metadata and is not a security sandbox. Do not copy dirty or
+untracked project state, run setup hooks, commit, or push automatically.
+
+`cli/launch.py` maps the cwd and scene root into the checkout, injects explicit
+bundles into the same effective source used by projection (including safe
+committed source symlinks), then reuses scene resolution and per-tool compilation.
+Report recovered retained paths even when allocation never yields. An isolated
+`SceneLaunchContext` skips shared `info/exclude` writes and global pruning;
+Codex renders native `-c` overrides instead of a global profile. Its override
+parser splits keys on literal dots without parsing TOML key quotes: use bare
+paths for simple names, or one partial `mcp_servers` inline table for complex
+names. Native config-read evidence and preservation checks are recorded in
+[the isolated-launch audit](docs/isolated-scene-launches.md). Concern-scoped
+persistent fallback is allowed only inside the owned checkout, and partial
+activation errors prevent dispatch. Keep fatal `SceneLaunchInputError` behavior.
+Pass the explicit `concerns` scope through activation to the engine's declaration,
+projection and removal phases, and record only those concerns in persistent
+state. `concerns=None` preserves ordinary persistent scene behavior; changing
+only `ResolvedScene.configured_concerns` does not scope engine phases.
+
+`utils/owned_launch.py` owns the subprocess group/tree through exit and
+cancellation before checkout deletion. POSIX plain launches hand off and restore
+the controlling terminal's foreground group. Transcript launches own the CLI's
+PTY directly: BSD `script` puts the tool in another process group, so killing the
+wrapper's group alone leaks descendants. Preserve actual redirected stdin and
+EOF rather than replacing a pipe with an un-fed PTY. Observe the leader without
+reaping it
+until the last group signal, and retain the checkout on teardown failure. A
+failed kqueue registration with ESRCH means the leader already exited; close the
+unregistered watcher instead of blocking on it. Forward SIGWINCH to the owned
+transcript PTY and restore the prior handler. Terminal Plan launches reuse their
+existing managed PTY transport, which completes group teardown before returning;
+regressions cover actual adapter dispatch and cancellation with descendants.
+Keep BSD-only `kqueue` calls behind explicit platform narrowing as well as the
+runtime `waitid` capability check. Validate `uv run mypy --platform linux
+src/crossby/` when editing this fallback on macOS; native Mac typing alone misses
+Linux's narrower standard-library stubs.
+Regression tests use temporary Git repositories and local stub executables in
+`test_scenes/test_worktree_launch.py`; never substitute live paid agent turns.
 
 ### Browser terminal (`crossby ui`)
 
@@ -354,6 +436,35 @@ permission, binding, resource-limit, or timeout defect. Permission option
 display labels must never choose an implicit allow or deny decision.
 The checked behavior and version floors are documented in
 `docs/brokered-headless-verification.md`.
+
+Claude's alternate transport requires the optional `claude-sdk` extra. Run
+`uv run --extra claude-sdk pytest tests/unit/test_ai_tools/test_claude_sdk.py`
+to exercise the actual SDK dispatcher against deterministic child JSONL
+fixtures. Tests for missing/incompatible dependencies always run; SDK dispatch
+tests skip when the extra is absent. CI installs all extras. Keep the SDK pin,
+distribution/API gate, command builder and transport interface in agreement;
+the upstream custom transport API is explicitly unstable.
+The bridge captures native wire IDs before the SDK constructs callbacks,
+because `ToolPermissionContext` exposes only the tool-use ID. Use the shared
+optional `SessionOperation.native_input` for detached, bounded authoritative
+tool arguments; it is handler-only evidence and must never enter events or
+diagnostics. Forced runtime stops retain their timeout/cancellation status even
+when a profile requires a native terminal event for normal completion.
+Native transports can pass `request_cancel_event` to `interact()` or
+`native_interaction_response()` to stop the bridge's wait when a request is
+withdrawn without cancelling the session. `interact()` carries that signal through
+its interaction-event observers as well as the interaction handler; `emit()`
+accepts the same optional signal for request-bound notifications. The caller's
+handler remains isolated in its daemon worker; a late answer cannot re-enter dispatch. `JsonRpcProcess.send`
+accepts an optional `write_guard` which commits response rights inside the actual
+writer, after send-lock/executor waits. Existing callers retain their prior
+behavior. Claude synchronizes that guard with native withdrawal and closure.
+`send()` also accepts an optional `before_stop` hook for a bounded native abort
+attempt before cancellation or expiry forces a partial writer's process teardown.
+The transport must bound that hook; hard kill/join still run if it raises. Claude
+uses its existing once-owned interruption with a separate 0.2-second cleanup
+budget for both ordinary and approval writes. Other callers retain their prior
+stop behavior, and partial frames are never retried.
 
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget
@@ -699,9 +810,12 @@ The load-bearing rule when adding removal to a writer:
 - **Writers must never infer "absent from `data` ⇒ remove".** Revocation is computed **only** in `run_sync()` as `ledger_owned − current_set` and handed to the writer through an explicit, default-empty field on `SyncData` (`hooks_remove`, `permissions_remove`, `mcp_remove`). A writer that inferred removal from its own `data` would be catastrophic: `config/claude_allowlist.configure_plan_hooks` and the Cursor/Copilot equivalents call writers directly with a single-hook `SyncData` on every plan-mode/worktree session setup, and would wipe every other hook in the file.
 - **Ownership is what crossby *wrote*, not what matched the source.** Each writer reports the identities it created **fresh** this run via `SyncResult.created` (an entry it appended, a permission/server it added — never one already present). `run_sync()` records `new_owned = (ledger_owned ∩ current) ∪ created`. This is what keeps a hand-authored entry that merely shares a `(event, command)` / pattern / server-name with the source from being claimed — and thereby later narrowed or revoked — by crossby.
 - `run_sync()` records new ownership **only** for writers that did not return `error` — an error leaves the ledger untouched so the next run retries cleanly.
+- Hook and permission readers distinguish absent input (`None` / empty data) from a present unreadable or invalid JSON source (`SourceReadError`). Discovery can collect per-source diagnostics, and `build_sync_data()` carries them in `SyncData.source_errors`; `run_sync()` refuses every writer for an affected concern before computing revocations or changing ownership. The wizard carries scan errors into the same gate, including when no valid data or ownership exists. Partial multi-source results never authorize that concern's writes; unrelated concerns retain continue-on-error behavior. `discover_hooks()` always validates supported nested identity, scope, and protection fields before using the result as deletion authority. Low-level hook extractors retain a permissive mode for non-destructive extraction; callers must use discovery or `validate=True` when the output can drive revocation. Unknown events, non-command native handler types, and unused optional metadata are not schema errors; effective supported fields cannot be silently skipped. Active source failures also produce a concern-level error when target/writer filtering leaves no matching writer, so inspection cannot report high readiness from an empty result.
 - The ledger is **gitignored** (via `gitignore_utils.update_managed_block`) and therefore **per-machine**: a fresh clone starts with an empty ledger and can only *add* until it catches up with what is already on disk — it never revokes an entry it has no record of writing. A truly missing `owned.json` degrades to "own nothing". A malformed ledger is never overwritten: ordinary sync refuses hooks, permissions, and MCP writers before mutation because their ownership could not be persisted, while unrelated whole-artifact writers may still run. Post-writer persistence remains best-effort: an `OSError` while saving a previously valid ledger or updating `.gitignore` is surfaced in result rows without discarding the writes that already succeeded.
 - **Scene mutate/revert operations fail *closed* on missing or corrupt recovery authority.** `load_ledger_checked()` marks an existing ledger corrupt when it is a symlink, directory, unparseable/non-object JSON, or contains malformed `scene` or `scene_paths` restore provenance. The `scene_paths` section accepts only registered project-relative targets and exact sibling `.bak[2…]` paths. Each descriptor records true absence, a literal symlink target, a deliberately unchanged canonical source, or a real directory's allocated backup. Directory descriptors also persist the captured device/inode and a pending/completed displacement phase, so a retry can authenticate the exact directory on either side of an interrupted rename and never adopt recreated managed output as the baseline. `use`, `clear`, and their `--plan` paths validate ancestors and descriptors before inspecting or mutating targets; legacy PROJECT output without exact provenance requires manual recovery.
-- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. `mcp_remove` bounds the existing `enabled=False` deletion so crossby can never delete a same-named server a human wrote. Hooks and permissions do revoke-on-absence.
+- MCP is narrower than hooks/permissions: it does **not** auto-revoke a server merely absent from the source. Discovery separates native inventory, portable connection data, and activation. `SyncData.mcp_disabled` carries valid native disables even for nonportable configurations; `mcp_remove` bounds deletion by target ownership and excludes the winning native source itself. Successful writers release ownership only for authorized removals. A same-named server a human wrote is never deleted. Hooks and permissions do revoke-on-absence.
+- MCP activation readers validate native booleans and sidecar lists without resolving environment references or exposing configuration values. Present malformed files/sections and ambiguous activation refuse MCP through `source_errors`, including inspection and wizard paths. Codex and Antigravity writers retain existing native activation booleans when updating connections; Claude/Cursor sidecars remain untouched, and unreadable target activation refuses writes. The [activation audit](docs/mcp-activation-discovery.md) records the supported locations, native evidence, and limits; do not assign semantics to unaudited fields or private IDE state.
+- `ResolvedScene.configured_concerns` records explicit selector scope separately from selected item names. An omitted MCP selector applies no filter, even when discovery contains disabled project servers; an explicit MCP selector still excludes native-disabled entries from strict launch output. Directly constructed resolved scenes retain an optional default for compatibility.
 - A revocation-only row classifies as `Removed` (not `Added`) in `sync/report.py`, and `--plan`/`--doctor` count it via `PlanSummary.revoked_count`.
 - **The interactive wizard revokes on *environment-wide absence*.** Each revocable concern (hooks, permissions, MCP) dispatches on *data OR ownership*: the wizard loads the ledger once and runs `run_sync()` for a concern when the merged source data is non-empty **or** any installed target still owns entries for it. Because the wizard merges discovery across *all* installed tools (no `--from` scope), "revoke" here means the concern has emptied across the **whole environment** — an entry still present on any installed tool is rediscovered as current and is **not** stripped. This is *not* entry-for-entry `--from` parity (where an entry present only on other tools would be revoked). Two consequences to know: MCP revokes only via `disabled ∩ owned`, so an owned-but-emptied MCP dispatch removes nothing and just emits `skipped`/discovery rows; and declining a still-present port while the ledger owns entries leaves `data` empty for that concern, so the ownership arm fires and revokes the owned copies (a later confirm re-adds them). Hardening "decline ≠ revoke" (e.g. also requiring `not scan.<concern>.found`) is a possible follow-up, not current behavior.
 
@@ -935,6 +1049,8 @@ Writers that own file-tree concerns (rules, agents, skills) support up to three 
 - **`copy`**: physical copy with optional per-file rewrite (e.g. translate tool names `Bash`→`Shell` for Cursor). Used when the user wants a real file to commit, or when a marker on the source content would otherwise leak across schemas.
 - **`translate`**: agent writers delegate to `subagents.api.convert(from_tool, to_tool, content)` (canonical `SubagentIR` + per-tool parsers/emitters). Skill writers parse via `SkillDefinition` and call `translate_skill_for_target`. Both attach manual-fix notes for fields the target doesn't honour, render back to the target's on-disk shape, hash-compare for idempotency, and remove stale outputs whose source disappeared.
 
+Skills carry the effective source boundary in `SyncData.skills_source_tools`: `None` intentionally discovers commands from every supported source for unscoped API callers, while `()` discovers none. Readers bind explicit sources and the wizard binds its canonical skills selection; writers pass the boundary to secondary slash-command discovery. Translation tracks native-source paths and command-source tools per output in `.crossby-translated-skills.json`, with a whole-tree fingerprint that prevents scoped cleanup or replacement of human edits. Scoped cleanup never treats the directory-level `.crossby-managed` marker as per-source ownership; legacy outputs lacking provenance are retained. Unscoped API flows retain their legacy whole-tree cleanup for unknown stale directories. Duplicate command names and native/command collisions fail before writes. Render the entire source inventory before target cleanup; persist fingerprints for actual tree changes even when a later support-copy operation fails, so a repaired retry recognizes Crossby writes. Only new output directories or trees whose pre-write fingerprint still matches their recorded ownership can receive refreshed cleanup authority. Unscoped updates retain the prior ownership status of dirty or unowned trees, preserving human additions even when generated files change. A completed sync can transfer the source attribution of a verified clean owned output even when rendering is identical; dry-run reports that provenance update.
+
 When you add a new writer that handles one of these concerns, decide which strategies it supports, plumb each through `_sync_symlink` / `_sync_copy` / `_sync_translate` (see `agents.py` / `skills.py` for the existing pattern), and add tests for each strategy plus the no-op idempotent case.
 
 ### Adding a manual-fix path
@@ -1083,6 +1199,102 @@ Available on each adapter for programmatic use:
 | Sandbox toggle    | —                                        | —                   | —                | `workspace-write` / `danger-full-access` | — | `enabled` / `disabled` |
 
 The sandbox toggle is keyword-only on `launch()`, `build_launch_command()`, `build_resume_command()`, and `sandbox_config_args()`. It is a programmatic adapter contract, not a CLI/config option. Every resume override and GUI `launch()` override must accept the keyword even when it is inert, so polymorphic calls remain `TypeError`-free.
+
+### Runtime subagent readiness
+
+`adapter.subagent_spawning_status(working_dir=None, headless=True,
+launch_args=(), environment=None, request=None)` returns a frozen
+`SubagentSpawnStatus`. The five public types (`SubagentSpawnStatus`,
+`SubagentSpawnState`, `SubagentSpawnSupport`, `SubagentSpawnReason`, and
+`SubagentSpawnEvidence`) are exported from `crossby.ai_tools`.
+
+| State | Meaning | Consumer predicate |
+| --- | --- | --- |
+| `available` | Audited runtime and effective launch context permit spawning | `True` |
+| `disabled` | The selected launch's effective controls prevent spawning | `False` |
+| `unsupported` | Audited family or requested launch mode lacks support | `False` |
+| `unknown` | The adapter cannot safely establish effective readiness | `False` |
+
+Use `status.is_available` or `bool(status)`; never replace an unknown answer
+with a tool-name allowlist or `capabilities().subagent_spawning == "supported"`.
+The declaration defaults to `unaudited`. Even `supported` requires an effective
+runtime check. Serialize decisions with `status.model_dump(mode="json")` for
+prompt-free provenance: tool id, state, reason code/text, evidence, normalized
+cwd, headless mode, version and an opaque input-context fingerprint.
+
+A `HeadlessSessionRequest` supplies managed launch context. Do not mix it with
+extra native options, a different cwd or `headless=False`. For ordinary native
+CLI launches, `launch_args` is the exact option sequence excluding the binary,
+subcommand and prompt. `environment` replaces the entire child environment;
+when omitted it snapshots inheritance. Relative PATH entries resolve against
+the intended child cwd. Preserve scene/profile environment additions and native
+options if checking a manually assembled launch. The fingerprint omits the
+prompt and exposes no environment or credential values; it identifies inputs,
+not immutable files or binaries. There is no readiness cache. Recheck before
+launch when configuration, model metadata, environment or installation changes.
+
+Codex's audited native introspection floor is 0.162.1. One five-second shared
+subprocess deadline covers version detection and app-server initialization,
+`config/read` with the actual cwd, `configRequirements/read`,
+`experimentalFeature/list`, and `model/list`, including bounded pagination.
+Owned subprocess helpers bound output and clean up the process tree. Fixed
+cleanup grace may extend the subprocess budget slightly. These are read methods;
+no thread, model turn, tool invocation or config write/enablement request occurs.
+Startup may use existing native credentials, contact its usual service, and
+refresh native catalogs/caches. Do not copy a subset of config into a temporary
+CODEX_HOME: that would measure a different launch. Unit tests replace native
+processes; opt-in smoke tests use complete isolated fixture contexts and never
+perform paid model inference. Run the native read audit with
+`CROSSBY_SUBAGENT_READINESS_SMOKE=1 ./scripts/test.sh tests/unit/test_ai_tools/test_codex_subagent_readiness_smoke.py`;
+its fixture config bytes must remain unchanged.
+
+The resolver follows native precedence: an enabled `multi_agent_v2` selects v2;
+otherwise `agents.enabled=false` disables spawning; otherwise selected model
+metadata takes precedence over the legacy `multi_agent` flag. A model selected
+by name must have an unambiguous native catalog entry; no model-name guess is
+allowed. V1 depth zero or v2 concurrency with only the parent slot establishes
+disablement. Effective managed feature requirements must agree with feature
+metadata. Malformed, missing or incompatible evidence, unavailable binaries,
+unknown/older versions, failed reads and timeouts are `unknown`.
+
+`features list` alone is insufficient: it omits `agents.enabled` and model
+selection. The original #153 scaffold inferred that the key was ignored because
+its feature row stayed enabled; native runtime source and config introspection
+show that inference was wrong. With v2 off, effective `agents.enabled=false`
+correctly reports `disabled`. With v2 on, native v2 precedence applies. The
+[official subagent documentation](https://developers.openai.com/codex/subagents)
+and [app-server read contract](https://developers.openai.com/codex/app-server)
+describe the relevant controls and methods.
+
+Ordinary managed unattended requests preserve their model, effort, sandbox and
+network inputs, including the adapter's native effort mapping (`MAX` is `xhigh`
+for Codex). Fresh ordinary CLI checks audit a narrow option set; profiles,
+source-changing flags, local providers, cwd/worktree relocation, custom thread
+sources, brokered transports, resume and planning return `unknown`. Mixed feature
+toggles and config overrides return `unknown` because native precedence differs
+by launch mode; never translate toggles inline to fabricate an affirmative result.
+Contexts containing `CODEX_API_KEY` return `unknown`: native exec and standalone
+app-server select authentication differently, which can change catalog/default
+model selection. Credentials are never copied or translated to repair this.
+Headless contexts with managed approval, reviewer or sandbox constraints also
+remain `unknown`: exec's initial `never` approval selection and possible
+AutoReview rebuild differ from standalone config reads and can reject a launch
+that the reads accept. The probe does not approximate native permission fallback.
+Explicit Code Mode routing controls or `multi_agent_v2.non_code_mode_only=false`
+also remain `unknown` when they can hide the spawning surface. A child's denied
+sandbox/approval operation does not establish lack of spawning.
+Readiness does not verify authentication, every future child operation, or that a
+model complied with an instruction to delegate; actual delegation requires
+separate observed execution evidence.
+
+Claude declares audited family support, with its ordinary headless version floor
+2.1.263. Direct `--disallowedTools` or `--tools` exclusions can establish
+`disabled`; per-agent exclusions cannot establish a blanket denial. Otherwise
+its effective managed/remote policy and unattended permission behavior remain
+`unknown`. Local settings scans are insufficient: managed policy can ignore
+non-managed permission rules. Other adapters remain `unaudited`/`unknown` until
+their actual runtime contracts are checked. Adding a declaration without a
+runtime resolver must never produce `available`.
 
 ## Commit Conventions
 

@@ -10,3 +10,18 @@ Read this at the start of every session. Add new entries via `wade knowledge add
 Codex serializes function/custom-tool output as a plain string or an array of content items, even though its Rust FunctionCallOutputPayload contains body and success fields. The success field is internal metadata and is not serialized; do not expect a {body, success} object or infer success from the presence of a result. Protocol reference: https://github.com/openai/codex/blob/main/codex-rs/protocol/src/models.rs (FunctionCallOutputPayload serializer).
 
 ---
+
+## e5e4d7f953ac | 2026-10-13 | implementation | tags: claude-sdk, headless | Issue #189
+
+ClaudeSDKClient configures can_use_tool by replacing its options with permission_prompt_tool_name=stdio during connect; that replacement does not reach a preconstructed custom transport. A separately rendered SDK subprocess command must explicitly carry the stdio permission-prompt selector or native callbacks will not be routed to the broker.
+## 06a038aa1225 | 2026-10-13 | implementation | tags: testing, macos | Issue #161
+
+On macOS, sandboxed full checks can fail process-state probes (ps), controlling-terminal acquisition, and setgid preservation even when untouched base passes those tests with normal approved execution permissions. Compare failures under identical permissions before attributing them to a change; the PTY naturally-exited-session assertion still reports gone rather than Linux /proc state Z on untouched macOS base.
+
+---
+
+## b488bca45a62 | 2026-10-13 | implementation | tags: codex, ai-tools | Issue #153
+
+Native Codex exec enables CODEX_API_KEY authentication while standalone app-server disables it, so identical child environments can yield different model catalogs/defaults and are not proof of launch equivalence. At rust-v0.162.1, see exec/src/lib.rs and app-server/src/lib.rs AuthManager construction, plus models-manager catalog filtering by authentication mode. Do not copy or translate credentials to repair a readiness probe; return Unknown when the effective authentication context cannot be established.
+
+---

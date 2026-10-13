@@ -224,6 +224,10 @@ def render_scene_entry(name: str, scene: SceneConfig, *, indent: int = 2) -> str
         body["extends"] = scene.extends
     if scene.profile is not None:
         body["profile"] = scene.profile
+    if scene.isolation is not None:
+        body["isolation"] = scene.isolation
+    if scene.inject is not None:
+        body["inject"] = scene.inject.model_dump()
     for concern in SCENE_CONCERNS:
         sel: SceneSelector | None = getattr(scene, concern)
         if sel is None:

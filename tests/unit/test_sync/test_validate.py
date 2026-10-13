@@ -489,11 +489,11 @@ class TestMCPCommandPaths:
         assert not any(f.tool_id == AIToolID.CURSOR for f in findings)
 
     def test_env_var_command_expanded(self, tmp_path: Path, monkeypatch) -> None:
-        """${VAR} in command is expanded via os.path.expandvars before lookup."""
+        """Cursor uses its native ${env:VAR} form during validation."""
         monkeypatch.setenv("CROSSBY_TEST_SHELL", "sh")
         _write_json(
             tmp_path / ".cursor" / "mcp.json",
-            {"mcpServers": {"shell": {"command": "${CROSSBY_TEST_SHELL}"}}},
+            {"mcpServers": {"shell": {"command": "${env:CROSSBY_TEST_SHELL}"}}},
         )
         findings = validate_mcp_command_paths(tmp_path)
         assert any(f.tool_id == AIToolID.CURSOR and f.level == "ok" for f in findings)
