@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import json
 import math
+import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -210,7 +211,18 @@ class SDKTransport:
         if self.session_id is not None:
             self.context.set_provenance(session_id=self.session_id)
         self.controller = _SDKController(
-            self.context, self.command, cwd=self.context.request.working_dir, headerless=True
+            self.context,
+            self.command,
+            cwd=self.context.request.working_dir,
+            headerless=True,
+            # Match the pinned SDK's subprocess environment. Its nested-session
+            # marker and SDK entrypoint are launch metadata, not permission flags.
+            env={
+                **{key: value for key, value in os.environ.items() if key != "CLAUDECODE"},
+                "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+                "CLAUDE_AGENT_SDK_VERSION": SDK_VERSION,
+                "PWD": str(self.context.request.working_dir),
+            },
         )
         self.controller.bridge = self
         self.controller.client = self.client

@@ -30,7 +30,7 @@ from crossby.models.ai import (
 from crossby.utils.versioning import BinaryVersion
 
 _CHILD = r"""
-import json, sys, time, subprocess
+import json, sys, time, subprocess, os
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
 record = Path(sys.argv[2])
@@ -41,6 +41,9 @@ def emit(data):
 def save(data):
     with record.open('a') as f:
         f.write(json.dumps(data) + '\n')
+save({'type':'fixture_environment', 'entrypoint':os.environ.get('CLAUDE_CODE_ENTRYPOINT'),
+      'version':os.environ.get('CLAUDE_AGENT_SDK_VERSION'), 'nested':os.environ.get('CLAUDECODE'),
+      'pwd':os.environ.get('PWD')})
 def result():
     frame = {'type': 'result', 'subtype': config.get('subtype', 'success'),
              'is_error': config.get('is_error', False), 'duration_ms': 1,
@@ -504,3 +507,19 @@ def test_short_cost_prompt_does_not_turn_metadata_into_failure(sdk_child: Any) -
     result = run({}, request_values={"prompt": "cost"})
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.usage.input_tokens == 5
+
+
+def test_sdk_environment_matches_launch_context(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CLAUDECODE", "parent-session")
+    run, record = sdk_child
+    assert run({}).status is HeadlessTerminalStatus.SUCCEEDED
+    env = _records(record)[0]
+    assert env == {
+        "type": "fixture_environment",
+        "entrypoint": "sdk-py",
+        "version": SDK_VERSION,
+        "nested": None,
+        "pwd": str(tmp_path),
+    }

@@ -38,7 +38,9 @@ unstable APIs, so the optional extra is exactly pinned and imports/API are
 checked before spawning. The owned process reads raw JSONL through Crossby's
 byte-bounded queue and deadlines, while the SDK owns initialization, permission
 dispatch and native response serialization. The installed CLI is used, never a
-different bundled executable.
+different bundled executable. Its SDK entrypoint/version and working-directory
+environment match the pinned SDK; its inherited nested-session marker is cleared
+as in upstream SDK startup.
 
 The [official user-input contract](https://code.claude.com/docs/en/agent-sdk/user-input)
 uses question text as the answer-map key and option labels as the values.
@@ -61,7 +63,8 @@ subtype/error state, exact session ID, token usage, cost and permission-denial
 presence are retained. JSON/JSONL without a schema preserve the final native
 envelope (including native cost/metadata); schemas select `structured_output`
 and use the shared validator. Cost is also available in a bounded usage-event
-payload for text/schema results. Event/diagnostic content excludes prompts,
+payload for text/schema results (omitted when its key overlaps the protected
+prompt). Event/diagnostic content excludes prompts,
 answers and raw tool arguments.
 
 Claude remains tool-managed for sandbox policy. Unsupported network grants,
