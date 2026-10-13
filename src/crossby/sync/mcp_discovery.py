@@ -184,6 +184,22 @@ def discover_mcp_servers(
                 result.errors.append(f"{path}: MCP server `{name}` must be an object")
                 continue
             normalized = _normalize_entry(entry)
+            unsupported: tuple[str, ...] = ()
+            if tool == "cursor":
+                from crossby.sync.mcp_cursor import normalize_cursor_mcp
+
+                normalized, unsupported = normalize_cursor_mcp(normalized)
+                # Native fields outside our connection model (auth, envFile,
+                # etc.) must not vanish along with their interpolation.
+                unsupported = tuple(
+                    sorted(
+                        set(unsupported)
+                        | (
+                            set(entry)
+                            - {"command", "args", "env", "url", "headers", "type", "transport"}
+                        )
+                    )
+                )
             # Antigravity's serverUrl is a native remote declaration without
             # an explicit transport discriminator (unlike Claude's url).
             if tool == "antigravity-cli" and "serverUrl" in entry and "command" not in entry:
@@ -212,7 +228,12 @@ def discover_mcp_servers(
                     result.conflicts.append((name, existing_tool, tool))
             else:
                 result.servers[name] = DiscoveredServer(
-                    name=name, source_tool=tool, data=normalized, scope=scope, enabled=enabled
+                    name=name,
+                    source_tool=tool,
+                    data=normalized,
+                    scope=scope,
+                    enabled=enabled,
+                    unsupported_fields=unsupported,
                 )
                 if isinstance(entry.get("oauth"), dict):
                     result.oauth_servers.append((name, tool))

@@ -386,6 +386,11 @@ class CursorMCPWriter(_JsonMCPWriter):
 
     tool_id = AIToolID.CURSOR
 
+    def _to_entry(self, server: MCPServerConfig) -> dict[str, Any]:
+        from crossby.sync.mcp_cursor import render_cursor_mcp
+
+        return render_cursor_mcp(_to_json_entry(server))
+
     @property
     def _config_path_parts(self) -> tuple[str, str]:
         return ".cursor", "mcp.json"

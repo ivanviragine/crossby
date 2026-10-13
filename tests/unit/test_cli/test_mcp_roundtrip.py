@@ -311,7 +311,6 @@ def test_native_url_only_and_crossby_sse_metadata(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("target", "relative_path", "key"),
     [
-        ("cursor", ".cursor/mcp.json", "mcpServers"),
         ("copilot", ".vscode/mcp.json", "servers"),
         ("antigravity-cli", ".agents/mcp_config.json", "mcpServers"),
     ],
@@ -343,7 +342,7 @@ def test_reference_targets_preserve_native_auth_and_sync_literal_siblings(
     assert "secret-that" not in report
 
 
-def test_wizard_preserves_codex_references_for_unsupported_target(
+def test_wizard_renders_codex_references_for_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("crossby.ui.prompts.is_tty", lambda: False)
@@ -357,6 +356,7 @@ def test_wizard_preserves_codex_references_for_unsupported_target(
     )
     result = runner.invoke(app, ["sync", "mcp", "--path", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    assert not (tmp_path / ".cursor/mcp.json").exists()
-    assert "manual-fix" in (tmp_path / REPORT_PATH).read_text()
-    assert load_ledger(tmp_path).mcp(AIToolID.CURSOR) == frozenset()
+    target = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"]
+    assert target["remote"]["headers"] == {"Authorization": "Bearer ${env:API_TOKEN}"}
+    assert "manual-fix" not in (tmp_path / REPORT_PATH).read_text()
+    assert load_ledger(tmp_path).mcp(AIToolID.CURSOR) == frozenset({"remote"})

@@ -72,11 +72,11 @@ class MCPServerConfig(BaseModel):
     A server must have either ``command`` (stdio transport) or ``url``
     (http/sse transport) — not both, not neither.
 
-    ``headers`` is the source-shaped HTTP-header map (as Claude/Cursor
-    write it, with ``${VAR}`` literals preserved). The Codex writer
-    refactors this into ``bearer_token_env_var`` / ``http_headers`` /
-    ``env_http_headers`` at render time; other writers preserve the
-    literal shape.
+    ``headers`` is a Claude-shaped HTTP-header map with ``${VAR}``
+    references preserved. Cursor discovery normalizes its native references
+    to this shape, and its writer renders ``${env:VAR}``. The Codex writer
+    refactors representable references into ``bearer_token_env_var`` /
+    ``env_http_headers``; literals stay in ``http_headers``.
     """
 
     command: str | None = None

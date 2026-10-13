@@ -51,9 +51,10 @@ tool's docs and confirm the schemas before trusting these rows.
 | Source | Target | Strategy | Caveat |
 | --- | --- | --- | --- |
 | `.mcp.json` (project scope), `.claude/settings.json`, and — only with `--include-user-scope` — `~/.claude.json` (user scope) `mcpServers` | `.mcp.json` (Claude, plus a narrow `enabledMcpjsonServers` approval in `.claude/settings.json`), `.cursor/mcp.json`, `.agents/mcp_config.json` (Antigravity CLI), `.vscode/mcp.json`, `.codex/config.toml` | non-destructive merge | Existing entries the user added by hand are preserved. Claude reads project servers from `.mcp.json` (not `settings.json`), and remote entries are written with `type`, not `transport`. User scope is off by default so personal `~/.claude.json` servers don't leak into committed project files. A name defined in both `.mcp.json` and `.claude/settings.json` is reported as a duplicate to clean up. |
+| Claude `${NAME}` / Cursor `${env:NAME}` in `command`, `args`, `env`, `url`, `headers` | Cursor / Claude native reference syntax | bounded reference translation | Prefixes/suffixes are retained. Defaults, other interpolation and interpolation-shaped literals refuse the server and preserve target entries; Codex reverse supports only its dedicated-field subset. See `docs/mcp-environment-references.md`. |
 | `headers: {Authorization: "Bearer ${TOKEN}"}` | Codex `bearer_token_env_var = "TOKEN"` | regex rewrite | Only the `Bearer ${VAR}` shape is rewritten; `${VAR:-default}` fallbacks are dropped and the key is reported. |
 | `headers: {X-Foo: "${VAR}"}` | Codex `env_http_headers = {X-Foo = "VAR"}` | regex rewrite | Static headers stay in `http_headers`. |
-| `env: {KEY: "${KEY}"}` (self-reference) | Codex `env_vars = ["KEY"]` | regex rewrite | Other `${VAR}` env values stay literal so source tools can interpolate them. |
+| `env: {KEY: "${KEY}"}` (self-reference) | Codex `env_vars = ["KEY"]` | regex rewrite | Claude-source aliases remain literal under the existing Codex rewrite; Cursor-source aliases are refused because Codex cannot interpolate them. |
 | `enabled: false` / `disabled: true` | dropped from the target | merge | Disabled servers in the source are removed from every target. |
 | `oauth: {...}` (`callbackPort`, `clientId`, `authServerMetadataUrl`, ...) | not written to any target | report-only | No writer ports OAuth config across tools; a `manual-fix` row is reported per server instead of silently dropping it (`Not Added` in the sync report). Configure OAuth manually for each target. |
 | Remote (http/sse) server `url` | Antigravity CLI `serverUrl` | key rename | Antigravity CLI's `.agents/mcp_config.json` uses `serverUrl` instead of `url`/`httpUrl` for remote servers; stdio servers are unaffected. |
@@ -120,7 +121,7 @@ track its own "already nudged" state rather than rely on the payload.
 | `.codex/config.toml` parses as TOML | error | Manual edits that broke the file. |
 | `.codex/agents/*.toml` carries `name` / `description` / `developer_instructions` | error | Translated agent files that lost a required field. |
 | `<tool>/skills/<name>/SKILL.md` carries `name` / `description` | error | Stripped or hand-edited skill frontmatter. |
-| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json` (and `~/.claude.json` under `--include-user-scope`) | warning | Missing binary on the host; users see this before the first invocation fails. Env-var-templated commands like `${HOME}/bin/foo` are expanded via `os.path.expandvars` before the lookup. |
+| Every MCP server `command` is on `PATH` across `.codex/config.toml`, `.mcp.json`, `.claude/settings.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json` (and `~/.claude.json` under `--include-user-scope`) | warning | Missing binary on the host; users see this before the first invocation fails. Cursor checks supported `${env:NAME}` references once, retaining surrounding text; unset references warn, and `$NAME` / `${NAME}` stay literal. Other targets retain `os.path.expandvars`. Checks never execute commands or persist expanded values; diagnostics retain original command text. |
 | `AGENTS.md` / `CLAUDE.md` / `.cursorrules` / `.github/copilot-instructions.md` ≤ 32KB | warning | Instructions creeping past the size threshold beyond which review becomes painful. |
 | Tool-specific JSON files parse as JSON | error | `.claude/settings.json`, `.cursor/cli.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/mcp_config.json`. |
 
@@ -140,7 +141,8 @@ the concerns below) aren't wired yet.
 | Claude → Copilot | hooks | `user_prompt_submit` and `notification`; the `tools` filter (crossby writes Copilot hooks unscoped — see the per-tool table above) |
 | Claude → Antigravity CLI | hooks | `session_start` / `user_prompt_submit` / `notification` (no agy equivalent); `matcher` on `Stop`; non-`command` hook types |
 | Codex → Claude | agents | `model_reasoning_effort` (Claude has no equivalent); `[permissions]` table |
-| Codex → Cursor / Copilot / Antigravity CLI | mcp | TOML-specific `bearer_token_env_var` → header rewrite back into `Authorization: Bearer ${VAR}` form |
+| Codex → Cursor | mcp | Dedicated reference fields render native `${env:NAME}` without resolving values; supported Cursor references round-trip to Codex |
+| Codex / Cursor → Copilot / Antigravity CLI | mcp | Environment-reference servers are skipped with manual-fix reports; existing target entries are preserved |
 | Cursor → Codex | hooks | same drops as Claude → Codex (matcher on `UserPromptSubmit` / `Stop`, unsupported events) |
 | Cursor → any non-Cursor | commands | wrapped as `cursor-command-<slug>` skill; slash invocation is lost |
 | Any tool with Claude-only markers in its instructions file → any non-Claude target | rules | symlink downgraded to copy with a `crossby:manual-fix` block; per-tool marker list lives in `instruction_markers.py` |
