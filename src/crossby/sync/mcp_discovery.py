@@ -27,6 +27,8 @@ class DiscoveredServer:
     # "user" only for the home-directory ``~/.claude.json``. Lets callers label
     # each server and keep user-scoped ones out of committed project files.
     scope: Scope = "project"
+    # Names only: never include configuration values in a manual-fix report.
+    unsupported_fields: tuple[str, ...] = ()
 
 
 @dataclass
@@ -183,8 +185,14 @@ def discover_mcp_servers(
                 if name in result.servers:
                     result.conflicts.append((name, result.servers[name].source_tool, "codex"))
                 else:
+                    from crossby.sync.mcp_codex import normalize_codex_mcp
+
+                    normalized, unsupported = normalize_codex_mcp(entry)
                     result.servers[name] = DiscoveredServer(
-                        name=name, source_tool="codex", data=dict(entry)
+                        name=name,
+                        source_tool="codex",
+                        data=normalized,
+                        unsupported_fields=unsupported,
                     )
 
     return result
