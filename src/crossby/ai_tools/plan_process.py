@@ -18,7 +18,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, ClassVar, TypeVar
@@ -735,18 +735,33 @@ class JsonRpcProcess:
             if not self._closing.is_set():
                 raise
 
-    def send(self, payload: dict[str, Any], *, timeout: float | None = None) -> None:
+    def send(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
+        write_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    ) -> None:
         deadline = self._deadline
         if timeout is not None:
             deadline = min(deadline, time.monotonic() + timeout)
         if not self._send_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             raise TimeoutError("timed out waiting to write a JSON-RPC message")
         try:
-            self._send_locked(payload, deadline=deadline)
+            if write_guard is None:
+                self._send_locked(payload, deadline=deadline)
+            else:
+                self._send_locked(payload, deadline=deadline, write_guard=write_guard)
         finally:
             self._send_lock.release()
 
-    def _send_locked(self, payload: dict[str, Any], *, deadline: float) -> None:
+    def _send_locked(
+        self,
+        payload: dict[str, Any],
+        *,
+        deadline: float,
+        write_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    ) -> None:
         cancel_event = getattr(self, "_cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             raise SessionProcessCancelledError("JSON-RPC child was cancelled")
@@ -754,13 +769,17 @@ class JsonRpcProcess:
             raise EOFError(f"JSON-RPC child exited with status {self._proc.returncode}")
         envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
         line = json.dumps(envelope, separators=(",", ":")) + "\n"
-        errors: list[OSError | ValueError] = []
+        errors: list[BaseException] = []
 
         def write() -> None:
             try:
-                self._stdin.write(line)
-                self._stdin.flush()
-            except (OSError, ValueError) as exc:
+                # Commit at the physical writer boundary, after waiting for the
+                # send lock/executor. Native transports can atomically revoke
+                # queued replies before any bytes enter the pipe.
+                with write_guard() if write_guard is not None else nullcontext():
+                    self._stdin.write(line)
+                    self._stdin.flush()
+            except BaseException as exc:
                 errors.append(exc)
 
         remaining = deadline - time.monotonic()

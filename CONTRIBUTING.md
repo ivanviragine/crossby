@@ -368,6 +368,13 @@ optional `SessionOperation.native_input` for detached, bounded authoritative
 tool arguments; it is handler-only evidence and must never enter events or
 diagnostics. Forced runtime stops retain their timeout/cancellation status even
 when a profile requires a native terminal event for normal completion.
+Native transports can pass `request_cancel_event` to `interact()` or
+`native_interaction_response()` to stop the bridge's wait when a request is
+withdrawn without cancelling the session. The caller's handler remains isolated
+in its daemon worker; a late answer cannot re-enter dispatch. `JsonRpcProcess.send`
+accepts an optional `write_guard` which commits response rights inside the actual
+writer, after send-lock/executor waits. Existing callers retain their prior
+behavior. Claude synchronizes that guard with native withdrawal and closure.
 
 Each `HeadlessCleanupHooks` operation receives a `HeadlessCleanupContext` with
 its cleanup-stage deadline and cancellation signal. Hooks must use that budget

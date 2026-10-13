@@ -59,6 +59,9 @@ for line in sys.stdin:
     save(frame)
     if frame['type'] == 'control_request':
         subtype = frame['request']['subtype']
+        if subtype == 'initialize' and mode == 'startup_error':
+            result()
+            break
         if subtype == 'initialize' and mode == 'startup_stall':
             continue
         emit({'type': 'control_response', 'response': {
@@ -81,6 +84,7 @@ for line in sys.stdin:
                   'title': 'Display is not executable', 'blocked_path': '/blocked',
                   'agent_id': 'agent-exact'}})
             if mode == 'native_cancel':
+                time.sleep(config.get('cancel_delay', 0))
                 emit({'type': 'control_cancel_request', 'request_id': 'wire-exact'})
                 result()
             if mode == 'duplicate':
@@ -218,6 +222,7 @@ def test_permission_native_authority(sdk_child: Any, outcome: PlanInteractionOut
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     operation = seen[0].operation
     assert operation.shell_expression == "git status" and operation.argv is None
+    assert operation.execution_dir is None
     assert {b.name: b.value for b in operation.native_binding_ids} == {
         "request_id": "wire-exact",
         "tool_use_id": "tool-exact",
@@ -523,3 +528,113 @@ def test_sdk_environment_matches_launch_context(
         "nested": None,
         "pwd": str(tmp_path),
     }
+
+
+def test_native_cancel_unblocks_waiting_handler_before_idle_expiry(sdk_child: Any) -> None:
+    run, record = sdk_child
+    entered, release = threading.Event(), threading.Event()
+
+    def handler(_i: Any) -> SessionInteractionResponse:
+        entered.set()
+        release.wait(2)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.ANSWERED, option_id="Two")
+
+    started = time.monotonic()
+    try:
+        result = run(
+            {"mode": "native_cancel", "cancel_delay": 0.03, "request": _questions()},
+            handler,
+            request_values={"idle_timeout_seconds": 0.2},
+        )
+        assert entered.is_set()
+        assert result.status is HeadlessTerminalStatus.SUCCEEDED
+        assert time.monotonic() - started < 0.6
+        assert not any(f["type"] == "control_response" for f in _records(record))
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("withdrawal", ["cancel", "close"])
+def test_queued_native_reply_is_revoked_at_physical_write(tmp_path: Path, withdrawal: str) -> None:
+    import asyncio
+
+    from crossby.ai_tools.claude_sdk import SDKTransport
+    from crossby.ai_tools.headless import HeadlessRuntimeContext, _HeadlessInteractionCancelledError
+    from crossby.models.ai import AIToolID
+
+    pytest.importorskip("claude_agent_sdk")
+    record = tmp_path / "writes.jsonl"
+    request = HeadlessSessionRequest(
+        prompt="task", working_dir=tmp_path, interaction_mode=HeadlessInteractionMode.BROKERED
+    )
+    context = HeadlessRuntimeContext(
+        tool_id=AIToolID.CLAUDE,
+        version="2.1.263",
+        capability=ClaudeAdapter().capabilities().headless,
+        request=request,
+        started_at=time.monotonic(),
+        deadline=time.monotonic() + 2,
+        interaction_handler=None,
+        event_handler=None,
+        cancel_event=None,
+    )
+    code = (
+        "import sys; from pathlib import Path; "
+        "p=Path(sys.argv[1]); "
+        "[p.open('a').write(line) for line in sys.stdin]"
+    )
+    transport = SDKTransport(context, [sys.executable, "-c", code, str(record)])
+    asyncio.run(transport.connect())
+    transport.pending["wire"] = ("tool", "Bash", {"command": "dangerous"})
+    transport.request_cancellations["wire"] = threading.Event()
+    process = transport.controller.process
+    queued = threading.Event()
+    original_send = process.send
+
+    def queued_send(*args: Any, **kwargs: Any) -> None:
+        queued.set()
+        original_send(*args, **kwargs)
+
+    process.send = queued_send
+    errors = []
+
+    def reply() -> None:
+        try:
+            transport._reply(
+                "wire",
+                {
+                    "type": "control_response",
+                    "response": {"request_id": "wire", "response": {"behavior": "allow"}},
+                },
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    process._send_lock.acquire()
+    worker = threading.Thread(target=reply)
+    worker.start()
+    try:
+        assert queued.wait(1)
+        if withdrawal == "cancel":
+            transport.cancel_request("wire")
+        else:
+            transport.revoke_replies()
+            transport.closed = True
+    finally:
+        process._send_lock.release()
+        worker.join(1)
+        context.cleanup(abort=False)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], _HeadlessInteractionCancelledError)
+    assert not record.exists() or record.read_text() == ""
+
+
+def test_native_startup_error_is_failed_not_initialization_timeout(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    result = run(
+        {"mode": "startup_error", "subtype": "error_during_execution", "is_error": True},
+        request_values={"idle_timeout_seconds": 0.2},
+    )
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == "error_during_execution"
+    assert result.session_id == "session-exact"

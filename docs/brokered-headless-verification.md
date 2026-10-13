@@ -54,6 +54,12 @@ preserve other operation details. Permission suggestions never become persistent
 grants. Denied/skipped clarification ends the session without invented answers;
 denied permissions send native denial. Handler errors remain managed transport
 errors even though the SDK normally converts them into control errors.
+Execution directory remains unset: Claude's Bash working directory can persist
+across commands, and launch cwd is not authoritative execution evidence.
+Native cancellation signals the bounded callback wait so executor shutdown does
+not delay a successful result until its idle deadline. Withdrawal and closure
+share a lock with response commitment inside the physical writer; a response
+queued behind a send lock or executor cannot revive a withdrawn request.
 
 Startup, callbacks, I/O and teardown share the Crossby deadline. Cleanup attempts
 SDK interruption once before process-group termination, killing descendants

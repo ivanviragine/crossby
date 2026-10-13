@@ -162,6 +162,10 @@ class _HeadlessStopError(Exception):
         self.warning = warning
 
 
+class _HeadlessInteractionCancelledError(ValueError):
+    """A native request was withdrawn without cancelling the entire session."""
+
+
 @dataclass(frozen=True)
 class HeadlessCleanupContext:
     """Deadline and cancellation signal supplied to one cleanup operation.
@@ -455,8 +459,15 @@ class HeadlessRuntimeContext:
             conversation_id=event.conversation_id,
         )
 
-    def interact(self, interaction: SessionInteraction) -> SessionInteractionResponse:
+    def interact(
+        self,
+        interaction: SessionInteraction,
+        *,
+        request_cancel_event: threading.Event | None = None,
+    ) -> SessionInteractionResponse:
         """Resolve one interaction under unattended or bounded brokered policy."""
+        if request_cancel_event is not None and request_cancel_event.is_set():
+            raise _HeadlessInteractionCancelledError("The native interaction was withdrawn.")
         self._stop_if_needed()
         self.set_provenance(
             session_id=interaction.session_id,
@@ -504,6 +515,7 @@ class HeadlessRuntimeContext:
             interaction,
             timeout_seconds=max(0.0, interaction_deadline - time.monotonic()),
             label="interaction handler",
+            request_cancel_event=request_cancel_event,
         )
         if not isinstance(response, SessionInteractionResponse):
             raise self.transport_error("The interaction handler returned an invalid response.")
@@ -531,10 +543,13 @@ class HeadlessRuntimeContext:
     request_interaction = interact
 
     def native_interaction_response(
-        self, interaction: SessionInteraction
+        self,
+        interaction: SessionInteraction,
+        *,
+        request_cancel_event: threading.Event | None = None,
     ) -> SessionInteractionResponse:
         """Require an explicit live native choice before protocol helpers reply."""
-        response = self.interact(interaction)
+        response = self.interact(interaction, request_cancel_event=request_cancel_event)
         refused = response.outcome in {
             PlanInteractionOutcome.DENIED,
             PlanInteractionOutcome.SKIPPED,
@@ -604,6 +619,7 @@ class HeadlessRuntimeContext:
         *,
         timeout_seconds: float,
         label: str,
+        request_cancel_event: threading.Event | None = None,
     ) -> Any:
         if timeout_seconds <= 0:
             raise _HeadlessStopError(
@@ -628,6 +644,8 @@ class HeadlessRuntimeContext:
         ).start()
         callback_deadline = time.monotonic() + timeout_seconds
         while True:
+            if request_cancel_event is not None and request_cancel_event.is_set():
+                raise _HeadlessInteractionCancelledError("The native interaction was withdrawn.")
             self._stop_if_needed()
             remaining = callback_deadline - time.monotonic()
             if remaining <= 0:
@@ -640,6 +658,8 @@ class HeadlessRuntimeContext:
             except queue.Empty:
                 continue
             self._stop_if_needed()
+            if request_cancel_event is not None and request_cancel_event.is_set():
+                raise _HeadlessInteractionCancelledError("The native interaction was withdrawn.")
             if isinstance(result, BaseException):
                 raise self.transport_error(f"The managed {label} failed.") from None
             return result

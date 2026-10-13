@@ -13,14 +13,15 @@ import json
 import math
 import os
 import threading
-from collections.abc import AsyncIterator
-from contextlib import suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager, suppress
 from importlib import metadata
 from typing import Any
 
 from crossby.ai_tools.headless import (
     HeadlessCleanupContext,
     HeadlessRuntimeContext,
+    _HeadlessInteractionCancelledError,
     _HeadlessStopError,
 )
 from crossby.ai_tools.headless_cli import MISSING, complete_session, non_blank_text, usage_from
@@ -177,7 +178,7 @@ class _SDKController(ProtocolSessionController):
                 return
             self._aborted = True
         if self.bridge is not None:
-            self.bridge.accept_replies = False
+            self.bridge.revoke_replies()
         if self.client is None or self.loop is None or not self.loop.is_running():
             return
         future = asyncio.run_coroutine_threadsafe(self.client.interrupt(), self.loop)
@@ -198,9 +199,12 @@ class SDKTransport:
         self.accept_replies = True
         self.session_id: str | None = context.request.resume_id
         self.pending: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        self.request_cancellations: dict[str, threading.Event] = {}
+        self.pending_lock = threading.RLock()
         self.seen: set[str] = set()
         self.tool_ids: set[str] = set()
         self.terminal: dict[str, Any] | None = None
+        self.query_submitted = False
         self.failure: BaseException | None = None
         self.ended = asyncio.Event()
         self.closed = False
@@ -290,11 +294,15 @@ class SDKTransport:
                 raise ValueError("Claude SDK control request has invalid binding")
             if len(json.dumps(native_input, allow_nan=False).encode()) > 256 * 1024:
                 raise ValueError("Claude SDK tool arguments exceeded the fixed size limit")
-            self.seen.add(request_id)
-            self.tool_ids.add(tool_id)
-            self.pending[request_id] = (tool_id, tool, native_input)
+            with self.pending_lock:
+                if self.closed or not self.accept_replies:
+                    raise _HeadlessInteractionCancelledError("Claude SDK session was closed.")
+                self.seen.add(request_id)
+                self.tool_ids.add(tool_id)
+                self.pending[request_id] = (tool_id, tool, native_input)
+                self.request_cancellations[request_id] = threading.Event()
         elif kind == "control_cancel_request":
-            self.pending.pop(_identity(frame.get("request_id")), None)
+            self.cancel_request(_identity(frame.get("request_id")))
         elif kind == "result":
             if (
                 self.pending
@@ -303,6 +311,10 @@ class SDKTransport:
             ):
                 raise ValueError("Claude SDK result has unresolved requests or no session")
             self.terminal = frame
+            if not self.query_submitted:
+                # Wake the SDK's pending initialize request immediately. It
+                # otherwise waits its fixed minimum even after native refusal.
+                raise ValueError("Claude SDK returned a terminal result before query startup")
         elif kind in {"assistant", "user"}:
             message = frame.get("message", {})
             blocks = message.get("content", []) if isinstance(message, dict) else []
@@ -342,7 +354,7 @@ class SDKTransport:
             if frame.get("type") == "control_response":
                 request_id = frame.get("response", {}).get("request_id")
                 if request_id not in self.pending:
-                    raise ValueError("Claude SDK response has no live native request")
+                    return
                 # No await between checking liveness and the bounded write worker.
                 await asyncio.to_thread(self._reply, request_id, frame)
             else:
@@ -353,10 +365,36 @@ class SDKTransport:
     def _reply(self, request_id: str, frame: dict[str, Any]) -> None:
         assert self.controller is not None
         self.context.checkpoint()
-        if not self.accept_replies or request_id not in self.pending:
-            raise ValueError("Claude SDK request was cancelled before replying")
-        self.pending.pop(request_id)
-        self.controller.process.send(frame, timeout=self.context.remaining_seconds())
+        self.controller.process.send(
+            frame,
+            timeout=self.context.remaining_seconds(),
+            write_guard=lambda: self._commit_reply(request_id),
+        )
+
+    @contextmanager
+    def _commit_reply(self, request_id: str) -> Iterator[None]:
+        with self.pending_lock:
+            if self.closed or not self.accept_replies or request_id not in self.pending:
+                raise _HeadlessInteractionCancelledError("Claude SDK request was withdrawn.")
+            self.context.checkpoint()
+            self.pending.pop(request_id)
+            self.request_cancellations.pop(request_id, None)
+            yield
+
+    def cancel_request(self, request_id: str) -> None:
+        with self.pending_lock:
+            self.pending.pop(request_id, None)
+            signal = self.request_cancellations.pop(request_id, None)
+            if signal is not None:
+                signal.set()
+
+    def revoke_replies(self) -> None:
+        with self.pending_lock:
+            self.accept_replies = False
+            for signal in self.request_cancellations.values():
+                signal.set()
+            self.request_cancellations.clear()
+            self.pending.clear()
 
     async def end_input(self) -> None:
         if self.controller is not None:
@@ -376,19 +414,19 @@ class SDKTransport:
         )
 
     async def close(self) -> None:
-        self.accept_replies = False
+        self.revoke_replies()
         self.closed = True
-        self.pending.clear()
         if self.controller is not None:
             await asyncio.to_thread(self.controller.process.close, timeout=0.1)
 
     def _binding(self, tool: str, native_input: dict[str, Any], permission: Any) -> tuple[str, str]:
         tool_id = _identity(permission.tool_use_id)
-        matches = [
-            request_id
-            for request_id, (native_tool_id, native_tool, raw) in self.pending.items()
-            if native_tool_id == tool_id and native_tool == tool and raw == native_input
-        ]
+        with self.pending_lock:
+            matches = [
+                request_id
+                for request_id, (native_tool_id, native_tool, raw) in self.pending.items()
+                if native_tool_id == tool_id and native_tool == tool and raw == native_input
+            ]
         if len(matches) != 1 or self.session_id is None:
             raise ValueError("Claude SDK callback does not match a live native request")
         return matches[0], tool_id
@@ -401,8 +439,12 @@ class SDKTransport:
         sdk, _ = load_sdk()
         try:
             request_id, tool_id = self._binding(tool, native_input, permission)
+            with self.pending_lock:
+                signal = self.request_cancellations.get(request_id)
+            if signal is None:
+                raise _HeadlessInteractionCancelledError("Claude SDK request was withdrawn.")
             if tool == "AskUserQuestion":
-                updated = await asyncio.to_thread(self._questions, native_input, request_id)
+                updated = await asyncio.to_thread(self._questions, native_input, request_id, signal)
                 if updated is None:
                     return sdk.PermissionResultDeny(
                         message="Clarification declined", interrupt=True
@@ -418,29 +460,33 @@ class SDKTransport:
                 operation=self._operation(tool, native_input, request_id, tool_id, permission),
             )
             response = await asyncio.to_thread(
-                self.context.native_interaction_response, interaction
+                self.context.native_interaction_response, interaction, request_cancel_event=signal
             )
             if response.outcome is PlanInteractionOutcome.APPROVED:
                 return sdk.PermissionResultAllow(updated_input=native_input)
             return sdk.PermissionResultDeny(message="Permission declined")
         except asyncio.CancelledError:
             raise
+        except _HeadlessInteractionCancelledError:
+            raise asyncio.CancelledError from None
         except BaseException as exc:
             # SDK converts callback exceptions to control errors; retain the actual
             # managed stop/handler failure so it cannot become a successful turn.
             self.failure = exc
-            self.accept_replies = False
+            self.revoke_replies()
             raise ValueError("Claude brokered callback failed") from None
 
-    def _questions(self, native_input: dict[str, Any], request_id: str) -> dict[str, Any] | None:
+    def _questions(
+        self, native_input: dict[str, Any], request_id: str, signal: threading.Event
+    ) -> dict[str, Any] | None:
         questions = native_input.get("questions")
         if not isinstance(questions, list) or not 1 <= len(questions) <= 4:
             raise ValueError("Claude SDK supplied an invalid question collection")
         assert self.session_id is not None
         answers: dict[str, Any] = {}
         for question in questions:
-            if request_id not in self.pending or not self.accept_replies:
-                raise ValueError("Claude SDK question was cancelled")
+            if signal.is_set():
+                raise _HeadlessInteractionCancelledError("Claude SDK question was withdrawn.")
             if not isinstance(question, dict):
                 raise ValueError("Claude SDK supplied an invalid question")
             key = _identity(question.get("question"))
@@ -477,10 +523,11 @@ class SDKTransport:
                     options=options,
                     allow_multiple=multiple,
                     allow_other=True,
-                )
+                ),
+                request_cancel_event=signal,
             )
-            if request_id not in self.pending or not self.accept_replies:
-                raise ValueError("Claude SDK question was cancelled")
+            if signal.is_set():
+                raise _HeadlessInteractionCancelledError("Claude SDK question was withdrawn.")
             selected = [
                 *((response.option_id,) if response.option_id else ()),
                 *response.option_ids,
@@ -538,7 +585,9 @@ class SDKTransport:
                 else PlanOperationKind.OTHER
             ),
             shell_expression=non_blank_text(raw.get("command")) if tool == "Bash" else None,
-            execution_dir=self.context.request.working_dir,
+            # Claude's Bash cwd can persist across commands; launch cwd is not
+            # evidence of the current native execution directory.
+            execution_dir=None,
             permission_targets=tuple(targets),
             native_binding_ids=tuple(bindings),
             native_input=raw,
@@ -560,6 +609,7 @@ def run_sdk_session(
         succeeded = False
         try:
             await client.connect()
+            transport.query_submitted = True
             await client.query(request.prompt)
             response = client.receive_response()
             pending = asyncio.create_task(anext(response, None))
@@ -602,9 +652,23 @@ def run_sdk_session(
         if isinstance(transport.failure, _HeadlessStopError):
             raise transport.failure from None
         context.checkpoint()
-        if transport.failure is not None and not isinstance(transport.failure, ValueError):
-            raise transport.failure from None
-        raise context.transport_error("Claude SDK session failed during native dispatch.") from None
+        if (
+            not transport.query_submitted
+            and transport.terminal is not None
+            and (
+                transport.terminal.get("is_error") is True
+                or transport.terminal.get("subtype") != "success"
+            )
+        ):
+            frame = transport.terminal
+            assert transport.controller is not None
+            code = transport.controller.process._proc.wait(timeout=context.remaining_seconds())
+        else:
+            if transport.failure is not None and not isinstance(transport.failure, ValueError):
+                raise transport.failure from None
+            raise context.transport_error(
+                "Claude SDK session failed during native dispatch."
+            ) from None
     native_status = _identity(frame.get("subtype"))
     status = (
         HeadlessTerminalStatus.CANCELLED
