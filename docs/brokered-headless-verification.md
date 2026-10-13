@@ -27,7 +27,8 @@ against the request schema before a response is sent. A missing or invalid
 selection cannot become a native response.
 Ordinary Codex threads are persisted so their returned thread IDs can be
 resumed; collected-plan threads keep their prior ephemeral behavior.
-Bounded `item/agentMessage/delta` progress refreshes the idle deadline while
+Bounded agent-message, reasoning, plan, command, file-change, and MCP progress
+notifications refresh the idle deadline only for the active thread and turn;
 completed agent messages supply the final text in native order.
 A Codex 0.162.1 loopback probe completed one minimal turn in a temporary
 directory, reopened the app-server process, and resumed the exact thread ID.
@@ -61,7 +62,9 @@ It accepts a final assistant message only when its native `parentID` matches
 the submitted user message ID, the exact session and message IDs match, and
 the native finish reason is `stop`. A bounded incremental SSE
 reader normalizes matching assistant, tool, and usage progress when the server
-delivers it. SSE progress is dropped if its bounded queue fills; polling remains
+delivers it. Native part deltas from prompt-bound assistant messages refresh
+the idle deadline without adding an event for each streamed fragment. SSE
+progress is dropped if its bounded queue fills; polling remains
 the terminal authority because [some 1.18.x builds](https://github.com/anomalyco/opencode/issues/46733)
 have an `/event` endpoint that stays quiet during a live session. The current
 ordinary driver does not expose response schemas or command-policy changes on

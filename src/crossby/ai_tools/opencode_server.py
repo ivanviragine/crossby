@@ -267,6 +267,16 @@ class OpenCodeServer:
                     else HeadlessEventKind.TOOL_STARTED,
                     payload={"tool_call_id": part_id},
                 )
+            elif kind == "message.part.delta":
+                if (
+                    properties.get("sessionID") != session_id
+                    or properties.get("messageID") not in self._bound_message_ids
+                ):
+                    continue
+                _required_text(properties, "partID")
+                _required_text(properties, "field")
+                _required_text(properties, "delta")
+                context.mark_progress()
 
     def _abort_active_session(self, _ctx: HeadlessCleanupContext) -> None:
         session_id = self.active_session_id

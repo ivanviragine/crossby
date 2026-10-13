@@ -223,6 +223,84 @@ def test_codex_deltas_refresh_progress_and_completed_messages_accumulate(
     assert sum(event.message == "delta" for event in result.events) == 512
 
 
+@pytest.mark.parametrize(
+    "method",
+    [
+        "item/plan/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+        "item/fileChange/outputDelta",
+        "item/mcpToolCall/progress",
+    ],
+)
+def test_codex_bound_native_streams_refresh_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            {
+                "method": method,
+                "params": {"threadId": "thr-exact", "turnId": "turn-exact", "delta": "x"},
+            },
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turnId": "turn-exact",
+                    "item": {"type": "agentMessage", "id": "msg-exact", "text": "Done."},
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thr-exact",
+                    "turn": {"id": "turn-exact", "status": "completed"},
+                },
+            },
+            {"id": 4, "result": {}},
+        ],
+    )
+    result = AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+        _request(tmp_path),
+        lambda _interaction: SessionInteractionResponse(outcome=PlanInteractionOutcome.CANCELLED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert any(
+        event.kind is HeadlessEventKind.PROGRESS and event.message == "delta"
+        for event in result.events
+    )
+
+
+@pytest.mark.parametrize("binding", [{"threadId": "thr-foreign"}, {"turnId": "turn-foreign"}])
+def test_codex_native_stream_rejects_foreign_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: dict[str, str]
+) -> None:
+    _install_rpc(
+        monkeypatch,
+        [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thr-exact"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-exact"}}},
+            {
+                "method": "item/reasoning/textDelta",
+                "params": {"threadId": "thr-exact", "turnId": "turn-exact", **binding},
+            },
+        ],
+    )
+    with pytest.raises(HeadlessTransportError):
+        AbstractAITool.get(AIToolID.CODEX).run_headless_session(
+            _request(tmp_path),
+            lambda _interaction: SessionInteractionResponse(
+                outcome=PlanInteractionOutcome.CANCELLED
+            ),
+        )
+
+
 def _cursor_state(
     model: str, effort: str, *, thinking: str | None = None, fast: str | None = None
 ) -> dict[str, Any]:
@@ -1040,6 +1118,18 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
     )
     server._events.put(
         {
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses-exact",
+                "messageID": "msg-foreign",
+                "partID": "part-foreign",
+                "field": "text",
+                "delta": "ignore",
+            },
+        }
+    )
+    server._events.put(
+        {
             "type": "message.updated",
             "properties": {
                 "info": {
@@ -1066,13 +1156,41 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
             },
         }
     )
+    server._events.put(
+        {
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses-exact",
+                "messageID": "msg-current",
+                "partID": "part-exact",
+                "field": "text",
+                "delta": "streamed",
+            },
+        }
+    )
+    server._events.put(
+        {
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses-foreign",
+                "messageID": "msg-current",
+                "partID": "part-exact",
+                "field": "text",
+                "delta": "ignore",
+            },
+        }
+    )
 
     class FakeContext:
         def __init__(self) -> None:
             self.events: list[tuple[HeadlessEventKind, str | None, Any]] = []
+            self.progress_count = 0
 
         def emit(self, kind: HeadlessEventKind, **fields: Any) -> None:
             self.events.append((kind, fields.get("message"), fields.get("payload")))
+
+        def mark_progress(self) -> None:
+            self.progress_count += 1
 
     context = FakeContext()
     server.drain_events(context, "ses-exact", "prompt-exact")
@@ -1081,6 +1199,7 @@ def test_opencode_sse_progress_uses_exact_prompt_binding() -> None:
         (HeadlessEventKind.USAGE, "usage updated", None),
         (HeadlessEventKind.TOOL_COMPLETED, None, {"tool_call_id": "tool-exact"}),
     ]
+    assert context.progress_count == 1
 
 
 def test_opencode_sse_survives_quiet_period_longer_than_200ms(

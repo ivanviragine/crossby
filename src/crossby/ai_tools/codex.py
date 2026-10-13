@@ -81,6 +81,17 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
 _CODEX_STREAM_EVENT_KINDS = frozenset(
     {"thread.started", "turn.started", "item.completed", "turn.completed", "turn.failed", "error"}
 )
+_CODEX_BROKERED_PROGRESS_METHODS = frozenset(
+    {
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+        "item/fileChange/outputDelta",
+        "item/mcpToolCall/progress",
+    }
+)
 
 
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
@@ -805,12 +816,17 @@ class CodexAdapter(AbstractAITool):
                 else:
                     context.emit(HeadlessEventKind.PROGRESS, message="item updated")
                 continue
-            if method == "item/agentMessage/delta":
+            if method in _CODEX_BROKERED_PROGRESS_METHODS:
                 if not isinstance(params, dict) or (
                     params.get("threadId") != thread_id or params.get("turnId") != turn_id
                 ):
-                    raise ValueError("Codex emitted a message delta for another turn")
-                delta_progress.note(HeadlessEventKind.ASSISTANT_MESSAGE, message="delta")
+                    raise ValueError("Codex emitted progress for another turn")
+                delta_progress.note(
+                    HeadlessEventKind.ASSISTANT_MESSAGE
+                    if method == "item/agentMessage/delta"
+                    else HeadlessEventKind.PROGRESS,
+                    message="delta",
+                )
                 continue
             if method == "item/tool/requestUserInput" and "id" in message:
                 rpc.track_native_request(message)
