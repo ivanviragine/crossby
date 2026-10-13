@@ -83,7 +83,16 @@ run completion. The bridge retains the submitted prompt's native result,
 including output/schema and usage, while consuming background turns and keeping
 their permission/question callbacks live. Process exit and raw transport EOF do
 not prove SDK message validity: the SDK consumer drains through its end marker
-and parser errors propagate before Crossby accepts completion. Only `local_agent` and
+and parser errors propagate before Crossby accepts completion. Pinned SDK
+`rate_limit_event` notifications remain valid during active background
+continuations. Their required session/UUID bindings and documented status are
+validated; normalization emits only content-free progress. Quota details and
+native reason/raw fields stay private, and notifications neither reopen a
+completed run nor replace prompt output/accounting. See the pinned
+[SDK notification types](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.165/src/claude_agent_sdk/types.py)
+and [native parser](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.165/src/claude_agent_sdk/_internal/message_parser.py).
+
+Only `local_agent` and
 `local_workflow` tasks defer input closure: `task_started` adds them;
 `task_notification` or terminal `task_updated` removes them. Background snapshots
 do not replace this ledger, and long-lived shells/monitors do not defer closure.

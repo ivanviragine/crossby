@@ -336,6 +336,7 @@ class SDKTransport:
                 "assistant",
                 "user",
                 "stream_event",
+                "rate_limit_event",
                 "control_request",
                 "control_response",
                 "control_cancel_request",
@@ -344,7 +345,20 @@ class SDKTransport:
             # Replies to our bounded interrupt remain valid after a turn ends.
             if not (lifecycle or continuation or kind == "control_response"):
                 raise ValueError("Claude SDK emitted content outside its active run")
-        if kind in {"system", "assistant", "user", "stream_event", "result"}:
+        if kind == "rate_limit_event":
+            # Pinned SDK notifications do not reopen a turn or finish a run.
+            # Keep their native binding/required shape without exposing quota
+            # details (including arbitrary native reason/raw fields).
+            _identity(frame.get("uuid"))
+            _identity(frame.get("session_id"))
+            info = frame.get("rate_limit_info")
+            if not isinstance(info, dict) or info.get("status") not in {
+                "allowed",
+                "allowed_warning",
+                "rejected",
+            }:
+                raise ValueError("Claude SDK reported an invalid rate-limit notification")
+        if kind in {"system", "assistant", "user", "stream_event", "result", "rate_limit_event"}:
             native_session = frame.get("session_id")
             if native_session is not None:
                 native_session = _identity(native_session)
@@ -502,7 +516,7 @@ class SDKTransport:
                 self.turn_in_progress = True
                 self.run_complete = False
             self.context.mark_progress()
-        elif kind == "system":
+        elif kind in {"system", "rate_limit_event"}:
             self.context.emit(HeadlessEventKind.PROGRESS)
 
     def _record_prompt_accounting(self, frame: dict[str, Any]) -> None:

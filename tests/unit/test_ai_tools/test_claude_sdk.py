@@ -45,6 +45,11 @@ save({'type':'fixture_environment', 'entrypoint':os.environ.get('CLAUDE_CODE_ENT
       'version':os.environ.get('CLAUDE_AGENT_SDK_VERSION'), 'nested':os.environ.get('CLAUDECODE'),
       'pwd':os.environ.get('PWD')})
 background_stage = 0
+def rate_limit():
+    if 'rate_limit' in config:
+        emit({'type':'rate_limit_event', 'uuid':config.get('rate_limit_uuid','rate-exact'),
+              'session_id':config.get('rate_limit_session',session),
+              'rate_limit_info':config['rate_limit']})
 def delay_drain():
     end = time.monotonic() + config.get('drain_delay', 0.5)
     while time.monotonic() < end:
@@ -92,6 +97,7 @@ def result():
     if mode == 'background':
         if background_stage == 0:
             background_stage = 1
+            rate_limit()
             emit({'type':'system', 'subtype':'background_tasks_changed',
                   'tasks':[], 'session_id':session})
             time.sleep(0.03)
@@ -116,6 +122,8 @@ def result():
         emit({'type':'system', 'subtype':'session_state_changed',
               'sdk_host_only':config.get('host_only', True), 'state':config.get('state', 'idle'),
               'session_id':config.get('lifecycle_session', session)})
+    if mode == 'late_rate_limit':
+        rate_limit()
     if mode == 'trailing':
         emit({'type': 'assistant', 'session_id': session, 'message': {'content': []}})
 for line in sys.stdin:
@@ -138,6 +146,8 @@ for line in sys.stdin:
     elif frame['type'] == 'user':
         if mode not in {'no_session', 'query_backpressure'}:
             emit({'type': 'system', 'subtype': 'init', 'session_id': session})
+        if mode not in {'background', 'late_rate_limit'}:
+            rate_limit()
         if mode == 'stall':
             child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
             save({'descendant': child.pid})
@@ -1615,3 +1625,80 @@ def test_blocked_write_cancellation_attempts_native_abort_before_kill(
     process = transports[0].controller.process
     assert process._proc.poll() is not None
     assert not process._write_thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "mode,with_state", [("normal", True), ("background", True), ("background", False)]
+)
+@pytest.mark.parametrize("status", ["allowed", "allowed_warning", "rejected"])
+def test_sdk_rate_limit_notifications_preserve_active_run_and_privacy(
+    sdk_child: Any, monkeypatch: pytest.MonkeyPatch, mode: str, with_state: bool, status: str
+) -> None:
+    import claude_agent_sdk
+
+    run, record = sdk_child
+    native_receive = claude_agent_sdk.ClaudeSDKClient.receive_messages
+    seen = []
+
+    async def receive(client: Any) -> Any:
+        async for message in native_receive(client):
+            if isinstance(message, claude_agent_sdk.RateLimitEvent):
+                seen.append(message)
+            yield message
+
+    monkeypatch.setattr(claude_agent_sdk.ClaudeSDKClient, "receive_messages", receive)
+    result = run(
+        {
+            "mode": mode,
+            "with_state": with_state,
+            "rate_limit": {
+                "status": status,
+                "overageDisabledReason": "private task",
+                "extra": "private rate detail",
+            },
+        },
+        lambda _i: SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED),
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "Completed"
+    assert result.usage.input_tokens == 5
+    assert result.session_id == "session-exact"
+    assert len(seen) == 1
+    assert seen[0].uuid == "rate-exact"
+    assert seen[0].session_id == "session-exact"
+    assert seen[0].rate_limit_info.status == status
+    assert "private task" not in result.model_dump_json()
+    assert "private rate detail" not in result.model_dump_json()
+    assert all(
+        event.payload is None for event in result.events if event.kind is HeadlessEventKind.PROGRESS
+    )
+    if mode == "background":
+        reply = next(f["response"] for f in _records(record) if f["type"] == "control_response")
+        assert reply["request_id"] == "background-wire"
+        assert reply["response"]["behavior"] == "allow"
+
+
+@pytest.mark.parametrize("mode", ["normal", "background"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rate_limit_session": "different"},
+        {"rate_limit_session": None},
+        {"rate_limit_uuid": None},
+        {"rate_limit": None},
+        {"rate_limit": {"status": "unknown"}},
+    ],
+)
+def test_sdk_rate_limit_notifications_require_bound_native_identity_and_status(
+    sdk_child: Any, mode: str, extra: dict[str, Any]
+) -> None:
+    run, _ = sdk_child
+    with pytest.raises(HeadlessTransportError) as error:
+        run({"mode": mode, "rate_limit": {"status": "allowed"}, **extra})
+    assert error.value.partial.session_id == "session-exact"
+
+
+def test_rate_limit_notification_cannot_reopen_completed_run(sdk_child: Any) -> None:
+    run, _ = sdk_child
+    with pytest.raises(HeadlessTransportError):
+        run({"mode": "late_rate_limit", "rate_limit": {"status": "allowed"}})
