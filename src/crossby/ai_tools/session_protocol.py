@@ -18,6 +18,7 @@ from crossby.ai_tools.headless import (
     HeadlessRuntimeContext,
 )
 from crossby.ai_tools.plan_process import (
+    ContentLengthJsonRpcProcess,
     HeaderlessJsonRpcProcess,
     JsonRpcProcess,
     kill_process_group,
@@ -39,6 +40,7 @@ class ProtocolSessionController:
         *,
         cwd: Path,
         headerless: bool = False,
+        content_length: bool = False,
         env: dict[str, str] | None = None,
     ) -> None:
         self.context = context
@@ -48,7 +50,13 @@ class ProtocolSessionController:
         self._abort_method: str | None = None
         self._abort_params: dict[str, Any] | None = None
         self._abort_notification = False
-        process_type = HeaderlessJsonRpcProcess if headerless else JsonRpcProcess
+        process_type = (
+            ContentLengthJsonRpcProcess
+            if content_length
+            else HeaderlessJsonRpcProcess
+            if headerless
+            else JsonRpcProcess
+        )
         self.process = process_type(
             command,
             cwd=cwd,

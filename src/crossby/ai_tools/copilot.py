@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from crossby.ai_tools.base import AbstractAITool
 from crossby.handoff.models import ConversationTranscript, SessionRef
@@ -42,6 +42,9 @@ class CopilotAdapter(AbstractAITool):
     TOOL_ID: ClassVar[AIToolID] = AIToolID.COPILOT
 
     def capabilities(self) -> AIToolCapabilities:
+        from crossby.ai_tools.copilot_sdk import brokered_profile
+
+        brokered = brokered_profile()
         return AIToolCapabilities(
             tool_id=AIToolID.COPILOT,
             display_name="GitHub Copilot",
@@ -62,7 +65,12 @@ class CopilotAdapter(AbstractAITool):
                 # schema is not verified, so the managed transport stays on the
                 # documented text response rather than guessing a shape.
                 native_outputs=(HeadlessNativeOutput.TEXT,),
-                interaction_modes=(HeadlessInteractionMode.UNATTENDED,),
+                interaction_modes=(
+                    (HeadlessInteractionMode.UNATTENDED, HeadlessInteractionMode.BROKERED)
+                    if brokered is not None
+                    else (HeadlessInteractionMode.UNATTENDED,)
+                ),
+                brokered=brokered,
                 supports_response_schema=False,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
@@ -204,7 +212,101 @@ class CopilotAdapter(AbstractAITool):
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
         """Return Copilot's complete command, including its argument-delivered prompt."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.copilot_sdk import command
+
+            return command()
         return self._headless_command(request)
+
+    def _validate_headless_request(
+        self, request: HeadlessSessionRequest, **kwargs: Any
+    ) -> HeadlessSessionRequest:
+        from crossby.ai_tools.copilot_sdk import SDK_REMEDIATION, load_sdk
+        from crossby.ai_tools.headless import HeadlessUnsupportedError, _is_safe_provenance_id
+
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            if request.resume_id is not None and not _is_safe_provenance_id(request.resume_id):
+                raise HeadlessUnsupportedError(
+                    "Copilot SDK resume requires an exact bounded native session ID.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            try:
+                load_sdk()
+            except Exception:
+                raise HeadlessUnsupportedError(
+                    "Copilot brokered sessions require the compatible optional SDK. "
+                    + SDK_REMEDIATION,
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                ) from None
+        return super()._validate_headless_request(request, **kwargs)
+
+    def _validate_headless_launch_context(self, request: HeadlessSessionRequest) -> None:
+        if request.interaction_mode is not HeadlessInteractionMode.BROKERED:
+            return super()._validate_headless_launch_context(request)
+        from crossby.ai_tools.copilot_sdk import approval_rules
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        try:
+            approval_rules(request)
+        except ValueError:
+            raise HeadlessUnsupportedError(
+                "Unsupported Copilot native rule; use kind or kind(argument).",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            ) from None
+
+    def _validate_headless_mode_version(
+        self, request: HeadlessSessionRequest, detected: Any
+    ) -> None:
+        super()._validate_headless_mode_version(request, detected)
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.copilot_sdk import NATIVE_VERSION, SDK_REMEDIATION
+            from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+            if detected.normalized != (1, 0, 97):
+                raise HeadlessUnsupportedError(
+                    f"Copilot SDK sessions require runtime {NATIVE_VERSION}. {SDK_REMEDIATION}",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+
+    def _detect_headless_version(
+        self,
+        *,
+        timeout_seconds: float,
+        deadline: float | None = None,
+        mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
+    ) -> Any:
+        if mode is not HeadlessInteractionMode.BROKERED:
+            return super()._detect_headless_version(
+                timeout_seconds=timeout_seconds, deadline=deadline, mode=mode
+            )
+        from crossby.ai_tools.copilot_sdk import SDK_REMEDIATION, command
+        from crossby.ai_tools.headless import HeadlessPreflightError
+        from crossby.ai_tools.session_process import run_captured
+        from crossby.utils.versioning import BinaryVersion, parse_semver
+
+        try:
+            probe = run_captured(
+                [command()[0], "--version", "--no-auto-update"],
+                cwd=Path.cwd(),
+                timeout=min(5.0, timeout_seconds),
+                deadline=deadline,
+            )
+            if probe.returncode == 0:
+                for line in (probe.stdout + "\n" + probe.stderr).splitlines():
+                    parsed = parse_semver(line)
+                    if parsed is not None:
+                        return BinaryVersion(normalized=parsed, text=line.strip())
+        except (OSError, ValueError, TimeoutError):
+            pass
+        raise HeadlessPreflightError(
+            "Cannot verify pinned Copilot runtime. " + SDK_REMEDIATION,
+            tool_id=self.TOOL_ID,
+            capability=self.capabilities().headless,
+        )
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
         """Build the exact unattended ``copilot --prompt`` invocation."""
@@ -238,6 +340,10 @@ class CopilotAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Run one unattended Copilot prompt turn and normalize its text response."""
+        if request.interaction_mode is HeadlessInteractionMode.BROKERED:
+            from crossby.ai_tools.copilot_sdk import run_session
+
+            return run_session(request, context)
         from crossby.ai_tools.headless_cli import (
             capture_failure_warnings,
             complete_session,

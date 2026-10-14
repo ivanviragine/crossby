@@ -688,6 +688,7 @@ class AbstractAITool(ABC):
 
         caps = self.capabilities()
         capability = caps.headless
+        self._validate_headless_launch_context(request)
         if not capability.managed_supported:
             raise HeadlessUnsupportedError.for_tool(
                 tool_id=self.TOOL_ID,
@@ -835,12 +836,23 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+
         if detected.normalized < floor:
             raise HeadlessUnsupportedError(
                 f"{self.capabilities().display_name} requires {profile.version_requirement} "
                 f"The oldest verified release is {profile.verified_version}.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
+            )
+
+    def _validate_headless_launch_context(self, request: HeadlessSessionRequest) -> None:
+        from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+        if request.launch_context is not None and request.launch_context.nonempty:
+            raise HeadlessUnsupportedError(
+                "This managed transport cannot preserve native launch context.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
             )
 
     def _detect_headless_version_bounded(

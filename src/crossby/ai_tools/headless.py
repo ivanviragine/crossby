@@ -710,6 +710,11 @@ class HeadlessRuntimeContext:
                 )
             self._provenance[name] = value
 
+    def record_usage(self, usage: TokenUsage) -> None:
+        """Retain a validated running aggregate before fallible event observers."""
+        self.validate_provenance(usage=usage)
+        self._provenance["usage"] = usage
+
     def validate_provenance(
         self,
         *,

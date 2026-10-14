@@ -444,6 +444,25 @@ fixtures. Tests for missing/incompatible dependencies always run; SDK dispatch
 tests skip when the extra is absent. CI installs all extras. Keep the SDK pin,
 distribution/API gate, command builder and transport interface in agreement;
 the upstream custom transport API is explicitly unstable.
+
+Copilot's alternate transport requires `copilot-sdk`, pinned to 1.0.21 and
+runtime 1.0.97/protocol 3. Run `uv run --all-extras pytest
+tests/unit/test_ai_tools/test_copilot_sdk.py` to exercise actual SDK
+create/resume, incoming request dispatch, generated RPC decisions and native
+event parsing against a deterministic Content-Length child. CI installs all
+extras; keep the exact version/API gate and private per-instance seams aligned.
+`ContentLengthJsonRpcProcess` extends the shared process boundary and retains
+bounded framing, process-tree ownership, write commitment and abort-before-kill.
+Its reads poll closure/current idle authority; executor cancellation alone
+cannot wake a blocked physical reader or handler.
+
+`HeadlessLaunchContext` carries resolved profile approvals and MCP exclusions;
+unsupported transports reject it. Copilot adds rules with native session scope
+and never replaces inherited denied rules, URLs or content exclusions. Preserve
+raw permission/form input before generated DTO conversion, which can omit
+unknown fields. SDK UI elicitation is a presentation dialect: suggestions are
+not automatically JSON Schema constraints. Refuse URL/MCP/unknown form dialects
+before calling the handler when their semantics cannot be represented safely.
 The bridge captures native wire IDs before the SDK constructs callbacks,
 because `ToolPermissionContext` exposes only the tool-use ID. Use the shared
 optional `SessionOperation.native_input` for detached, bounded authoritative

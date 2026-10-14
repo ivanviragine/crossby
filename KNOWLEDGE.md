@@ -25,3 +25,9 @@ On macOS, sandboxed full checks can fail process-state probes (ps), controlling-
 Native Codex exec enables CODEX_API_KEY authentication while standalone app-server disables it, so identical child environments can yield different model catalogs/defaults and are not proof of launch equivalence. At rust-v0.162.1, see exec/src/lib.rs and app-server/src/lib.rs AuthManager construction, plus models-manager catalog filtering by authentication mode. Do not copy or translate credentials to repair a readiness probe; return Unknown when the effective authentication context cannot be established.
 
 ---
+
+## f1261b3941d1 | 2026-10-14 | implementation | tags: copilot-sdk, headless | Issue #190
+
+Copilot SDK 1.0.21 generates a local session ID before a resumable transcript exists; cold resume of an untouched session reports session-not-found. A persisted native turn is required to verify resume, so retaining an interrupted session ID must not imply guaranteed transcript recovery.
+
+---

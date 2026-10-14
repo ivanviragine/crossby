@@ -25,6 +25,7 @@ backpressure without dropping frames. Its 1 MiB frame limit counts bytes.
 | Adapter | Profile floor | Transport and normal turn | Accepted output | Interaction binding | Cancellation |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | CLI 2.1.263 and optional SDK 0.2.165 | SDK `ClaudeSDKClient` with owned custom transport, ordinary query or exact resume | text, JSON, JSONL and response schemas | exact wire request and tool-use IDs plus initialized session; question text and labels are native answer keys | SDK `interrupt()`, then owned process cleanup |
+| Copilot | runtime 1.0.97 and optional SDK 1.0.21 (exact pins) | real SDK create/resume/send over owned Content-Length stdio | text | native numeric question RPC ID; exact permission/elicitation request IDs and session; message/turn provenance | SDK `abort()`, detach and owned tree cleanup |
 | Codex CLI | 0.162.1 | `codex app-server --stdio`, `thread/start` or exact `thread/resume`, then `turn/start` without `collaborationMode` | text | exact JSON-RPC request ID plus thread, turn, item, and question IDs | `turn/interrupt` for the active thread and turn, then process cleanup |
 | Cursor | 2026.09.10-fd3934a | ACP `initialize`, authentication, `session/new` or exact `session/load`, then `session/prompt` without plan mode | text | exact request and session IDs, question IDs, selected option IDs, and message chunk IDs | `session/cancel` notification for the active session, then process cleanup |
 | OpenCode | 1.19.0 | authenticated loopback `POST /session` or validated exact session, then ordinary `prompt_async` | text | exact session ID, submitted user message ID and assistant `parentID` for final answers and pending tool calls, pending question/permission ID | session abort only for a newly created session, then process cleanup |
@@ -274,3 +275,60 @@ ownership, blocked socket cleanup, and cross-path permission decisions. Run
 when a newly advertised native request shape was verified only on a later
 build. Unsupported combinations must fail during preflight before starting a
 native process.
+
+## Copilot Python SDK
+
+The release audit uses official `github-copilot-sdk==1.0.21`, immutable source
+revision `f9a6c731432bec99b0a63a24cda1e77a29697634`, and runtime 1.0.97/protocol 3.
+[The pinned SDK source](https://github.com/github/copilot-sdk/tree/f9a6c731432bec99b0a63a24cda1e77a29697634/python)
+contains the audited client, session, JSON-RPC dispatcher and generated APIs.
+The distribution/API gate runs again during brokered preflight. CLI version
+probing disables automatic updates, and startup verifies the actual runtime
+and negotiated protocol before sending the task. No automatic runtime download
+or connection to an external shared server is used.
+
+Deterministic tests use the actual SDK with `tests/fixtures/copilot_sdk_peer.py`
+and an owned real process. The native release audit additionally used a local
+synthetic OpenAI-compatible provider to confirm streaming, persisted exact-ID
+resume, questions, form request IDs, scoped rule addition, native abort and
+stop. No paid model service was contacted; these are protocol/lifecycle proofs,
+not verification of a model's work quality.
+
+The SDK's built-in child ownership and unbounded readers/writers are replaced
+through narrowly audited per-instance seams. Crossby owns one cleanup chain,
+1 MiB framed messages, bounded pending records, physical reply commitment,
+current idle/overall read authority and process-tree teardown. Cancelling a
+waiting coroutine does not stop its executor thread: closure and request
+withdrawal wake workers before executor shutdown. A stalled or partial write
+is never retried; native abort is attempted within its cleanup grace first.
+
+Legacy questions preserve the JSON-RPC ID that the SDK callback omits. Choice
+strings are the native identities; ambiguous duplicates fail closed. The real
+SDK callback executes under that request's identity context. Permission and
+elicitation broadcast responders retain their separate exact request IDs.
+Native completion withdraws both the handler and interaction event observer.
+Handler errors and invalid responses never authorize a tool. Permission replies
+are generated approve-once, reject or user-not-available decisions, with no
+permanent/session/location grant inferred from a display label.
+
+Permission operations retain bounded detached raw input, including managed
+approval requirements. Only native `resolvedWorkingDirectory`/`resolvedPath`
+provide resolved authority; launch cwd and intention prose cannot supply it.
+Inherited deny rules, managed restrictions and exclusions are preserved.
+Supplied approval rules use additive session scope; scene-excluded MCP servers
+are disabled and their approval entries removed before dispatch.
+
+Supported SDK UI forms preserve native presentation metadata and use explicit
+content with native accept/decline actions. Suggested enum values permit native
+freeform responses. URL elicitation, source-tagged MCP forms and unknown dialects
+are rejected truthfully; Crossby does not turn them into a prose question.
+This profile accepts text and manual/on-request posture. JSON, response schemas,
+effort, explicit network access and sandbox disabling are rejected in preflight.
+Default sandbox behavior remains native/tool-managed.
+
+The submitted native message ID binds root final output; child/background output
+cannot replace it. Root idle requires correlated response evidence and no live
+interactions. Native error, aborted idle, premature EOF and SDK parsing errors
+cannot become success from idle or exit zero. Safe session/failure/denial/usage
+provenance is retained before fallible event observers; caller timeout and cancel
+remain authoritative after native abort/cleanup.

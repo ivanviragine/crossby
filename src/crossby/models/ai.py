@@ -587,6 +587,37 @@ SessionOperationKind = PlanOperationKind
 SessionPermissionTargetKind = PlanPermissionTargetKind
 
 
+class HeadlessLaunchContext(BaseModel):
+    """Resolved per-run native approval rules and MCP scene exclusions.
+
+    Tool rules authorize operations; they do not change model tool visibility.
+    Unsupported transports reject nonempty context before launching.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allow_tools: tuple[str, ...] = ()
+    allow_urls: tuple[str, ...] = ()
+    excluded_mcp_servers: tuple[str, ...] = ()
+
+    @field_validator("allow_tools", "allow_urls", "excluded_mcp_servers")
+    @classmethod
+    def _bounded_entries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > 256 or len(set(value)) != len(value):
+            raise ValueError("launch context requires bounded unique entries")
+        if any(
+            not v.strip() or any(ord(c) < 32 for c in v) or len(v.encode()) > 4096 for v in value
+        ):
+            raise ValueError("launch context entries must be nonblank and bounded")
+        if sum(len(v.encode()) for v in value) > 65536:
+            raise ValueError("launch context exceeded its byte limit")
+        return value
+
+    @property
+    def nonempty(self) -> bool:
+        return bool(self.allow_tools or self.allow_urls or self.excluded_mcp_servers)
+
+
 class HeadlessSessionRequest(BaseModel):
     """Portable inputs for one complete, managed ordinary agent session.
 
@@ -606,6 +637,7 @@ class HeadlessSessionRequest(BaseModel):
     network_access: bool = False
     approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.ON_REQUEST
     command_policy: PlanCommandPolicy | None = None
+    launch_context: HeadlessLaunchContext | None = None
     interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED
     native_output: HeadlessNativeOutput = Field(
         default=HeadlessNativeOutput.TEXT,

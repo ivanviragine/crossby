@@ -564,6 +564,7 @@ only when `interaction_mode=BROKERED` and an interaction handler is supplied:
 | Tool | Brokered transport | Verified build | Output | Native interactions | Resume | Native abort |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | optional Agent SDK | CLI 2.1.263; SDK 0.2.165 (deterministic fixtures) | text, JSON, JSONL; response schemas | `AskUserQuestion` and tool permissions | exact session | SDK `interrupt()` |
+| GitHub Copilot | optional Python SDK | runtime 1.0.97; SDK 1.0.21 | text | legacy questions, permissions and supported SDK UI forms | exact session | SDK `abort()` |
 | Codex CLI | app-server | 0.162.1 | text | questions, command/file and built-in permissions, MCP form/URL elicitation | exact thread | exact `turn/interrupt` |
 | Cursor | ACP | 2026.09.10-fd3934a | text | questions and permissions | exact session via `session/load` | exact `session/cancel` |
 | OpenCode | authenticated loopback server | 1.19.0 | text | session questions and permissions | exact session | session abort for newly created sessions |
@@ -593,6 +594,31 @@ install fails brokered preflight with remediation while unattended and
 interactive launches remain available. The installed `claude` CLI must also
 meet the version floor. SDK dispatch is tested with deterministic child-process
 fixtures; this is not a claim of live model verification.
+
+Install `pip install "crossby[copilot-sdk]"` for Copilot's brokered profile.
+It requires exactly `github-copilot-sdk==1.0.21`, Copilot CLI/runtime `1.0.97`
+and protocol 3. Missing or incompatible support fails before the task starts;
+the installed CLI is used with automatic updates disabled. This integration
+accepts text output and the `ON_REQUEST` approval posture. Response schemas,
+JSON/JSONL, effort, explicit network access and disabling the tool-managed
+sandbox are unsupported. URL elicitation and unaudited MCP form dialects fail
+closed with guidance to use a native UI host.
+
+`HeadlessSessionRequest.launch_context` accepts a frozen `HeadlessLaunchContext`
+with native `allow_tools`, `allow_urls` and resolved `excluded_mcp_servers`.
+The helper `crossby.ai_tools.copilot_sdk.launch_context(scene=..., ...)` converts
+existing scene/profile inputs. Rules are added only to native session scope;
+existing denials and managed restrictions remain authoritative. Other transports
+reject nonempty context instead of silently dropping it. Tool approval rules
+control permission, independently from model tool visibility.
+
+Copilot questions preserve exact choice strings and native freeform permission.
+Permissions preserve the original native input and authoritative resolved cwd
+or path when supplied. SDK UI form metadata is retained for the handler;
+suggested enum values do not prohibit freeform answers. Form responses use
+`SessionInteractionResponse.content`, while a legacy question uses a native
+option ID or permitted answer. Cancellation invokes SDK abort before owned
+process cleanup, and retains safely observed session IDs for resume.
 
 Claude preserves the native wire request ID separately from the tool-use ID.
 Question text is the native answer key, and option labels are the native option
