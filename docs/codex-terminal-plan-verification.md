@@ -192,6 +192,154 @@ cases also cover directory, project, and thread-title text containing `loading`;
 they cannot override the model readiness signal. Screens without the observed
 loaded-model prefix still fail closed.
 
+## Missing Plan footer regression (issue #217)
+
+The successful 0.162.1 runs above do not cover every status layout. A subsequent
+user retry with Crossby 0.43.1 and Wade 1.2.12 exposed two distinct failures:
+at 180 columns, the adapter timed out awaiting activation; at 140 columns with
+`tui.status_line=["model-with-reasoning","current-dir"]`, the task ran and Wade
+readiness passed while the adapter remained in `START`. Caller keyboard input
+was then rejected and no planning gate completed.
+
+The supplied `wide-terminal.log` was reconstructed with `pyte.Screen(180, 45)`.
+Its native info cell reads `• Model changed to gpt-6.1-sol high for Plan mode.`
+immediately before the Codex startup banner. The empty composer and native
+model/effort/directory footer are present, but the footer has no Plan label.
+The supplied `compact-status-screen.txt` shows tool activity, Wade readiness,
+`• Working (27s • esc to interrupt)`, and an empty composer with the minimal
+footer and no Plan label. Sanitized captures are
+`plan-notice-no-footer.txt` and `working-no-plan-footer.txt` in the existing
+0.162.1 fixture directory. Paths/session identifiers are replaced; native UI
+wording and relevant layout are retained.
+
+Before the production change, replaying the wide raw terminal frames left the
+original state machine in `PLAN`. Separately, a confirmed task paste followed
+by the real compact working capture left it in `START`. This reproduction
+separates activation proof from submission acknowledgement; it does not claim
+that an offline replay completed native planning.
+The supervisor also recovered the original Wade task from its preserved prompt
+file and replayed the complete compact raw transcript. The old state machine
+remained in `START` with only `PLAN_READY`; the candidate reached `ACTIVE` with
+exactly `PLAN_READY` and `MESSAGE_SUBMITTED`, for complete frames and 1-, 4,096-,
+and 65,536-byte delivery. This uses the original prompt rather than substituting
+a short task that cannot match its real paste placeholder.
+
+Activation now accepts the observed Plan footer or that exact native notice
+after Crossby's `/plan` Enter. The notice must be fresh, immediately precede
+the banner, match the footer's model/effort, and accompany an empty composer.
+Previously visible notices, quoted/body notices, mismatched model/effort,
+Default-mode notices, and modal screens cannot activate the task. This is a
+bounded screen protocol, not an authenticated native event API; unobserved
+notice layouts or model display-name mappings remain fail-closed.
+
+After activation, paste confirmation still requires the native footer and
+matching composer, but no longer requires the transient Plan label. Submission
+acknowledgement requires the native working timer/interrupt row immediately
+above the bottommost cleared composer and a recognized model/effort/directory
+footer, or that same working row directly above the footer when no composer is
+rendered. Task echoes and prose mentioning `esc to interrupt` are insufficient.
+Legacy screen support retains its separate Plan-footer path, including an empty
+composer with an adjacent native working row. A `Folder access` heading in task
+text is ordinary content; the complete native trust modal remains blocked by its
+dialog/composer/footer structure. No input guard,
+trust decision, exactly-once submission rule, or startup deadline is removed.
+
+Both supplied raw logs contain synchronized output markers (`CSI ?2026 h/l`).
+The adapter now observes each completed synchronized redraw through the
+terminal parser, including markers split across reads and multiple redraws in
+one read. A complete transient activation frame therefore survives a later
+frame that omits the label. Incomplete synchronized redraws never trigger
+startup actions. Older unframed output retains the existing screen-read path.
+`plan-notice-redraw.json` retains the supplied wide log's actual synchronized
+frames and cursor operations; path/session replacements have fixed display
+width so native column offsets are preserved. Tests replay those frames under
+byte-split and coalesced delivery.
+
+The nested PTY stand-in covers notice-only activation, coalesced and byte-split
+redraws, footer loss during paste and only after submission, timeout and keyboard
+rejection before acknowledgement, one task/event pair, resize, and terminal
+restoration. Its compact footer comes from the captured minimal layout to fit
+the fake's fixed window; it does not reproduce native reflow at every width.
+These deterministic checks and the bootstrap implementation are not proof of
+completed native Wade planning under the user's reproducing configuration.
+That consumer acceptance requires a separate live run through native planning,
+independent review, finalization, and collection.
+
+The supervisor completed that separate Wade consumer gate with the candidate,
+Codex 0.162.1, `gpt-6.1-sol`/high, a long disposable worktree path, and a
+140-column minimal native status layout. Native session
+`01a13a6f-a270-7153-89ec-b2423467827a` entered Plan, received one initial task,
+emitted each startup event once, asked a native question, and produced one plan.
+An independent sandboxed Sol6.1/high review completed, Wade's done gate passed,
+implementation was explicitly declined, and `/exit` returned 0. The parent
+collected one reviewed, completed plan; independent recollection confirmed the
+handoff `ba851cc9-3328-45bb-b0fb-dd3edc631086` and unchanged `greeting.py`.
+Evidence is retained in `/tmp/crossby-owned/ack-fix/native-evidence.json`.
+
+The live run's acknowledgement still displayed the Plan footer: it proves the
+complete consumer lifecycle under that layout, while the original user's exact
+raw-transcript replay separately proves the missing-footer fix. An earlier
+probe's outer diagnostic renderer crashed on Unicode after Wade done and before
+normal exit/collection; that interrupted run is not acceptance evidence. The
+passing rerun changed only that outer diagnostic renderer. Neither probe
+created provider issues or PRs or changed global configuration.
+
+PR #218 feedback exposed a separate paste-confirmation ambiguity: the native
+empty-composer label can match a short task's first-line prefix. Before the
+correction, a controlled nested PTY recorded an Enter byte and a transition to
+`START` on a stale empty composer for the task `Ask`, before displaying its paste.
+The task was sent once, but its receipt had not been confirmed. Exact-label
+tasks and multiline tasks starting with the label reproduced the same false
+transition in focused state tests.
+
+The empty label is now insufficient evidence for the short-paste path. Short
+prefixes such as `Ask` proceed once their distinct pasted line appears; longer
+ordinary task lines also proceed normally. If the visible first line is exactly
+`Ask Codex to do anything`, this text-only parser cannot distinguish it from the
+untouched composer, even with continuation text. It remains in `PASTE` and fails
+within the unchanged deadline without Enter or `MESSAGE_SUBMITTED`, unless a
+native pasted-content placeholder independently proves receipt. The adapter
+does not rewrite or retry the task and adds no message-validation restriction.
+Nested PTY tests synchronize on passive parser observation of the stale frame,
+then release the actual paste display and verify one-shot submission or bounded
+failure, event counts, exact task content, and terminal restoration.
+
+The same feedback identified an unsanitized `toplevel=` home path in
+`working-no-plan-footer.txt`; it is now `/tmp/native-plan-fixture`. Its indentation
+and screen row count are retained. The raw redraw JSON was not changed, so its
+carriage returns and cursor offsets remain intact. The existing native acceptance
+run is retained with its stated limits; the original user's exact transcript is
+replayed again on the corrected paste guard.
+
+A further GitHub review found a compatibility regression in running screens
+without a composer. The original `origin/main` wide-status unit test used
+`Working (0s • esc to interrupt)` directly above the model/effort/path footer.
+The branch had added a composer to that fixture, hiding the unsupported old
+shape. The unchanged original unit suite reproduced two failures (with/without
+warning) and 96 passes before this correction. After adding a structural
+no-composer acknowledgement branch, all 98 unchanged base tests pass.
+
+The original wide-status test now covers both layouts. Known no-composer
+working/footer screens acknowledge once with or without the transient Plan
+label; task echoes, indented timer text, intervening body/modal text, and prose
+about interrupt do not satisfy that native branch. The separate legacy
+Plan-footer fallback is retained. Nested PTYs cover hidden composers with
+native Plan and minimal footers, and preserve the original legacy stand-in's
+working-row/test-banner/footer order. `NATIVE INTERACTION` is a stand-in
+transport notification, not native evidence; current native-layout stand-ins
+keep it above the working row and exercise both composer variants. No new live
+capture or paid native planning run is claimed for this compatibility branch.
+
+Compatibility review for this correction must compare OLD supported positive
+fixtures against `origin/main`, not only the updated branch tests. The supervisor's
+unchanged base test and capture copy is `/tmp/crossby-owned/ack-fix/base-tests`;
+`base-tests-before.log` and `base-tests-after.log` retain the 96-pass/2-fail to
+98-pass proof. Do not modify those copied tests to fit the implementation.
+An AST audit found the wide-status test was the only existing unit-test body
+changed in this branch; original integration positive assertions and default
+prompt remain intact. The previous native gate proof is retained with its limits,
+and the original user's exact transcript is replayed on this final correction.
+
 ## Deterministic checks
 
 `./scripts/test.sh tests/unit/test_ai_tools/test_codex_terminal.py

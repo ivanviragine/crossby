@@ -31,3 +31,9 @@ Native Codex exec enables CODEX_API_KEY authentication while standalone app-serv
 Copilot SDK 1.0.21 generates a local session ID before a resumable transcript exists; cold resume of an untouched session reports session-not-found. A persisted native turn is required to verify resume, so retaining an interrupted session ID must not imply guaranteed transcript recovery.
 
 ---
+
+## 0f15f6bf27db | 2026-10-14 | implementation | tags: terminal, testing | Issue #217
+
+Load raw terminal captures with read_bytes() and feed bytes to pyte, or explicitly preserve newlines when decoding. Path.read_text() normalizes carriage returns, which changes cursor behavior and can make a real native startup sequence appear unrecognized even though its raw bytes replay correctly.
+
+---

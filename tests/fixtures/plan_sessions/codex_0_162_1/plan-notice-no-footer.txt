@@ -1,0 +1,13 @@
+• Model changed to gpt-6.1-sol high for Plan mode.
+
+
+  >_ OpenAI Codex (v0.162.1)
+     /tmp/native-plan-fixture
+  permissions: YOLO mode
+
+  Tip: Use the desktop app. Run codex app to open it. It installs automatically if needed.
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · /tmp/native-plan-fixture · plan-fixture · Context 0% used · weekly 50% left · native-session…  ⚠ 1 warning · f2 to view

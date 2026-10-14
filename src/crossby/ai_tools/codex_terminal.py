@@ -81,6 +81,7 @@ class _Startup:
         self.on_event = on_event
         self.port = _InputPort()
         self.user_screen = False
+        self._prior_notices: set[str] = set()
 
     def _emit(self, kind: InteractiveLaunchEventKind) -> None:
         if self.on_event is not None:
@@ -99,6 +100,30 @@ class _Startup:
             "",
         )
         empty = composer == "Ask Codex to do anything"
+        footer_model = re.match(
+            r"\s*([^\s·]+) (default|minimal|low|medium|high|xhigh) · (?:/|~(?:/|(?=\s|$)))",
+            footer,
+        )
+        banner = re.search(r"(?m)^\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*$", rendered)
+        # This native info cell precedes the startup banner in the observed
+        # 0.162.1 redraw. Require its exact model/effort, position, ready UI,
+        # and freshness after our /plan Enter; arbitrary body text is no proof.
+        notice = lines[0].strip() if lines else ""
+        notice_matches = bool(
+            footer_model
+            and notice
+            == f"• Model changed to {footer_model[1].lower()} {footer_model[2]} for Plan mode."
+            and banner
+            and len(lines) > 1
+            and re.fullmatch(r"\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)", lines[1])
+        )
+        if self.phase in {_Phase.READY, _Phase.COMMAND}:
+            self._prior_notices.update(
+                line.strip()
+                for line in lines
+                if re.fullmatch(r"• Model changed to \S+ \S+ for Plan mode\.", line.strip())
+            )
+        activation_notice = notice_matches and notice not in self._prior_notices
         normalized = " ".join(rendered.split())
         legacy_trust = "Do you trust the contents of this directory?" in normalized
         login = "sign in" in rendered.lower()
@@ -129,20 +154,14 @@ class _Startup:
             # Later fields can be arbitrary directory/branch/project/title
             # text: words such as "loading" there do not describe model state.
             loaded = re.search(r"(?m)^\s*[│ ]*model:\s+(?!loading\b)\S", rendered)
-            footer_ready = bool(
-                re.search(r"(?m)^\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*$", rendered)
-                and re.match(
-                    r"\s*[^\s·]+ (?:default|minimal|low|medium|high|xhigh) · (?:/|~(?:/|(?=\s|$)))",
-                    footer,
-                )
-            )
+            footer_ready = bool(banner and footer_model)
             if (loaded or footer_ready) and empty:
                 self.phase = _Phase.COMMAND
                 return b"/plan"
         elif self.phase is _Phase.COMMAND and composer == "/plan":
             self.phase = _Phase.PLAN
             return b"\r"
-        elif self.phase is _Phase.PLAN and plan_status and empty:
+        elif self.phase is _Phase.PLAN and (plan_status or activation_notice) and empty:
             self.port.open = True
             try:
                 self._emit(InteractiveLaunchEventKind.PLAN_READY)
@@ -158,25 +177,101 @@ class _Startup:
         elif self.phase is _Phase.PASTE:
             assert self.port.message is not None
             # Codex expands large-paste placeholders only on submission. Small
-            # pastes render directly; the leading line proves paste completion.
+            # pastes render directly; the leading line must differ from the
+            # untouched composer's label to prove receipt. Identical visible
+            # lines stay ambiguous, even when the task has continuation lines.
             placeholder = f"[Pasted Content {len(self.port.message)} chars]"
             first_line = next(
                 line for line in self.port.message.splitlines() if line.strip()
             ).expandtabs(4)
-            if plan_status and (
-                composer == placeholder
-                or (
-                    len(self.port.message) <= 1000
-                    and composer.startswith(first_line[:40])
-                    and bool(first_line[:40].strip())
+            # PASTE/START are reachable only after positive native activation.
+            # Its transient footer is not a prerequisite for later redraws.
+            if (
+                (plan_status or footer_model)
+                and not modern_trust
+                and (
+                    composer == placeholder
+                    or (
+                        len(self.port.message) <= 1000
+                        and not empty
+                        and composer.startswith(first_line[:40])
+                        and bool(first_line[:40].strip())
+                    )
                 )
             ):
                 self.phase = _Phase.START
                 return b"\r"
-        elif self.phase is _Phase.START and "esc to interrupt" in rendered and plan_status:
-            self.phase = _Phase.ACTIVE
-            self._emit(InteractiveLaunchEventKind.MESSAGE_SUBMITTED)
+        elif self.phase is _Phase.START:
+            # A native running row beside the cleared composer or, when hidden,
+            # directly beside its model footer acknowledges Enter.
+            # Neither the task echo nor prose mentioning interrupt is evidence.
+            composer_index = next(
+                (
+                    index
+                    for index in range(len(lines) - 1, -1, -1)
+                    if lines[index].lstrip().startswith("\u203a ")
+                ),
+                0,
+            )
+            working_pattern = (
+                r"(?:[•◦] )?Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)(?: · .*)?"
+            )
+            working = bool(
+                composer_index and re.fullmatch(working_pattern, lines[composer_index - 1])
+            )
+            hidden_composer_working = bool(
+                not composer
+                and footer_model
+                and len(lines) > 1
+                and re.fullmatch(working_pattern, lines[-2])
+            )
+            legacy_timer = any(
+                re.fullmatch(r"Working \(\d+s • esc to interrupt\)", line.strip()) for line in lines
+            )
+            legacy_working = any(line.strip() == "Working • esc to interrupt" for line in lines)
+            if not modern_trust and (
+                ((footer_model or plan_status) and empty and working)
+                or hidden_composer_working
+                or (
+                    not footer_model
+                    and plan_status
+                    and not composer
+                    and (legacy_timer or legacy_working)
+                )
+            ):
+                self.phase = _Phase.ACTIVE
+                self._emit(InteractiveLaunchEventKind.MESSAGE_SUBMITTED)
         return b""
+
+
+class _ScreenUpdates:
+    """Observe complete synchronized native redraws, independent of read chunks."""
+
+    def __init__(self, columns: int, rows: int, observe: Callable[[str], None]) -> None:
+        import pyte
+
+        self.framed = False
+
+        class Screen(pyte.Screen):
+            def set_mode(screen, *modes: int, **kwargs: bool) -> None:  # noqa: N805
+                super().set_mode(*modes, **kwargs)
+                if kwargs.get("private") and 2026 in modes:
+                    self.framed = True
+
+            def reset_mode(screen, *modes: int, **kwargs: bool) -> None:  # noqa: N805
+                super().reset_mode(*modes, **kwargs)
+                if kwargs.get("private") and 2026 in modes:
+                    observe("\n".join(screen.display))
+
+        self.screen = Screen(columns, rows)
+        self.stream = pyte.ByteStream(self.screen)
+        self.observe = observe
+
+    def feed(self, data: bytes) -> None:
+        self.stream.feed(data)
+        if not self.framed:
+            # Older/unframed terminals retain the original observation path.
+            self.observe("\n".join(self.screen.display))
 
 
 class _TerminalReplies:
@@ -242,7 +337,6 @@ def run_terminal_plan(
     import tty
 
     import pexpect
-    import pyte
 
     startup = _Startup(prompt, on_event)
     input_fd = sys.stdin.fileno()
@@ -259,11 +353,15 @@ def run_terminal_plan(
         dimensions=(rows, columns),
         echo=False,
     )
-    screen = pyte.Screen(columns, rows)
-    stream = pyte.ByteStream(screen)
     child_fd = child.child_fd
     os.set_blocking(child_fd, False)
     outgoing = bytearray()
+
+    def observe(rendered: str) -> None:
+        if startup.phase is not _Phase.ACTIVE and not outgoing:
+            outgoing.extend(startup.advance(rendered))
+
+    updates = _ScreenUpdates(columns, rows, observe)
     replies = _TerminalReplies()
     deadline = time.monotonic() + startup_timeout
     saved_handlers: dict[
@@ -274,7 +372,7 @@ def run_terminal_plan(
     def resize(_signum: int, _frame: object) -> None:
         dimensions = os.get_terminal_size(output_fd)
         if dimensions.lines > 0 and dimensions.columns > 0:
-            screen.resize(dimensions.lines, dimensions.columns)
+            updates.screen.resize(dimensions.lines, dimensions.columns)
             child.setwinsize(dimensions.lines, dimensions.columns)
 
     def terminate(signum: int, _frame: object) -> None:
@@ -333,9 +431,7 @@ def run_terminal_plan(
                 transcript.write(data)
                 transcript.flush()
             if not active:
-                stream.feed(data)
-                if not outgoing:
-                    outgoing.extend(startup.advance("\n".join(screen.display)))
+                updates.feed(data)
         if startup.phase is not _Phase.ACTIVE:
             raise TerminalStartupError(f"Codex exited {startup.phase.value}; task not retried")
         # EOF can precede waitpid visibility (notably on macOS). Allow bounded

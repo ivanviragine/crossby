@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from crossby.ai_tools.codex import CodexAdapter
 from crossby.ai_tools.codex_terminal import (
     TerminalStartupError,
     _Phase,
+    _ScreenUpdates,
     _Startup,
     _TerminalReplies,
     parse_wrapper_args,
@@ -38,6 +40,320 @@ CURRENT_SCREENS = Path(__file__).parents[2] / "fixtures/plan_sessions/codex_0_16
 
 def current_screen(name: str) -> str:
     return (CURRENT_SCREENS / f"{name}.txt").read_text()
+
+
+def test_native_notice_activates_without_transient_plan_footer() -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(current_screen("plan-notice-no-footer")) == b"\x1b[200~Task\x1b[201~"
+    assert startup.phase is _Phase.PASTE
+
+
+def test_native_paste_and_acknowledgement_do_not_require_plan_footer_again() -> None:
+    events: list[InteractiveLaunchEventKind] = []
+    startup = _Startup(
+        None,
+        lambda event, port: (
+            events.append(event.kind),
+            port.send_message("Task")
+            if event.kind is InteractiveLaunchEventKind.PLAN_READY
+            else None,
+        ),
+    )
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(current_screen("plan")) == b"\x1b[200~Task\x1b[201~"
+    footer = current_screen("plan-notice-no-footer").splitlines()[-1]
+    assert startup.advance("\u203a Task\n" + footer) == b"\r"
+    assert startup.advance(current_screen("working-no-plan-footer")) == b""
+    assert startup.phase is _Phase.ACTIVE
+    assert startup.advance(current_screen("working-no-plan-footer")) == b""
+    assert events == [
+        InteractiveLaunchEventKind.PLAN_READY,
+        InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+    ]
+
+
+def test_legacy_empty_composer_acknowledges_the_adjacent_working_row() -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert (
+        startup.advance(
+            "Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything\ngpt Plan mode"
+        )
+        == b""
+    )
+    assert startup.phase is _Phase.ACTIVE
+
+
+@pytest.mark.parametrize("footer", ["native-plan", "native-no-plan", "legacy"])
+def test_hidden_composer_acknowledges_only_once_with_known_working_footer(footer: str) -> None:
+    events: list[InteractiveLaunchEventKind] = []
+
+    def event(item: InteractiveLaunchEvent, port: InteractiveSession) -> None:
+        events.append(item.kind)
+        if item.kind is InteractiveLaunchEventKind.PLAN_READY:
+            port.send_message("Task")
+
+    startup = _Startup(None, event)
+    assert activate(startup) == b"\x1b[200~Task\x1b[201~"
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    status = (
+        "gpt Plan mode"
+        if footer == "legacy"
+        else current_screen("plan" if footer == "native-plan" else "initial-minimal").splitlines()[
+            -1
+        ]
+    )
+    screen = "Working (0s • esc to interrupt)\n" + status
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.ACTIVE
+    assert startup.advance(screen) == b""
+    assert events == [
+        InteractiveLaunchEventKind.PLAN_READY,
+        InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Task mentions esc to interrupt",
+        "  Working (0s • esc to interrupt)",
+        "Working (0s • esc to interrupt)\nQuoted body text",
+        "\u203a Task\nWorking (0s • esc to interrupt)",
+        "Working (0s • esc to interrupt)\nUnknown modal",
+    ],
+)
+def test_hidden_composer_requires_native_row_beside_footer_without_task_echo(body: str) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    assert startup.advance(body + "\n" + footer) == b""
+    assert startup.phase is _Phase.START
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "Task mentions esc to interrupt\ngpt Plan mode",
+        "\u203a Task echo\nWorking (0s • esc to interrupt)\ngpt Plan mode",
+        "Assistant quoted Working (0s • esc to interrupt)\ngpt Plan mode",
+        "Working (0s • esc to interrupt)\nUnknown modal",
+    ],
+)
+def test_legacy_working_footer_does_not_acknowledge_prose_task_echo_or_unknown_footer(
+    screen: str,
+) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.START
+
+
+def test_folder_access_heading_in_task_and_echo_is_ordinary_text() -> None:
+    startup = _Startup("Task\nFolder access\nDescribe this section.", None)
+    activate(startup)
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    assert startup.advance("\u203a Task\nFolder access\nDescribe this section.\n" + footer) == b"\r"
+    screen = (
+        "\u203a Task\nFolder access\nDescribe this section.\n"
+        "Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything\n" + footer
+    )
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.ACTIVE
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Ask",
+        "Ask Codex",
+        "Ask Codex to do anything",
+        "Ask Codex to do anything\nDescribe this section.",
+        "Ask Codex to do anything about the project",
+        "Plan this normal task",
+    ],
+)
+def test_stale_empty_composer_never_confirms_a_short_task(message: str) -> None:
+    events: list[InteractiveLaunchEventKind] = []
+
+    def event(item: InteractiveLaunchEvent, port: InteractiveSession) -> None:
+        events.append(item.kind)
+        if item.kind is InteractiveLaunchEventKind.PLAN_READY:
+            port.send_message(message)
+
+    startup = _Startup(None, event)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(current_screen("plan")) == b"\x1b[200~" + message.encode() + b"\x1b[201~"
+    for name in ["plan", "initial-minimal", "plan-notice-no-footer"]:
+        assert startup.advance(current_screen(name)) == b""
+        assert startup.phase is _Phase.PASTE
+    first_line = message.splitlines()[0]
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    paste = "\u203a " + message + "\n" + footer
+    if first_line == "Ask Codex to do anything":
+        # Text-only composer confirmation cannot distinguish this visible line.
+        assert startup.advance(paste) == b""
+        assert startup.phase is _Phase.PASTE
+        assert events == [InteractiveLaunchEventKind.PLAN_READY]
+    else:
+        assert startup.advance(paste) == b"\r"
+        assert startup.advance(paste) == b""
+        assert startup.advance(current_screen("working-no-plan-footer")) == b""
+        assert startup.phase is _Phase.ACTIVE
+        assert events == [
+            InteractiveLaunchEventKind.PLAN_READY,
+            InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+        ]
+
+
+def test_paste_placeholder_can_prove_receipt_of_task_with_ambiguous_first_line() -> None:
+    message = "Ask Codex to do anything\n" + "Describe this section.\n" * 100
+    startup = _Startup(message, None)
+    activate(startup)
+    assert startup.advance(PLAN) == b""
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    paste = f"\u203a [Pasted Content {len(message)} chars]\n" + footer
+    assert startup.advance(paste) == b"\r"
+    assert startup.advance(paste) == b""
+
+
+@pytest.mark.parametrize("phase", [_Phase.PASTE, _Phase.START])
+@pytest.mark.parametrize("name", ["trust", "question", "final"])
+def test_native_modals_after_activation_do_not_submit_or_acknowledge(
+    phase: _Phase, name: str
+) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    if phase is _Phase.START:
+        assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert startup.advance(current_screen(name)) == b""
+    assert startup.phase is phase
+
+
+@pytest.mark.parametrize("chunk", [1, 4096, 65536])
+def test_real_native_notice_redraws_activate_across_read_boundaries(chunk: int) -> None:
+    capture = json.loads((CURRENT_SCREENS / "plan-notice-redraw.json").read_text())
+    startup = _Startup("Task", None)
+    sent: list[bytes] = []
+
+    def observe(screen: str) -> None:
+        output = startup.advance(screen)
+        if output:
+            sent.append(output)
+
+    updates = _ScreenUpdates(capture["columns"], capture["rows"], observe)
+    data = capture["terminal"].encode()
+    for offset in range(0, len(data), chunk):
+        updates.feed(data[offset : offset + chunk])
+    assert sent == [b"/plan", b"\r", b"\x1b[200~Task\x1b[201~"]
+    assert startup.phase is _Phase.PASTE
+
+
+@pytest.mark.parametrize("boundary", ["ready", "command", "body"])
+def test_stale_native_activation_notice_is_not_plan_proof(boundary: str) -> None:
+    startup = _Startup("Task", None)
+    notice = current_screen("plan-notice-no-footer")
+    ready = notice if boundary == "ready" else current_screen("initial")
+    if boundary == "body":
+        ready = ready.replace("\u203a Ask", notice.splitlines()[0] + "\n\u203a Ask")
+    assert startup.advance(ready) == b"/plan"
+    command = notice.replace("\u203a Ask Codex to do anything", "\u203a /plan")
+    assert startup.advance(command if boundary == "command" else current_screen("command")) == b"\r"
+    assert startup.advance(notice) == b""
+    assert startup.phase is _Phase.PLAN
+
+
+@pytest.mark.parametrize(
+    "mutation", ["prose", "quoted", "body", "model", "effort", "default", "modal"]
+)
+def test_notice_requires_exact_fresh_native_context(mutation: str) -> None:
+    notice = current_screen("plan-notice-no-footer")
+    if mutation == "prose":
+        notice = notice.replace("• Model changed", "Assistant says Model changed")
+    elif mutation == "quoted":
+        notice = "Assistant quoted:\n" + notice
+    elif mutation == "body":
+        first, rest = notice.split("\n", 1)
+        notice = rest.replace("\u203a Ask", first + "\n\u203a Ask")
+    elif mutation == "model":
+        notice = notice.replace("Model changed to gpt-6.1-sol", "Model changed to o3")
+    elif mutation == "effort":
+        notice = notice.replace("high for Plan", "low for Plan")
+    elif mutation == "default":
+        notice = notice.replace("for Plan mode.", "for Default mode.")
+    else:
+        notice += "\nUnknown modal\n\u203a 1. Continue"
+    startup = _Startup("Task", None)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(notice) == b""
+    assert startup.phase is _Phase.PLAN
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "The task mentions esc to interrupt",
+        "• Working (0s • esc to interrupt)\nAssistant quoted this status",
+        "\u203a Working (0s • esc to interrupt)",
+        "• Working (0s • esc to interrupt)\n\u203a Task",
+        "• Working (0s • esc to interrupt)\nUnknown modal\n\u203a Ask Codex to do anything",
+        "\u203a Task echo\n  • Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything",
+    ],
+)
+def test_task_or_body_text_does_not_acknowledge_submission(body: str) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    assert startup.advance(body + "\n" + footer) == b""
+    assert startup.phase is _Phase.START
+
+
+def synchronized(text: str) -> bytes:
+    return b"\x1b[?2026h\x1b[2J\x1b[H" + text.replace("\n", "\r\n").encode() + b"\x1b[?2026l"
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 4096, 65536])
+def test_activation_survives_chunked_and_coalesced_native_redraws(chunk: int) -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    sent: list[bytes] = []
+
+    def observe(screen: str) -> None:
+        if not sent:
+            output = startup.advance(screen)
+            if output:
+                sent.append(output)
+
+    updates = _ScreenUpdates(180, 45, observe)
+    # The actual Plan footer frame can disappear in the same os.read payload.
+    data = synchronized(current_screen("plan")) + synchronized(current_screen("initial"))
+    for offset in range(0, len(data), chunk):
+        updates.feed(data[offset : offset + chunk])
+    assert sent == [b"\x1b[200~Task\x1b[201~"]
+    assert startup.phase is _Phase.PASTE
+
+
+def test_incomplete_synchronized_redraw_does_not_submit() -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    observed: list[str] = []
+    updates = _ScreenUpdates(180, 45, observed.append)
+    frame = synchronized(current_screen("plan"))
+    updates.feed(frame[:-1])
+    assert observed == []
+    updates.feed(frame[-1:])
+    assert len(observed) == 1
 
 
 @pytest.mark.parametrize(
@@ -269,7 +585,10 @@ def test_caller_receives_ready_before_input_and_submission_after_native_turn() -
 
 
 @pytest.mark.parametrize("with_warning", [False, True])
-def test_wide_status_with_shortcut_still_submits_task(with_warning: bool) -> None:
+@pytest.mark.parametrize("with_composer", [False, True])
+def test_wide_status_with_shortcut_still_submits_task(
+    with_warning: bool, with_composer: bool
+) -> None:
     received: list[InteractiveLaunchEventKind] = []
     plan_screen = WIDE_PLAN if with_warning else WIDE_PLAN.split("    ⚠", 1)[0]
     status_line = plan_screen.splitlines()[-1]
@@ -285,7 +604,10 @@ def test_wide_status_with_shortcut_still_submits_task(with_warning: bool) -> Non
     assert startup.advance(plan_screen) == b"\x1b[200~Plan issue #188\x1b[201~"
     assert received == [InteractiveLaunchEventKind.PLAN_READY]
     assert startup.advance("\u203a Plan issue #188\n" + status_line) == b"\r"
-    assert startup.advance("Working (0s • esc to interrupt)\n" + status_line) == b""
+    working_screen = "Working (0s • esc to interrupt)\n"
+    if with_composer:
+        working_screen += "\u203a Ask Codex to do anything\n"
+    assert startup.advance(working_screen + status_line) == b""
     assert startup.phase is _Phase.ACTIVE
     assert received == [
         InteractiveLaunchEventKind.PLAN_READY,
