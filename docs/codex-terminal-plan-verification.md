@@ -76,7 +76,14 @@ Observed screens, with directory/session details sanitized in
   empty composer, and model/effort/directory footer, rather than Context text.
   Independent native captures with the default layout and an explicit minimal
   `tui.status_line=["model-with-reasoning","current-dir"]` also omit Context;
-  both layouts are included in the regression fixtures.
+  both layouts are included in the regression fixtures. A directory field can
+  also be bare `/` or `~`: actual root and canonical disposable-HOME captures
+  confirm both forms. These startup-only checks use isolated HOME/CODEX_HOME
+  and an inert loopback provider, with no authentication or model turn.
+  Noncanonical `/tmp` HOME initially rendered its full `/private/tmp` path;
+  canonicalizing HOME was necessary to observe bare `~`. Root/home fixtures
+  and path-boundary tests retain rejection of relative and `~someone` fields
+  while preserving long paths and paths containing spaces.
 - Typing `/plan` shows a selected `› /plan  switch to Plan mode` suggestion
   above the actual `› /plan` composer. Enter activates the footer's `Plan mode`
   label, followed by the warning. The empty composer text is unchanged.
@@ -185,6 +192,21 @@ submission rejection, long/unicode messages, native keyboard handoff, window
 resize, terminal query replies, trust prompts, timeout, early exit, cancellation,
 exit-code propagation, and terminal restoration. Approval/sandbox combinations
 are checked independently without requesting unrestricted live execution.
+
+The PTY harness waits for the actual `MESSAGE_SUBMITTED` callback before
+resizing or sending interactive keys. A fake `NATIVE INTERACTION` banner is
+only output bytes, which Crossby relays before parsing: Python 3.11 CI exposed
+a race where an immediate resize wrapped the fixture's 119-character footer,
+then input arrived while startup was still in `START`. A controlled parse
+barrier reproduced both failures with the saved error `Input interrupted
+automatic Plan startup; task not retried`; event-synchronized controls entered
+`ACTIVE`, relayed the key, and exited normally. The fake resize handler does
+not redraw/reflow its status like the native CLI. Production's pre-acknowledgement
+input guard remains intact, and existing startup/test timeouts are unchanged.
+A pending-status fixture explicitly withholds the complete working status until
+the parent verifies that only `PLAN_READY` has occurred; resize follows the
+submission callback. Test failures include the saved startup error and event
+list rather than only an exit-code mismatch.
 
 ## Scope
 

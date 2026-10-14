@@ -10,7 +10,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 scenario = sys.argv[2]
-current = scenario in {"current", "current_trust"}
+current = scenario in {"current", "current_pending", "current_trust"}
 screens = Path(__file__).with_name("codex_0_162_1")
 tty.setraw(sys.stdin.fileno())
 (root / "pid").write_text(str(os.getpid()))
@@ -79,6 +79,14 @@ def resized(signum: int, frame: object) -> None:
 
 
 signal.signal(signal.SIGWINCH, resized)
+if scenario == "current_pending":
+    display("Working (0s • esc to interrupt)\nNATIVE INTERACTION")
+    # Explicit parent-controlled boundary: no complete working status yet.
+    deadline = time.monotonic() + 2
+    while not (root / "show-status").exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Parent did not release the pending Plan status")
+        time.sleep(0.01)
 display(f"Working (0s • esc to interrupt)\nNATIVE INTERACTION\n{status}")
 answer = os.read(0, 1)
 (root / "answer").write_bytes(answer)

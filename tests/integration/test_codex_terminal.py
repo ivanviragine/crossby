@@ -21,6 +21,8 @@ saved = termios.tcgetattr(0)
 def event(item, session):
     with (root / "events").open("a") as stream:
         stream.write(item.kind.value + "\\n")
+    if item.kind.value == "message_submitted":
+        print("CROSSBY_MESSAGE_SUBMITTED", flush=True)
     if item.kind.value == "plan_ready":
         session.send_message((root / "prompt").read_text())
 try:
@@ -53,8 +55,15 @@ def spawn(root: Path, scenario: str = "success"):
     )
 
 
+def failure_details(root: Path, child) -> str:
+    error = (root / "error").read_text() if (root / "error").exists() else None
+    events = (root / "events").read_text().splitlines() if (root / "events").exists() else []
+    return f"terminal={child.before!r}\nstartup_error={error!r}\nevents={events!r}"
+
+
 @pytest.mark.parametrize(
-    "scenario", ["success", "current", "trust", "current_trust", "reply", "exit_race"]
+    "scenario",
+    ["success", "current", "current_pending", "trust", "current_trust", "reply", "exit_race"],
 )
 def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: str) -> None:
     child = spawn(tmp_path, scenario)
@@ -73,12 +82,19 @@ def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: s
             child.send("\x1b[12;")
             child.send("3R")
         child.expect_exact("NATIVE INTERACTION")
+        if scenario == "current_pending":
+            # A native banner can arrive before the Plan status is parsed.
+            assert (tmp_path / "events").read_text().splitlines() == ["plan_ready"]
+            (tmp_path / "show-status").touch()
+        # Resize/input exercise ACTIVE handoff, so synchronize on Crossby's
+        # acknowledgement rather than bytes printed by the native stand-in.
+        child.expect_exact("CROSSBY_MESSAGE_SUBMITTED")
         child.setwinsize(40, 100)
         child.expect_exact("RESIZED")
         child.send("q")
         child.expect(pexpect.EOF)
         child.close()
-        assert child.exitstatus == 7, child.before
+        assert child.exitstatus == 7, failure_details(tmp_path, child)
         assert (tmp_path / "message").read_text() == (tmp_path / "prompt").read_text()
         assert (tmp_path / "events").read_text().splitlines() == ["plan_ready", "message_submitted"]
         assert (tmp_path / "answer").read_bytes() == b"q"
@@ -87,6 +103,8 @@ def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: s
         assert json.loads((tmp_path / "size").read_text()) == [100, 40]
         assert (tmp_path / "restored").read_text() == "True"
         assert "NATIVE INTERACTION" in (tmp_path / "transcript").read_text()
+    except (pexpect.TIMEOUT, pexpect.EOF) as exc:
+        pytest.fail(f"{exc}\n{failure_details(tmp_path, child)}", pytrace=False)
     finally:
         child.close(force=True)
 

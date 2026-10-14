@@ -50,6 +50,8 @@ def current_screen(name: str) -> str:
         "initial-default",
         "initial-minimal",
         "initial-branch",
+        "initial-root",
+        "initial-home",
     ],
 )
 def test_current_ready_footer_can_omit_context_and_truncate_cwd(name: str) -> None:
@@ -61,6 +63,20 @@ def test_current_ready_footer_can_omit_context_and_truncate_cwd(name: str) -> No
 def test_directory_name_is_not_a_loading_status(name: str, directory: str) -> None:
     screen = current_screen(name).replace("/tmp/native-plan-fixture", directory)
     assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("directory", ["/", "~", "~/project", "/tmp/native plan with spaces"])
+def test_current_ready_accepts_complete_root_home_and_spaced_directory_fields(
+    directory: str,
+) -> None:
+    screen = current_screen("initial").replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("directory", ["relative/path", "~someone", "unknown"])
+def test_current_ready_rejects_unrecognized_directory_fields(directory: str) -> None:
+    screen = current_screen("initial").replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b""
 
 
 @pytest.mark.parametrize(
