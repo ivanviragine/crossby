@@ -202,7 +202,8 @@ class _Startup:
                 self.phase = _Phase.START
                 return b"\r"
         elif self.phase is _Phase.START:
-            # A native running row plus a cleared composer acknowledges Enter.
+            # A native running row beside the cleared composer or, when hidden,
+            # directly beside its model footer acknowledges Enter.
             # Neither the task echo nor prose mentioning interrupt is evidence.
             composer_index = next(
                 (
@@ -212,12 +213,17 @@ class _Startup:
                 ),
                 0,
             )
+            working_pattern = (
+                r"(?:[•◦] )?Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)(?: · .*)?"
+            )
             working = bool(
-                composer_index
-                and re.fullmatch(
-                    r"(?:[•◦] )?Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)(?: · .*)?",
-                    lines[composer_index - 1],
-                )
+                composer_index and re.fullmatch(working_pattern, lines[composer_index - 1])
+            )
+            hidden_composer_working = bool(
+                not composer
+                and footer_model
+                and len(lines) > 1
+                and re.fullmatch(working_pattern, lines[-2])
             )
             legacy_timer = any(
                 re.fullmatch(r"Working \(\d+s • esc to interrupt\)", line.strip()) for line in lines
@@ -225,6 +231,7 @@ class _Startup:
             legacy_working = any(line.strip() == "Working • esc to interrupt" for line in lines)
             if not modern_trust and (
                 ((footer_model or plan_status) and empty and working)
+                or hidden_composer_working
                 or (
                     not footer_model
                     and plan_status

@@ -79,6 +79,8 @@ def failure_details(root: Path, child) -> str:
     [
         "success",
         "current",
+        "current_hidden",
+        "current_hidden_no_plan",
         "current_pending",
         "current_notice",
         "current_coalesced",

@@ -125,7 +125,7 @@ def resized(signum: int, frame: object) -> None:
 
 
 signal.signal(signal.SIGWINCH, resized)
-if scenario == "current_ack_only":
+if scenario in {"current_ack_only", "current_hidden_no_plan"}:
     status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
 if scenario == "current_pending":
     display("Working (0s • esc to interrupt)\nNATIVE INTERACTION")
@@ -139,7 +139,12 @@ working_screen = "NATIVE INTERACTION\nWorking (0s • esc to interrupt)\n"
 if scenario == "current_body_heading":
     working_screen = "\u203a Task echo\nFolder access\n" + working_screen
 if current:
-    working_screen += "\u203a Ask Codex to do anything\n"
+    if scenario not in {"current_hidden", "current_hidden_no_plan"}:
+        working_screen += "\u203a Ask Codex to do anything\n"
+else:
+    # Preserve the original legacy stand-in's no-composer layout. This banner
+    # is a test transport notification, not native acknowledgement evidence.
+    working_screen = "Working (0s • esc to interrupt)\nNATIVE INTERACTION\n"
 working_screen += status
 if scenario in {"current_notice", "current_coalesced", "current_chunked"}:
     os.write(1, framed(working_screen))

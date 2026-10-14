@@ -88,6 +88,73 @@ def test_legacy_empty_composer_acknowledges_the_adjacent_working_row() -> None:
     assert startup.phase is _Phase.ACTIVE
 
 
+@pytest.mark.parametrize("footer", ["native-plan", "native-no-plan", "legacy"])
+def test_hidden_composer_acknowledges_only_once_with_known_working_footer(footer: str) -> None:
+    events: list[InteractiveLaunchEventKind] = []
+
+    def event(item: InteractiveLaunchEvent, port: InteractiveSession) -> None:
+        events.append(item.kind)
+        if item.kind is InteractiveLaunchEventKind.PLAN_READY:
+            port.send_message("Task")
+
+    startup = _Startup(None, event)
+    assert activate(startup) == b"\x1b[200~Task\x1b[201~"
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    status = (
+        "gpt Plan mode"
+        if footer == "legacy"
+        else current_screen("plan" if footer == "native-plan" else "initial-minimal").splitlines()[
+            -1
+        ]
+    )
+    screen = "Working (0s • esc to interrupt)\n" + status
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.ACTIVE
+    assert startup.advance(screen) == b""
+    assert events == [
+        InteractiveLaunchEventKind.PLAN_READY,
+        InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Task mentions esc to interrupt",
+        "  Working (0s • esc to interrupt)",
+        "Working (0s • esc to interrupt)\nQuoted body text",
+        "\u203a Task\nWorking (0s • esc to interrupt)",
+        "Working (0s • esc to interrupt)\nUnknown modal",
+    ],
+)
+def test_hidden_composer_requires_native_row_beside_footer_without_task_echo(body: str) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    assert startup.advance(body + "\n" + footer) == b""
+    assert startup.phase is _Phase.START
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "Task mentions esc to interrupt\ngpt Plan mode",
+        "\u203a Task echo\nWorking (0s • esc to interrupt)\ngpt Plan mode",
+        "Assistant quoted Working (0s • esc to interrupt)\ngpt Plan mode",
+        "Working (0s • esc to interrupt)\nUnknown modal",
+    ],
+)
+def test_legacy_working_footer_does_not_acknowledge_prose_task_echo_or_unknown_footer(
+    screen: str,
+) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.START
+
+
 def test_folder_access_heading_in_task_and_echo_is_ordinary_text() -> None:
     startup = _Startup("Task\nFolder access\nDescribe this section.", None)
     activate(startup)
@@ -518,7 +585,10 @@ def test_caller_receives_ready_before_input_and_submission_after_native_turn() -
 
 
 @pytest.mark.parametrize("with_warning", [False, True])
-def test_wide_status_with_shortcut_still_submits_task(with_warning: bool) -> None:
+@pytest.mark.parametrize("with_composer", [False, True])
+def test_wide_status_with_shortcut_still_submits_task(
+    with_warning: bool, with_composer: bool
+) -> None:
     received: list[InteractiveLaunchEventKind] = []
     plan_screen = WIDE_PLAN if with_warning else WIDE_PLAN.split("    ⚠", 1)[0]
     status_line = plan_screen.splitlines()[-1]
@@ -534,12 +604,10 @@ def test_wide_status_with_shortcut_still_submits_task(with_warning: bool) -> Non
     assert startup.advance(plan_screen) == b"\x1b[200~Plan issue #188\x1b[201~"
     assert received == [InteractiveLaunchEventKind.PLAN_READY]
     assert startup.advance("\u203a Plan issue #188\n" + status_line) == b"\r"
-    assert (
-        startup.advance(
-            "Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything\n" + status_line
-        )
-        == b""
-    )
+    working_screen = "Working (0s • esc to interrupt)\n"
+    if with_composer:
+        working_screen += "\u203a Ask Codex to do anything\n"
+    assert startup.advance(working_screen + status_line) == b""
     assert startup.phase is _Phase.ACTIVE
     assert received == [
         InteractiveLaunchEventKind.PLAN_READY,

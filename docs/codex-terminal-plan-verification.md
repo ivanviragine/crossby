@@ -236,7 +236,8 @@ After activation, paste confirmation still requires the native footer and
 matching composer, but no longer requires the transient Plan label. Submission
 acknowledgement requires the native working timer/interrupt row immediately
 above the bottommost cleared composer and a recognized model/effort/directory
-footer. Task echoes and prose mentioning `esc to interrupt` are insufficient.
+footer, or that same working row directly above the footer when no composer is
+rendered. Task echoes and prose mentioning `esc to interrupt` are insufficient.
 Legacy screen support retains its separate Plan-footer path, including an empty
 composer with an adjacent native working row. A `Folder access` heading in task
 text is ordinary content; the complete native trust modal remains blocked by its
@@ -309,6 +310,35 @@ and screen row count are retained. The raw redraw JSON was not changed, so its
 carriage returns and cursor offsets remain intact. The existing native acceptance
 run is retained with its stated limits; the original user's exact transcript is
 replayed again on the corrected paste guard.
+
+A further GitHub review found a compatibility regression in running screens
+without a composer. The original `origin/main` wide-status unit test used
+`Working (0s • esc to interrupt)` directly above the model/effort/path footer.
+The branch had added a composer to that fixture, hiding the unsupported old
+shape. The unchanged original unit suite reproduced two failures (with/without
+warning) and 96 passes before this correction. After adding a structural
+no-composer acknowledgement branch, all 98 unchanged base tests pass.
+
+The original wide-status test now covers both layouts. Known no-composer
+working/footer screens acknowledge once with or without the transient Plan
+label; task echoes, indented timer text, intervening body/modal text, and prose
+about interrupt do not satisfy that native branch. The separate legacy
+Plan-footer fallback is retained. Nested PTYs cover hidden composers with
+native Plan and minimal footers, and preserve the original legacy stand-in's
+working-row/test-banner/footer order. `NATIVE INTERACTION` is a stand-in
+transport notification, not native evidence; current native-layout stand-ins
+keep it above the working row and exercise both composer variants. No new live
+capture or paid native planning run is claimed for this compatibility branch.
+
+Compatibility review for this correction must compare OLD supported positive
+fixtures against `origin/main`, not only the updated branch tests. The supervisor's
+unchanged base test and capture copy is `/tmp/crossby-owned/ack-fix/base-tests`;
+`base-tests-before.log` and `base-tests-after.log` retain the 96-pass/2-fail to
+98-pass proof. Do not modify those copied tests to fit the implementation.
+An AST audit found the wide-status test was the only existing unit-test body
+changed in this branch; original integration positive assertions and default
+prompt remain intact. The previous native gate proof is retained with its limits,
+and the original user's exact transcript is replayed on this final correction.
 
 ## Deterministic checks
 

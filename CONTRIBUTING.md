@@ -13,13 +13,17 @@ exact-version allowlist; unrecognized screens already fail closed) and replace t
 Plan activation and task acknowledgement are separate startup boundaries. Once
 activation is observed, a later redraw may omit the Plan footer. Confirm the
 paste in the native composer and acknowledge the submitted turn from the native
-working row beside the cleared composer; task/body mentions of interrupt are
-insufficient. Observe each completed synchronized redraw, rather than assuming
+working row beside the cleared composer, or directly beside the recognized
+model/effort/directory footer when the composer is hidden. Task/body mentions of
+interrupt are insufficient. Observe each completed synchronized redraw, rather than assuming
 one PTY read contains one native frame. Retain the input guard until acknowledgement.
 The empty-composer label cannot confirm a short paste, even if it matches the
 task's first-line prefix. A visible first line identical to that label remains
 ambiguous; fail closed within the existing deadline unless a native pasted-content
 placeholder proves receipt. Preserve the task text and one-shot delivery.
+For startup compatibility reviews, compare changed positive fixtures with their
+base versions. Exercise the old supported layouts as well as new ones; passing
+only the branch's rewritten fixtures does not establish compatibility.
 Deterministic tests use nested PTYs and a fake CLI; live evidence is documented
 in `docs/codex-terminal-plan-verification.md`. The separate app-server collector
 retains its own `collector_verified_version` floor.
