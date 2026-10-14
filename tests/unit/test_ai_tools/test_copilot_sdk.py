@@ -104,6 +104,7 @@ def test_exact_question_and_choice(peer):
 
     result, frames = peer("question", answer)
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.turn_id == "0"  # The model continuation's native turn is 1.
     assert seen[0].request_id == "101" and not seen[0].allow_other
     assert [o.option_id for o in seen[0].options] == ["A", "B"]
     assert next(f for f in frames if f.get("id") == 101)["result"] == {
@@ -140,6 +141,7 @@ def test_form_suggestions_preserve_freeform(peer):
         ),
     )
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.turn_id == "0"  # The form tool continues in native model turn 1.
     response = next(f for f in frames if f.get("method") == "session.ui.handlePendingElicitation")
     assert response["params"]["requestId"] == "form-id"
     assert response["params"]["result"]["content"] == {"choice": "outside-suggested-values"}

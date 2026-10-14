@@ -65,7 +65,7 @@ def finish():
             "messageId": "assistant-result",
             "content": "result ✓",
             "originatingMessageId": message_id,
-            "turnId": "1" if scenario == "multi-turn" else "0",
+            "turnId": "1" if scenario in {"multi-turn", "question", "form"} else "0",
         },
     )
     event(
