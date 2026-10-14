@@ -48,6 +48,13 @@ def test_current_ready_footer_can_omit_context_and_truncate_cwd(name: str) -> No
     assert _Startup("Task", None).advance(current_screen(name)) == b"/plan"
 
 
+@pytest.mark.parametrize("name", ["initial", "initial-minimal"])
+@pytest.mark.parametrize("directory", ["/tmp/loading", "/tmp/lazy-loading"])
+def test_directory_name_is_not_a_loading_status(name: str, directory: str) -> None:
+    screen = current_screen(name).replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
 @pytest.mark.parametrize(
     "screen",
     [

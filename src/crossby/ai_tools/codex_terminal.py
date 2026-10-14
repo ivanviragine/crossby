@@ -127,13 +127,18 @@ class _Startup:
             # model names in body text. Context and later fields disappear at
             # narrow widths; even the cwd can be truncated with an ellipsis.
             loaded = re.search(r"(?m)^\s*[│ ]*model:\s+(?!loading\b)\S", rendered)
+            footer_fields = footer.split(" · ", 2)
+            # The directory is user-controlled text, not a loading indicator.
+            status_loading = len(footer_fields) == 3 and re.search(
+                r"\bloading\b", footer_fields[2], re.IGNORECASE
+            )
             footer_ready = bool(
                 re.search(r"(?m)^\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*$", rendered)
                 and re.match(
                     r"\s*GPT-[\w.-]+ (?:minimal|low|medium|high|xhigh) · (?:/|~/)\S",
                     footer,
                 )
-                and not re.search(r"\bloading\b", footer, re.IGNORECASE)
+                and not status_loading
             )
             if (loaded or footer_ready) and empty:
                 self.phase = _Phase.COMMAND

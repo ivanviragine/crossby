@@ -133,16 +133,42 @@ dialogs remain blocked under the same startup deadline. Unit tests cover the
 Trust and Quit selections, incomplete/unknown screens, and the legacy prompt.
 Nested PTY coverage verifies no task/event before an explicit caller Enter, then
 normal Plan startup. The sanitized native trust capture is `trust.txt` beside
-the current-screen fixtures. The supervisor reruns the actual Wade handoff proof
-separately after this fix.
+the current-screen fixtures.
 
-This demonstrates a real native final plan through the candidate Crossby
-adapter. The bootstrap repair plan and independent Wade headless reviews are
-separate artifacts, not native proof. The supervisor separately validates Wade's
-actual planning entrypoint with the candidate dependency in an isolated
-environment; this adapter smoke does not establish Wade's plan-file handoff.
-The current model was not run on CLI 0.154.0, which rejects it; legacy screen
-support is retained through deterministic tests and the earlier live evidence.
+The supervisor then completed a separate actual Wade consumer probe with
+candidate Crossby and Wade source on `PYTHONPATH`: `run_interactive_planning_session()`
+in a freshly bootstrapped detached Git worktree, `gpt-6.1-sol`/high, sandbox
+workspace-write, network disabled, and on-request approvals. The caller
+explicitly pressed Enter at the observed trust modal. Native Plan activated,
+one full Wade task arrived, and the planner reached `wade plan-session check`
+(`IN_WORKTREE`). The caller answered the native question with `Finalize`.
+The native planner produced the final greeting repair plan, imported it through
+`wade plan-session done --from-stdin`, and obtained an independent review using:
+
+```sh
+wade review plan .wade/plans/PLAN.md --ai codex --model gpt-6.1-sol \
+  --effort high --mode headless --sandbox
+```
+
+The first review launch failed under the host sandbox; retrying with approved
+host execution kept the reviewer itself sandboxed and returned no material
+findings. No self-review acknowledgement substituted for the external review.
+`wade plan-session done` then validated the reviewed plan; implementation was
+declined, `/exit` returned 0, and the actual parent collector received one
+completed, reviewed plan. Independent recollection confirmed the handoff, one
+initial task, native Plan/model/high context, and unchanged `greeting.py`.
+The supervisor retained `215-wade-evidence.json`, native session
+`01a13a03-226d-7872-8764-82175565cd42`, and completed Wade handoff
+`3f17a75a-1970-42a9-b10d-a314bd0059ae` under `/tmp/crossby-owned`.
+This consumer probe exercised native launch/import/review/done/collection; it
+created no provider issues or PRs and did not update installed packages.
+
+The bootstrap repair plan and independent headless reviews are separate from
+the two real native planning proofs. The current model was not run on CLI
+0.154.0, which rejects it; legacy screen support is retained through
+deterministic tests and the earlier live evidence. Other custom status layouts
+that omit the observed model/effort/directory structure remain fail-closed.
+Directory text such as `/tmp/loading` is excluded from loading-status checks.
 
 ## Deterministic checks
 
