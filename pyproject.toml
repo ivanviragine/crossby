@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 claude-sdk = ["claude-agent-sdk==0.2.165"]
+copilot-sdk = ["github-copilot-sdk==1.0.21"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

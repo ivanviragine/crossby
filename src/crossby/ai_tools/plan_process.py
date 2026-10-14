@@ -21,7 +21,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, ClassVar, TypeVar
+from typing import IO, Any, ClassVar, TypeVar, cast
 
 _STDERR_TAIL_LIMIT = 8 * 1024
 _STDOUT_QUEUE_LIMIT = 256
@@ -774,8 +774,7 @@ class JsonRpcProcess:
             raise SessionProcessCancelledError("JSON-RPC child was cancelled")
         if self._proc.poll() is not None:
             raise EOFError(f"JSON-RPC child exited with status {self._proc.returncode}")
-        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
-        line = json.dumps(envelope, separators=(",", ":")) + "\n"
+        line = self._wire_frame(payload)
         errors: list[BaseException] = []
 
         def write() -> None:
@@ -784,8 +783,7 @@ class JsonRpcProcess:
                 # send lock/executor. Native transports can atomically revoke
                 # queued replies before any bytes enter the pipe.
                 with write_guard() if write_guard is not None else nullcontext():
-                    self._stdin.write(line)
-                    self._stdin.flush()
+                    self._write_frame(line)
             except BaseException as exc:
                 errors.append(exc)
 
@@ -821,12 +819,19 @@ class JsonRpcProcess:
         if errors:
             raise errors[0]
 
+    def _wire_frame(self, payload: dict[str, Any]) -> str:
+        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
+        return json.dumps(envelope, separators=(",", ":")) + "\n"
+
+    def _write_frame(self, frame: str) -> None:
+        self._stdin.write(frame)
+        self._stdin.flush()
+
     def send_cleanup(self, payload: dict[str, Any]) -> None:
         """Best-effort native abort after the ordinary work deadline expires."""
         if self._proc.poll() is not None:
             return
-        envelope = {"jsonrpc": "2.0", **payload} if self._include_jsonrpc_version else payload
-        encoded = (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
+        encoded = self._wire_frame(payload).encode("utf-8")
         if len(encoded) > _JSON_RPC_FRAME_LIMIT:
             raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
         # The runtime bounds this hook. A stalled prior writer cannot be
@@ -1001,6 +1006,62 @@ class HeaderlessJsonRpcProcess(JsonRpcProcess):
     """Codex app-server's JSONL dialect, which omits the JSON-RPC version field."""
 
     _include_jsonrpc_version = False
+
+
+class ContentLengthJsonRpcProcess(JsonRpcProcess):
+    """SDK JSON-RPC framing, retaining the shared owned-process safety boundary."""
+
+    def _wire_frame(self, payload: dict[str, Any]) -> str:
+        content = json.dumps({"jsonrpc": "2.0", **payload}, allow_nan=False)
+        size = len(content.encode("utf-8"))
+        if size > _JSON_RPC_FRAME_LIMIT:
+            raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
+        return f"Content-Length: {size}\r\n\r\n{content}"
+
+    def _write_frame(self, frame: str) -> None:
+        # Binary writes avoid Windows newline translation and count UTF-8 bytes.
+        stream = cast(Any, self._stdin).buffer
+        data = memoryview(frame.encode("utf-8"))
+        while data:
+            written = stream.write(data)
+            if not written:
+                raise OSError("short SDK frame write")
+            data = data[written:]
+        stream.flush()
+
+    def _read_stdout(self, stream: IO[str]) -> None:
+        # Never mix text-wrapper reads with its buffered binary stream.
+        source = cast(Any, stream).buffer
+        try:
+            while not self._closing.is_set():
+                header = source.readline(1025)
+                if not header:
+                    break
+                if len(header) > 1024 or not header.startswith(b"Content-Length: "):
+                    raise ValueError("invalid SDK frame header")
+                size_text = header[len(b"Content-Length: ") :].strip()
+                if not size_text.isdigit() or len(size_text) > 10:
+                    raise ValueError("invalid SDK frame length")
+                size = int(size_text)
+                if size <= 0 or size > _JSON_RPC_FRAME_LIMIT:
+                    raise JsonRpcFrameLimitError(_JSON_RPC_FRAME_LIMIT)
+                if source.readline(3) != b"\r\n":
+                    raise ValueError("invalid SDK header separator")
+                chunks: list[bytes] = []
+                remaining = size
+                while remaining:
+                    chunk = source.read(min(remaining, _JSON_RPC_READ_CHUNK_SIZE))
+                    if not chunk:
+                        raise ValueError("truncated SDK frame")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                if not self._queue_stdout(b"".join(chunks).decode("utf-8")):
+                    break
+        except (ValueError, OSError):
+            if not self._closing.is_set():
+                self._queue_stdout(ValueError("invalid SDK framed stream"))
+        finally:
+            self._queue_stdout(None)
 
 
 # Neutral names for new ordinary-session transports.  Plan-prefixed names and
