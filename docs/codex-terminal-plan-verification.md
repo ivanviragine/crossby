@@ -168,7 +168,13 @@ the two real native planning proofs. The current model was not run on CLI
 0.154.0, which rejects it; legacy screen support is retained through
 deterministic tests and the earlier live evidence. Other custom status layouts
 that omit the observed model/effort/directory structure remain fail-closed.
-Directory text such as `/tmp/loading` is excluded from loading-status checks.
+Readiness uses the positively identified model/effort prefix; it does not scan
+free footer text for loading words. An additional real native capture with
+`tui.status_line=["model-with-reasoning","current-dir","git-branch"]` on branch
+`feat/loading` confirms that such branch names are valid ready state. Regression
+cases also cover directory, project, and thread-title text containing `loading`;
+they cannot override the model readiness signal. Screens without the observed
+loaded-model prefix still fail closed.
 
 ## Deterministic checks
 
