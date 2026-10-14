@@ -162,6 +162,7 @@ while True:
                 {"content": params["prompt"], "messageId": message_id, "turnId": "0"},
             )
             if scenario == "delayed-usage":
+                event("assistant.turn_start", {"turnId": "0"})
                 event(
                     "assistant.usage",
                     {
