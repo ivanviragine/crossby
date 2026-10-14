@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -74,6 +75,64 @@ def test_native_paste_and_acknowledgement_do_not_require_plan_footer_again() -> 
     ]
 
 
+def test_legacy_empty_composer_acknowledges_the_adjacent_working_row() -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert (
+        startup.advance(
+            "Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything\ngpt Plan mode"
+        )
+        == b""
+    )
+    assert startup.phase is _Phase.ACTIVE
+
+
+def test_folder_access_heading_in_task_and_echo_is_ordinary_text() -> None:
+    startup = _Startup("Task\nFolder access\nDescribe this section.", None)
+    activate(startup)
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    assert startup.advance("\u203a Task\nFolder access\nDescribe this section.\n" + footer) == b"\r"
+    screen = (
+        "\u203a Task\nFolder access\nDescribe this section.\n"
+        "Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything\n" + footer
+    )
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.ACTIVE
+
+
+@pytest.mark.parametrize("phase", [_Phase.PASTE, _Phase.START])
+@pytest.mark.parametrize("name", ["trust", "question", "final"])
+def test_native_modals_after_activation_do_not_submit_or_acknowledge(
+    phase: _Phase, name: str
+) -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    if phase is _Phase.START:
+        assert startup.advance("\u203a Task\ngpt Plan mode") == b"\r"
+    assert startup.advance(current_screen(name)) == b""
+    assert startup.phase is phase
+
+
+@pytest.mark.parametrize("chunk", [1, 4096, 65536])
+def test_real_native_notice_redraws_activate_across_read_boundaries(chunk: int) -> None:
+    capture = json.loads((CURRENT_SCREENS / "plan-notice-redraw.json").read_text())
+    startup = _Startup("Task", None)
+    sent: list[bytes] = []
+
+    def observe(screen: str) -> None:
+        output = startup.advance(screen)
+        if output:
+            sent.append(output)
+
+    updates = _ScreenUpdates(capture["columns"], capture["rows"], observe)
+    data = capture["terminal"].encode()
+    for offset in range(0, len(data), chunk):
+        updates.feed(data[offset : offset + chunk])
+    assert sent == [b"/plan", b"\r", b"\x1b[200~Task\x1b[201~"]
+    assert startup.phase is _Phase.PASTE
+
+
 @pytest.mark.parametrize("boundary", ["ready", "command", "body"])
 def test_stale_native_activation_notice_is_not_plan_proof(boundary: str) -> None:
     startup = _Startup("Task", None)
@@ -123,6 +182,7 @@ def test_notice_requires_exact_fresh_native_context(mutation: str) -> None:
         "\u203a Working (0s • esc to interrupt)",
         "• Working (0s • esc to interrupt)\n\u203a Task",
         "• Working (0s • esc to interrupt)\nUnknown modal\n\u203a Ask Codex to do anything",
+        "\u203a Task echo\n  • Working (0s • esc to interrupt)\n\u203a Ask Codex to do anything",
     ],
 )
 def test_task_or_body_text_does_not_acknowledge_submission(body: str) -> None:

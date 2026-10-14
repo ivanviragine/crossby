@@ -44,7 +44,10 @@ raise SystemExit(code)
 
 
 def spawn(root: Path, scenario: str = "success"):
-    (root / "prompt").write_text("Plan this café task.\n" * 1000)
+    message = "Plan this café task.\n"
+    if scenario == "current_body_heading":
+        message += "Folder access\n"
+    (root / "prompt").write_text(message * 1000)
     return pexpect.spawn(
         sys.executable,
         ["-c", HARNESS, str(root), str(FAKE), scenario],
@@ -72,6 +75,7 @@ def failure_details(root: Path, child) -> str:
         "current_chunked",
         "current_disappears",
         "current_ack_only",
+        "current_body_heading",
         "trust",
         "current_trust",
         "reply",

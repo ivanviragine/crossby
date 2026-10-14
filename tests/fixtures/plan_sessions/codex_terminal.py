@@ -121,6 +121,8 @@ if scenario == "current_pending":
             raise RuntimeError("Parent did not release the pending Plan status")
         time.sleep(0.01)
 working_screen = "NATIVE INTERACTION\nWorking (0s • esc to interrupt)\n"
+if scenario == "current_body_heading":
+    working_screen = "\u203a Task echo\nFolder access\n" + working_screen
 if current:
     working_screen += "\u203a Ask Codex to do anything\n"
 working_screen += status

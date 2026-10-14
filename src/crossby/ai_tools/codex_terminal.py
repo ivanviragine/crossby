@@ -186,7 +186,7 @@ class _Startup:
             # Its transient footer is not a prerequisite for later redraws.
             if (
                 (plan_status or footer_model)
-                and not folder_access
+                and not modern_trust
                 and (
                     composer == placeholder
                     or (
@@ -213,15 +213,15 @@ class _Startup:
                 composer_index
                 and re.fullmatch(
                     r"(?:[•◦] )?Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)(?: · .*)?",
-                    lines[composer_index - 1].strip(),
+                    lines[composer_index - 1],
                 )
             )
             legacy_timer = any(
                 re.fullmatch(r"Working \(\d+s • esc to interrupt\)", line.strip()) for line in lines
             )
             legacy_working = any(line.strip() == "Working • esc to interrupt" for line in lines)
-            if not folder_access and (
-                (footer_model and empty and working)
+            if not modern_trust and (
+                ((footer_model or plan_status) and empty and working)
                 or (
                     not footer_model
                     and plan_status

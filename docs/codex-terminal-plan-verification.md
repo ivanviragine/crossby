@@ -217,6 +217,12 @@ original state machine in `PLAN`. Separately, a confirmed task paste followed
 by the real compact working capture left it in `START`. This reproduction
 separates activation proof from submission acknowledgement; it does not claim
 that an offline replay completed native planning.
+The supervisor also recovered the original Wade task from its preserved prompt
+file and replayed the complete compact raw transcript. The old state machine
+remained in `START` with only `PLAN_READY`; the candidate reached `ACTIVE` with
+exactly `PLAN_READY` and `MESSAGE_SUBMITTED`, for complete frames and 1-, 4,096-,
+and 65,536-byte delivery. This uses the original prompt rather than substituting
+a short task that cannot match its real paste placeholder.
 
 Activation now accepts the observed Plan footer or that exact native notice
 after Crossby's `/plan` Enter. The notice must be fresh, immediately precede
@@ -231,7 +237,10 @@ matching composer, but no longer requires the transient Plan label. Submission
 acknowledgement requires the native working timer/interrupt row immediately
 above the bottommost cleared composer and a recognized model/effort/directory
 footer. Task echoes and prose mentioning `esc to interrupt` are insufficient.
-Legacy screen support retains its separate Plan-footer path. No input guard,
+Legacy screen support retains its separate Plan-footer path, including an empty
+composer with an adjacent native working row. A `Folder access` heading in task
+text is ordinary content; the complete native trust modal remains blocked by its
+dialog/composer/footer structure. No input guard,
 trust decision, exactly-once submission rule, or startup deadline is removed.
 
 Both supplied raw logs contain synchronized output markers (`CSI ?2026 h/l`).
@@ -240,6 +249,10 @@ terminal parser, including markers split across reads and multiple redraws in
 one read. A complete transient activation frame therefore survives a later
 frame that omits the label. Incomplete synchronized redraws never trigger
 startup actions. Older unframed output retains the existing screen-read path.
+`plan-notice-redraw.json` retains the supplied wide log's actual synchronized
+frames and cursor operations; path/session replacements have fixed display
+width so native column offsets are preserved. Tests replay those frames under
+byte-split and coalesced delivery.
 
 The nested PTY stand-in covers notice-only activation, coalesced and byte-split
 redraws, footer loss during paste and only after submission, timeout and keyboard
@@ -250,6 +263,25 @@ These deterministic checks and the bootstrap implementation are not proof of
 completed native Wade planning under the user's reproducing configuration.
 That consumer acceptance requires a separate live run through native planning,
 independent review, finalization, and collection.
+
+The supervisor completed that separate Wade consumer gate with the candidate,
+Codex 0.162.1, `gpt-6.1-sol`/high, a long disposable worktree path, and a
+140-column minimal native status layout. Native session
+`01a13a6f-a270-7153-89ec-b2423467827a` entered Plan, received one initial task,
+emitted each startup event once, asked a native question, and produced one plan.
+An independent sandboxed Sol6.1/high review completed, Wade's done gate passed,
+implementation was explicitly declined, and `/exit` returned 0. The parent
+collected one reviewed, completed plan; independent recollection confirmed the
+handoff `ba851cc9-3328-45bb-b0fb-dd3edc631086` and unchanged `greeting.py`.
+Evidence is retained in `/tmp/crossby-owned/ack-fix/native-evidence.json`.
+
+The live run's acknowledgement still displayed the Plan footer: it proves the
+complete consumer lifecycle under that layout, while the original user's exact
+raw-transcript replay separately proves the missing-footer fix. An earlier
+probe's outer diagnostic renderer crashed on Unicode after Wade done and before
+normal exit/collection; that interrupted run is not acceptance evidence. The
+passing rerun changed only that outer diagnostic renderer. Neither probe
+created provider issues or PRs or changed global configuration.
 
 ## Deterministic checks
 
