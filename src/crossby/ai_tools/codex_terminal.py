@@ -177,7 +177,9 @@ class _Startup:
         elif self.phase is _Phase.PASTE:
             assert self.port.message is not None
             # Codex expands large-paste placeholders only on submission. Small
-            # pastes render directly; the leading line proves paste completion.
+            # pastes render directly; the leading line must differ from the
+            # untouched composer's label to prove receipt. Identical visible
+            # lines stay ambiguous, even when the task has continuation lines.
             placeholder = f"[Pasted Content {len(self.port.message)} chars]"
             first_line = next(
                 line for line in self.port.message.splitlines() if line.strip()
@@ -191,6 +193,7 @@ class _Startup:
                     composer == placeholder
                     or (
                         len(self.port.message) <= 1000
+                        and not empty
                         and composer.startswith(first_line[:40])
                         and bool(first_line[:40].strip())
                     )

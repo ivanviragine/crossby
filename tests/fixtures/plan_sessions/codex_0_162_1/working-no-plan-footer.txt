@@ -5,7 +5,7 @@
 • Ran wade plan-session check
   └   wade v1.2.12
     IN_WORKTREE
-    toplevel=/Users/ivanviragine/Documents/workspace/.worktrees/wade/plan-5de99270
+    toplevel=/tmp/native-plan-fixture
     +4 lines (⌃t to view transcript)
 
 • Ran cat .wade/session/skills/builtin/planning/SKILL.md .wade/session/reference/plan-output-contract.md

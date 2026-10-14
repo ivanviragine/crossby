@@ -2,6 +2,7 @@
 
 import json
 import os
+import select
 import signal
 import sys
 import time
@@ -88,11 +89,25 @@ status = (screens / "plan.txt").read_text().splitlines()[-1] if current else "te
 if scenario in {"current_notice", "current_coalesced", "current_chunked", "current_disappears"}:
     status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
 paste_screen = f"\u203a [Pasted Content {len(message)} chars]\n{status}"
+if scenario == "current_stale_paste":
+    status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
+    display("NATIVE_STALE_COMPOSER\n\u203a Ask Codex to do anything\n" + status)
+    deadline = time.monotonic() + 2
+    while not (root / "show-paste").exists():
+        if select.select([0], [], [], 0.01)[0]:
+            (root / "early-input").write_bytes(os.read(0, 100))
+            raise SystemExit(3)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Parent did not release the stale composer")
+    paste_screen = "\u203a " + message + "\n" + status
 if scenario in {"current_notice", "current_coalesced", "current_chunked"}:
     os.write(1, framed(paste_screen))
 else:
     display(paste_screen)
-assert os.read(0, 1) == b"\r"
+submission = os.read(0, 1)
+if scenario == "current_stale_paste":
+    (root / "submission").write_bytes(submission)
+assert submission == b"\r"
 
 if scenario == "current_ack_guard":
     status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]

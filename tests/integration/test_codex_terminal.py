@@ -15,9 +15,19 @@ FAKE = Path(__file__).parents[1] / "fixtures/plan_sessions/codex_terminal.py"
 HARNESS = """
 import json, sys, termios
 from pathlib import Path
-from crossby.ai_tools.codex_terminal import run_terminal_plan, TerminalStartupError
+from crossby.ai_tools.codex_terminal import run_terminal_plan, TerminalStartupError, _Startup
 root = Path(sys.argv[1])
 saved = termios.tcgetattr(0)
+advance = _Startup.advance
+def observe_advance(startup, rendered):
+    output = advance(startup, rendered)
+    if "NATIVE_STALE_COMPOSER" in rendered and not (root / "stale-observed").exists():
+        (root / "stale-observed").write_text(json.dumps({
+            "phase": startup.phase.name, "output": output.hex(),
+        }))
+        print("CROSSBY_STALE_OBSERVED", flush=True)
+    return output
+_Startup.advance = observe_advance
 def event(item, session):
     with (root / "events").open("a") as stream:
         stream.write(item.kind.value + "\\n")
@@ -43,11 +53,11 @@ raise SystemExit(code)
 """
 
 
-def spawn(root: Path, scenario: str = "success"):
+def spawn(root: Path, scenario: str = "success", *, prompt: str | None = None):
     message = "Plan this café task.\n"
     if scenario == "current_body_heading":
         message += "Folder access\n"
-    (root / "prompt").write_text(message * 1000)
+    (root / "prompt").write_text(message * 1000 if prompt is None else prompt)
     return pexpect.spawn(
         sys.executable,
         ["-c", HARNESS, str(root), str(FAKE), scenario],
@@ -145,6 +155,58 @@ def test_post_submission_still_requires_ack_before_keyboard_handoff(
         assert (tmp_path / "restored").read_text() == "True"
         error = (tmp_path / "error").read_text()
         assert ("Input interrupted" if interrupt else "timed out") in error
+    finally:
+        child.close(force=True)
+
+
+@pytest.mark.parametrize(
+    "message,ambiguous",
+    [
+        ("Ask", False),
+        ("Ask Codex to do anything", True),
+        ("Ask Codex to do anything\nDescribe this section.", True),
+        ("Ask Codex to do anything about the project", False),
+    ],
+)
+def test_stale_native_composer_cannot_submit_before_paste_receipt(
+    tmp_path: Path, message: str, ambiguous: bool
+) -> None:
+    child = spawn(tmp_path, "current_stale_paste", prompt=message)
+    try:
+        child.expect_exact("CROSSBY_STALE_OBSERVED")
+        # Parser barrier: output bytes alone do not prove the adapter observed
+        # the stale frame. The wrapper only records results; it never changes them.
+        assert json.loads((tmp_path / "stale-observed").read_text()) == {
+            "phase": "PASTE",
+            "output": "",
+        }
+        assert (tmp_path / "events").read_text().splitlines() == ["plan_ready"]
+        assert not (tmp_path / "submission").exists()
+        (tmp_path / "show-paste").touch()
+        if ambiguous:
+            child.expect(pexpect.EOF)
+            child.close()
+            assert child.exitstatus == 91, failure_details(tmp_path, child)
+            assert (
+                "timed out waiting for the initial task paste" in (tmp_path / "error").read_text()
+            )
+            assert not (tmp_path / "submission").exists()
+            assert (tmp_path / "events").read_text().splitlines() == ["plan_ready"]
+        else:
+            child.expect_exact("CROSSBY_MESSAGE_SUBMITTED")
+            child.send("q")
+            child.expect(pexpect.EOF)
+            child.close()
+            assert child.exitstatus == 7, failure_details(tmp_path, child)
+            assert (tmp_path / "submission").read_bytes() == b"\r"
+            assert (tmp_path / "events").read_text().splitlines() == [
+                "plan_ready",
+                "message_submitted",
+            ]
+            assert (tmp_path / "answer").read_bytes() == b"q"
+        assert (tmp_path / "message").read_text() == message
+        assert not (tmp_path / "early-input").exists()
+        assert (tmp_path / "restored").read_text() == "True"
     finally:
         child.close(force=True)
 

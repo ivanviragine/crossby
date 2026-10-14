@@ -283,6 +283,33 @@ normal exit/collection; that interrupted run is not acceptance evidence. The
 passing rerun changed only that outer diagnostic renderer. Neither probe
 created provider issues or PRs or changed global configuration.
 
+PR #218 feedback exposed a separate paste-confirmation ambiguity: the native
+empty-composer label can match a short task's first-line prefix. Before the
+correction, a controlled nested PTY recorded an Enter byte and a transition to
+`START` on a stale empty composer for the task `Ask`, before displaying its paste.
+The task was sent once, but its receipt had not been confirmed. Exact-label
+tasks and multiline tasks starting with the label reproduced the same false
+transition in focused state tests.
+
+The empty label is now insufficient evidence for the short-paste path. Short
+prefixes such as `Ask` proceed once their distinct pasted line appears; longer
+ordinary task lines also proceed normally. If the visible first line is exactly
+`Ask Codex to do anything`, this text-only parser cannot distinguish it from the
+untouched composer, even with continuation text. It remains in `PASTE` and fails
+within the unchanged deadline without Enter or `MESSAGE_SUBMITTED`, unless a
+native pasted-content placeholder independently proves receipt. The adapter
+does not rewrite or retry the task and adds no message-validation restriction.
+Nested PTY tests synchronize on passive parser observation of the stale frame,
+then release the actual paste display and verify one-shot submission or bounded
+failure, event counts, exact task content, and terminal restoration.
+
+The same feedback identified an unsanitized `toplevel=` home path in
+`working-no-plan-footer.txt`; it is now `/tmp/native-plan-fixture`. Its indentation
+and screen row count are retained. The raw redraw JSON was not changed, so its
+carriage returns and cursor offsets remain intact. The existing native acceptance
+run is retained with its stated limits; the original user's exact transcript is
+replayed again on the corrected paste guard.
+
 ## Deterministic checks
 
 `./scripts/test.sh tests/unit/test_ai_tools/test_codex_terminal.py

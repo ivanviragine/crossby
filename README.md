@@ -1080,6 +1080,12 @@ closed. Startup has a 120-second deadline; unexpected input, an unrecognized
 screen, or early exit fails without resubmitting the task. Trust/login screens
 remain interactive. Startup messages must be ordinary nonblank text, at most
 100,000 UTF-8 bytes, without terminal control characters (newline/tab allowed).
+Paste confirmation must distinguish the task from the empty-composer label
+`Ask Codex to do anything`. If a short task's visible first line is exactly that
+label, the text-only handshake remains ambiguous unless Codex displays a native
+pasted-content placeholder. Startup then fails within its deadline without
+sending Enter, changing the message, or retrying it; continuation lines alone
+do not resolve this adapter's first-line ambiguity.
 
 Callers can pass `prompt=` as usual or own deferred delivery through the public
 startup callback:

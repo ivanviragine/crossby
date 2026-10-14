@@ -101,6 +101,62 @@ def test_folder_access_heading_in_task_and_echo_is_ordinary_text() -> None:
     assert startup.phase is _Phase.ACTIVE
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Ask",
+        "Ask Codex",
+        "Ask Codex to do anything",
+        "Ask Codex to do anything\nDescribe this section.",
+        "Ask Codex to do anything about the project",
+        "Plan this normal task",
+    ],
+)
+def test_stale_empty_composer_never_confirms_a_short_task(message: str) -> None:
+    events: list[InteractiveLaunchEventKind] = []
+
+    def event(item: InteractiveLaunchEvent, port: InteractiveSession) -> None:
+        events.append(item.kind)
+        if item.kind is InteractiveLaunchEventKind.PLAN_READY:
+            port.send_message(message)
+
+    startup = _Startup(None, event)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(current_screen("plan")) == b"\x1b[200~" + message.encode() + b"\x1b[201~"
+    for name in ["plan", "initial-minimal", "plan-notice-no-footer"]:
+        assert startup.advance(current_screen(name)) == b""
+        assert startup.phase is _Phase.PASTE
+    first_line = message.splitlines()[0]
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    paste = "\u203a " + message + "\n" + footer
+    if first_line == "Ask Codex to do anything":
+        # Text-only composer confirmation cannot distinguish this visible line.
+        assert startup.advance(paste) == b""
+        assert startup.phase is _Phase.PASTE
+        assert events == [InteractiveLaunchEventKind.PLAN_READY]
+    else:
+        assert startup.advance(paste) == b"\r"
+        assert startup.advance(paste) == b""
+        assert startup.advance(current_screen("working-no-plan-footer")) == b""
+        assert startup.phase is _Phase.ACTIVE
+        assert events == [
+            InteractiveLaunchEventKind.PLAN_READY,
+            InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+        ]
+
+
+def test_paste_placeholder_can_prove_receipt_of_task_with_ambiguous_first_line() -> None:
+    message = "Ask Codex to do anything\n" + "Describe this section.\n" * 100
+    startup = _Startup(message, None)
+    activate(startup)
+    assert startup.advance(PLAN) == b""
+    footer = current_screen("initial-minimal").splitlines()[-1]
+    paste = f"\u203a [Pasted Content {len(message)} chars]\n" + footer
+    assert startup.advance(paste) == b"\r"
+    assert startup.advance(paste) == b""
+
+
 @pytest.mark.parametrize("phase", [_Phase.PASTE, _Phase.START])
 @pytest.mark.parametrize("name", ["trust", "question", "final"])
 def test_native_modals_after_activation_do_not_submit_or_acknowledge(
