@@ -192,6 +192,65 @@ cases also cover directory, project, and thread-title text containing `loading`;
 they cannot override the model readiness signal. Screens without the observed
 loaded-model prefix still fail closed.
 
+## Missing Plan footer regression (issue #217)
+
+The successful 0.162.1 runs above do not cover every status layout. A subsequent
+user retry with Crossby 0.43.1 and Wade 1.2.12 exposed two distinct failures:
+at 180 columns, the adapter timed out awaiting activation; at 140 columns with
+`tui.status_line=["model-with-reasoning","current-dir"]`, the task ran and Wade
+readiness passed while the adapter remained in `START`. Caller keyboard input
+was then rejected and no planning gate completed.
+
+The supplied `wide-terminal.log` was reconstructed with `pyte.Screen(180, 45)`.
+Its native info cell reads `• Model changed to gpt-6.1-sol high for Plan mode.`
+immediately before the Codex startup banner. The empty composer and native
+model/effort/directory footer are present, but the footer has no Plan label.
+The supplied `compact-status-screen.txt` shows tool activity, Wade readiness,
+`• Working (27s • esc to interrupt)`, and an empty composer with the minimal
+footer and no Plan label. Sanitized captures are
+`plan-notice-no-footer.txt` and `working-no-plan-footer.txt` in the existing
+0.162.1 fixture directory. Paths/session identifiers are replaced; native UI
+wording and relevant layout are retained.
+
+Before the production change, replaying the wide raw terminal frames left the
+original state machine in `PLAN`. Separately, a confirmed task paste followed
+by the real compact working capture left it in `START`. This reproduction
+separates activation proof from submission acknowledgement; it does not claim
+that an offline replay completed native planning.
+
+Activation now accepts the observed Plan footer or that exact native notice
+after Crossby's `/plan` Enter. The notice must be fresh, immediately precede
+the banner, match the footer's model/effort, and accompany an empty composer.
+Previously visible notices, quoted/body notices, mismatched model/effort,
+Default-mode notices, and modal screens cannot activate the task. This is a
+bounded screen protocol, not an authenticated native event API; unobserved
+notice layouts or model display-name mappings remain fail-closed.
+
+After activation, paste confirmation still requires the native footer and
+matching composer, but no longer requires the transient Plan label. Submission
+acknowledgement requires the native working timer/interrupt row immediately
+above the bottommost cleared composer and a recognized model/effort/directory
+footer. Task echoes and prose mentioning `esc to interrupt` are insufficient.
+Legacy screen support retains its separate Plan-footer path. No input guard,
+trust decision, exactly-once submission rule, or startup deadline is removed.
+
+Both supplied raw logs contain synchronized output markers (`CSI ?2026 h/l`).
+The adapter now observes each completed synchronized redraw through the
+terminal parser, including markers split across reads and multiple redraws in
+one read. A complete transient activation frame therefore survives a later
+frame that omits the label. Incomplete synchronized redraws never trigger
+startup actions. Older unframed output retains the existing screen-read path.
+
+The nested PTY stand-in covers notice-only activation, coalesced and byte-split
+redraws, footer loss during paste and only after submission, timeout and keyboard
+rejection before acknowledgement, one task/event pair, resize, and terminal
+restoration. Its compact footer comes from the captured minimal layout to fit
+the fake's fixed window; it does not reproduce native reflow at every width.
+These deterministic checks and the bootstrap implementation are not proof of
+completed native Wade planning under the user's reproducing configuration.
+That consumer acceptance requires a separate live run through native planning,
+independent review, finalization, and collection.
+
 ## Deterministic checks
 
 `./scripts/test.sh tests/unit/test_ai_tools/test_codex_terminal.py

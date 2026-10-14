@@ -63,7 +63,20 @@ def failure_details(root: Path, child) -> str:
 
 @pytest.mark.parametrize(
     "scenario",
-    ["success", "current", "current_pending", "trust", "current_trust", "reply", "exit_race"],
+    [
+        "success",
+        "current",
+        "current_pending",
+        "current_notice",
+        "current_coalesced",
+        "current_chunked",
+        "current_disappears",
+        "current_ack_only",
+        "trust",
+        "current_trust",
+        "reply",
+        "exit_race",
+    ],
 )
 def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: str) -> None:
     child = spawn(tmp_path, scenario)
@@ -105,6 +118,29 @@ def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: s
         assert "NATIVE INTERACTION" in (tmp_path / "transcript").read_text()
     except (pexpect.TIMEOUT, pexpect.EOF) as exc:
         pytest.fail(f"{exc}\n{failure_details(tmp_path, child)}", pytrace=False)
+    finally:
+        child.close(force=True)
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_post_submission_still_requires_ack_before_keyboard_handoff(
+    tmp_path: Path, interrupt: bool
+) -> None:
+    child = spawn(tmp_path, "current_ack_guard")
+    try:
+        child.expect_exact("NATIVE_PENDING")
+        assert (tmp_path / "events").read_text().splitlines() == ["plan_ready"]
+        if interrupt:
+            child.send("q")
+        child.expect(pexpect.EOF)
+        child.close()
+        assert child.exitstatus == 91, failure_details(tmp_path, child)
+        assert (tmp_path / "message").read_text() == (tmp_path / "prompt").read_text()
+        assert (tmp_path / "events").read_text().splitlines() == ["plan_ready"]
+        assert not (tmp_path / "unexpected-input").exists()
+        assert (tmp_path / "restored").read_text() == "True"
+        error = (tmp_path / "error").read_text()
+        assert ("Input interrupted" if interrupt else "timed out") in error
     finally:
         child.close(force=True)
 

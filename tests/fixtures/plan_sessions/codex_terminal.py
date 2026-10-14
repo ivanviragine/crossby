@@ -10,7 +10,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 scenario = sys.argv[2]
-current = scenario in {"current", "current_pending", "current_trust"}
+current = scenario.startswith("current")
 screens = Path(__file__).with_name("codex_0_162_1")
 tty.setraw(sys.stdin.fileno())
 (root / "pid").write_text(str(os.getpid()))
@@ -19,6 +19,10 @@ tty.setraw(sys.stdin.fileno())
 def display(text: str) -> None:
     sys.stdout.write("\x1b[2J\x1b[H" + text.replace("\n", "\r\n"))
     sys.stdout.flush()
+
+
+def framed(text: str) -> bytes:
+    return b"\x1b[?2026h\x1b[2J\x1b[H" + text.replace("\n", "\r\n").encode() + b"\x1b[?2026l"
 
 
 def read_until(suffix: bytes) -> bytes:
@@ -58,18 +62,45 @@ display(
     (screens / "command.txt").read_text() if current else "\u203a /plan\n/plan switch to Plan mode"
 )
 assert os.read(0, 1) == b"\r"
-display(
-    (screens / "plan.txt").read_text()
-    if current
-    else "model: test\n\u203a Ask Codex to do anything\ntest Plan mode"
-)
+
+if scenario in {"current_notice", "current_coalesced", "current_chunked"}:
+    notice_screen = (screens / "plan-notice-no-footer.txt").read_text().splitlines()
+    notice_screen[-1] = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
+    data = framed("\n".join(notice_screen))
+    if scenario != "current_notice":
+        data = framed((screens / "plan.txt").read_text()) + data
+    if scenario == "current_chunked":
+        for byte in data:
+            os.write(1, bytes([byte]))
+    else:
+        os.write(1, data)
+else:
+    display(
+        (screens / "plan.txt").read_text()
+        if current
+        else "model: test\n\u203a Ask Codex to do anything\ntest Plan mode"
+    )
 paste = read_until(b"\x1b[201~")
 assert paste.startswith(b"\x1b[200~")
 message = paste[6:-6].decode()
 (root / "message").write_text(message)
 status = (screens / "plan.txt").read_text().splitlines()[-1] if current else "test Plan mode"
-display(f"\u203a [Pasted Content {len(message)} chars]\n{status}")
+if scenario in {"current_notice", "current_coalesced", "current_chunked", "current_disappears"}:
+    status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
+paste_screen = f"\u203a [Pasted Content {len(message)} chars]\n{status}"
+if scenario in {"current_notice", "current_coalesced", "current_chunked"}:
+    os.write(1, framed(paste_screen))
+else:
+    display(paste_screen)
 assert os.read(0, 1) == b"\r"
+
+if scenario == "current_ack_guard":
+    status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
+    display(
+        "NATIVE_PENDING\nTask says esc to interrupt\n\u203a Ask Codex to do anything\n" + status
+    )
+    (root / "unexpected-input").write_bytes(os.read(0, 1))
+    raise SystemExit(3)
 
 
 def resized(signum: int, frame: object) -> None:
@@ -79,6 +110,8 @@ def resized(signum: int, frame: object) -> None:
 
 
 signal.signal(signal.SIGWINCH, resized)
+if scenario == "current_ack_only":
+    status = (screens / "initial-minimal.txt").read_text().splitlines()[-1]
 if scenario == "current_pending":
     display("Working (0s • esc to interrupt)\nNATIVE INTERACTION")
     # Explicit parent-controlled boundary: no complete working status yet.
@@ -87,7 +120,14 @@ if scenario == "current_pending":
         if time.monotonic() >= deadline:
             raise RuntimeError("Parent did not release the pending Plan status")
         time.sleep(0.01)
-display(f"Working (0s • esc to interrupt)\nNATIVE INTERACTION\n{status}")
+working_screen = "NATIVE INTERACTION\nWorking (0s • esc to interrupt)\n"
+if current:
+    working_screen += "\u203a Ask Codex to do anything\n"
+working_screen += status
+if scenario in {"current_notice", "current_coalesced", "current_chunked"}:
+    os.write(1, framed(working_screen))
+else:
+    display(working_screen)
 answer = os.read(0, 1)
 (root / "answer").write_bytes(answer)
 if scenario == "exit_race":

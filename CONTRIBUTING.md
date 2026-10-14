@@ -10,6 +10,12 @@ It observes Codex (0.154.0 or newer) screen state, submits `/plan`, and exposes 
 Consumers own the initial task via the one-shot input port; native questions
 and subsequent keyboard input remain in Codex. Keep only a version floor (no
 exact-version allowlist; unrecognized screens already fail closed) and replace this adapter when a native pre-prompt Plan selector is verified.
+Plan activation and task acknowledgement are separate startup boundaries. Once
+activation is observed, a later redraw may omit the Plan footer. Confirm the
+paste in the native composer and acknowledge the submitted turn from the native
+working row beside the cleared composer; task/body mentions of interrupt are
+insufficient. Observe each completed synchronized redraw, rather than assuming
+one PTY read contains one native frame. Retain the input guard until acknowledgement.
 Deterministic tests use nested PTYs and a fake CLI; live evidence is documented
 in `docs/codex-terminal-plan-verification.md`. The separate app-server collector
 retains its own `collector_verified_version` floor.
