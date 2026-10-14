@@ -84,6 +84,15 @@ Observed screens, with directory/session details sanitized in
   canonicalizing HOME was necessary to observe bare `~`. Root/home fixtures
   and path-boundary tests retain rejection of relative and `~someone` fields
   while preserving long paths and paths containing spaces.
+  Startup-only captures also show `o3 high`, `o4-mini high`,
+  `codex-mini-latest high`, and lowercase `gpt-4.1 high` in the same native
+  model-with-reasoning field. With no explicit effort, native `o3` and `gpt-4.1`
+  show `default` in that field. Readiness recognizes the model token generically,
+  without a brand allowlist, while retaining the native banner, bottommost empty
+  composer, known effort, and directory structure. Captures used the same isolated
+  inert-provider setup; no alternate-model inference, authentication, or model
+  availability was verified. All real planning and review turns remained
+  `gpt-6.1-sol`/high.
 - Typing `/plan` shows a selected `› /plan  switch to Plan mode` suggestion
   above the actual `› /plan` composer. Enter activates the footer's `Plan mode`
   label, followed by the warning. The empty composer text is unchanged.

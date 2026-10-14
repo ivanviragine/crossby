@@ -58,6 +58,22 @@ def test_current_ready_footer_can_omit_context_and_truncate_cwd(name: str) -> No
     assert _Startup("Task", None).advance(current_screen(name)) == b"/plan"
 
 
+@pytest.mark.parametrize("model", ["o3", "o4-mini", "codex-mini-latest", "gpt-4.1"])
+def test_compatible_models_use_the_observed_native_model_effort_field(model: str) -> None:
+    assert CodexAdapter().is_model_compatible(model)
+    assert _Startup("Task", None).advance(current_screen(f"initial-{model}")) == b"/plan"
+
+
+def test_loaded_model_token_is_not_a_brand_allowlist() -> None:
+    screen = current_screen("initial").replace("GPT-6.1-Sol", "custom-provider/model:variant")
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("model", ["o3", "gpt-4.1"])
+def test_unspecified_effort_uses_the_observed_native_default_field(model: str) -> None:
+    assert _Startup("Task", None).advance(current_screen(f"initial-{model}-default")) == b"/plan"
+
+
 @pytest.mark.parametrize("name", ["initial", "initial-minimal"])
 @pytest.mark.parametrize("directory", ["/tmp/loading", "/tmp/lazy-loading"])
 def test_directory_name_is_not_a_loading_status(name: str, directory: str) -> None:
@@ -163,7 +179,7 @@ def test_observed_current_native_screens_submit_exactly_once() -> None:
         "An assistant mentioned GPT-6.1-Sol high and Plan mode\n\u203a Ask Codex to do anything",
         current_screen("initial").replace(">_ OpenAI Codex (v0.162.1)", "Unknown application"),
         current_screen("initial").replace("GPT-6.1-Sol high", "loading"),
-        current_screen("initial").replace("GPT-6.1-Sol high", "Unknown high"),
+        current_screen("initial").replace("GPT-6.1-Sol high", "Unrecognized screen"),
         current_screen("initial").replace(
             "\u203a Ask Codex to do anything", "\u203a Unknown composer"
         ),

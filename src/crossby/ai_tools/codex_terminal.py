@@ -132,7 +132,7 @@ class _Startup:
             footer_ready = bool(
                 re.search(r"(?m)^\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*$", rendered)
                 and re.match(
-                    r"\s*GPT-[\w.-]+ (?:minimal|low|medium|high|xhigh) · (?:/|~(?:/|(?=\s|$)))",
+                    r"\s*[^\s·]+ (?:default|minimal|low|medium|high|xhigh) · (?:/|~(?:/|(?=\s|$)))",
                     footer,
                 )
             )
