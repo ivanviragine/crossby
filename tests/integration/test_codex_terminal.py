@@ -53,13 +53,21 @@ def spawn(root: Path, scenario: str = "success"):
     )
 
 
-@pytest.mark.parametrize("scenario", ["success", "trust", "reply", "exit_race"])
+@pytest.mark.parametrize(
+    "scenario", ["success", "current", "trust", "current_trust", "reply", "exit_race"]
+)
 def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: str) -> None:
     child = spawn(tmp_path, scenario)
     try:
         if scenario == "trust":
             child.expect_exact("Do you trust the contents of this directory?")
             child.send("y")
+        if scenario == "current_trust":
+            child.expect_exact("enter continue · esc quit")
+            assert not (tmp_path / "events").exists()
+            assert not (tmp_path / "message").exists()
+            assert not (tmp_path / "trust-answer").exists()
+            child.send("\r")
         if scenario == "reply":
             child.expect_exact("\x1b[6n")
             child.send("\x1b[12;")
@@ -74,6 +82,8 @@ def test_native_ui_prompt_once_resize_input_and_exit(tmp_path: Path, scenario: s
         assert (tmp_path / "message").read_text() == (tmp_path / "prompt").read_text()
         assert (tmp_path / "events").read_text().splitlines() == ["plan_ready", "message_submitted"]
         assert (tmp_path / "answer").read_bytes() == b"q"
+        if scenario == "current_trust":
+            assert (tmp_path / "trust-answer").read_bytes() == b"\r"
         assert json.loads((tmp_path / "size").read_text()) == [100, 40]
         assert (tmp_path / "restored").read_text() == "True"
         assert "NATIVE INTERACTION" in (tmp_path / "transcript").read_text()

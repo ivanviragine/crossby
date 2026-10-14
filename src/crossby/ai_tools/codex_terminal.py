@@ -92,20 +92,50 @@ class _Startup:
         # At wider widths Codex appends a shortcut hint and warnings after the mode label.
         # Check the status line for the label, not just its final characters.
         plan_status = bool(re.search(r"(?:^|\s)Plan mode(?:\s|$)", footer))
-        empty = any(line.lstrip() == "\u203a Ask Codex to do anything" for line in lines)
         # Slash-command suggestions can also start with the prompt marker and appear above the
         # actual composer. The composer is the bottommost such line.
         composer = next(
             (line.lstrip()[2:] for line in reversed(lines) if line.lstrip().startswith("\u203a ")),
             "",
         )
-        self.user_screen = self.phase is _Phase.READY and (
-            "Do you trust the contents of this directory?" in " ".join(rendered.split())
-            or "sign in" in rendered.lower()
+        empty = composer == "Ask Codex to do anything"
+        normalized = " ".join(rendered.split())
+        legacy_trust = "Do you trust the contents of this directory?" in normalized
+        login = "sign in" in rendered.lower()
+        folder_access = any(line.strip() == "Folder access" for line in lines)
+        # 0.162.1 replaced the legacy trust question with this native modal.
+        # Only a complete, observed dialog permits caller keyboard input;
+        # partial redraws block injection without approving anything.
+        modern_trust = (
+            bool(lines)
+            and lines[0].strip() == "Folder access"
+            and "Trust this folder? Codex can read, edit, and run files here" in normalized
+            and "Your trust decision will be saved." in normalized
+            and "1. Trust and continue" in normalized
+            and "2. Quit" in normalized
+            and composer in {"1. Trust and continue", "2. Quit"}
+            and footer.strip() == "enter continue · esc quit"
         )
+        blocked = legacy_trust or login or folder_access
+        self.user_screen = self.phase is _Phase.READY and (legacy_trust or login or modern_trust)
+        if blocked and self.phase in {_Phase.READY, _Phase.COMMAND, _Phase.PLAN}:
+            return b""
         if self.phase is _Phase.READY:
-            loaded = re.search(r"model:\s+(?!loading\b)\S", rendered)
-            if loaded and empty and not self.user_screen:
+            # Legacy Codex shows a model header; 0.162.1 instead shows the
+            # selected model/effort in a status footer below the composer.
+            # Require the native banner AND the model/effort/cwd footer, not
+            # model names in body text. Context and later fields disappear at
+            # narrow widths; even the cwd can be truncated with an ellipsis.
+            loaded = re.search(r"(?m)^\s*[│ ]*model:\s+(?!loading\b)\S", rendered)
+            footer_ready = bool(
+                re.search(r"(?m)^\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*$", rendered)
+                and re.match(
+                    r"\s*GPT-[\w.-]+ (?:minimal|low|medium|high|xhigh) · (?:/|~/)\S",
+                    footer,
+                )
+                and not re.search(r"\bloading\b", footer, re.IGNORECASE)
+            )
+            if (loaded or footer_ready) and empty:
                 self.phase = _Phase.COMMAND
                 return b"/plan"
         elif self.phase is _Phase.COMMAND and composer == "/plan":
@@ -132,10 +162,13 @@ class _Startup:
             first_line = next(
                 line for line in self.port.message.splitlines() if line.strip()
             ).expandtabs(4)
-            if composer == placeholder or (
-                len(self.port.message) <= 1000
-                and composer.startswith(first_line[:40])
-                and bool(first_line[:40].strip())
+            if plan_status and (
+                composer == placeholder
+                or (
+                    len(self.port.message) <= 1000
+                    and composer.startswith(first_line[:40])
+                    and bool(first_line[:40].strip())
+                )
             ):
                 self.phase = _Phase.START
                 return b"\r"

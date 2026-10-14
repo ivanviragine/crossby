@@ -2,6 +2,8 @@
 
 Verified 2026-09-15 on macOS with Codex CLI 0.154.0. Startup and first-turn
 submission were rechecked 2026-09-25 with Codex CLI 0.157.0.
+Native planning through a final proposed plan was rechecked 2026-10-14 with
+Codex CLI 0.162.1, model `gpt-6.1-sol`, and high effort.
 
 ## Why the terminal adapter exists
 
@@ -49,6 +51,98 @@ observe the Plan indicator, emit `PLAN_READY`, submit a short task, and emit
 `MESSAGE_SUBMITTED` after the first native Plan turn began. This live check used
 an isolated temporary directory and exited normally. It did not exercise the
 full plan artifact handoff or every approval/sandbox combination.
+
+## Codex CLI 0.162.1 check
+
+The installed `/opt/homebrew/bin/codex` reported `codex-cli 0.162.1`.
+Direct screen inspection used a disposable fixture and this native command:
+
+```sh
+/opt/homebrew/bin/codex --no-alt-screen -m gpt-6.1-sol \
+  --sandbox workspace-write -a on-request \
+  -c 'model_reasoning_effort="high"' \
+  -c 'plan_mode_reasoning_effort="high"'
+```
+
+Observed screens, with directory/session details sanitized in
+`tests/fixtures/plan_sessions/codex_0_162_1/`:
+
+- Startup shows `>_ OpenAI Codex (v0.162.1)` and a directory, with no `model:`
+  header. The empty composer remains `› Ask Codex to do anything`.
+- The status footer starts `GPT-6.1-Sol high · /…`. At 140 columns it also
+  includes `Context 0% used`, usage/session information, and a warning. At 80
+  columns the directory is truncated and Context is omitted; at 100 columns
+  Context itself is truncated. Readiness requires the native banner, bottommost
+  empty composer, and model/effort/directory footer, rather than Context text.
+  Independent native captures with the default layout and an explicit minimal
+  `tui.status_line=["model-with-reasoning","current-dir"]` also omit Context;
+  both layouts are included in the regression fixtures.
+- Typing `/plan` shows a selected `› /plan  switch to Plan mode` suggestion
+  above the actual `› /plan` composer. Enter activates the footer's `Plan mode`
+  label, followed by the warning. The empty composer text is unchanged.
+- Short task text wraps in the composer. A real 1,855-character bracketed paste
+  displays `[Pasted Content 1855 chars]`. The working screen retains the Plan
+  footer and includes `Working (… • esc to interrupt)`.
+- Native `request_user_input` replaces the composer/footer with a question and
+  numbered choices. The final `Proposed Plan` opens the native `Implement this
+  plan?` menu. Neither screen is treated as a ready composer by regression tests.
+
+The candidate-code check used the public `CodexAdapter.launch()` with
+`plan_mode=True`, `model="gpt-6.1-sol"`, `effort=EffortLevel.HIGH`,
+`sandbox=True`, and an `on_event` callback. Candidate `src/` was supplied through
+`PYTHONPATH`; the installed Crossby/Wade packages were not changed. The adapter
+built the terminal wrapper around:
+
+```sh
+codex --model gpt-6.1-sol --no-alt-screen \
+  -c 'model_reasoning_effort="high"' \
+  -c 'plan_mode_reasoning_effort="high"'
+```
+
+This disposable non-worktree launch used default approvals (no yolo, auto, or
+accept-edits overrides) and normal existing authentication without copying or
+printing credentials or editing user config. The native rollout recorded
+`workspace-write` with network disabled, and an effective granular approval
+policy: sandbox approval, rules, and skill approval false; permission requests
+and MCP elicitations true. No trust or command-approval prompt appeared, so this
+run does not verify interactive approval handling.
+
+At 80 columns and 40 rows, Crossby emitted `PLAN_READY` once, sent one task, then
+emitted `MESSAGE_SUBMITTED` once. Codex read only the fixture's `greeting.py` and
+asked which greeting to use. Enter selected `Hi (Recommended)` through the native
+question UI. Codex rendered a final proposed plan to replace `print("Hello")`
+with `print("Hi")` and verify its output. The probe explicitly selected `No,
+stay in Plan mode`, then exited with `/exit` (status 0); the fixture remained
+unchanged.
+
+The run's own rollout confirmed native collaboration mode `plan`, model
+`gpt-6.1-sol`, and effort `high`, with exactly one task. CLI 0.162.1 records the
+user task as a `response_item` message, rather than the older `event_msg`
+`user_message`, and trims its final newline: 1,855 characters sent, 1,854 recorded.
+The initial evidence postprocessor assumed the older event type and failed after
+the successful native exit; checking the current message representation confirmed
+the task exactly after that native newline normalization.
+
+A subsequent supervisor probe of Wade in a fresh detached worktree exposed a
+second startup boundary: Codex displays `Folder access`, `Trust this folder?`,
+`1. Trust and continue`, `2. Quit`, and `enter continue · esc quit`. The old
+legacy-only trust matcher rejected the caller's Enter key. The adapter now
+recognizes the complete observed modal and relays actual caller keystrokes while
+waiting for readiness. It never generates trust approval; partial or unknown
+dialogs remain blocked under the same startup deadline. Unit tests cover the
+Trust and Quit selections, incomplete/unknown screens, and the legacy prompt.
+Nested PTY coverage verifies no task/event before an explicit caller Enter, then
+normal Plan startup. The sanitized native trust capture is `trust.txt` beside
+the current-screen fixtures. The supervisor reruns the actual Wade handoff proof
+separately after this fix.
+
+This demonstrates a real native final plan through the candidate Crossby
+adapter. The bootstrap repair plan and independent Wade headless reviews are
+separate artifacts, not native proof. The supervisor separately validates Wade's
+actual planning entrypoint with the candidate dependency in an isolated
+environment; this adapter smoke does not establish Wade's plan-file handoff.
+The current model was not run on CLI 0.154.0, which rejects it; legacy screen
+support is retained through deterministic tests and the earlier live evidence.
 
 ## Deterministic checks
 
