@@ -282,6 +282,7 @@ class Bridge:
         self.reader_started = False
         self.sending = False
         self.message_id: str | None = None
+        self.admission_events: list[dict[str, Any]] = []
         self.turn_id: str | None = None
         self.started = False
         self.final: str | None = None
@@ -363,6 +364,33 @@ class Bridge:
         with self.lock:
             return bool(self.event_sizes)
 
+    def bind_initial_turn(self, turn_id: str | None) -> None:
+        self.reader_started = True
+        if turn_id is not None and self.turn_id is None:
+            self.context.set_provenance(turn_id=turn_id)
+            self.turn_id = turn_id
+
+    def admit(self, message_id: str) -> None:
+        # Notifications can precede their send acknowledgement. Resolve their
+        # exact correlated initial turn in wire order, on the same reader,
+        # before subsequent notifications or ordered observer workers run.
+        for event in self.admission_events:
+            kind, data = event["type"], event["data"]
+            candidate = (
+                data.get("messageId")
+                if kind == "user.message"
+                else data.get("originatingMessageId")
+            )
+            if candidate == message_id:
+                self.bind_initial_turn(
+                    identity(data["turnId"]) if data.get("turnId") is not None else None
+                )
+            elif kind == "assistant.usage" and self.reader_started:
+                self.record_usage(data, identity(event["id"]))
+        self.admission_events.clear()
+        # Release ordered processing only after native evidence is retained.
+        self.message_id = message_id
+
     def before_stop(self) -> None:
         assert self.controller is not None
         self.controller._abort(
@@ -405,24 +433,33 @@ class Bridge:
             kind = event["type"]
             if not isinstance(data, dict):
                 raise ValueError("Copilot event data is not an object")
+            self.reserve_event(params)
             if not event.get("agentId"):
                 if self.reader_terminal and kind in _ACTIVE_EVENTS:
                     raise ValueError("Copilot emitted substantive root output after terminal idle")
-                if self.message_id is not None and (
-                    (kind == "user.message" and data.get("messageId") == self.message_id)
-                    or (
-                        kind == "assistant.message"
-                        and data.get("originatingMessageId") == self.message_id
-                    )
+                candidate = (
+                    data.get("messageId")
+                    if kind == "user.message"
+                    else data.get("originatingMessageId")
+                    if kind == "assistant.message"
+                    else None
+                )
+                if self.sending and candidate is not None:
+                    candidate = identity(candidate)
+                    turn_id = identity(data["turnId"]) if data.get("turnId") is not None else None
+                    if candidate == self.message_id:
+                        # Native model turns can advance within one prompt.
+                        self.bind_initial_turn(turn_id)
+                if (
+                    self.sending
+                    and self.message_id is None
+                    and kind in {"user.message", "assistant.message", "assistant.usage"}
                 ):
-                    self.reader_started = True
-                    if data.get("turnId") is not None and self.turn_id is None:
-                        turn_id = identity(data["turnId"])
-                        # Native model turns advance after tool execution within
-                        # one submitted message. Keep its initial native turn;
-                        # originatingMessageId binds subsequent model results.
-                        self.turn_id = turn_id
-                        self.context.set_provenance(turn_id=turn_id)
+                    if len(self.admission_events) >= _MAX_IDS:
+                        raise ValueError("Copilot exceeded the send-admission record limit")
+                    # References share the existing reserved-byte budget; no
+                    # second unbounded copy or SDK reconstruction is retained.
+                    self.admission_events.append(event)
                 if (
                     kind == "session.idle"
                     and self.reader_started
@@ -433,7 +470,6 @@ class Bridge:
                         if self.pending:
                             self.native_failed = True
                     self.revoke()
-            self.reserve_event(params)
             if kind in {"permission.completed", "elicitation.completed"}:
                 if kind == "permission.completed" and data.get("result", {}).get(
                     "kind", ""
@@ -950,7 +986,7 @@ def client_for(bridge: Bridge) -> Any:
 
                 def bind_message(response: Any) -> None:
                     try:
-                        bridge.message_id = identity(response["messageId"])
+                        bridge.admit(identity(response["messageId"]))
                     except BaseException as exc:
                         bridge.fail(exc)
 

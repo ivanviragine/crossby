@@ -334,6 +334,10 @@ Default sandbox behavior remains native/tool-managed.
 The submitted native message ID binds root final output; child/background output
 cannot replace it. Turn provenance retains the initial native turn ID; model
 turns can advance after tool execution within the same submitted message.
+Send admission resolves buffered correlated events in native wire order before
+later assistant notifications or observer workers can select the initial turn.
+Pre-admission usage following that correlated turn is retained before the
+ordered consumer is released to fallible event observers.
 Root idle requires correlated response evidence and no live
 interactions. Native error, aborted idle, premature EOF and SDK parsing errors
 cannot become success from idle or exit zero. Safe session/failure/denial/usage

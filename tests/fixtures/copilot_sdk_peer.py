@@ -65,7 +65,9 @@ def finish():
             "messageId": "assistant-result",
             "content": "result ✓",
             "originatingMessageId": message_id,
-            "turnId": "1" if scenario in {"multi-turn", "question", "form"} else "0",
+            "turnId": "1"
+            if scenario in {"multi-turn", "question", "form", "delayed-multi-turn"}
+            else "0",
         },
     )
     event(
@@ -154,11 +156,21 @@ while True:
             )
             continue
         result = {"messageId": message_id}
-        if scenario in {"send-delay", "large-event-burst"}:
+        if scenario in {"send-delay", "large-event-burst", "delayed-multi-turn", "delayed-usage"}:
             event(
                 "user.message",
                 {"content": params["prompt"], "messageId": message_id, "turnId": "0"},
             )
+            if scenario == "delayed-usage":
+                event(
+                    "assistant.usage",
+                    {
+                        "model": "synthetic",
+                        "inputTokens": 3,
+                        "outputTokens": 4,
+                        "apiCallId": "pre-admission-call",
+                    },
+                )
             for _ in range(16 if scenario == "large-event-burst" else 12):
                 if scenario == "large-event-burst":
                     event(
@@ -172,7 +184,11 @@ while True:
     if method == "session.send":
         if scenario == "old-idle":
             event("session.idle", {"mode": "interactive", "aborted": True})
-        event("user.message", {"content": params["prompt"], "messageId": message_id, "turnId": "0"})
+        if scenario != "delayed-multi-turn":
+            event(
+                "user.message",
+                {"content": params["prompt"], "messageId": message_id, "turnId": "0"},
+            )
         if scenario in {
             "question",
             "withdraw-question",

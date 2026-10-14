@@ -519,6 +519,45 @@ def test_native_model_turns_can_advance_within_one_submitted_message(peer):
     assert result.turn_id == "0"
 
 
+def test_pre_admission_user_turn_binds_before_continuation_reader(peer, monkeypatch):
+    from crossby.ai_tools.copilot_sdk import Bridge
+
+    final_read = threading.Event()
+    original_observe, original_event = Bridge.observe, Bridge.event
+
+    def observe(self, frame):
+        original_observe(self, frame)
+        raw = frame.get("params", {}).get("event", {})
+        if raw.get("type") == "assistant.message" and raw["data"].get("turnId") == "1":
+            final_read.set()
+
+    def event(self, raw):
+        if raw["type"] == "user.message":
+            # Force the ordered worker behind the native continuation. Native
+            # admission and frame parsing still run through the real SDK.
+            assert final_read.wait(1)
+        original_event(self, raw)
+
+    monkeypatch.setattr(Bridge, "observe", observe)
+    monkeypatch.setattr(Bridge, "event", event)
+    result, _ = peer("delayed-multi-turn", idle_timeout_seconds=0.25)
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.turn_id == "0"
+    assert result.final_text == "result ✓"
+
+
+def test_pre_admission_usage_is_retained_before_progress_observer_error(peer):
+    def observer(event):
+        if event.kind is HeadlessEventKind.PROGRESS:
+            raise RuntimeError("synthetic observer refusal")
+
+    with pytest.raises(HeadlessTransportError) as error:
+        peer("delayed-usage", observer=observer, idle_timeout_seconds=0.25)
+    assert error.value.partial.turn_id == "0"
+    assert error.value.partial.usage.input_tokens == 3
+    assert error.value.partial.usage.output_tokens == 4
+
+
 def test_large_sdk_events_are_bounded_before_send_admission(peer, monkeypatch):
     from crossby.ai_tools.copilot_sdk import Bridge
     from crossby.ai_tools.plan_process import _QUEUED_OUTPUT_BYTES_LIMIT
