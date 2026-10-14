@@ -33,6 +33,204 @@ WIDE_PLAN = (
     "GPT-5.6-Sol high · /tmp/plan-worktree · Context 0% used · weekly 45% left · session "
     "Plan mode (shift+tab to cycle)    ⚠ 1 warning · f2 to view"
 )
+CURRENT_SCREENS = Path(__file__).parents[2] / "fixtures/plan_sessions/codex_0_162_1"
+
+
+def current_screen(name: str) -> str:
+    return (CURRENT_SCREENS / f"{name}.txt").read_text()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "initial-80",
+        "initial-100",
+        "initial-120",
+        "initial",
+        "initial-default",
+        "initial-minimal",
+        "initial-branch",
+        "initial-root",
+        "initial-home",
+    ],
+)
+def test_current_ready_footer_can_omit_context_and_truncate_cwd(name: str) -> None:
+    assert _Startup("Task", None).advance(current_screen(name)) == b"/plan"
+
+
+@pytest.mark.parametrize("model", ["o3", "o4-mini", "codex-mini-latest", "gpt-4.1"])
+def test_compatible_models_use_the_observed_native_model_effort_field(model: str) -> None:
+    assert CodexAdapter().is_model_compatible(model)
+    assert _Startup("Task", None).advance(current_screen(f"initial-{model}")) == b"/plan"
+
+
+def test_loaded_model_token_is_not_a_brand_allowlist() -> None:
+    screen = current_screen("initial").replace("GPT-6.1-Sol", "custom-provider/model:variant")
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("model", ["o3", "gpt-4.1"])
+def test_unspecified_effort_uses_the_observed_native_default_field(model: str) -> None:
+    assert _Startup("Task", None).advance(current_screen(f"initial-{model}-default")) == b"/plan"
+
+
+@pytest.mark.parametrize("name", ["initial", "initial-minimal"])
+@pytest.mark.parametrize("directory", ["/tmp/loading", "/tmp/lazy-loading"])
+def test_directory_name_is_not_a_loading_status(name: str, directory: str) -> None:
+    screen = current_screen(name).replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("directory", ["/", "~", "~/project", "/tmp/native plan with spaces"])
+def test_current_ready_accepts_complete_root_home_and_spaced_directory_fields(
+    directory: str,
+) -> None:
+    screen = current_screen("initial").replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize("directory", ["relative/path", "~someone", "unknown"])
+def test_current_ready_rejects_unrecognized_directory_fields(directory: str) -> None:
+    screen = current_screen("initial").replace("/tmp/native-plan-fixture", directory)
+    assert _Startup("Task", None).advance(screen) == b""
+
+
+@pytest.mark.parametrize(
+    "metadata", ["feat/loading", "loading-project", "loading thread title", "Loading model"]
+)
+def test_free_footer_metadata_does_not_override_loaded_model(metadata: str) -> None:
+    screen = current_screen("initial-branch").replace("feat/loading", metadata)
+    assert _Startup("Task", None).advance(screen) == b"/plan"
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "Do you trust the contents of this directory?",
+        current_screen("trust"),
+        current_screen("trust").replace(
+            "\u203a 1. Trust and continue\n  2. Quit", "  1. Trust and continue\n\u203a 2. Quit"
+        ),
+    ],
+)
+def test_trust_requires_caller_keyboard_before_automatic_startup(screen: str) -> None:
+    startup = _Startup("Task", None)
+    for _ in range(2):
+        assert startup.advance(screen) == b""
+        assert startup.user_screen
+        assert startup.phase is _Phase.READY
+        assert startup.port.message is None
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert not startup.user_screen
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        current_screen("trust").replace("Folder access", "Unrecognized dialog"),
+        current_screen("trust").replace("Trust this folder?", "Unknown question?"),
+        current_screen("trust").replace("Your trust decision will be saved.", "Loading"),
+        current_screen("trust").replace("1. Trust and continue", "1. Unknown action"),
+        current_screen("trust").replace("2. Quit", ""),
+        current_screen("trust").replace("enter continue · esc quit", ""),
+        "Assistant quoted this dialog:\n" + current_screen("trust"),
+        "Folder access\nLoading",
+    ],
+)
+def test_partial_or_unknown_trust_dialog_never_allows_input_or_injection(screen: str) -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(screen) == b""
+    assert not startup.user_screen
+    assert startup.phase is _Phase.READY
+    assert startup.port.message is None
+
+
+def test_observed_current_native_screens_submit_exactly_once() -> None:
+    received: list[InteractiveLaunchEventKind] = []
+
+    def handler(event: InteractiveLaunchEvent, session: InteractiveSession) -> None:
+        received.append(event.kind)
+        if event.kind is InteractiveLaunchEventKind.PLAN_READY:
+            session.send_message(
+                "Plan changing greeting.py from Hello to a user-selected greeting."
+            )
+
+    startup = _Startup(None, handler)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    assert startup.advance(current_screen("plan")).startswith(b"\x1b[200~")
+    assert startup.advance(current_screen("plan")) == b""
+    assert startup.advance(current_screen("paste")) == b"\r"
+    assert startup.advance(current_screen("paste")) == b""
+    assert startup.advance(current_screen("working")) == b""
+    assert startup.phase is _Phase.ACTIVE
+    assert startup.advance(current_screen("question")) == b""
+    assert startup.advance(current_screen("final")) == b""
+    assert received == [
+        InteractiveLaunchEventKind.PLAN_READY,
+        InteractiveLaunchEventKind.MESSAGE_SUBMITTED,
+    ]
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "GPT-6.1-Sol high\n\u203a Ask Codex to do anything",
+        "An assistant mentioned GPT-6.1-Sol high and Plan mode\n\u203a Ask Codex to do anything",
+        current_screen("initial").replace(">_ OpenAI Codex (v0.162.1)", "Unknown application"),
+        current_screen("initial").replace("GPT-6.1-Sol high", "loading"),
+        current_screen("initial").replace("GPT-6.1-Sol high", "Unrecognized screen"),
+        current_screen("initial").replace(
+            "\u203a Ask Codex to do anything", "\u203a Unknown composer"
+        ),
+        current_screen("initial") + "Unknown modal\n\u203a 1. Continue",
+        current_screen("initial") + "Sign in to continue",
+        current_screen("initial") + "Do you trust the contents of this directory?",
+        current_screen("question"),
+        current_screen("final"),
+        READY.replace(
+            "\u203a Ask Codex to do anything", "\u203a Ask Codex to do anything\n\u203a /unknown"
+        ),
+    ],
+)
+def test_unrecognized_loading_and_blocked_ready_screens_never_inject(screen: str) -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(screen) == b""
+    assert startup.phase is _Phase.READY
+    assert startup.port.message is None
+
+
+def test_current_plan_indicator_must_be_in_footer_and_composer_empty() -> None:
+    startup = _Startup("Task", None)
+    assert startup.advance(current_screen("initial")) == b"/plan"
+    assert startup.advance(current_screen("command")) == b"\r"
+    for screen in [
+        "Assistant mentioned Plan mode\n" + current_screen("initial"),
+        current_screen("plan") + "Unknown modal\n\u203a 1. Continue",
+        current_screen("question"),
+        current_screen("final"),
+    ]:
+        assert startup.advance(screen) == b""
+        assert startup.phase is _Phase.PLAN
+        assert startup.port.message is None
+
+
+def test_task_about_sign_in_is_not_mistaken_for_startup_login() -> None:
+    startup = _Startup("Plan sign in improvements", None)
+    activate(startup)
+    assert startup.advance("\u203a Plan sign in improvements\ngpt Plan mode") == b"\r"
+    assert (
+        startup.advance("Plan sign in improvements\nWorking • esc to interrupt\ngpt Plan mode")
+        == b""
+    )
+    assert startup.phase is _Phase.ACTIVE
+
+
+def test_paste_confirmation_without_plan_footer_never_submits() -> None:
+    startup = _Startup("Task", None)
+    activate(startup)
+    assert startup.advance("\u203a Task\nUnknown modal") == b""
+    assert startup.phase is _Phase.PASTE
 
 
 def activate(startup: _Startup) -> bytes:

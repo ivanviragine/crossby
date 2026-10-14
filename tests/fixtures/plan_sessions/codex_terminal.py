@@ -10,6 +10,8 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 scenario = sys.argv[2]
+current = scenario in {"current", "current_pending", "current_trust"}
+screens = Path(__file__).with_name("codex_0_162_1")
 tty.setraw(sys.stdin.fileno())
 (root / "pid").write_text(str(os.getpid()))
 
@@ -38,19 +40,35 @@ if scenario == "unknown":
 if scenario == "trust":
     display("Do you trust the contents of this directory?")
     assert os.read(0, 1) == b"y"
+if scenario == "current_trust":
+    display((screens / "trust.txt").read_text())
+    answer = os.read(0, 1)
+    (root / "trust-answer").write_bytes(answer)
+    assert answer == b"\r"
 if scenario == "reply":
     display("\x1b[6n")
     assert read_until(b"R") == b"\x1b[12;3R"
-display("model: test\n\u203a Ask Codex to do anything\ntest")
+display(
+    (screens / "initial.txt").read_text()
+    if current
+    else "model: test\n\u203a Ask Codex to do anything\ntest"
+)
 assert read_until(b"n") == b"/plan"
-display("\u203a /plan\n/plan switch to Plan mode")
+display(
+    (screens / "command.txt").read_text() if current else "\u203a /plan\n/plan switch to Plan mode"
+)
 assert os.read(0, 1) == b"\r"
-display("model: test\n\u203a Ask Codex to do anything\ntest Plan mode")
+display(
+    (screens / "plan.txt").read_text()
+    if current
+    else "model: test\n\u203a Ask Codex to do anything\ntest Plan mode"
+)
 paste = read_until(b"\x1b[201~")
 assert paste.startswith(b"\x1b[200~")
 message = paste[6:-6].decode()
 (root / "message").write_text(message)
-display(f"\u203a [Pasted Content {len(message)} chars]\ntest Plan mode")
+status = (screens / "plan.txt").read_text().splitlines()[-1] if current else "test Plan mode"
+display(f"\u203a [Pasted Content {len(message)} chars]\n{status}")
 assert os.read(0, 1) == b"\r"
 
 
@@ -61,7 +79,15 @@ def resized(signum: int, frame: object) -> None:
 
 
 signal.signal(signal.SIGWINCH, resized)
-display("Working (0s • esc to interrupt)\nNATIVE INTERACTION\ntest Plan mode")
+if scenario == "current_pending":
+    display("Working (0s • esc to interrupt)\nNATIVE INTERACTION")
+    # Explicit parent-controlled boundary: no complete working status yet.
+    deadline = time.monotonic() + 2
+    while not (root / "show-status").exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Parent did not release the pending Plan status")
+        time.sleep(0.01)
+display(f"Working (0s • esc to interrupt)\nNATIVE INTERACTION\n{status}")
 answer = os.read(0, 1)
 (root / "answer").write_bytes(answer)
 if scenario == "exit_race":
