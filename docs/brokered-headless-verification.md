@@ -297,8 +297,11 @@ not verification of a model's work quality.
 The SDK's built-in child ownership and unbounded readers/writers are replaced
 through narrowly audited per-instance seams. Crossby owns one cleanup chain,
 1 MiB framed messages, bounded pending records, physical reply commitment,
-current idle/overall read authority and process-tree teardown. Cancelling a
-waiting coroutine does not stop its executor thread: closure and request
+current idle/overall read authority and process-tree teardown. A
+waiting event consumer cannot bypass the shared 8 MiB event budget: bytes are
+reserved in the native reader before SDK notification scheduling and released
+after processing. Only relevant root event data is retained.
+Cancelling a waiting coroutine does not stop its executor thread: closure and request
 withdrawal wake workers before executor shutdown. A stalled or partial write
 is never retried; native abort is attempted within its cleanup grace first.
 
@@ -310,6 +313,8 @@ Native completion withdraws both the handler and interaction event observer.
 Handler errors and invalid responses never authorize a tool. Permission replies
 are generated approve-once, reject or user-not-available decisions, with no
 permanent/session/location grant inferred from a display label.
+Child ownership from the native event or request is preserved; unsupported
+child permissions, forms and questions never reach the root handler.
 
 Permission operations retain bounded detached raw input, including managed
 approval requirements. Only native `resolvedWorkingDirectory`/`resolvedPath`
@@ -327,8 +332,15 @@ effort, explicit network access and sandbox disabling are rejected in preflight.
 Default sandbox behavior remains native/tool-managed.
 
 The submitted native message ID binds root final output; child/background output
-cannot replace it. Root idle requires correlated response evidence and no live
+cannot replace it. Turn provenance retains the initial native turn ID; model
+turns can advance after tool execution within the same submitted message.
+Root idle requires correlated response evidence and no live
 interactions. Native error, aborted idle, premature EOF and SDK parsing errors
 cannot become success from idle or exit zero. Safe session/failure/denial/usage
 provenance is retained before fallible event observers; caller timeout and cancel
 remain authoritative after native abort/cleanup.
+Create/resume requires the runtime's exact returned session ID. Ordinary work
+sets and verifies native interactive mode, rejecting deferred transitions or
+model changes, and sends interactive message provenance. Reader-side message
+binding fences substantive root events and interaction replies at terminal
+idle before asynchronous SDK dispatch can approve late work.

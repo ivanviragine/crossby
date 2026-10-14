@@ -12,6 +12,7 @@ scenario = os.environ.get("CROSSBY_COPILOT_SCENARIO", "success")
 log = Path(os.environ["CROSSBY_COPILOT_LOG"])
 sid = None
 message_id = "submitted-message"
+native_mode = "autopilot" if scenario == "resume-autopilot" else "plan"
 
 
 def write(frame):
@@ -39,6 +40,18 @@ def event(kind, data, agent=None):
 
 
 def finish():
+    if scenario == "multi-turn":
+        event(
+            "assistant.message",
+            {
+                "messageId": "intermediate",
+                "content": "intermediate",
+                "originatingMessageId": message_id,
+                "turnId": "0",
+            },
+        )
+        event("assistant.turn_end", {"turnId": "0"})
+        event("assistant.turn_start", {"turnId": "1"})
     if scenario == "usage":
         event(
             "assistant.usage",
@@ -52,7 +65,7 @@ def finish():
             "messageId": "assistant-result",
             "content": "result ✓",
             "originatingMessageId": message_id,
-            "turnId": "0",
+            "turnId": "1" if scenario == "multi-turn" else "0",
         },
     )
     event(
@@ -64,9 +77,35 @@ def finish():
         },
         "child-agent",
     )
-    event("session.idle", {"mode": "interactive", "aborted": scenario == "aborted"})
+    event("session.idle", {"mode": native_mode, "aborted": scenario == "aborted"})
     if scenario == "malformed-after-idle":
         event("assistant.message", {"messageId": "broken"})
+    if scenario == "unmatched-after-idle":
+        event(
+            "assistant.message",
+            {
+                "messageId": "late",
+                "content": "late unrelated root",
+                "originatingMessageId": "other-message",
+            },
+        )
+    if scenario == "permission-after-idle":
+        event(
+            "permission.requested",
+            {
+                "requestId": "late-permission",
+                "permissionRequest": {
+                    "kind": "shell",
+                    "fullCommandText": "git status",
+                    "canOfferSessionApproval": False,
+                    "commands": [],
+                    "hasWriteFileRedirection": False,
+                    "intention": "late",
+                    "possiblePaths": [],
+                    "possibleUrls": [],
+                },
+            },
+        )
 
 
 while True:
@@ -94,6 +133,18 @@ while True:
         result = {"sessionId": sid, "capabilities": {"ui": {"elicitation": True}}}
         if scenario == "resume-mismatch":
             result["sessionId"] = "different-native-session"
+        if scenario == "resume-no-id":
+            result.pop("sessionId")
+    elif method == "session.mode.set":
+        if scenario != "mode-refusal":
+            native_mode = params["mode"]
+        result = {
+            "status": "changed",
+            "modelChanged": False,
+            "modeApplied": scenario != "mode-refusal",
+        }
+    elif method == "session.mode.get":
+        result = native_mode
     elif method == "session.permissions.setMode":
         result = {"success": True, "mode": "manual"}
     elif method == "session.send":
@@ -103,14 +154,20 @@ while True:
             )
             continue
         result = {"messageId": message_id}
-        if scenario == "send-delay":
+        if scenario in {"send-delay", "large-event-burst"}:
             event(
                 "user.message",
                 {"content": params["prompt"], "messageId": message_id, "turnId": "0"},
             )
-            for _ in range(12):
-                time.sleep(0.05)
-                event("assistant.turn_start", {"turnId": "0"})
+            for _ in range(16 if scenario == "large-event-burst" else 12):
+                if scenario == "large-event-burst":
+                    event(
+                        "assistant.message_delta",
+                        {"messageId": "inflight", "deltaContent": "x" * 900000},
+                    )
+                else:
+                    time.sleep(0.05)
+                    event("assistant.turn_start", {"turnId": "0"})
     write({"id": frame["id"], "result": result})
     if method == "session.send":
         if scenario == "old-idle":
@@ -122,6 +179,7 @@ while True:
             "stall-question",
             "freeform",
             "backpressure",
+            "child-question",
         }:
             write(
                 {
@@ -132,6 +190,7 @@ while True:
                         "question": "Choose",
                         "choices": ["A", "B"],
                         "allowFreeform": scenario in {"freeform", "backpressure"},
+                        **({"ownerAgentId": "child-agent"} if scenario == "child-question" else {}),
                     },
                 }
             )
@@ -143,7 +202,7 @@ while True:
                 time.sleep(0.05)
                 write({"method": "$/cancelRequest", "params": {"id": 101}})
                 finish()
-        elif scenario in {"permission", "withdraw-permission", "denial"}:
+        elif scenario in {"permission", "withdraw-permission", "denial", "child-permission"}:
             event(
                 "permission.requested",
                 {
@@ -162,6 +221,7 @@ while True:
                         "managedApprovalRequired": True,
                     },
                 },
+                "child-agent" if scenario == "child-permission" else None,
             )
             if scenario == "withdraw-permission":
                 time.sleep(0.05)
@@ -173,7 +233,7 @@ while True:
                     },
                 )
                 finish()
-        elif scenario in {"form", "url-form"}:
+        elif scenario in {"form", "url-form", "child-form"}:
             event(
                 "elicitation.requested",
                 {
@@ -185,6 +245,7 @@ while True:
                         "properties": {"choice": {"type": "string", "enum": ["A", "B"]}},
                     },
                 },
+                "child-agent" if scenario == "child-form" else None,
             )
         elif scenario in {"idle-progress", "idle-progress-long"}:
 

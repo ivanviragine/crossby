@@ -440,3 +440,102 @@ def test_sdk_request_wait_survives_native_progress_before_admission(peer):
 def test_resume_response_identity_must_match(peer):
     with pytest.raises(HeadlessTransportError):
         peer("resume-mismatch", resume_id="exact-native-session")
+
+
+def recorded_frames():
+    return [
+        json.loads(line)
+        for line in Path(os.environ["CROSSBY_COPILOT_LOG"]).read_text().splitlines()
+    ]
+
+
+@pytest.mark.parametrize("scenario", ["child-permission", "child-form", "child-question"])
+def test_child_interactions_never_reach_root_handler(peer, scenario):
+    seen = []
+
+    def approve(interaction):
+        seen.append(interaction)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    with pytest.raises(HeadlessTransportError):
+        peer(scenario, approve)
+    assert not seen
+    assert not any(
+        f.get("id") == 101
+        or f.get("method")
+        in {
+            "session.permissions.handlePendingPermissionRequest",
+            "session.ui.handlePendingElicitation",
+        }
+        for f in recorded_frames()
+    )
+
+
+def test_resumed_autopilot_is_explicitly_changed_to_interactive(peer):
+    result, frames = peer("resume-autopilot", resume_id="exact-native-session")
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    mode = next(f for f in frames if f.get("method") == "session.mode.set")
+    assert mode["params"] == {"mode": "interactive", "sessionId": "exact-native-session"}
+    assert (
+        next(f for f in frames if f.get("method") == "session.send")["params"]["agentMode"]
+        == "interactive"
+    )
+
+
+@pytest.mark.parametrize("scenario", ["resume-no-id", "mode-refusal"])
+def test_native_admission_requires_identity_and_interactive_mode(peer, scenario):
+    with pytest.raises(HeadlessTransportError):
+        peer(scenario, resume_id="exact-native-session")
+    assert not any(f.get("method") == "session.send" for f in recorded_frames())
+
+
+def test_unmatched_substantive_root_output_after_idle_fails(peer):
+    with pytest.raises(HeadlessTransportError):
+        peer("unmatched-after-idle")
+
+
+def test_native_terminal_fence_precedes_sdk_interaction_dispatch(peer):
+    seen = []
+
+    def approve(interaction):
+        seen.append(interaction)
+        return SessionInteractionResponse(outcome=PlanInteractionOutcome.APPROVED)
+
+    with pytest.raises(HeadlessTransportError):
+        peer("permission-after-idle", approve)
+    assert not seen
+    assert not any(
+        f.get("method") == "session.permissions.handlePendingPermissionRequest"
+        for f in recorded_frames()
+    )
+
+
+def test_native_model_turns_can_advance_within_one_submitted_message(peer):
+    result, _ = peer("multi-turn")
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "result ✓"
+    assert result.turn_id == "0"
+
+
+def test_large_sdk_events_are_bounded_before_send_admission(peer, monkeypatch):
+    from crossby.ai_tools.copilot_sdk import Bridge
+    from crossby.ai_tools.plan_process import _QUEUED_OUTPUT_BYTES_LIMIT
+
+    original = Bridge.reserve_event
+    retained = []
+    rejected = []
+
+    def reserve(self, params):
+        try:
+            original(self, params)
+        except ValueError as exc:
+            rejected.append(str(exc))
+            raise
+        retained.append(self.event_bytes)
+
+    monkeypatch.setattr(Bridge, "reserve_event", reserve)
+    with pytest.raises(HeadlessTransportError):
+        peer("large-event-burst")
+    assert rejected == ["Copilot SDK event buffering exceeded the shared byte limit"]
+    assert 7 * 1024 * 1024 < max(retained) <= _QUEUED_OUTPUT_BYTES_LIMIT
+    assert any(f.get("method") == "session.abort" for f in recorded_frames())

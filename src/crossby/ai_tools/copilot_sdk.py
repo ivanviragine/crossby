@@ -17,10 +17,12 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
 from importlib import metadata
 from types import SimpleNamespace
 from typing import Any
 
+from crossby.ai_tools import plan_process
 from crossby.ai_tools.headless import (
     HeadlessCleanupContext,
     HeadlessRuntimeContext,
@@ -58,6 +60,32 @@ NATIVE_VERSION = "1.0.97"
 SDK_REMEDIATION = 'Install "crossby[copilot-sdk]" and Copilot CLI 1.0.97.'
 _MAX_IDS = 4096
 _MAX_PENDING_BYTES = 1024 * 1024
+_ACTIVE_EVENTS = {
+    "user.message",
+    "assistant.message",
+    "assistant.message_delta",
+    "assistant.streaming_delta",
+    "assistant.turn_start",
+    "assistant.turn_end",
+    "tool.execution_start",
+    "tool.execution_complete",
+    "assistant.usage",
+    "permission.requested",
+    "elicitation.requested",
+}
+_RELEVANT_EVENTS = _ACTIVE_EVENTS | {
+    "session.error",
+    "session.idle",
+    "permission.completed",
+    "elicitation.completed",
+}
+
+
+@dataclass(frozen=True)
+class PendingInteraction:
+    data: dict[str, Any]
+    cancelled: threading.Event
+    agent_id: str | None
 
 
 def load_sdk() -> tuple[Any, Any, Any]:
@@ -250,17 +278,22 @@ class Bridge:
         self.native_status: str | None = None
         self.native_aborted = False
         self.terminal = False
+        self.reader_terminal = False
+        self.reader_started = False
         self.sending = False
         self.message_id: str | None = None
         self.turn_id: str | None = None
         self.started = False
         self.final: str | None = None
-        self.pending: dict[tuple[str, int | str], tuple[dict[str, Any], threading.Event]] = {}
+        self.pending: dict[tuple[str, int | str], PendingInteraction] = {}
         self.seen: set[tuple[str, int | str]] = set()
         self.lock = threading.RLock()
         self.accept = True
         self.frames = 0
-        self.events: asyncio.Queue[tuple[dict[str, Any], Any]] = asyncio.Queue(_MAX_IDS)
+        self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(_MAX_IDS)
+        self.event_sizes: dict[str, int] = {}
+        self.event_bytes = 0
+        self.max_event_bytes = plan_process._QUEUED_OUTPUT_BYTES_LIMIT
         self.done = asyncio.Event()
         self.usage: TokenUsage | None = None
         self.usage_calls: set[str] = set()
@@ -277,38 +310,58 @@ class Bridge:
             self.context.set_provenance(native_status=status)
             self.native_status = status
 
-    def track(self, key: tuple[str, int | str], data: dict[str, Any]) -> None:
+    def track(
+        self, key: tuple[str, int | str], data: dict[str, Any], agent_id: str | None = None
+    ) -> None:
         with self.lock:
             if not self.accept or key in self.seen or len(self.seen) >= _MAX_IDS:
                 raise ValueError("Copilot reused a request or exceeded the request limit")
-            total = sum(len(json.dumps(item[0]).encode()) for item in self.pending.values())
+            total = sum(len(json.dumps(item.data).encode()) for item in self.pending.values())
             if total + len(json.dumps(data, allow_nan=False).encode()) > _MAX_PENDING_BYTES:
                 raise ValueError("Copilot pending requests exceeded the byte limit")
-            self.pending[key] = (data, threading.Event())
+            self.pending[key] = PendingInteraction(data, threading.Event(), agent_id)
             self.seen.add(key)
 
     def withdraw(self, key: tuple[str, int | str]) -> None:
         with self.lock:
             item = self.pending.pop(key, None)
             if item:
-                item[1].set()
+                item.cancelled.set()
 
     def revoke(self) -> None:
         with self.lock:
             self.accept = False
-            for _, signal in self.pending.values():
-                signal.set()
+            for item in self.pending.values():
+                item.cancelled.set()
             self.pending.clear()
 
     @contextmanager
     def commit(self, key: tuple[str, int | str]) -> Iterator[None]:
         with self.lock:
-            if not self.accept or key not in self.pending:
+            if not self.accept or self.reader_terminal or key not in self.pending:
                 raise _HeadlessInteractionCancelledError("Copilot request was withdrawn.")
             self.context.checkpoint()
             self.pending.pop(key)
         # Never retain the cancellation registry lock across physical pipe I/O.
         yield
+
+    def reserve_event(self, params: dict[str, Any]) -> None:
+        """Bound bytes before SDK dispatch can schedule a retained notification."""
+        eid = identity(params["event"]["id"])
+        size = len(json.dumps(params, ensure_ascii=False, allow_nan=False).encode())
+        with self.lock:
+            if eid in self.event_sizes or self.event_bytes + size > self.max_event_bytes:
+                raise ValueError("Copilot SDK event buffering exceeded the shared byte limit")
+            self.event_sizes[eid] = size
+            self.event_bytes += size
+
+    def release_event(self, eid: str) -> None:
+        with self.lock:
+            self.event_bytes -= self.event_sizes.pop(eid, 0)
+
+    def has_reserved_events(self) -> bool:
+        with self.lock:
+            return bool(self.event_sizes)
 
     def before_stop(self) -> None:
         assert self.controller is not None
@@ -352,6 +405,35 @@ class Bridge:
             kind = event["type"]
             if not isinstance(data, dict):
                 raise ValueError("Copilot event data is not an object")
+            if not event.get("agentId"):
+                if self.reader_terminal and kind in _ACTIVE_EVENTS:
+                    raise ValueError("Copilot emitted substantive root output after terminal idle")
+                if self.message_id is not None and (
+                    (kind == "user.message" and data.get("messageId") == self.message_id)
+                    or (
+                        kind == "assistant.message"
+                        and data.get("originatingMessageId") == self.message_id
+                    )
+                ):
+                    self.reader_started = True
+                    if data.get("turnId") is not None and self.turn_id is None:
+                        turn_id = identity(data["turnId"])
+                        # Native model turns advance after tool execution within
+                        # one submitted message. Keep its initial native turn;
+                        # originatingMessageId binds subsequent model results.
+                        self.turn_id = turn_id
+                        self.context.set_provenance(turn_id=turn_id)
+                if (
+                    kind == "session.idle"
+                    and self.reader_started
+                    and data.get("mode") != "autopilot"
+                ):
+                    self.reader_terminal = True
+                    with self.lock:
+                        if self.pending:
+                            self.native_failed = True
+                    self.revoke()
+            self.reserve_event(params)
             if kind in {"permission.completed", "elicitation.completed"}:
                 if kind == "permission.completed" and data.get("result", {}).get(
                     "kind", ""
@@ -362,16 +444,23 @@ class Bridge:
                 if not self.sending or self.terminal:
                     raise ValueError("Copilot requested interaction outside the submitted turn")
                 if data.get("resolvedByHook") is not True:
-                    self.track((kind.split(".")[0], identity(data.get("requestId"))), data)
+                    agent_id = event.get("agentId") or None
+                    if agent_id is not None:
+                        agent_id = identity(agent_id)
+                    self.track(
+                        (kind.split(".")[0], identity(data.get("requestId"))),
+                        data,
+                        agent_id=agent_id,
+                    )
             if event.get("agentId"):
                 return
             if kind == "session.error":
                 self.native_failed = True
                 self.record_status("failure")
-            if kind == "session.idle" and self.started and data.get("aborted") is True:
+            if kind == "session.idle" and self.reader_started and data.get("aborted") is True:
                 self.native_aborted = True
                 self.record_status("aborted")
-            if kind == "assistant.usage" and self.started:
+            if kind == "assistant.usage" and self.reader_started:
                 self.record_usage(data, identity(event.get("id")))
 
     def record_usage(self, data: dict[str, Any], event_id: str) -> None:
@@ -405,7 +494,9 @@ class Bridge:
         if item is None:
             raise _HeadlessInteractionCancelledError("Copilot request was withdrawn.")
         return await asyncio.to_thread(
-            self.context.native_interaction_response, interaction, request_cancel_event=item[1]
+            self.context.native_interaction_response,
+            interaction,
+            request_cancel_event=item.cancelled,
         )
 
     async def raw_question(self, frame: dict[str, Any]) -> None:
@@ -415,6 +506,8 @@ class Bridge:
             await self.rpc._send_message({"jsonrpc": "2.0", "id": frame["id"], "result": result})
         except _HeadlessInteractionCancelledError:
             pass
+        except asyncio.CancelledError:
+            raise
         except BaseException as exc:
             self.fail(exc)
         finally:
@@ -426,9 +519,15 @@ class Bridge:
             item = self.pending.get(key)
         if item is None:
             raise _HeadlessInteractionCancelledError("Copilot question was withdrawn.")
-        params = item[0]
+        params = item.data
         if invocation.get("session_id") != params.get("sessionId"):
             raise ValueError("Copilot user-input callback changed session binding")
+        if (
+            params.get("agentId")
+            or params.get("ownerAgentId")
+            or params.get("ownerSessionId") not in (None, self.session_id)
+        ):
+            raise ValueError("Copilot child-agent questions require a native UI host")
 
         choices = params.get("choices") or []
         freeform = params.get("allowFreeform", True)
@@ -468,7 +567,9 @@ class Bridge:
                 item = self.pending.get(key)
             if item is None:
                 return
-            data = item[0]
+            data = item.data
+            if item.agent_id is not None:
+                raise ValueError("Copilot child-agent permissions require a native UI host")
             raw = data["permissionRequest"]
             if data.get("ownerSessionId") not in (None, self.session_id) or data.get(
                 "ownerAgentId"
@@ -499,6 +600,8 @@ class Bridge:
                 self.context.add_warning("Copilot permission request was already resolved.")
         except _HeadlessInteractionCancelledError:
             pass
+        except asyncio.CancelledError:
+            raise
         except BaseException as exc:
             self.fail(exc)
 
@@ -509,7 +612,9 @@ class Bridge:
                 item = self.pending.get(key)
             if item is None:
                 return
-            data = item[0]
+            data = item.data
+            if item.agent_id is not None:
+                raise ValueError("Copilot child-agent elicitation requires a native UI host")
             if data.get("mode") not in (None, "form") or data.get("url"):
                 raise ValueError("Copilot URL elicitation is unsupported; use a native UI host.")
             if data.get("elicitationSource") is not None:
@@ -559,6 +664,8 @@ class Bridge:
                 self.context.add_warning("Copilot elicitation request was already resolved.")
         except _HeadlessInteractionCancelledError:
             pass
+        except asyncio.CancelledError:
+            raise
         except BaseException as exc:
             self.fail(exc)
 
@@ -599,14 +706,18 @@ class Bridge:
                 # while ordered result processing waits for exact turn binding.
                 self.context.checkpoint()
                 self.context.mark_progress()
-            self.events.put_nowait((params["event"], event))
+            if kind in _RELEVANT_EVENTS and not event.agent_id:
+                self.events.put_nowait(params["event"])
+            else:
+                self.release_event(identity(params["event"]["id"]))
         except BaseException as exc:
+            self.release_event(identity(params["event"]["id"]))
             self.fail(exc)
 
     async def process_events(self) -> None:
         try:
             while True:
-                raw, _event = await self.events.get()
+                raw = await self.events.get()
                 self.processing = True
                 try:
                     # Buffer processing until the SDK admits and identifies our send.
@@ -618,6 +729,7 @@ class Bridge:
                     await asyncio.to_thread(self.event, raw)
                 finally:
                     self.processing = False
+                    self.release_event(identity(raw["id"]))
                     self.events.task_done()
         except asyncio.CancelledError:
             raise
@@ -626,7 +738,7 @@ class Bridge:
 
     async def drain_events(self) -> None:
         await asyncio.sleep(0)
-        while not self.events.empty() or self.processing:
+        while not self.events.empty() or self.processing or self.has_reserved_events():
             if self.failure:
                 raise self.failure
             self.context.checkpoint()
@@ -638,9 +750,11 @@ class Bridge:
         kind, data = raw["type"], raw["data"]
         if raw.get("agentId") or not self.sending:
             return
+        if self.terminal and kind in _ACTIVE_EVENTS:
+            raise ValueError("Copilot emitted substantive root output after terminal idle")
         if kind == "user.message" and data.get("messageId") == self.message_id:
             self.started = True
-            if data.get("turnId") is not None:
+            if data.get("turnId") is not None and self.turn_id is None:
                 self.turn_id = identity(data["turnId"])
                 self.context.set_provenance(turn_id=self.turn_id)
         if kind == "assistant.message":
@@ -812,7 +926,7 @@ def client_for(bridge: Bridge) -> Any:
                         return None
                 except EOFError:
                     bridge.eof.set()
-                    if not bridge.terminal and not bridge.native_failed:
+                    if not bridge.reader_terminal and not bridge.native_failed:
                         bridge.fail(ValueError("Copilot SDK reached EOF before completion"))
                     return None
                 except BaseException as exc:
@@ -832,6 +946,17 @@ def client_for(bridge: Bridge) -> Any:
             assert deadline is not None
             remaining = max(0.001, deadline - time.monotonic())
             kwargs["timeout"] = min(kwargs.get("timeout") or remaining, remaining)
+            if method == "session.send":
+
+                def bind_message(response: Any) -> None:
+                    try:
+                        bridge.message_id = identity(response["messageId"])
+                    except BaseException as exc:
+                        bridge.fail(exc)
+
+                # Pinned SDK invokes this in the reader before scheduling any
+                # subsequent notifications, even if the event loop is busy.
+                kwargs["on_response_inline"] = bind_message
             pending = asyncio.create_task(super().request(method, params, **kwargs))
             try:
                 while not pending.done():
@@ -844,8 +969,8 @@ def client_for(bridge: Bridge) -> Any:
                 if method in {"session.create", "session.resume"}:
                     if not isinstance(response, dict):
                         raise ValueError("Copilot omitted the native session response")
-                    confirmed = response.get("sessionId")
-                    if confirmed is not None and confirmed != params.get("sessionId"):
+                    confirmed = identity(response.get("sessionId"))
+                    if confirmed != params.get("sessionId"):
                         raise ValueError("Copilot returned a different native session identity")
                 return response
             finally:
@@ -918,7 +1043,11 @@ def run_session(
         try:
             await client.start()
             status = await client.get_status()
-            if status.version != NATIVE_VERSION or status.protocol_version != 3:
+            if (
+                status.version != NATIVE_VERSION
+                or status.protocol_version != 3
+                or client._negotiated_protocol_version != 3
+            ):
                 raise ValueError("Unsupported Copilot runtime/protocol; " + SDK_REMEDIATION)
             launch = request.launch_context or HeadlessLaunchContext()
             from crossby.ai_tools.copilot import CopilotAdapter
@@ -948,6 +1077,19 @@ def run_session(
             if request.resume_id and session.session_id != request.resume_id:
                 raise ValueError("Copilot did not confirm the exact resume identity")
             _, rpc, _ = load_sdk()
+            # Message agentMode is provenance, while mode.set controls the
+            # native session. Resumed planning/autopilot work must not inherit.
+            changed = await session.rpc.mode.set(
+                rpc.ModeSetRequest(mode=rpc.SessionMode.INTERACTIVE)
+            )
+            if (
+                changed.confirmation is not None
+                or changed.defer_implementation is True
+                or changed.mode_applied is False
+                or changed.model_changed
+                or await session.rpc.mode.get() != rpc.SessionMode.INTERACTIVE
+            ):
+                raise ValueError("Copilot could not establish ordinary interactive mode")
             configured = await session.rpc.permissions.configure(
                 rpc.PermissionsConfigureParams(
                     approve_all_read_permission_requests=False,
@@ -973,7 +1115,9 @@ def run_session(
                 raise ValueError("Copilot refused manual permission mode")
             await bridge.drain_events()
             bridge.sending = True
-            bridge.message_id = identity(await session.send(request.prompt))
+            bridge.message_id = identity(
+                await session.send(request.prompt, agent_mode="interactive")
+            )
             while not bridge.done.is_set():
                 context.checkpoint()
                 await asyncio.sleep(min(0.01, context.remaining_seconds()))
@@ -1012,6 +1156,8 @@ def run_session(
 
     try:
         bridge, code = asyncio.run(run())
+        if bridge.failure is not None:
+            raise bridge.failure
     except (_HeadlessStopError, HeadlessTransportError):
         raise
     except BaseException:
