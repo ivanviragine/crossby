@@ -376,8 +376,11 @@ class TestClassifyTierUniversal:
         assert classify_tier_universal("claude-opus-5") == ModelTier.POWERFUL
         assert classify_tier_universal("claude-fable-5-1") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-2.5-pro") == ModelTier.POWERFUL
+        assert classify_tier_universal("gemini-4-argon") == ModelTier.POWERFUL
+        assert classify_tier_universal("gemini-4-argon-low") == ModelTier.POWERFUL
         assert classify_tier_universal("gemini-ultra") == ModelTier.POWERFUL
         assert classify_tier_universal("gpt-5.4") == ModelTier.POWERFUL
+        assert classify_tier_universal("muse-wonder-1.0-low") == ModelTier.POWERFUL
 
     def test_balanced_tier_sonnet(self) -> None:
         assert classify_tier_universal("claude-sonnet-4-6") == ModelTier.BALANCED

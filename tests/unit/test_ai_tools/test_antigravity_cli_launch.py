@@ -40,21 +40,28 @@ class TestAntigravityCLIEffort:
             EffortLevel.HIGH,
         )
 
+    @pytest.mark.parametrize("base", ["gemini-4-argon", "gemini-3.8-flash"])
     @pytest.mark.parametrize("effort", [EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH])
-    def test_gemini_3_8_bakes_each_supported_effort(self, effort: EffortLevel) -> None:
-        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.8-flash", effort=effort)
-        assert _model_of(cmd) == f"gemini-3.8-flash-{effort.value}"
+    def test_gemini_current_bakes_each_supported_effort(
+        self, base: str, effort: EffortLevel
+    ) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model=base, effort=effort)
+        assert _model_of(cmd) == f"{base}-{effort.value}"
         assert "--effort" not in cmd
 
-    def test_gemini_3_8_no_effort_defaults_to_medium(self) -> None:
-        cmd = AntigravityCLIAdapter().build_launch_command(model="gemini-3.8-flash", effort=None)
-        assert _model_of(cmd) == "gemini-3.8-flash-medium"
+    @pytest.mark.parametrize("base", ["gemini-4-argon", "gemini-3.8-flash"])
+    def test_gemini_current_no_effort_defaults_to_medium(self, base: str) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model=base, effort=None)
+        assert _model_of(cmd) == f"{base}-medium"
 
+    @pytest.mark.parametrize("base", ["gemini-4-argon", "gemini-3.8-flash"])
     @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
-    def test_gemini_3_8_xhigh_and_max_normalize_to_high(self, effort: EffortLevel) -> None:
+    def test_gemini_current_xhigh_and_max_normalize_to_high(
+        self, base: str, effort: EffortLevel
+    ) -> None:
         with pytest.warns(UserWarning, match="only low/medium/high"):
-            resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.8-flash", effort)
-        assert resolved == "gemini-3.8-flash-high"
+            resolved = AntigravityCLIAdapter().resolve_effort_model(base, effort)
+        assert resolved == f"{base}-high"
 
     def test_gemini_3_8_suffix_wins_and_minimal_is_never_emitted(self) -> None:
         resolved = AntigravityCLIAdapter().resolve_effort_model(

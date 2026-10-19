@@ -202,6 +202,9 @@ class TestAntigravityModelParsing:
     ) -> None:
         output = """
         Available models:
+          gemini-4-argon-low         Gemini 4 Argon (Low)
+          gemini-4-argon-medium      Gemini 4 Argon (Medium)
+          gemini-4-argon-high        Gemini 4 Argon (High)
           gemini-3.8-flash-low       Gemini 3.8 Flash (Low)
           gemini-3.8-flash-medium    Gemini 3.8 Flash (Medium)
           gemini-3.8-flash-high      Gemini 3.8 Flash (High)
@@ -214,6 +217,7 @@ class TestAntigravityModelParsing:
         """
 
         assert PROBE_MODULE.parse_antigravity_models(output) == {
+            "gemini-4-argon",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "claude-opus-4-6-thinking",
@@ -223,6 +227,9 @@ class TestAntigravityModelParsing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
+            ("gemini-4-argon-low", "gemini-4-argon"),
+            ("gemini-4-argon-medium", "gemini-4-argon"),
+            ("gemini-4-argon-high", "gemini-4-argon"),
             ("gemini-3.8-flash-low", "gemini-3.8-flash"),
             ("gemini-3.8-flash-medium", "gemini-3.8-flash"),
             ("gemini-3.8-flash-high", "gemini-3.8-flash"),
@@ -335,7 +342,7 @@ class TestDeprecationParsing:
         <a id="deprecated-codex-models"></a>
         <a id="configure-your-default-local-model"></a></nav>
         <h2 id="recommended-models">Recommended models</h2>
-        <code>codex -m gpt-6-sol</code> <code>codex -m gpt-6-luna</code>
+        <code>codex -m gpt-6.1-sol</code> <code>codex -m gpt-6-luna</code>
         <h2 id="other-models">Other models</h2>
         <code>codex -m gpt-5.5</code>
         <h2 id="deprecated-codex-models">Deprecated Codex models</h2>
