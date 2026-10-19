@@ -56,10 +56,10 @@ _EXPECTED_TIERS: dict[str, ModelTier] = {
     "gemini-3.8-flash-high": ModelTier.FAST,
     "gemini-3.8-flash-low": ModelTier.FAST,
     "gemini-3.8-flash-medium": ModelTier.FAST,
-    "gpt-5.4": ModelTier.POWERFUL,
     "gpt-5.6-luna": ModelTier.FAST,
     "gpt-5.6-sol": ModelTier.POWERFUL,
     "gpt-5.6-terra": ModelTier.BALANCED,
+    "gpt-6-sol": ModelTier.POWERFUL,
 }
 
 
@@ -142,6 +142,8 @@ class TestDocumentedFamilyRoles:
             ("gpt-5.6-terra-low", ModelTier.BALANCED),
             ("gpt-5.6-sol-none", ModelTier.POWERFUL),
             ("claude-fable-5.1-low", ModelTier.POWERFUL),
+            ("gemini-4-argon-low", ModelTier.POWERFUL),
+            ("muse-wonder-1.0-low", ModelTier.POWERFUL),
         ],
     )
     def test_explicit_family_component_controls_tier(
@@ -197,7 +199,7 @@ class TestClaudeTierDefaults:
     [
         (
             AIToolID.COPILOT,
-            ("claude-haiku-4.5", "claude-sonnet-5", "claude-sonnet-5", "gpt-5.4"),
+            ("claude-haiku-4.5", "claude-sonnet-5", "claude-sonnet-5", "gpt-6-sol"),
         ),
         (
             AIToolID.ANTIGRAVITY_CLI,

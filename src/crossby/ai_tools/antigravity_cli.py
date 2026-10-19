@@ -59,10 +59,12 @@ if TYPE_CHECKING:
 # an already-suffixed model, while a bare Gemini base model *requires* an effort.
 # Only these base families require/encode effort (verified via `agy models` + live
 # probing); every other catalog model launches bare and ignores effort. Per-model
-# tiers differ: the flash families accept low/medium/high, gemini-3.1-pro only low/high.
-# From the Claude 5.5 generation on, agy lists Claude models effort-expanded too
-# (claude-opus-5-5-low/-medium/-high); the older claude-*-4-6 IDs stay bare.
+# tiers differ: gemini-4-argon and the flash families accept low/medium/high,
+# gemini-3.1-pro only low/high. From the Claude 5.5 generation on, agy lists
+# Claude models effort-expanded too (claude-opus-5-5-low/-medium/-high); the
+# older claude-*-4-6 IDs stay bare.
 _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
+    "gemini-4-argon": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.8-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.7-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.6-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),

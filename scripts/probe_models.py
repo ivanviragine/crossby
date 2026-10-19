@@ -82,7 +82,7 @@ _CLAUDE_DATED_ALIAS_RE = re.compile(
 # "foo-1.2-bar") rather than a plain word from the description column.
 _ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[./-][a-z0-9._-]+)+$")
 _ANTIGRAVITY_EFFORT_RE = re.compile(
-    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro)|claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*)"
+    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro|argon)|claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*)"
     r"-(?:low|medium|high)$"
 )
 
@@ -257,7 +257,8 @@ def parse_codex_deprecations(text: str) -> set[str]:
     """Extract model IDs named in the Codex docs' "Deprecated Codex models" section.
 
     That prose also names the replacements ("Replace gpt-5.4 with gpt-6-sol"),
-    so IDs offered under "Recommended models" are never treated as deprecated.
+    so IDs named after "with" or offered under "Recommended models" are never
+    treated as deprecated.
     """
     section = _html_section(
         text, "deprecated-codex-models", 'id="configure-your-default-local-model"'
@@ -265,8 +266,10 @@ def parse_codex_deprecations(text: str) -> set[str]:
     recommended = _html_section(text, "recommended-models", 'id="other-models"')
     if section is None or recommended is None:
         return set()
-    mentioned = set(re.findall(r"\b(gpt-\d[a-z0-9.-]*[a-z0-9])", _html_to_text(section)))
-    return mentioned - set(re.findall(r"codex -m (gpt-[a-z0-9._-]+)", recommended))
+    section_text = _html_to_text(section)
+    mentioned = set(re.findall(r"\b(gpt-\d[a-z0-9.-]*[a-z0-9])", section_text))
+    replacements = set(re.findall(r"\bwith\s+(gpt-\d[a-z0-9.-]*[a-z0-9])", section_text))
+    return mentioned - replacements - set(re.findall(r"codex -m (gpt-[a-z0-9._-]+)", recommended))
 
 
 def parse_gemini_deprecations(text: str, today: datetime.date) -> set[str]:
