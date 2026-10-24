@@ -17,12 +17,11 @@ from typing import Any
 import structlog
 import yaml
 
-from crossby.handoff._utils import mtime_as_utc, safe_resolve
+from crossby.handoff._utils import mtime_as_utc, safe_resolve, visible_text
 from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
     SessionRef,
-    ToolCall,
 )
 from crossby.models.ai import AIToolID
 
@@ -97,82 +96,19 @@ def _read_workspace(path: Path) -> dict[str, Any] | None:
 
 def _turn_from_event(event: dict[str, Any]) -> ConversationTurn | None:
     event_type = event.get("type")
+    if event_type not in ("user.message", "assistant.message"):
+        return None
     data = event.get("data") or {}
     if not isinstance(data, dict):
         return None
-    timestamp = _parse_timestamp(event.get("timestamp"))
-    if event_type == "user.message":
-        content = _coerce_text(data.get("content"))
-        if not content:
-            return None
-        return ConversationTurn(role="user", content=content, timestamp=timestamp)
-    if event_type == "assistant.message":
-        content = _coerce_text(data.get("content"))
-        tool_calls = _extract_tool_requests(data.get("toolRequests"))
-        file_refs = _extract_file_refs(data.get("toolRequests"))
-        if not content and not tool_calls:
-            return None
-        return ConversationTurn(
-            role="assistant",
-            content=content,
-            tool_calls=tool_calls,
-            file_refs=file_refs,
-            timestamp=timestamp,
-        )
-    if event_type == "tool.result":
-        content = _coerce_text(data.get("output") or data.get("result"))
-        if not content:
-            return None
-        return ConversationTurn(role="tool", content=content, timestamp=timestamp)
-    return None
-
-
-def _coerce_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for block in value:
-            if isinstance(block, dict):
-                if isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-                elif isinstance(block.get("content"), str):
-                    parts.append(block["content"])
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return ""
-
-
-def _extract_tool_requests(value: Any) -> list[ToolCall]:
-    if not isinstance(value, list):
-        return []
-    out: list[ToolCall] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "unknown")
-        args = entry.get("arguments") or {}
-        if isinstance(args, dict):
-            out.append(ToolCall(name=name, arguments=args, call_id=entry.get("toolCallId")))
-    return out
-
-
-def _extract_file_refs(value: Any) -> list[Path]:
-    if not isinstance(value, list):
-        return []
-    refs: list[Path] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        args = entry.get("arguments") or {}
-        if not isinstance(args, dict):
-            continue
-        for key in ("path", "file_path", "filePath"):
-            candidate = args.get(key)
-            if isinstance(candidate, str) and candidate:
-                refs.append(Path(candidate))
-    return refs
+    content = visible_text(data.get("content"))
+    if not content.strip():
+        return None
+    return ConversationTurn(
+        role="user" if event_type == "user.message" else "assistant",
+        content=content,
+        timestamp=_parse_timestamp(event.get("timestamp")),
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

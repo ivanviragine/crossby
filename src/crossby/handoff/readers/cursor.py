@@ -21,7 +21,7 @@ from typing import Any
 
 import structlog
 
-from crossby.handoff._utils import mtime_as_utc
+from crossby.handoff._utils import mtime_as_utc, visible_text
 from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
@@ -137,21 +137,10 @@ def _extract_messages(data: Any) -> list[dict[str, Any]]:
 
 def _turn_from_message(msg: dict[str, Any]) -> ConversationTurn | None:
     role = str(msg.get("role", "")).lower()
-    if role not in {"user", "assistant", "tool", "system"}:
+    if role not in {"user", "assistant"} or msg.get("channel") == "analysis":
         return None
-    content = msg.get("content") or msg.get("text") or ""
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                if isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-                elif isinstance(block.get("content"), str):
-                    parts.append(block["content"])
-            elif isinstance(block, str):
-                parts.append(block)
-        content = "\n".join(parts)
-    if not isinstance(content, str) or not content.strip():
+    content = visible_text(msg.get("content") or msg.get("text") or "")
+    if not content.strip():
         return None
     return ConversationTurn(
         role=role,

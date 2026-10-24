@@ -1212,6 +1212,12 @@ Session IDs are extracted automatically from transcripts when `--transcript` is 
 
 ### Handoff Sources & Targets
 
+Handoff readers return only user messages and visible assistant responses,
+including progress updates. Filter reasoning, tool calls/results, source
+system/developer instructions, and empty turns before token-budget truncation.
+Use the source event and content-block types: Claude tool results use `user`
+events, so filtering roles alone is insufficient.
+
 | Tool                                  | Source (read)                                        | Target (launch) |
 | ------------------------------------- | ---------------------------------------------------- | --------------- |
 | Claude                                | ✓ (`~/.claude/projects/<encoded>/<id>.jsonl`)        | ✓               |

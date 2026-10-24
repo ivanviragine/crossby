@@ -444,7 +444,7 @@ crossby handoff --from claude --to codex --prompt-preset cc-compact
 crossby handoff --from claude --to codex --prompt ./my-prompt.md
 ```
 
-Codex handoffs preserve function and custom-tool calls plus their text results, with call IDs linking results to commands. Results count toward the transcript token budget; older turns can be dropped, and non-text output blocks are skipped.
+Handoffs use only user messages and visible assistant responses, including progress updates. Readers exclude reasoning, tool calls and results, source system/developer instructions, and non-text blocks before applying the transcript token budget. Empty turns are skipped, and older conversation turns can be dropped to fit the budget.
 
 crossby reads the chosen session from the source tool, asks an LLM to summarize it into a structured handoff document, writes it to `.crossby/handoffs/HANDOFF-<timestamp>.md`, and — for a CLI target — launches the tool with the file **path** (not its contents) as the initial prompt, so it fits under OS argv limits regardless of transcript size.
 
