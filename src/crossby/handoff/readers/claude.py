@@ -16,12 +16,11 @@ from typing import Any
 
 import structlog
 
-from crossby.handoff._utils import mtime_as_utc
+from crossby.handoff._utils import mtime_as_utc, visible_text
 from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
     SessionRef,
-    ToolCall,
 )
 from crossby.models.ai import AIToolID
 
@@ -106,96 +105,19 @@ def _first_event_timestamp(path: Path) -> datetime | None:
 
 def _turn_from_event(event: dict[str, Any]) -> ConversationTurn | None:
     event_type = event.get("type")
-    if event_type == "user":
-        return _user_turn(event)
-    if event_type == "assistant":
-        return _assistant_turn(event)
-    return None
-
-
-def _user_turn(event: dict[str, Any]) -> ConversationTurn | None:
+    if event_type not in ("user", "assistant") or event.get("isMeta"):
+        return None
     message = event.get("message") or {}
-    content = message.get("content")
-    text = _stringify_claude_content(content)
+    if not isinstance(message, dict):
+        return None
+    text = visible_text(message.get("content"))
     if not text.strip():
         return None
     return ConversationTurn(
-        role="user",
+        role=event_type,
         content=text,
         timestamp=_parse_timestamp(event.get("timestamp")),
     )
-
-
-def _assistant_turn(event: dict[str, Any]) -> ConversationTurn | None:
-    message = event.get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, list):
-        text = _stringify_claude_content(content)
-        if not text.strip():
-            return None
-        return ConversationTurn(
-            role="assistant",
-            content=text,
-            timestamp=_parse_timestamp(event.get("timestamp")),
-        )
-
-    text_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    file_refs: list[Path] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            value = block.get("text", "")
-            if value:
-                text_parts.append(str(value))
-        elif btype == "thinking":
-            value = block.get("thinking", "")
-            if value:
-                text_parts.append(f"[thinking] {value}")
-        elif btype == "tool_use":
-            name = str(block.get("name", "unknown"))
-            inputs = block.get("input") or {}
-            if isinstance(inputs, dict):
-                tool_calls.append(
-                    ToolCall(
-                        name=name,
-                        arguments=inputs,
-                        call_id=block.get("id"),
-                    )
-                )
-                for key in ("file_path", "path", "notebook_path"):
-                    candidate = inputs.get(key)
-                    if isinstance(candidate, str) and candidate:
-                        file_refs.append(Path(candidate))
-    combined = "\n".join(text_parts).strip()
-    if not combined and not tool_calls:
-        return None
-    return ConversationTurn(
-        role="assistant",
-        content=combined,
-        tool_calls=tool_calls,
-        file_refs=file_refs,
-        timestamp=_parse_timestamp(event.get("timestamp")),
-    )
-
-
-def _stringify_claude_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                if "text" in block and isinstance(block["text"], str):
-                    parts.append(block["text"])
-                elif "content" in block and isinstance(block["content"], str):
-                    parts.append(block["content"])
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return ""
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

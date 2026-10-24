@@ -30,16 +30,12 @@ def test_happy_path_returns_user_and_assistant_turns(fixtures_dir: Path, tmp_pat
 
     transcript = claude_reader.read_session(ref)
 
-    # 2 user turns, 2 assistant turns (tool_use + text), file-history-snapshot ignored
-    assert len(transcript.turns) == 4
-    assert transcript.turns[0].role == "user"
-    assert "refactor the auth module" in transcript.turns[0].content.lower()
-    assert transcript.turns[1].role == "assistant"
-    assert transcript.turns[1].tool_calls, "tool_use block should yield a ToolCall"
-    assert transcript.turns[1].tool_calls[0].name == "Read"
-    assert transcript.turns[1].file_refs == [Path("/Users/tester/proj/auth.py")]
-    assert transcript.turns[2].content.endswith("caches sessions.")
-    assert transcript.turns[3].role == "user"
+    assert [(t.role, t.content) for t in transcript.turns] == [
+        ("user", "Let's refactor the auth module."),
+        ("assistant", "The auth module has three routes; the /login one caches sessions."),
+        ("user", "Great, proceed with the refactor."),
+    ]
+    assert all(not t.tool_calls and not t.file_refs for t in transcript.turns)
 
 
 def test_empty_session_returns_no_turns(fixtures_dir: Path, tmp_path: Path) -> None:

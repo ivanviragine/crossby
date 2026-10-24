@@ -24,7 +24,7 @@ def _ref(path: Path, cwd: Path, session_id: str = "sess-1") -> SessionRef:
     )
 
 
-def test_happy_path_parses_user_assistant_and_tool_turns(
+def test_happy_path_keeps_user_and_visible_assistant_text(
     fixtures_dir: Path, tmp_path: Path
 ) -> None:
     events = tmp_path / "events.jsonl"
@@ -34,9 +34,10 @@ def test_happy_path_parses_user_assistant_and_tool_turns(
     transcript = copilot_reader.read_session(ref)
 
     roles = [t.role for t in transcript.turns]
-    assert roles == ["user", "assistant", "tool", "assistant"]
-    assert transcript.turns[1].tool_calls[0].name == "view"
-    assert transcript.turns[1].file_refs == [Path("/Users/tester/proj/PLAN.md")]
+    assert roles == ["user", "assistant", "assistant"]
+    assert transcript.turns[1].content == "Reading the plan."
+    assert transcript.turns[2].content == "Plan looks clear. Proceeding."
+    assert all(not t.tool_calls and not t.file_refs for t in transcript.turns)
 
 
 def test_empty_session_returns_no_turns(tmp_path: Path) -> None:

@@ -7,6 +7,36 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+
+def visible_text(content: Any) -> str:
+    """Extract message text without reasoning, tool, or attachment blocks.
+
+    Untyped text/content blocks and plain strings occur in older session
+    formats. Typed blocks must explicitly describe visible message text;
+    looking only for a text/content field would also admit tool results.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in (
+            None,
+            "text",
+            "input_text",
+            "output_text",
+        ):
+            for key in ("text", "input_text", "output_text", "content"):
+                value = block.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+                    break
+    return "\n".join(parts)
 
 
 def safe_resolve(path: Path) -> Path:

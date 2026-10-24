@@ -5,8 +5,9 @@ Codex stores rollouts under
 a ``session_meta`` event that carries ``id``, ``timestamp``, and ``cwd``.
 Subsequent events are either ``response_item`` (``message`` / ``reasoning``
 / ``function_call`` / ``function_call_output`` / custom-tool variants) or
-``event_msg`` (higher-level protocol events). We extract messages, reasoning
-summaries, tool calls, and text results; other events and non-text blocks are skipped.
+``event_msg`` (higher-level protocol events). We extract only user messages and
+visible assistant responses. Reasoning, tool activity, source instructions,
+and non-text blocks are skipped.
 """
 
 from __future__ import annotations
@@ -18,12 +19,11 @@ from typing import Any
 
 import structlog
 
-from crossby.handoff._utils import mtime_as_utc, safe_resolve
+from crossby.handoff._utils import mtime_as_utc, safe_resolve, visible_text
 from crossby.handoff.models import (
     ConversationTranscript,
     ConversationTurn,
     SessionRef,
-    ToolCall,
 )
 from crossby.models.ai import AIToolID
 
@@ -109,124 +109,19 @@ def _turn_from_event(event: dict[str, Any]) -> ConversationTurn | None:
     if event.get("type") != "response_item":
         return None
     payload = event.get("payload")
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or payload.get("type") != "message":
         return None
-    timestamp = _parse_timestamp(event.get("timestamp"))
-    payload_type = payload.get("type")
-    if payload_type == "message":
-        return _message_turn(payload, timestamp)
-    if payload_type == "function_call":
-        return _function_call_turn(payload, timestamp)
-    if payload_type == "custom_tool_call":
-        return _custom_tool_call_turn(payload, timestamp)
-    if payload_type in ("function_call_output", "custom_tool_call_output"):
-        return _tool_output_turn(payload, timestamp)
-    if payload_type == "reasoning":
-        return _reasoning_turn(payload, timestamp)
-    return None
-
-
-def _message_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
     role = str(payload.get("role", "")).lower()
-    if role == "developer":
-        role = "system"
-    if role not in {"user", "assistant", "system", "tool"}:
+    if role not in {"user", "assistant"} or payload.get("channel") == "analysis":
         return None
-    content = payload.get("content")
-    text = _stringify_codex_content(content)
-    if not text.strip():
-        return None
-    return ConversationTurn(role=role, content=text, timestamp=ts)
-
-
-def _function_call_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
-    name = str(payload.get("name") or "unknown")
-    arguments_raw = payload.get("arguments")
-    arguments: dict[str, Any] = {}
-    if isinstance(arguments_raw, str):
-        try:
-            parsed = json.loads(arguments_raw)
-        except json.JSONDecodeError:
-            parsed = {"raw": arguments_raw}
-        arguments = parsed if isinstance(parsed, dict) else {"value": parsed}
-    elif isinstance(arguments_raw, dict):
-        arguments = arguments_raw
-    return ConversationTurn(
-        role="assistant",
-        content="",
-        tool_calls=[ToolCall(name=name, arguments=arguments, call_id=_call_id(payload))],
-        timestamp=ts,
-    )
-
-
-def _call_id(payload: dict[str, Any]) -> str | None:
-    value = payload.get("call_id")
-    return value if isinstance(value, str) and value else None
-
-
-def _custom_tool_call_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
-    raw_input = payload.get("input")
-    if not isinstance(raw_input, str):
-        return None
-    return ConversationTurn(
-        role="assistant",
-        content="",
-        tool_calls=[
-            ToolCall(
-                name=str(payload.get("name") or "unknown"),
-                arguments={"input": raw_input},
-                call_id=_call_id(payload),
-            )
-        ],
-        timestamp=ts,
-    )
-
-
-def _tool_output_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
-    text = _stringify_codex_content(payload.get("output"))
+    text = visible_text(payload.get("content"))
     if not text.strip():
         return None
     return ConversationTurn(
-        role="tool",
+        role=role,
         content=text,
-        tool_call_id=_call_id(payload),
-        timestamp=ts,
+        timestamp=_parse_timestamp(event.get("timestamp")),
     )
-
-
-def _reasoning_turn(payload: dict[str, Any], ts: datetime | None) -> ConversationTurn | None:
-    summaries = payload.get("summary")
-    text_parts: list[str] = []
-    if isinstance(summaries, list):
-        for entry in summaries:
-            if isinstance(entry, dict) and isinstance(entry.get("text"), str):
-                text_parts.append(entry["text"])
-    content = "\n".join(text_parts).strip()
-    if not content:
-        return None
-    return ConversationTurn(
-        role="assistant",
-        content=f"[reasoning] {content}",
-        timestamp=ts,
-    )
-
-
-def _stringify_codex_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                for key in ("text", "input_text", "output_text", "content"):
-                    value = block.get(key)
-                    if isinstance(value, str) and value:
-                        parts.append(value)
-                        break
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return ""
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
