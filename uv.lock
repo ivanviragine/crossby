@@ -300,7 +300,7 @@ toml = [
 
 [[package]]
 name = "crossby"
-version = "0.44.0"
+version = "0.44.1"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
