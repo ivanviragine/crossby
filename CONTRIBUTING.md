@@ -1226,6 +1226,32 @@ events, so filtering roles alone is insufficient.
 | Copilot                               | ✓ (`~/.copilot/session-state/<id>/events.jsonl`)     | ✓               |
 | Antigravity CLI, OpenCode, Antigravity IDE, VS Code| —                                        | ✓               |
 
+### Agent conversations (`crossby ask` / `crossby converse`)
+
+`services/converse.py` holds the engine and `cli/converse.py` the commands.
+Every turn calls `run_headless_session()` in `UNATTENDED` mode through the
+`TurnRunner` protocol. The default `HeadlessTurnRunner` runs the session in a
+worker thread, so Ctrl-C sets the runtime's `cancel_event` and the native
+process group is torn down before the interrupt propagates. Tests inject a
+fake runner and never start a native CLI.
+
+- **No native resume.** Unattended profiles declare `supports_resume=False`
+  on every adapter, so each turn replays the goal and the trimmed transcript
+  (`render_history`, which keeps the newest turns). If unattended resume ever
+  lands, the right change is passing `resume_id` per participant. It must not
+  route through brokered mode, whose transports and restrictions differ.
+- **Turn prompt:** `data/prompts/converse_turn.md`. **Summary prompt:**
+  `data/prompts/converse_summary.md`, run through `HandoffSummarizer.summarize_raw()`
+  after the conversation is expressed as a handoff `ConversationTranscript`.
+  Fill templates with `str.format` on the template only; goal text may
+  contain braces.
+- **Stop rules:** two consecutive `DONE`s means agreement. A missing status
+  line is `MISSING`, never agreement. A turn that times out because the
+  overall deadline bounded it is `TIMEOUT` (exit 2); a turn that hits its own
+  `--turn-timeout` is `FAILED` (exit 1).
+- **Recursion guard:** `child_depth()` raises `CROSSBY_CONVERSE_DEPTH` for
+  child processes, and `check_depth()` refuses at `MAX_DEPTH`.
+
 ### Library API (not exposed via CLI)
 
 Available on each adapter for programmatic use:

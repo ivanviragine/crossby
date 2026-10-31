@@ -28,6 +28,7 @@ Any of the five direct-sync tools can be the source — `crossby sync --from cur
 | Give my other tools the same rules/agents/skills/MCP/hooks I already wrote | **Sync** | `crossby sync --plan --from claude` |
 | Run a tool with only the capabilities one task needs | **Scenes** | `crossby scene list` / `crossby launch --scene <name>` |
 | Continue my current session in a different tool | **Handoff** | `crossby handoff --from claude --to codex` |
+| Have two agents work a problem out between themselves, headless | **Converse** | `crossby converse codex claude --goal "…"` |
 | Launch a tool and drive it from a browser instead of a shell | **Browser terminal** | `crossby ui` |
 
 Everything else in this README expands one of these. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
@@ -456,6 +457,37 @@ The default preset produces a structured six-section handoff (current task, key 
 
 - **Claude, Cursor, Codex, Copilot, OpenCode, Antigravity CLI** are launched with the handoff pre-loaded.
 - **VS Code and the Antigravity IDE** can't receive an initial message, so crossby writes the handoff file and prints its path for you to open by hand.
+
+## Agent conversations
+
+`crossby converse` has two agents work toward a goal in a headless back-and-forth, then writes a neutral summary of the whole exchange. `crossby ask` is the single-question version.
+
+```bash
+# Two agents investigate together until they agree, or a limit stops them
+crossby converse codex claude --goal "Find why test_sync_hooks is flaky and agree on a fix"
+
+# Script it: JSON on stdout, no live turns on stderr
+crossby converse claude cursor --goal-file goal.md --max-turns 4 --json --quiet
+
+# One question to another agent; '-' reads it from stdin
+crossby ask codex "Is there a race in src/cache.py invalidate()?"
+git diff | crossby ask claude -
+```
+
+How a conversation runs:
+
+- The first agent opens. Each later turn goes to the other agent with the goal and the conversation so far, and every reply ends with `STATUS: CONTINUE` or `STATUS: DONE`.
+- It stops when two consecutive replies (one from each agent) say `DONE`, on `--max-turns` (default 6), on `--timeout` for the whole conversation (default 1800s), or when a session fails. A reply with no status line counts as `CONTINUE`, never as agreement.
+- Each turn is a fresh unattended [managed headless session](#managed-headless-sessions): unexpected questions fail it and unapproved permissions are denied. No headless adapter can resume a native session in unattended mode, so the conversation is replayed into every turn, trimmed to `--history-chars` (default 80,000) by dropping the oldest turns. Agents don't keep their own working memory between turns; what they found has to be in their replies.
+- Agents are told to read but not modify files. That is an instruction, not a sandbox: Codex's headless sandbox still allows writes inside the workspace.
+
+When it stops, crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`). Unless you pass `--no-summary`, it then runs a summarizer pass (the [handoff](#session-handoff) summarizer with a conversation prompt) and writes `summary.md`, covering the outcome, key findings, agreed decisions, open disagreements and next steps. The summarizer is the first agent by default; pick another with `--summarizer-tool`. A conversation stopped by a limit or a failure is still summarized, so you can see where it got stuck. A Ctrl-C keeps the transcript and skips the summary.
+
+Output is split for scripting: live turns and progress go to stderr, and stdout gets only the summary (or the last reply with `--no-summary`, or a JSON object with `--json`). Exit codes: `0` agreed, `2` stopped by the turn or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
+
+`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for the agents they start, and both refuse to run when it is already set, so a consulted agent can't start another consultation. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
+
+Both commands accept the managed-headless tools: **Claude, Codex, Cursor, Copilot, OpenCode, Antigravity CLI**.
 
 ## Launch options
 
