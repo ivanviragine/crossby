@@ -257,6 +257,100 @@ def test_converse_persists_each_turn_before_the_next_starts(
     assert "- Outcome: agreed" in final
 
 
+def test_failed_transcript_update_keeps_the_previous_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.cli import converse as cli
+    from crossby.config import json_utils
+
+    path = tmp_path / "run" / "transcript.md"
+    cli._write(path, "turn 1 saved\n")
+
+    def failing_replace(_src: object, _dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(json_utils.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="No space left"):
+        cli._write(path, "turn 1 saved\nturn 2 half-writ")
+
+    assert path.read_text(encoding="utf-8") == "turn 1 saved\n"
+    assert [p.name for p in path.parent.iterdir()] == ["transcript.md"]
+
+
+def test_write_that_fails_part_way_keeps_the_previous_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from crossby.cli import converse as cli
+    from crossby.config import json_utils
+
+    path = tmp_path / "transcript.md"
+    cli._write(path, "turn 1 saved\n")
+    real_fdopen = os.fdopen
+
+    class HalfWritten:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> HalfWritten:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.handle.close()
+
+        def write(self, text: str) -> int:
+            self.handle.write(text[: len(text) // 2])
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(
+        json_utils.os, "fdopen", lambda fd, *a, **k: HalfWritten(real_fdopen(fd, *a, **k))
+    )
+    with pytest.raises(OSError, match="Input/output error"):
+        cli._write(path, "turn 1 saved\nturn 2 saved\n")
+
+    assert path.read_text(encoding="utf-8") == "turn 1 saved\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["transcript.md"]
+
+
+def test_transcript_write_replaces_unencodable_characters(tmp_path: Path) -> None:
+    # On POSIX, invalid bytes in argv (e.g. --goal) arrive as lone surrogates.
+    from crossby.cli import converse as cli
+
+    path = tmp_path / "transcript.md"
+    cli._write(path, "**Goal:** fix caf\udce9 bug\n")
+    assert path.read_text(encoding="utf-8") == "**Goal:** fix caf? bug\n"
+
+
+def test_failed_per_turn_save_warns_and_the_conversation_continues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.cli import converse as cli
+
+    _use_runner(monkeypatch, FakeRunner(AGREEING))
+    _fake_summary(monkeypatch)
+    real_write = cli._write
+    calls = {"n": 0}
+
+    def flaky_write(path: Path, text: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the save after turn 2
+            raise OSError(28, "No space left on device")
+        real_write(path, text)
+
+    monkeypatch.setattr(cli, "_write", flaky_write)
+    result = runner.invoke(
+        app, ["converse", "codex", "claude", "-g", "x", "-q", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Could not save the transcript after turn 2" in result.stderr
+    (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
+    final = (run_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "## Turn 3: codex" in final
+    assert "- Outcome: agreed" in final
+
+
 def test_converse_ctrl_c_while_printing_keeps_the_transcript(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

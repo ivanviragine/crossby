@@ -1257,7 +1257,7 @@ fake runner and never start a native CLI.
   the same measure as `_validate_headless_request()`.
 - **Interrupts and persistence:** `run_conversation()` catches Ctrl-C around
   the whole relay, including caller callbacks, and returns the completed
-  turns. The CLI rewrites `transcript.md` after every turn, before printing it.
+  turns. The CLI rewrites `transcript.md` after every turn, before printing it, with `atomic_write_text()`: a plain `write_text()` truncates first, so one failed update would erase every saved turn. A failed per-turn save only warns; the next save or the final write retries.
 - **Stop rules:** two consecutive `DONE`s means agreement. A missing status
   line is `MISSING`, never agreement. A turn that times out because the
   overall deadline bounded it is `TIMEOUT` (exit 2); a turn that hits its own

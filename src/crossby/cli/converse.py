@@ -164,16 +164,19 @@ def converse(
     def on_turn(turn: ConverseTurn) -> None:
         # Persist before printing, so a crash or Ctrl-C keeps every completed turn.
         completed.append(turn)
-        _write(
-            transcript_path,
-            engine.render_partial_transcript(
-                goal=goal_text,
-                participants=participants,
-                max_turns=max_turns,
-                started_at=started_at,
-                turns=completed,
-            ),
+        partial = engine.render_partial_transcript(
+            goal=goal_text,
+            participants=participants,
+            max_turns=max_turns,
+            started_at=started_at,
+            turns=completed,
         )
+        try:
+            _write(transcript_path, partial)
+        except OSError as exc:
+            # The previous transcript is intact (the write is atomic), and the
+            # next turn or the final write tries again; don't end the conversation.
+            console.warn(f"Could not save the transcript after turn {turn.number}: {exc}")
         if not quiet:
             _show_turn(turn)
 
@@ -288,8 +291,16 @@ def _read_text_input(
 
 
 def _write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    """Replace ``path`` atomically, so a failed write keeps the previous content.
+
+    The transcript is rewritten after every turn; a truncating write that
+    failed part-way would erase every turn saved so far.
+    """
+    from crossby.config.json_utils import atomic_write_text
+
+    # On POSIX, invalid bytes in argv (e.g. --goal) arrive as lone surrogates,
+    # which strict UTF-8 cannot encode; replace them rather than fail.
+    atomic_write_text(path, text.encode("utf-8", "replace").decode("utf-8"))
 
 
 def _show_turn(turn: ConverseTurn) -> None:
