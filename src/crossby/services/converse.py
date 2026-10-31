@@ -675,13 +675,16 @@ def summarize_conversation(
         timeout_seconds=timeout_seconds,
         working_dir=working_dir,
     )
-    raw = summarizer.summarize_raw(
-        to_handoff_transcript(result, transcript_path),
-        source_tool=a.tool,
-        target_tool=b.tool,
-        prompt_source="converse-summary",
-        on_truncate=on_truncate,
-    )
+    # The summarizer is an agent too: it must not be able to start another
+    # consultation, so it runs under the same recursion guard as the turns.
+    with child_depth():
+        raw = summarizer.summarize_raw(
+            to_handoff_transcript(result, transcript_path),
+            source_tool=a.tool,
+            target_tool=b.tool,
+            prompt_source="converse-summary",
+            on_truncate=on_truncate,
+        )
     return raw.body
 
 

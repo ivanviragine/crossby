@@ -584,6 +584,7 @@ def test_summary_uses_the_handoff_summarizer_with_goal_and_stop_reason(
         captured["working_dir"] = self.working_dir
         captured["turns"] = [turn.content for turn in transcript.turns]
         captured["kwargs"] = kwargs
+        captured["depth"] = os.environ.get(DEPTH_ENV)
         return RawHandoff(
             source_tool=kwargs["source_tool"],
             target_tool=kwargs["target_tool"],
@@ -608,6 +609,8 @@ def test_summary_uses_the_handoff_summarizer_with_goal_and_stop_reason(
     assert "codex and claude" in template
     assert "## Open Disagreements" in template
     assert captured["working_dir"] == tmp_path
+    assert captured["depth"] == "1"
+    assert DEPTH_ENV not in os.environ
     assert captured["turns"] == [
         "codex (turn 1, STATUS: CONTINUE):\nCause is X.",
         "claude (turn 2, STATUS: DONE):\nAgreed.",
