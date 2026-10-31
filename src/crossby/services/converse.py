@@ -534,6 +534,11 @@ def run_conversation(
             except KeyboardInterrupt:
                 return finish(StopReason.INTERRUPTED, f"interrupted during turn {number}")
             except HeadlessSessionError as exc:
+                # The managed runtime re-probes the version before it starts and
+                # raises (rather than returning TIMED_OUT) when the deadline it
+                # was given runs out there; that is still the overall time limit.
+                if clock() >= deadline:
+                    return out_of_time(f"during turn {number}")
                 return finish(StopReason.FAILED, f"{speaker.label} turn {number}: {exc}")
             duration = clock() - turn_started
 

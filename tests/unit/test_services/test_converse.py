@@ -425,6 +425,20 @@ def test_deadline_hit_during_a_turn_is_a_timeout(tmp_path: Path) -> None:
     assert "during turn 1" in (result.error or "")
 
 
+def test_startup_error_after_the_deadline_is_a_timeout(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(
+        ["a\nSTATUS: CONTINUE", _unsupported(AIToolID.CLAUDE, "version probe ran out of time")],
+        clock=clock,
+        seconds_per_turn=30,
+    )
+    result = _run(runner, tmp_path, timeout_seconds=50, clock=clock)
+    assert result.stop_reason is StopReason.TIMEOUT
+    assert result.exit_code == 2
+    assert result.error == "conversation time limit of 50s reached during turn 2"
+    assert len(result.turns) == 1
+
+
 def test_keyboard_interrupt_returns_partial_result(tmp_path: Path) -> None:
     runner = FakeRunner(["a\nSTATUS: CONTINUE", KeyboardInterrupt()])
     result = _run(runner, tmp_path)
