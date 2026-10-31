@@ -1240,11 +1240,20 @@ fake runner and never start a native CLI.
   (`render_history`, which keeps the newest turns). If unattended resume ever
   lands, the right change is passing `resume_id` per participant. It must not
   route through brokered mode, whose transports and restrictions differ.
-- **Turn prompt:** `data/prompts/converse_turn.md`. **Summary prompt:**
-  `data/prompts/converse_summary.md`, run through `HandoffSummarizer.summarize_raw()`
-  after the conversation is expressed as a handoff `ConversationTranscript`.
-  Fill templates with `str.format` on the template only; goal text may
-  contain braces.
+- **Prompts:** `data/prompts/converse_turn.md` (turns), `converse_ask.md`
+  (frames an `ask` question with the same read-only rules) and
+  `converse_summary.md`. Fill templates with `str.format` on the template
+  only; goal and question text may contain braces.
+- **Summary:** `summarize_conversation()` is one more `UNATTENDED` session
+  through the same `TurnRunner`, never `HandoffSummarizer`'s plain
+  `subprocess.run()`, so it keeps the runtime's cancellation, process-group
+  cleanup and each tool's unattended permission policy. `build_summary_prompt()`
+  reuses the handoff `render_turn()` and `truncate_transcript()`, then a
+  character ceiling (`SUMMARY_PROMPT_CHARS`) keeps argv-transport tools under
+  the runtime's argument limit.
+- **Interrupts and persistence:** `run_conversation()` catches Ctrl-C around
+  the whole relay, including caller callbacks, and returns the completed
+  turns. The CLI rewrites `transcript.md` after every turn, before printing it.
 - **Stop rules:** two consecutive `DONE`s means agreement. A missing status
   line is `MISSING`, never agreement. A turn that times out because the
   overall deadline bounded it is `TIMEOUT` (exit 2); a turn that hits its own

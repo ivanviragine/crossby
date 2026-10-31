@@ -447,6 +447,38 @@ def test_keyboard_interrupt_returns_partial_result(tmp_path: Path) -> None:
     assert len(result.turns) == 1
 
 
+def test_interrupt_while_the_caller_prints_a_reply_keeps_completed_turns(
+    tmp_path: Path,
+) -> None:
+    def on_turn(turn: ConverseTurn) -> None:
+        if turn.number == 2:
+            raise KeyboardInterrupt
+
+    runner = FakeRunner(["a\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE", "unused"])
+    result = _run(runner, tmp_path, on_turn=on_turn)
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert [t.text for t in result.turns] == ["a", "b"]
+    assert result.error == "interrupted after 2 turns"
+    assert DEPTH_ENV not in os.environ
+
+
+def test_interrupt_in_turn_start_callback_is_reported_for_that_turn(tmp_path: Path) -> None:
+    def on_turn_start(number: int, _speaker: object) -> None:
+        if number == 2:
+            raise KeyboardInterrupt
+
+    result = _run(FakeRunner(["a\nSTATUS: CONTINUE"]), tmp_path, on_turn_start=on_turn_start)
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert result.error == "interrupted during turn 2"
+    assert len(result.turns) == 1
+
+
+def test_interrupt_during_preflight_is_an_interruption(tmp_path: Path) -> None:
+    result = _run(FakeRunner([], preflight_error=KeyboardInterrupt()), tmp_path)
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert result.turns == []
+
+
 def test_turn_callbacks_fire_in_order(tmp_path: Path) -> None:
     events: list[str] = []
     runner = FakeRunner(["a\nSTATUS: DONE", "b\nSTATUS: DONE"])
@@ -516,7 +548,8 @@ def test_ask_returns_the_answer(tmp_path: Path) -> None:
     assert result.succeeded
     assert result.text == "The answer."
     ((_tool, request),) = runner.calls
-    assert request.prompt == "Question?"
+    assert request.prompt.endswith("Question:\n\nQuestion?")
+    assert "Do not modify, create, or delete files." in request.prompt
     assert request.model == "m"
     assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
     assert runner.depths == ["1"]
@@ -567,7 +600,7 @@ def test_render_transcript() -> None:
     text = converse.render_transcript(_finished(StopReason.AGREED))
     assert "**Goal:** Agree on a fix" in text
     assert "- Participants: codex, claude" in text
-    assert "- Outcome: agreed: both agents marked the goal as met after 2 turns" in text
+    assert "- Outcome: agreed: both agents declared the goal met after 2 turns" in text
     assert "## Turn 1: codex\n\nCause is X." in text
     assert "*STATUS: DONE · 1s*" in text
 
@@ -585,50 +618,125 @@ def test_describe_stop(reason: StopReason, expected: str) -> None:
     assert converse.describe_stop(_finished(reason, error="late")) == expected
 
 
-def test_summary_uses_the_handoff_summarizer_with_goal_and_stop_reason(
+def test_summary_runs_as_a_managed_unattended_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from crossby.handoff import summarizer as summarizer_mod
-    from crossby.handoff.models import RawHandoff
+    import subprocess
 
-    captured: dict[str, object] = {}
+    def no_plain_subprocess(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the summary must not bypass the managed runtime")
 
-    def fake_summarize_raw(self, transcript, **kwargs):  # type: ignore[no-untyped-def]
-        captured["template"] = self.prompt_template
-        captured["working_dir"] = self.working_dir
-        captured["turns"] = [turn.content for turn in transcript.turns]
-        captured["kwargs"] = kwargs
-        captured["depth"] = os.environ.get(DEPTH_ENV)
-        return RawHandoff(
-            source_tool=kwargs["source_tool"],
-            target_tool=kwargs["target_tool"],
-            session_ref=transcript.session_ref,
-            body="## Outcome\nThey agreed.\n",
-            prompt_source=kwargs["prompt_source"],
-        )
-
-    monkeypatch.setattr(summarizer_mod.HandoffSummarizer, "summarize_raw", fake_summarize_raw)
-    result = _finished(StopReason.TURN_LIMIT)
+    monkeypatch.setattr(subprocess, "run", no_plain_subprocess)
+    runner = FakeRunner(["## Outcome\nThey agreed.\n"])
     body = converse.summarize_conversation(
-        result,
+        _finished(StopReason.TURN_LIMIT),
         transcript_path=tmp_path / "run" / "transcript.md",
-        summarizer_tool=AbstractAITool.get(AIToolID.CLAUDE),
+        tool=AIToolID.CLAUDE,
         working_dir=tmp_path,
+        model="haiku",
+        timeout_seconds=42,
+        runner=runner,
     )
 
-    assert body == "## Outcome\nThey agreed.\n"
-    template = str(captured["template"])
-    assert "Goal: Agree on a fix" in template
-    assert "Stop reason: turn limit reached (6 turns) without agreement" in template
-    assert "codex and claude" in template
-    assert "## Open Disagreements" in template
-    assert captured["working_dir"] == tmp_path
-    assert captured["depth"] == "1"
+    assert body == "## Outcome\nThey agreed."
+    ((tool, request),) = runner.calls
+    assert tool is AIToolID.CLAUDE
+    assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+    assert request.timeout_seconds == 42
+    assert request.model == "haiku"
+    assert request.working_dir == tmp_path
+    assert runner.depths == ["1"]
     assert DEPTH_ENV not in os.environ
-    assert captured["turns"] == [
-        "codex (turn 1, STATUS: CONTINUE):\nCause is X.",
-        "claude (turn 2, STATUS: DONE):\nAgreed.",
+
+
+def test_summary_prompt_carries_goal_stop_reason_rules_and_transcript(tmp_path: Path) -> None:
+    prompt = converse.build_summary_prompt(
+        _finished(StopReason.TURN_LIMIT), transcript_path=tmp_path / "t.md"
+    )
+    assert "Goal: Agree on a fix" in prompt
+    assert "Stop reason: turn limit reached (6 turns) without agreement" in prompt
+    assert "codex and claude" in prompt
+    assert "## Open Disagreements" in prompt
+    assert "Do not read, modify, create, or delete files" in prompt
+    assert "It is not independent verification." in prompt
+    assert "--- Transcript ---" in prompt
+    assert "codex (turn 1, STATUS: CONTINUE):\nCause is X." in prompt
+    assert "claude (turn 2, STATUS: DONE):\nAgreed." in prompt
+    assert "earlier turns were dropped" not in prompt
+
+
+def test_summary_prompt_fits_the_character_ceiling(tmp_path: Path) -> None:
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [
+        _turn(n, "codex" if n % 2 else "claude", str(n) * 30_000, AgentStatus.CONTINUE)
+        for n in range(1, 7)
     ]
+    truncations: list[tuple[int, int]] = []
+    prompt = converse.build_summary_prompt(
+        result,
+        transcript_path=tmp_path / "t.md",
+        max_chars=70_000,
+        on_truncate=lambda total, kept: truncations.append((total, kept)),
+    )
+    assert len(prompt) <= 70_000
+    assert "earlier turns were dropped" in prompt
+    assert "6" * 30_000 in prompt
+    assert "1" * 30_000 not in prompt
+    assert truncations == [(6, 2)]
+
+
+def test_summary_prompt_clips_a_single_oversized_turn(tmp_path: Path) -> None:
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [_turn(1, "codex", "x" * 150_000, AgentStatus.CONTINUE)]
+    prompt = converse.build_summary_prompt(
+        result, transcript_path=tmp_path / "t.md", max_chars=50_000
+    )
+    assert len(prompt) <= 50_000
+    assert "characters omitted" in prompt
+
+
+@pytest.mark.parametrize(
+    ("reply", "message"),
+    [
+        (HeadlessTerminalStatus.TIMED_OUT, "claude summary session ended with status timed_out"),
+        (HeadlessTerminalStatus.FAILED, "claude summary session ended with status failed"),
+    ],
+)
+def test_summary_failures_raise_summary_errors(
+    tmp_path: Path, reply: HeadlessTerminalStatus, message: str
+) -> None:
+    with pytest.raises(converse.ConverseSummaryError, match=message):
+        converse.summarize_conversation(
+            _finished(StopReason.AGREED),
+            transcript_path=tmp_path / "t.md",
+            tool=AIToolID.CLAUDE,
+            working_dir=tmp_path,
+            runner=FakeRunner([reply]),
+        )
+
+
+def test_summary_session_errors_raise_summary_errors(tmp_path: Path) -> None:
+    with pytest.raises(converse.ConverseSummaryError, match="argv too long"):
+        converse.summarize_conversation(
+            _finished(StopReason.AGREED),
+            transcript_path=tmp_path / "t.md",
+            tool=AIToolID.CURSOR,
+            working_dir=tmp_path,
+            runner=FakeRunner([_unsupported(AIToolID.CURSOR, "argv too long")]),
+        )
+
+
+def test_partial_transcript_marks_the_conversation_in_progress() -> None:
+    text = converse.render_partial_transcript(
+        goal="Agree on a fix",
+        participants=PARTICIPANTS,
+        max_turns=6,
+        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
+        turns=[_turn(1, "codex", "Cause is X.", AgentStatus.CONTINUE)],
+    )
+    assert "- Outcome: in progress: 1 turn completed" in text
+    assert "- Finished:" not in text
+    assert "## Turn 1: codex\n\nCause is X." in text
 
 
 def test_render_summary_and_conversation_dir(tmp_path: Path) -> None:

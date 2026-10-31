@@ -35,7 +35,6 @@ from crossby.models.ai import (
 )
 
 if TYPE_CHECKING:
-    from crossby.ai_tools.base import AbstractAITool
     from crossby.handoff.models import ConversationTranscript
 
 DEPTH_ENV = "CROSSBY_CONVERSE_DEPTH"
@@ -48,7 +47,8 @@ DEFAULT_MAX_TURNS = 6
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 600.0
 DEFAULT_HISTORY_CHARS = 80_000
-DEFAULT_SUMMARY_TIMEOUT_SECONDS = 300
+DEFAULT_SUMMARY_TIMEOUT_SECONDS = 300.0
+DEFAULT_SUMMARY_TOKEN_BUDGET = 32_000
 PREFLIGHT_TIMEOUT_SECONDS = 20.0
 # A turn needs a realistic minimum to start a native CLI and answer; with less
 # than this left on the overall deadline the conversation stops as timed out.
@@ -56,6 +56,11 @@ MIN_TURN_SECONDS = 5.0
 
 TURN_PROMPT_FILE = "converse_turn.md"
 SUMMARY_PROMPT_FILE = "converse_summary.md"
+ASK_PROMPT_FILE = "converse_ask.md"
+# Character ceiling for the assembled summary prompt. It stays under the
+# managed runtime's argv limit (120,000 on POSIX) for tools that take the
+# prompt as an argument, after the handoff token-budget truncation.
+SUMMARY_PROMPT_CHARS = 100_000
 
 
 class ConverseError(RuntimeError):
@@ -64,6 +69,10 @@ class ConverseError(RuntimeError):
 
 class ConverseDepthError(ConverseError):
     """``ask``/``converse`` was invoked from inside another conversation."""
+
+
+class ConverseSummaryError(RuntimeError):
+    """The summary session failed; the transcript is unaffected."""
 
 
 class AgentStatus(StrEnum):
@@ -402,9 +411,12 @@ def ask_agent(
 
     if not prompt.strip():
         raise ConverseError("The question is empty.")
+    from crossby.handoff.prompts import load_bundled_prompt
+
     runner = runner or HeadlessTurnRunner()
+    framed = load_bundled_prompt(ASK_PROMPT_FILE).format(question=prompt.strip()).strip()
     request = _request(
-        None, prompt=prompt, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
+        None, prompt=framed, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
     )
     started = clock()
     try:
@@ -482,101 +494,115 @@ def run_conversation(
             f"conversation time limit of {timeout_seconds:g}s reached {when}",
         )
 
-    # Fail fast, before the first agent spends time, if either side cannot run.
-    # Preflights spend the same overall budget as the turns.
-    for participant in dict.fromkeys(participants):
-        remaining = deadline - clock()
-        if remaining < MIN_TURN_SECONDS:
-            return out_of_time("during preflight")
-        probe = _request(
-            participant,
-            prompt="preflight",
-            working_dir=working_dir,
-            timeout_seconds=min(turn_timeout_seconds, remaining),
-        )
-        try:
-            runner.preflight(participant.tool, probe)
-        except HeadlessSessionError as exc:
-            if clock() >= deadline:
-                return out_of_time("during preflight")
-            return finish(StopReason.FAILED, f"{participant.label} cannot run headless: {exc}")
+    in_progress: int | None = None
 
-    cancel_event = threading.Event()
-    with child_depth():
-        for number in range(1, max_turns + 1):
-            speaker = participants[(number - 1) % 2]
-            peer = participants[number % 2]
+    def relay() -> ConversationResult:
+        nonlocal in_progress
+        # Fail fast, before the first agent spends time, if either side cannot run.
+        # Preflights spend the same overall budget as the turns.
+        for participant in dict.fromkeys(participants):
             remaining = deadline - clock()
             if remaining < MIN_TURN_SECONDS:
-                return out_of_time(f"before turn {number}")
-            bounded_by_deadline = remaining <= turn_timeout_seconds
-            prompt = build_turn_prompt(
-                template=template,
-                goal=goal,
-                speaker=speaker,
-                peer=peer,
-                turn=number,
-                max_turns=max_turns,
-                history=turns,
-                history_chars=history_chars,
-            )
-            request = _request(
-                speaker,
-                prompt=prompt,
+                return out_of_time("during preflight")
+            probe = _request(
+                participant,
+                prompt="preflight",
                 working_dir=working_dir,
                 timeout_seconds=min(turn_timeout_seconds, remaining),
             )
-            if on_turn_start is not None:
-                on_turn_start(number, speaker)
-            turn_started = clock()
             try:
-                result = runner.run(speaker.tool, request, cancel_event)
-            except KeyboardInterrupt:
-                return finish(StopReason.INTERRUPTED, f"interrupted during turn {number}")
+                runner.preflight(participant.tool, probe)
             except HeadlessSessionError as exc:
-                # The managed runtime re-probes the version before it starts and
-                # raises (rather than returning TIMED_OUT) when the deadline it
-                # was given runs out there; that is still the overall time limit.
                 if clock() >= deadline:
-                    return out_of_time(f"during turn {number}")
-                return finish(StopReason.FAILED, f"{speaker.label} turn {number}: {exc}")
-            duration = clock() - turn_started
+                    return out_of_time("during preflight")
+                return finish(StopReason.FAILED, f"{participant.label} cannot run headless: {exc}")
 
-            if result.status is HeadlessTerminalStatus.TIMED_OUT:
-                if bounded_by_deadline:
-                    return out_of_time(f"during turn {number}")
-                return finish(
-                    StopReason.FAILED,
-                    f"{speaker.label} turn {number} timed out after {turn_timeout_seconds:g}s",
+        cancel_event = threading.Event()
+        with child_depth():
+            for number in range(1, max_turns + 1):
+                speaker = participants[(number - 1) % 2]
+                peer = participants[number % 2]
+                remaining = deadline - clock()
+                if remaining < MIN_TURN_SECONDS:
+                    return out_of_time(f"before turn {number}")
+                bounded_by_deadline = remaining <= turn_timeout_seconds
+                prompt = build_turn_prompt(
+                    template=template,
+                    goal=goal,
+                    speaker=speaker,
+                    peer=peer,
+                    turn=number,
+                    max_turns=max_turns,
+                    history=turns,
+                    history_chars=history_chars,
                 )
-            if result.status is not HeadlessTerminalStatus.SUCCEEDED:
-                return finish(
-                    StopReason.FAILED,
-                    f"{speaker.label} turn {number} ended with status {result.status.value}",
+                request = _request(
+                    speaker,
+                    prompt=prompt,
+                    working_dir=working_dir,
+                    timeout_seconds=min(turn_timeout_seconds, remaining),
                 )
-            text = (result.final_text or "").strip()
-            if not text:
-                return finish(StopReason.FAILED, f"{speaker.label} turn {number} returned no text")
+                in_progress = number
+                if on_turn_start is not None:
+                    on_turn_start(number, speaker)
+                turn_started = clock()
+                try:
+                    result = runner.run(speaker.tool, request, cancel_event)
+                except HeadlessSessionError as exc:
+                    # The managed runtime re-probes the version before it starts and
+                    # raises (rather than returning TIMED_OUT) when the deadline it
+                    # was given runs out there; that is still the overall time limit.
+                    if clock() >= deadline:
+                        return out_of_time(f"during turn {number}")
+                    return finish(StopReason.FAILED, f"{speaker.label} turn {number}: {exc}")
+                duration = clock() - turn_started
 
-            body, status = parse_status(text)
-            turn = ConverseTurn(
-                number=number,
-                speaker=speaker.label,
-                tool=speaker.tool,
-                text=body,
-                status=status,
-                duration_seconds=duration,
-            )
-            turns.append(turn)
-            if on_turn is not None:
-                on_turn(turn)
-            if (
-                status is AgentStatus.DONE
-                and len(turns) >= 2
-                and turns[-2].status is AgentStatus.DONE
-            ):
-                return finish(StopReason.AGREED)
-    return finish(StopReason.TURN_LIMIT)
+                if result.status is HeadlessTerminalStatus.TIMED_OUT:
+                    if bounded_by_deadline:
+                        return out_of_time(f"during turn {number}")
+                    return finish(
+                        StopReason.FAILED,
+                        f"{speaker.label} turn {number} timed out after {turn_timeout_seconds:g}s",
+                    )
+                if result.status is not HeadlessTerminalStatus.SUCCEEDED:
+                    return finish(
+                        StopReason.FAILED,
+                        f"{speaker.label} turn {number} ended with status {result.status.value}",
+                    )
+                text = (result.final_text or "").strip()
+                if not text:
+                    return finish(
+                        StopReason.FAILED, f"{speaker.label} turn {number} returned no text"
+                    )
+
+                body, status = parse_status(text)
+                turn = ConverseTurn(
+                    number=number,
+                    speaker=speaker.label,
+                    tool=speaker.tool,
+                    text=body,
+                    status=status,
+                    duration_seconds=duration,
+                )
+                turns.append(turn)
+                in_progress = None
+                if on_turn is not None:
+                    on_turn(turn)
+                if (
+                    status is AgentStatus.DONE
+                    and len(turns) >= 2
+                    and turns[-2].status is AgentStatus.DONE
+                ):
+                    return finish(StopReason.AGREED)
+        return finish(StopReason.TURN_LIMIT)
+
+    # Ctrl-C can land anywhere: in a session, a preflight, or a caller's
+    # callback while it prints a reply. Every case keeps the completed turns.
+    try:
+        return relay()
+    except KeyboardInterrupt:
+        where = f"during turn {in_progress}" if in_progress else f"after {_turns(len(turns))}"
+        return finish(StopReason.INTERRUPTED, f"interrupted {where}")
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +617,7 @@ def _turns(count: int) -> str:
 def describe_stop(result: ConversationResult) -> str:
     done = _turns(len(result.turns))
     if result.stop_reason is StopReason.AGREED:
-        return f"agreed: both agents marked the goal as met after {done}"
+        return f"agreed: both agents declared the goal met after {done}"
     if result.stop_reason is StopReason.TURN_LIMIT:
         return f"turn limit reached ({_turns(result.max_turns)}) without agreement"
     detail = f": {result.error}" if result.error else ""
@@ -603,21 +629,65 @@ def describe_stop(result: ConversationResult) -> str:
 
 
 def render_transcript(result: ConversationResult) -> str:
-    """Render the whole conversation as markdown."""
-    a, b = result.participants
+    """Render a finished conversation as markdown."""
+    return _render_transcript(
+        goal=result.goal,
+        participants=result.participants,
+        max_turns=result.max_turns,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        turns=result.turns,
+        outcome=describe_stop(result),
+    )
+
+
+def render_partial_transcript(
+    *,
+    goal: str,
+    participants: tuple[Participant, Participant],
+    max_turns: int,
+    started_at: datetime,
+    turns: Sequence[ConverseTurn],
+) -> str:
+    """Render a conversation that is still running, so completed turns survive a crash."""
+    return _render_transcript(
+        goal=goal,
+        participants=participants,
+        max_turns=max_turns,
+        started_at=started_at,
+        finished_at=None,
+        turns=turns,
+        outcome=f"in progress: {_turns(len(turns))} completed",
+    )
+
+
+def _render_transcript(
+    *,
+    goal: str,
+    participants: tuple[Participant, Participant],
+    max_turns: int,
+    started_at: datetime,
+    finished_at: datetime | None,
+    turns: Sequence[ConverseTurn],
+    outcome: str,
+) -> str:
+    a, b = participants
     lines = [
         "# Conversation",
         "",
-        f"**Goal:** {result.goal}",
+        f"**Goal:** {goal}",
         "",
         f"- Participants: {a.label}, {b.label}",
-        f"- Started: {result.started_at.isoformat(timespec='seconds')}",
-        f"- Finished: {result.finished_at.isoformat(timespec='seconds')}",
-        f"- Turns: {len(result.turns)} of at most {result.max_turns}",
-        f"- Outcome: {describe_stop(result)}",
+        f"- Started: {started_at.isoformat(timespec='seconds')}",
+    ]
+    if finished_at is not None:
+        lines.append(f"- Finished: {finished_at.isoformat(timespec='seconds')}")
+    lines += [
+        f"- Turns: {len(turns)} of at most {max_turns}",
+        f"- Outcome: {outcome}",
         "",
     ]
-    for turn in result.turns:
+    for turn in turns:
         lines += [
             f"## Turn {turn.number}: {turn.speaker}",
             "",
@@ -651,46 +721,105 @@ def to_handoff_transcript(result: ConversationResult, path: Path) -> Conversatio
     )
 
 
+def build_summary_prompt(
+    result: ConversationResult,
+    *,
+    transcript_path: Path,
+    token_budget: int = DEFAULT_SUMMARY_TOKEN_BUDGET,
+    max_chars: int = SUMMARY_PROMPT_CHARS,
+    on_truncate: Callable[[int, int], None] | None = None,
+) -> str:
+    """Assemble the summary prompt with the handoff formatting and truncation.
+
+    The handoff token budget keeps the most recent turns; the character
+    ceiling then drops further old turns (and, for a single oversized turn,
+    clips it) so argv-transport tools can always receive the prompt.
+    """
+    from crossby.handoff.prompts import load_bundled_prompt
+    from crossby.handoff.summarizer import render_turn
+    from crossby.handoff.truncate import truncate_transcript
+
+    a, b = result.participants
+    header = (
+        load_bundled_prompt(SUMMARY_PROMPT_FILE)
+        .format(
+            participants=f"{a.label} and {b.label}",
+            goal=result.goal,
+            stop_reason=describe_stop(result),
+        )
+        .strip()
+    )
+    transcript = to_handoff_transcript(result, transcript_path)
+    prepared = truncate_transcript(transcript, token_budget)
+    turns = list(prepared.turns)
+    truncated = prepared.truncated
+
+    def assemble() -> str:
+        lines = [header, ""]
+        if truncated:
+            lines.append(
+                "Note: earlier turns were dropped to fit the size limit. Rely on the "
+                "last turns for where the conversation ended.\n"
+            )
+        lines.append("--- Transcript ---\n")
+        for turn in turns:
+            lines += [render_turn(turn), ""]
+        return "\n".join(lines)
+
+    prompt = assemble()
+    while len(prompt) > max_chars and len(turns) > 1:
+        turns.pop(0)
+        truncated = True
+        prompt = assemble()
+    if len(prompt) > max_chars and turns:
+        only = turns[0]
+        room = max(len(only.content) - (len(prompt) - max_chars) - 200, 1000)
+        turns = [only.model_copy(update={"content": _clip(only.content, room)})]
+        truncated = True
+        prompt = assemble()
+    if truncated and on_truncate is not None:
+        on_truncate(len(transcript.turns), len(turns))
+    return prompt
+
+
 def summarize_conversation(
     result: ConversationResult,
     *,
     transcript_path: Path,
-    summarizer_tool: AbstractAITool,
+    tool: AIToolID,
     working_dir: Path,
-    timeout_seconds: int = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
+    model: str | None = None,
+    timeout_seconds: float = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
+    runner: TurnRunner | None = None,
     on_truncate: Callable[[int, int], None] | None = None,
 ) -> str:
-    """Summarize a finished conversation with a neutral summarizer pass.
+    """Summarize a finished conversation in one managed unattended session.
 
-    Raises the handoff summarizer's errors unchanged so the caller can report
-    them; the transcript is already on disk when this runs.
+    The summary runs through the same boundary as the turns, so it gets the
+    runtime's deadline, cancellation, process-group cleanup and each tool's
+    unattended permission policy, plus the recursion guard. Failures raise
+    :class:`ConverseSummaryError`; the transcript is already on disk.
     """
-    from crossby.handoff.prompts import load_bundled_prompt
-    from crossby.handoff.summarizer import HandoffSummarizer
+    from crossby.ai_tools.headless import HeadlessSessionError
 
-    a, b = result.participants
-    template = load_bundled_prompt(SUMMARY_PROMPT_FILE).format(
-        participants=f"{a.label} and {b.label}",
-        goal=result.goal,
-        stop_reason=describe_stop(result),
+    prompt = build_summary_prompt(result, transcript_path=transcript_path, on_truncate=on_truncate)
+    request = _request(
+        None, prompt=prompt, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
     )
-    summarizer = HandoffSummarizer(
-        summarizer_tool,
-        prompt_template=template.strip(),
-        timeout_seconds=timeout_seconds,
-        working_dir=working_dir,
-    )
-    # The summarizer is an agent too: it must not be able to start another
-    # consultation, so it runs under the same recursion guard as the turns.
-    with child_depth():
-        raw = summarizer.summarize_raw(
-            to_handoff_transcript(result, transcript_path),
-            source_tool=a.tool,
-            target_tool=b.tool,
-            prompt_source="converse-summary",
-            on_truncate=on_truncate,
+    runner = runner or HeadlessTurnRunner()
+    try:
+        with child_depth():
+            session = runner.run(tool, request, threading.Event())
+    except HeadlessSessionError as exc:
+        raise ConverseSummaryError(str(exc)) from None
+    if session.status is not HeadlessTerminalStatus.SUCCEEDED:
+        raise ConverseSummaryError(
+            f"{tool.value} summary session ended with status {session.status.value}"
         )
-    return raw.body
+    text = (session.final_text or "").strip()
+    if not text:
+        raise ConverseSummaryError(f"{tool.value} returned an empty summary")
+    return text
 
 
 def render_summary(result: ConversationResult, body: str) -> str:

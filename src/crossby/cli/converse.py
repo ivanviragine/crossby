@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,7 +17,6 @@ import typer
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
-    from crossby.ai_tools.base import AbstractAITool
     from crossby.models.ai import AIToolID
     from crossby.services.converse import ConversationResult, ConverseTurn, Participant
 
@@ -39,8 +39,10 @@ def ask(
     """Ask another AI coding agent one question, headless, and print its answer.
 
     The agent runs unattended in the project: unexpected questions fail the
-    session and unapproved permissions are denied. Each call is a fresh
-    session, so include the context the agent needs in the question.
+    session and unapproved permissions are denied. The question is framed
+    with the same rules as a conversation turn: read and check, but do not
+    modify files. Each call is a fresh session, so include the context the
+    agent needs in the question.
 
     Examples::
 
@@ -138,22 +140,42 @@ def converse(
     project_root = _project_root(path)
     participant_ids = (_headless_tool(tool_a, "TOOL_A"), _headless_tool(tool_b, "TOOL_B"))
     goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
-    summarizer_adapter = None if no_summary else _summarizer(summarizer_tool, participant_ids[0])
+    summarizer_id: AIToolID | None = None
+    if not no_summary:
+        summarizer_id = (
+            _headless_tool(summarizer_tool, "--summarizer-tool")
+            if summarizer_tool is not None
+            else participant_ids[0]
+        )
     participants = engine.make_participants(*participant_ids, model_a=model_a, model_b=model_b)
+
+    started_at = datetime.now(tz=UTC)
+    if output_dir is not None:
+        out_dir = output_dir.resolve()
+    else:
+        out_dir = engine.conversation_dir(project_root, started_at)
+    transcript_path = out_dir / "transcript.md"
+    completed: list[ConverseTurn] = []
 
     def on_turn_start(number: int, speaker: Participant) -> None:
         if not quiet:
             _stderr(f"[step.count]\\[{number}/{max_turns}][/] {speaker.label} is replying…")
 
     def on_turn(turn: ConverseTurn) -> None:
-        if quiet:
-            return
-        sys.stderr.write(f"\n{turn.text or '(empty reply)'}\n\n")
-        _stderr(
-            f"[dim]      {turn.speaker} · STATUS: {turn.status.value} · "
-            f"{turn.duration_seconds:.0f}s[/]"
+        # Persist before printing, so a crash or Ctrl-C keeps every completed turn.
+        completed.append(turn)
+        _write(
+            transcript_path,
+            engine.render_partial_transcript(
+                goal=goal_text,
+                participants=participants,
+                max_turns=max_turns,
+                started_at=started_at,
+                turns=completed,
+            ),
         )
-        sys.stderr.flush()
+        if not quiet:
+            _show_turn(turn)
 
     try:
         engine.check_depth()
@@ -172,24 +194,21 @@ def converse(
         console.error(str(exc))
         raise typer.Exit(1) from None
 
-    if output_dir is not None:
-        out_dir = output_dir.resolve()
-    else:
-        out_dir = engine.conversation_dir(project_root, result.started_at)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    transcript_path = out_dir / "transcript.md"
-    transcript_path.write_text(engine.render_transcript(result), encoding="utf-8")
+    _write(transcript_path, engine.render_transcript(result))
 
     summary_path: Path | None = None
     summary_body: str | None = None
     summary_error: str | None = None
-    if summarizer_adapter is not None and result.turns and not _interrupted(result):
-        summary_body, summary_error = _summarize(
-            result, transcript_path, summarizer_adapter, project_root, quiet=quiet
+    exit_code = result.exit_code
+    if summarizer_id is not None and result.turns and not _interrupted(result):
+        summary_body, summary_error, interrupted = _summarize(
+            result, transcript_path, summarizer_id, project_root, quiet=quiet
         )
+        if interrupted:
+            exit_code = engine.EXIT_CODES[engine.StopReason.INTERRUPTED]
         if summary_body is not None:
             summary_path = out_dir / "summary.md"
-            summary_path.write_text(engine.render_summary(result, summary_body), encoding="utf-8")
+            _write(summary_path, engine.render_summary(result, summary_body))
 
     _report(
         result,
@@ -199,8 +218,8 @@ def converse(
         summary_error=summary_error,
         as_json=as_json,
     )
-    if result.exit_code:
-        raise typer.Exit(result.exit_code)
+    if exit_code:
+        raise typer.Exit(exit_code)
 
 
 # ---------------------------------------------------------------------------
@@ -268,27 +287,17 @@ def _read_text_input(
     return text.strip()
 
 
-def _summarizer(value: str | None, default: AIToolID) -> AbstractAITool:
-    from crossby.ai_tools.base import AbstractAITool
-    from crossby.models.ai import AIToolID
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
-    if value is None:
-        tool_id = default
-    else:
-        try:
-            tool_id = AIToolID(value)
-        except ValueError:
-            valid = ", ".join(t.value for t in AIToolID)
-            console.error(f"Unknown tool for --summarizer-tool: {value!r}. Valid: {valid}")
-            raise typer.Exit(1) from None
-    adapter = AbstractAITool.get(tool_id)
-    if not adapter.capabilities().supports_headless:
-        console.error(
-            f"{tool_id.value} cannot run a headless summary. Pick another --summarizer-tool "
-            "or pass --no-summary."
-        )
-        raise typer.Exit(1)
-    return adapter
+
+def _show_turn(turn: ConverseTurn) -> None:
+    sys.stderr.write(f"\n{turn.text or '(empty reply)'}\n\n")
+    _stderr(
+        f"[dim]      {turn.speaker} · STATUS: {turn.status.value} · {turn.duration_seconds:.0f}s[/]"
+    )
+    sys.stderr.flush()
 
 
 def _interrupted(result: ConversationResult) -> bool:
@@ -300,34 +309,34 @@ def _interrupted(result: ConversationResult) -> bool:
 def _summarize(
     result: ConversationResult,
     transcript_path: Path,
-    summarizer_adapter: AbstractAITool,
+    tool: AIToolID,
     project_root: Path,
     *,
     quiet: bool,
-) -> tuple[str | None, str | None]:
-    from crossby.handoff.summarizer import SummarizerParseError, SummarizerToolNotInstalledError
-    from crossby.services.converse import summarize_conversation
+) -> tuple[str | None, str | None, bool]:
+    """Return ``(summary, error, interrupted)``; the transcript is already written."""
+    from crossby.services.converse import ConverseSummaryError, summarize_conversation
 
     def warn_truncation(total: int, kept: int) -> None:
         console.warn(f"Summary input truncated: kept the last {kept} of {total} turns.")
 
     if not quiet:
-        _stderr(f"  [step]▸[/] Summarizing with {summarizer_adapter.TOOL_ID.value}…")
+        _stderr(f"  [step]▸[/] Summarizing with {tool.value}…")
     try:
         body = summarize_conversation(
             result,
             transcript_path=transcript_path,
-            summarizer_tool=summarizer_adapter,
+            tool=tool,
             working_dir=project_root,
             on_truncate=warn_truncation,
         )
-    except (SummarizerParseError, SummarizerToolNotInstalledError) as exc:
+    except ConverseSummaryError as exc:
         console.warn(f"Summary failed: {exc}")
-        return None, str(exc)
-    if not body.strip():
-        console.warn("Summary failed: the summarizer returned no text.")
-        return None, "the summarizer returned no text"
-    return body, None
+        return None, str(exc), False
+    except KeyboardInterrupt:
+        console.warn("Summary interrupted; the transcript is saved.")
+        return None, "interrupted", True
+    return body, None, False
 
 
 def _report(

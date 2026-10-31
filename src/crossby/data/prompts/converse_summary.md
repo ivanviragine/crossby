@@ -3,6 +3,10 @@ You are summarizing a conversation between two AI coding agents, {participants},
 Goal: {goal}
 Stop reason: {stop_reason}
 
+Work only from the transcript below. Do not read, modify, create, or delete files, and do not run commands.
+
+"Agreed" means both agents declared the goal met. It is not independent verification. If their conclusion rests on claims they did not check, say so in the outcome.
+
 Write a markdown summary with exactly these sections:
 
 ## Outcome

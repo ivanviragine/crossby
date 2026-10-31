@@ -35,7 +35,7 @@ def _use_runner(monkeypatch: pytest.MonkeyPatch, fake: FakeRunner) -> FakeRunner
 def _fake_summary(
     monkeypatch: pytest.MonkeyPatch,
     body: str = "## Outcome\nThey agreed on Y.",
-    error: Exception | None = None,
+    error: BaseException | None = None,
 ) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
@@ -75,7 +75,7 @@ def test_converse_agrees_writes_files_and_prints_summary(
     assert result.stdout.strip() == "## Outcome\nThey agreed on Y."
     assert "codex is replying" in result.stderr
     assert "Agreed, fix with Y." in result.stderr
-    assert "agreed: both agents marked the goal as met after 3 turns" in result.stderr
+    assert "agreed: both agents declared the goal met after 3 turns" in result.stderr
 
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
@@ -91,7 +91,7 @@ def test_converse_agrees_writes_files_and_prints_summary(
         AIToolID.CODEX,
     ]
     (call,) = summaries
-    assert call["summarizer_tool"].TOOL_ID is AIToolID.CODEX
+    assert call["tool"] is AIToolID.CODEX
     assert call["transcript_path"] == run_dir / "transcript.md"
     assert call["working_dir"] == tmp_path.resolve()
 
@@ -174,10 +174,8 @@ def test_converse_no_summary_prints_last_reply(
 def test_converse_summary_failure_is_a_warning_not_a_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from crossby.handoff.summarizer import SummarizerParseError
-
     _use_runner(monkeypatch, FakeRunner(AGREEING))
-    _fake_summary(monkeypatch, error=SummarizerParseError("tool exited 1"))
+    _fake_summary(monkeypatch, error=converse.ConverseSummaryError("tool exited 1"))
 
     result = runner.invoke(
         app, ["converse", "codex", "claude", "-g", "x", "-q", "--json", "--path", str(tmp_path)]
@@ -218,6 +216,110 @@ def test_converse_interrupt_skips_summary(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     assert result.exit_code == 130
     assert summaries == []
+
+
+def test_converse_persists_each_turn_before_the_next_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    seen: list[str] = []
+
+    class Peeking(FakeRunner):
+        def run(self, tool, request, cancel_event):  # type: ignore[no-untyped-def]
+            transcript = out_dir / "transcript.md"
+            seen.append(transcript.read_text(encoding="utf-8") if transcript.exists() else "")
+            return super().run(tool, request, cancel_event)
+
+    _use_runner(monkeypatch, Peeking(AGREEING))
+    _fake_summary(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "converse",
+            "codex",
+            "claude",
+            "-g",
+            "x",
+            "-q",
+            "--output-dir",
+            str(out_dir),
+            "--path",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen[0] == ""
+    assert "## Turn 1: codex\n\nCause is X." in seen[1]
+    assert "- Outcome: in progress: 1 turn completed" in seen[1]
+    assert "## Turn 2: claude" in seen[2]
+    final = (out_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "- Outcome: agreed" in final
+
+
+def test_converse_ctrl_c_while_printing_keeps_the_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.cli import converse as cli
+
+    _use_runner(monkeypatch, FakeRunner(AGREEING))
+    summaries = _fake_summary(monkeypatch)
+
+    def interrupted_print(turn: Any) -> None:
+        if turn.number == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_show_turn", interrupted_print)
+    result = runner.invoke(app, ["converse", "codex", "claude", "-g", "x", "--path", str(tmp_path)])
+
+    assert result.exit_code == 130
+    assert summaries == []
+    (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
+    transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
+    assert "## Turn 2: claude\n\nAgreed, fix with Y." in transcript
+    assert "- Outcome: interrupted by the user after 2 turns" in transcript
+
+
+def test_converse_ctrl_c_during_summary_exits_130_with_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_runner(monkeypatch, FakeRunner(AGREEING))
+    _fake_summary(monkeypatch, error=KeyboardInterrupt())  # type: ignore[arg-type]
+
+    result = runner.invoke(
+        app, ["converse", "codex", "claude", "-g", "x", "-q", "--json", "--path", str(tmp_path)]
+    )
+
+    assert result.exit_code == 130
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "agreed"
+    assert payload["summary_error"] == "interrupted"
+    (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
+    assert (run_dir / "transcript.md").exists()
+    assert not (run_dir / "summary.md").exists()
+
+
+def test_converse_summarizer_tool_must_run_headless(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_runner(monkeypatch, FakeRunner(AGREEING))
+    result = runner.invoke(
+        app,
+        [
+            "converse",
+            "codex",
+            "claude",
+            "-g",
+            "x",
+            "--summarizer-tool",
+            "vscode",
+            "--path",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "vscode cannot run a managed headless session" in result.stderr
+    assert fake.calls == []
 
 
 def test_converse_reads_goal_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -287,7 +389,7 @@ def test_ask_prints_answer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     result = runner.invoke(app, ["ask", "codex", "Is there a race?", "--path", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "It is a race."
-    assert fake.calls[0][1].prompt == "Is there a race?"
+    assert fake.calls[0][1].prompt.endswith("Question:\n\nIs there a race?")
 
 
 def test_ask_reads_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -296,7 +398,7 @@ def test_ask_reads_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
         app, ["ask", "claude", "-", "--path", str(tmp_path)], input="diff --git a b\n"
     )
     assert result.exit_code == 0, result.output
-    assert fake.calls[0][1].prompt == "diff --git a b"
+    assert fake.calls[0][1].prompt.endswith("Question:\n\ndiff --git a b")
 
 
 def test_ask_json_and_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
