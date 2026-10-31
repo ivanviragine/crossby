@@ -1248,9 +1248,13 @@ fake runner and never start a native CLI.
   through the same `TurnRunner`, never `HandoffSummarizer`'s plain
   `subprocess.run()`, so it keeps the runtime's cancellation, process-group
   cleanup and each tool's unattended permission policy. `build_summary_prompt()`
-  reuses the handoff `render_turn()` and `truncate_transcript()`, then a
-  character ceiling (`SUMMARY_PROMPT_CHARS`) keeps argv-transport tools under
-  the runtime's argument limit.
+  reuses the handoff `render_turn()` and `truncate_transcript()`, then trims
+  to `SUMMARY_PROMPT_CHARS` and to the summarizer's own transport limit.
+- **Prompt size:** Cursor, Copilot and Antigravity CLI receive the prompt as
+  an argument, which the runtime limits by encoded bytes (POSIX) or
+  command-line units (Windows), not characters. Turn and summary prompts are
+  shrunk until `AbstractAITool.headless_prompt_fits()` accepts them; it uses
+  the same measure as `_validate_headless_request()`.
 - **Interrupts and persistence:** `run_conversation()` catches Ctrl-C around
   the whole relay, including caller callbacks, and returns the completed
   turns. The CLI rewrites `transcript.md` after every turn, before printing it.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -724,6 +725,99 @@ def test_summary_session_errors_raise_summary_errors(tmp_path: Path) -> None:
             working_dir=tmp_path,
             runner=FakeRunner([_unsupported(AIToolID.CURSOR, "argv too long")]),
         )
+
+
+CJK = "\u4e2d"  # three UTF-8 bytes per character
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
+def test_summary_prompt_fits_an_argv_tools_byte_limit(tmp_path: Path) -> None:
+    # Codex's scenario: three 25,000-character CJK replies fit the character
+    # ceiling (75,000 chars) but not Cursor's 120,000-byte argument limit.
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [
+        _turn(n, "codex" if n % 2 else "claude", CJK * 25_000, AgentStatus.CONTINUE)
+        for n in range(1, 4)
+    ]
+    runner = FakeRunner(["## Outcome\nok"])
+    converse.summarize_conversation(
+        result,
+        transcript_path=tmp_path / "t.md",
+        tool=AIToolID.CURSOR,
+        working_dir=tmp_path,
+        runner=runner,
+    )
+    ((_tool, request),) = runner.calls
+    assert len(request.prompt) <= converse.SUMMARY_PROMPT_CHARS
+    assert len(os.fsencode(request.prompt)) <= 120_000
+    assert AbstractAITool.get(AIToolID.CURSOR).headless_prompt_fits(request.prompt)
+
+
+def test_summary_prompt_for_a_stdin_tool_keeps_the_character_ceiling(tmp_path: Path) -> None:
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [
+        _turn(n, "codex" if n % 2 else "claude", CJK * 25_000, AgentStatus.CONTINUE)
+        for n in range(1, 4)
+    ]
+    runner = FakeRunner(["## Outcome\nok"])
+    converse.summarize_conversation(
+        result,
+        transcript_path=tmp_path / "t.md",
+        tool=AIToolID.CLAUDE,
+        working_dir=tmp_path,
+        runner=runner,
+    )
+    ((_tool, request),) = runner.calls
+    # Claude reads the prompt from stdin, so all three turns still fit.
+    assert request.prompt.count(CJK * 25_000) == 3
+
+
+def test_summary_clips_one_turn_until_the_transport_accepts_it(tmp_path: Path) -> None:
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [_turn(1, "codex", "x" * 90_000, AgentStatus.CONTINUE)]
+    prompt = converse.build_summary_prompt(
+        result, transcript_path=tmp_path / "t.md", fits=lambda text: len(text) <= 20_000
+    )
+    assert len(prompt) <= 20_000
+    assert "characters omitted" in prompt
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
+def test_turn_prompts_shrink_history_for_an_argv_tool(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CODEX, AIToolID.CURSOR)
+    runner = FakeRunner([CJK * 50_000 + "\nSTATUS: CONTINUE", CJK * 100 + "\nSTATUS: CONTINUE"])
+    converse.run_conversation(
+        "goal", participants, working_dir=tmp_path, runner=runner, max_turns=2
+    )
+    (_codex, _first), (tool, second) = runner.calls
+    assert tool is AIToolID.CURSOR
+    assert len(os.fsencode(second.prompt)) <= 120_000
+    assert "characters omitted" in second.prompt
+
+
+def test_turn_prompt_history_is_left_alone_when_it_fits(tmp_path: Path) -> None:
+    checked: list[tuple[AIToolID, int]] = []
+
+    def fits(tool: AIToolID, prompt: str) -> bool:
+        checked.append((tool, len(prompt)))
+        return True
+
+    runner = FakeRunner(["a" * 5000 + "\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE"])
+    converse.run_conversation(
+        "goal", PARTICIPANTS, working_dir=tmp_path, runner=runner, max_turns=2, prompt_fits=fits
+    )
+    assert [tool for tool, _size in checked] == [AIToolID.CODEX, AIToolID.CLAUDE]
+    assert "a" * 5000 in runner.calls[1][1].prompt
+
+
+def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
+    cursor = AbstractAITool.get(AIToolID.CURSOR)
+    claude = AbstractAITool.get(AIToolID.CLAUDE)
+    assert cursor.headless_prompt_fits("short")
+    assert claude.headless_prompt_fits(CJK * 200_000)  # stdin: no argument limit
+    if not sys.platform.startswith("win"):
+        assert cursor.headless_prompt_fits(CJK * 40_000)
+        assert not cursor.headless_prompt_fits(CJK * 40_001)
 
 
 def test_partial_transcript_marks_the_conversation_in_progress() -> None:

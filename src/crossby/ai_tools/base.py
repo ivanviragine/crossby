@@ -610,6 +610,27 @@ class AbstractAITool(ABC):
         )
         return result
 
+    def headless_prompt_fits(
+        self,
+        prompt: str,
+        interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
+    ) -> bool:
+        """Whether ``prompt`` passes the managed runtime's prompt-size check.
+
+        Only argument-delivered prompts are bounded: the limit is measured in
+        filesystem-encoded bytes on POSIX and command-line units on Windows,
+        exactly as :meth:`_validate_headless_request` measures it. Callers that
+        build large prompts use this to shrink them before starting a session.
+        """
+        try:
+            mode = self.capabilities().headless.profile_for(interaction_mode)
+        except ValueError:
+            # The runtime reports an unsupported mode itself.
+            return True
+        if mode.prompt_transport is not HeadlessPromptTransport.ARGUMENT:
+            return True
+        return _argument_prompt_length(prompt) <= _MAX_HEADLESS_ARGUMENT_PROMPT
+
     def preflight_headless_session(
         self,
         request: HeadlessSessionRequest,

@@ -47,6 +47,7 @@ DEFAULT_MAX_TURNS = 6
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 600.0
 DEFAULT_HISTORY_CHARS = 80_000
+MIN_HISTORY_CHARS = 1000
 DEFAULT_SUMMARY_TIMEOUT_SECONDS = 300.0
 DEFAULT_SUMMARY_TOKEN_BUDGET = 32_000
 PREFLIGHT_TIMEOUT_SECONDS = 20.0
@@ -391,6 +392,16 @@ def _request(
     )
 
 
+PromptFits = Callable[[AIToolID, str], bool]
+
+
+def native_prompt_fits(tool: AIToolID, prompt: str) -> bool:
+    """Whether ``tool``'s unattended transport can receive ``prompt``."""
+    from crossby.ai_tools.base import AbstractAITool
+
+    return AbstractAITool.get(tool).headless_prompt_fits(prompt)
+
+
 # ---------------------------------------------------------------------------
 # ask
 # ---------------------------------------------------------------------------
@@ -452,6 +463,7 @@ def run_conversation(
     on_turn_start: Callable[[int, Participant], None] | None = None,
     on_turn: Callable[[ConverseTurn], None] | None = None,
     clock: Callable[[], float] = monotonic,
+    prompt_fits: PromptFits = native_prompt_fits,
 ) -> ConversationResult:
     """Relay between two agents until they agree or a limit stops them.
 
@@ -467,8 +479,8 @@ def run_conversation(
         raise ConverseError("--max-turns must be at least 2 so both agents can reply.")
     if timeout_seconds <= 0 or turn_timeout_seconds <= 0:
         raise ConverseError("Timeouts must be positive.")
-    if history_chars < 1000:
-        raise ConverseError("The history budget must be at least 1000 characters.")
+    if history_chars < MIN_HISTORY_CHARS:
+        raise ConverseError(f"The history budget must be at least {MIN_HISTORY_CHARS} characters.")
 
     runner = runner or HeadlessTurnRunner()
     template = template if template is not None else load_turn_template()
@@ -526,16 +538,23 @@ def run_conversation(
                 if remaining < MIN_TURN_SECONDS:
                     return out_of_time(f"before turn {number}")
                 bounded_by_deadline = remaining <= turn_timeout_seconds
-                prompt = build_turn_prompt(
-                    template=template,
-                    goal=goal,
-                    speaker=speaker,
-                    peer=peer,
-                    turn=number,
-                    max_turns=max_turns,
-                    history=turns,
-                    history_chars=history_chars,
-                )
+                # Argument-transport tools have a byte limit, not a character
+                # one: halve the replayed history until the prompt fits.
+                budget = history_chars
+                while True:
+                    prompt = build_turn_prompt(
+                        template=template,
+                        goal=goal,
+                        speaker=speaker,
+                        peer=peer,
+                        turn=number,
+                        max_turns=max_turns,
+                        history=turns,
+                        history_chars=budget,
+                    )
+                    if budget <= MIN_HISTORY_CHARS or prompt_fits(speaker.tool, prompt):
+                        break
+                    budget = max(budget // 2, MIN_HISTORY_CHARS)
                 request = _request(
                     speaker,
                     prompt=prompt,
@@ -727,13 +746,15 @@ def build_summary_prompt(
     transcript_path: Path,
     token_budget: int = DEFAULT_SUMMARY_TOKEN_BUDGET,
     max_chars: int = SUMMARY_PROMPT_CHARS,
+    fits: Callable[[str], bool] | None = None,
     on_truncate: Callable[[int, int], None] | None = None,
 ) -> str:
     """Assemble the summary prompt with the handoff formatting and truncation.
 
-    The handoff token budget keeps the most recent turns; the character
-    ceiling then drops further old turns (and, for a single oversized turn,
-    clips it) so argv-transport tools can always receive the prompt.
+    The handoff token budget keeps the most recent turns. Further old turns
+    are then dropped (and a single oversized turn clipped) until the prompt is
+    within ``max_chars`` and ``fits`` accepts it; ``fits`` is the summarizer
+    transport's own size check, so byte-limited argv tools always receive it.
     """
     from crossby.handoff.prompts import load_bundled_prompt
     from crossby.handoff.summarizer import render_turn
@@ -766,17 +787,22 @@ def build_summary_prompt(
             lines += [render_turn(turn), ""]
         return "\n".join(lines)
 
+    def too_big(text: str) -> bool:
+        return len(text) > max_chars or (fits is not None and not fits(text))
+
     prompt = assemble()
-    while len(prompt) > max_chars and len(turns) > 1:
+    while too_big(prompt) and len(turns) > 1:
         turns.pop(0)
         truncated = True
         prompt = assemble()
-    if len(prompt) > max_chars and turns:
+    if too_big(prompt) and turns:
         only = turns[0]
-        room = max(len(only.content) - (len(prompt) - max_chars) - 200, 1000)
-        turns = [only.model_copy(update={"content": _clip(only.content, room)})]
-        truncated = True
-        prompt = assemble()
+        room = min(len(only.content), max_chars)
+        while too_big(prompt) and room > MIN_HISTORY_CHARS:
+            room = max(room // 2, MIN_HISTORY_CHARS)
+            turns = [only.model_copy(update={"content": _clip(only.content, room)})]
+            truncated = True
+            prompt = assemble()
     if truncated and on_truncate is not None:
         on_truncate(len(transcript.turns), len(turns))
     return prompt
@@ -792,6 +818,7 @@ def summarize_conversation(
     timeout_seconds: float = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
     runner: TurnRunner | None = None,
     on_truncate: Callable[[int, int], None] | None = None,
+    prompt_fits: PromptFits = native_prompt_fits,
 ) -> str:
     """Summarize a finished conversation in one managed unattended session.
 
@@ -802,7 +829,12 @@ def summarize_conversation(
     """
     from crossby.ai_tools.headless import HeadlessSessionError
 
-    prompt = build_summary_prompt(result, transcript_path=transcript_path, on_truncate=on_truncate)
+    prompt = build_summary_prompt(
+        result,
+        transcript_path=transcript_path,
+        fits=lambda text: prompt_fits(tool, text),
+        on_truncate=on_truncate,
+    )
     request = _request(
         None, prompt=prompt, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
     )
