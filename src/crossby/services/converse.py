@@ -476,17 +476,29 @@ def run_conversation(
             error=error,
         )
 
+    def out_of_time(when: str) -> ConversationResult:
+        return finish(
+            StopReason.TIMEOUT,
+            f"conversation time limit of {timeout_seconds:g}s reached {when}",
+        )
+
     # Fail fast, before the first agent spends time, if either side cannot run.
+    # Preflights spend the same overall budget as the turns.
     for participant in dict.fromkeys(participants):
+        remaining = deadline - clock()
+        if remaining < MIN_TURN_SECONDS:
+            return out_of_time("during preflight")
         probe = _request(
             participant,
             prompt="preflight",
             working_dir=working_dir,
-            timeout_seconds=min(turn_timeout_seconds, timeout_seconds),
+            timeout_seconds=min(turn_timeout_seconds, remaining),
         )
         try:
             runner.preflight(participant.tool, probe)
         except HeadlessSessionError as exc:
+            if clock() >= deadline:
+                return out_of_time("during preflight")
             return finish(StopReason.FAILED, f"{participant.label} cannot run headless: {exc}")
 
     cancel_event = threading.Event()
@@ -496,10 +508,7 @@ def run_conversation(
             peer = participants[number % 2]
             remaining = deadline - clock()
             if remaining < MIN_TURN_SECONDS:
-                return finish(
-                    StopReason.TIMEOUT,
-                    f"conversation time limit of {timeout_seconds:g}s reached",
-                )
+                return out_of_time(f"before turn {number}")
             bounded_by_deadline = remaining <= turn_timeout_seconds
             prompt = build_turn_prompt(
                 template=template,
@@ -530,11 +539,7 @@ def run_conversation(
 
             if result.status is HeadlessTerminalStatus.TIMED_OUT:
                 if bounded_by_deadline:
-                    return finish(
-                        StopReason.TIMEOUT,
-                        f"conversation time limit of {timeout_seconds:g}s reached "
-                        f"during turn {number}",
-                    )
+                    return out_of_time(f"during turn {number}")
                 return finish(
                     StopReason.FAILED,
                     f"{speaker.label} turn {number} timed out after {turn_timeout_seconds:g}s",

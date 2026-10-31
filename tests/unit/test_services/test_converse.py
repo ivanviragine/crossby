@@ -70,18 +70,24 @@ class FakeRunner:
         *,
         clock: FakeClock | None = None,
         seconds_per_turn: float = 1.0,
+        seconds_per_preflight: float = 0.0,
         preflight_error: BaseException | None = None,
     ) -> None:
         self.replies = list(replies)
         self.clock = clock
         self.seconds_per_turn = seconds_per_turn
         self.preflight_error = preflight_error
+        self.seconds_per_preflight = seconds_per_preflight
         self.preflights: list[AIToolID] = []
+        self.preflight_timeouts: list[float] = []
         self.calls: list[tuple[AIToolID, HeadlessSessionRequest]] = []
         self.depths: list[str | None] = []
 
     def preflight(self, tool: AIToolID, request: HeadlessSessionRequest) -> None:
         self.preflights.append(tool)
+        self.preflight_timeouts.append(request.timeout_seconds)
+        if self.clock is not None:
+            self.clock.now += self.seconds_per_preflight
         if self.preflight_error is not None:
             raise self.preflight_error
 
@@ -310,6 +316,40 @@ def test_preflight_failure_stops_before_any_turn(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "codex cannot run headless: codex is too old" in (result.error or "")
     assert runner.calls == []
+
+
+def test_preflights_spend_the_overall_budget(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(
+        ["a\nSTATUS: DONE", "b\nSTATUS: DONE"], clock=clock, seconds_per_preflight=8
+    )
+    result = _run(runner, tmp_path, timeout_seconds=30, turn_timeout_seconds=600, clock=clock)
+    assert result.agreed
+    assert runner.preflight_timeouts == [30, 22]
+    assert [req.timeout_seconds for _tool, req in runner.calls] == [14, 13]
+
+
+def test_slow_preflight_that_exhausts_the_budget_is_a_timeout(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(["unused"], clock=clock, seconds_per_preflight=18)
+    result = _run(runner, tmp_path, timeout_seconds=20, clock=clock)
+    assert result.stop_reason is StopReason.TIMEOUT
+    assert result.error == "conversation time limit of 20s reached during preflight"
+    assert runner.preflights == [AIToolID.CODEX]
+    assert runner.calls == []
+
+
+def test_preflight_error_after_the_deadline_is_a_timeout(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(
+        [],
+        clock=clock,
+        seconds_per_preflight=25,
+        preflight_error=_unsupported(AIToolID.CODEX, "version probe timed out"),
+    )
+    result = _run(runner, tmp_path, timeout_seconds=20, clock=clock)
+    assert result.stop_reason is StopReason.TIMEOUT
+    assert "during preflight" in (result.error or "")
 
 
 def test_session_error_mid_conversation_keeps_completed_turns(tmp_path: Path) -> None:
