@@ -820,6 +820,80 @@ def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
         assert not cursor.headless_prompt_fits(CJK * 40_001)
 
 
+@pytest.fixture
+def simulated_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measure argument prompts the way the runtime does on Windows.
+
+    The runtime quotes the prompt with ``subprocess.list2cmdline`` and counts
+    UTF-16 units against a 30,000-unit limit; both work on any platform.
+    """
+    from crossby.ai_tools import base
+
+    monkeypatch.setattr(base.sys, "platform", "win32")
+    monkeypatch.setattr(base, "_MAX_HEADLESS_ARGUMENT_PROMPT", 30_000)
+
+
+def _windows_units(prompt: str) -> int:
+    import subprocess
+
+    return len(subprocess.list2cmdline([prompt]).encode("utf-16-le")) // 2
+
+
+EMOJI = "\U0001f600"  # two UTF-16 units
+
+
+@pytest.mark.usefixtures("simulated_windows")
+@pytest.mark.parametrize(
+    ("prompt", "fits"),
+    [
+        ("x" * 30_000, True),
+        ("x" * 30_001, False),
+        ('"' * 15_000, True),  # each quote is escaped as \" (two units)
+        ('"' * 15_001, False),
+        (EMOJI * 15_000, True),
+        (EMOJI * 15_001, False),
+    ],
+)
+def test_headless_prompt_fits_uses_windows_quoting_and_utf16(prompt: str, fits: bool) -> None:
+    assert _windows_units(prompt) == (len(prompt) * 2 if prompt[0] != "x" else len(prompt))
+    assert AbstractAITool.get(AIToolID.CURSOR).headless_prompt_fits(prompt) is fits
+    assert AbstractAITool.get(AIToolID.CLAUDE).headless_prompt_fits(prompt)
+
+
+@pytest.mark.usefixtures("simulated_windows")
+@pytest.mark.parametrize("unit", ["a", EMOJI, '"'])
+def test_summary_prompt_fits_the_windows_argument_limit(tmp_path: Path, unit: str) -> None:
+    # The reviewer's case: a 40,000-character ASCII summary input is rejected
+    # on Windows; emoji and quotes cost two units each.
+    result = _finished(StopReason.TURN_LIMIT)
+    result.turns = [
+        _turn(n, "codex" if n % 2 else "claude", unit * 20_000, AgentStatus.CONTINUE)
+        for n in range(1, 3)
+    ]
+    runner = FakeRunner(["## Outcome\nok"])
+    converse.summarize_conversation(
+        result,
+        transcript_path=tmp_path / "t.md",
+        tool=AIToolID.CURSOR,
+        working_dir=tmp_path,
+        runner=runner,
+    )
+    ((_tool, request),) = runner.calls
+    assert _windows_units(request.prompt) <= 30_000
+
+
+@pytest.mark.usefixtures("simulated_windows")
+def test_turn_prompts_fit_the_windows_argument_limit(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CODEX, AIToolID.COPILOT)
+    runner = FakeRunner([EMOJI * 20_000 + "\nSTATUS: CONTINUE", "ok\nSTATUS: CONTINUE"])
+    converse.run_conversation(
+        "goal", participants, working_dir=tmp_path, runner=runner, max_turns=2
+    )
+    (_codex, _first), (tool, second) = runner.calls
+    assert tool is AIToolID.COPILOT
+    assert _windows_units(second.prompt) <= 30_000
+
+
 def test_partial_transcript_marks_the_conversation_in_progress() -> None:
     text = converse.render_partial_transcript(
         goal="Agree on a fix",
