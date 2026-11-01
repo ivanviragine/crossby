@@ -622,6 +622,26 @@ def test_long_messages_survive_replay_and_only_history_shrinks(tmp_path: Path) -
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
+def test_history_is_dropped_entirely_before_a_message_is_rejected(tmp_path: Path) -> None:
+    # Codex's case: a 119,500-character question fits Copilot's 120,000-byte
+    # limit on its own, but not with even the 1,000-character history floor.
+    question = "Q" * 119_500
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
+    runner = FakeRunner(
+        ["q1\nNEXT: ASK", "A" * 3_000, question + "\nNEXT: ASK", "a2", "done\nNEXT: DONE"]
+    )
+    result = converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_replays
+    )
+    assert result.answered, result.error
+    copilot_turn_2 = runner.calls[3][1].prompt
+    assert copilot_turn_2.endswith("### Question\n" + question)
+    assert "2 earlier message(s) omitted" in copilot_turn_2
+    assert "A" * 100 not in copilot_turn_2
+    assert len(os.fsencode(copilot_turn_2)) <= 120_000
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
 def test_message_too_large_for_an_argv_tool_fails_explicitly(tmp_path: Path) -> None:
     participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CURSOR)
     runner = FakeRunner([CJK * 50_000 + "\nNEXT: ASK", "unused"])

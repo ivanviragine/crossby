@@ -399,10 +399,13 @@ def reply_for_asker(reply: str, *, final: bool, max_rounds: int) -> str:
 
 
 def _render_exchanges(blocks: Sequence[str], *, budget_chars: int, heading: str) -> tuple[str, int]:
-    """Keep the newest blocks that fit ``budget_chars``; return text and omitted count."""
+    """Keep the newest blocks that fit ``budget_chars``; return text and omitted count.
+
+    A budget of zero keeps no blocks at all, leaving only the omission note.
+    """
     kept: list[str] = []
     used = 0
-    for block in reversed(blocks):
+    for block in reversed(blocks if budget_chars > 0 else ()):
         if kept and used + len(block) > budget_chars:
             break
         if not kept:
@@ -656,14 +659,15 @@ def run_conversation(
             prompt = build_prompt(side, message, budget)
             if fits(side.participant.tool, prompt):
                 break
-            if budget <= MIN_HISTORY_CHARS:
+            if budget == 0:  # even with no replayed history, it does not fit
                 raise _StopError(
                     StopReason.FAILED,
                     f"{side.participant.label} turn {number}: the message "
                     f"({len(message):,} characters) is too large for "
                     f"{side.participant.tool.value}'s command-line prompt limit",
                 )
-            budget = max(budget // 2, MIN_HISTORY_CHARS)
+            # Halve the history down to the floor, then drop it entirely.
+            budget = 0 if budget <= MIN_HISTORY_CHARS else max(budget // 2, MIN_HISTORY_CHARS)
         request = _request(
             side.participant,
             prompt=prompt,
