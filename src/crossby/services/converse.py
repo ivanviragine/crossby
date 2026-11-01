@@ -1,14 +1,18 @@
-"""Goal-driven conversations between two headless AI coding agents.
+"""Goal-driven consultations between two headless AI coding agents.
 
-``crossby converse`` relays messages between two managed headless sessions
-until both agents say the goal is met, a turn or time limit is reached, or a
-session fails. ``crossby ask`` is the single-turn primitive underneath.
+``crossby converse ASKER RESPONDER --goal ...`` lets one agent consult another.
+The asker holds the goal: it decides what to ask, judges each answer, asks
+follow-up questions, and decides when it has enough. The responder never sees
+the goal; it only answers the asker's messages. ``crossby ask`` is the
+single-question primitive underneath.
 
-Unattended managed sessions cannot resume a native session on any adapter
-today, so every turn is a fresh unattended session whose prompt replays the
-goal and the conversation so far (bounded by a character budget). The relayed
-transcript is therefore the single source of truth, which keeps the loop
-uniform across every headless-capable tool and stateless between runs.
+Each side keeps its own native session. Where the adapter supports unattended
+resume (verified for Claude Code), every turn after the first resumes that
+side's session and carries only the other agent's latest message. A tool
+without verified resume falls back to replay: each turn is a fresh session
+whose prompt replays that side's earlier exchanges, bounded by a character
+budget and the transport's size limit. The transcript records which mode each
+side used.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ DEPTH_ENV = "CROSSBY_CONVERSE_DEPTH"
 # each other in an unbounded chain.
 MAX_DEPTH = 1
 
-DEFAULT_MAX_TURNS = 6
+DEFAULT_MAX_ROUNDS = 5
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 600.0
 DEFAULT_HISTORY_CHARS = 80_000
@@ -55,49 +59,65 @@ PREFLIGHT_TIMEOUT_SECONDS = 20.0
 # than this left on the overall deadline the conversation stops as timed out.
 MIN_TURN_SECONDS = 5.0
 
-TURN_PROMPT_FILE = "converse_turn.md"
+ASKER_PROMPT_FILE = "converse_asker.md"
+RESPONDER_PROMPT_FILE = "converse_responder.md"
 SUMMARY_PROMPT_FILE = "converse_summary.md"
-ASK_PROMPT_FILE = "converse_ask.md"
-# Character ceiling for the assembled summary prompt. It stays under the
-# managed runtime's argv limit (120,000 on POSIX) for tools that take the
-# prompt as an argument, after the handoff token-budget truncation.
+# Character ceiling for the assembled summary prompt, before the summarizer
+# transport's own size check.
 SUMMARY_PROMPT_CHARS = 100_000
+
+FINAL_NUDGE = (
+    "You have used all {max_rounds} messages. Write your final answer now and end "
+    "with the line `NEXT: DONE`."
+)
 
 
 class ConverseError(RuntimeError):
-    """A conversation request is invalid before any agent is started."""
+    """A consultation request is invalid before any agent is started."""
 
 
 class ConverseDepthError(ConverseError):
-    """``ask``/``converse`` was invoked from inside another conversation."""
+    """``ask``/``converse`` was invoked from inside another consultation."""
 
 
 class ConverseSummaryError(RuntimeError):
     """The summary session failed; the transcript is unaffected."""
 
 
-class AgentStatus(StrEnum):
-    """The status line an agent ends its reply with."""
+class Role(StrEnum):
+    ASKER = "asker"
+    RESPONDER = "responder"
 
-    CONTINUE = "CONTINUE"
+
+class Next(StrEnum):
+    """What the asker's reply is: a message to send, or its final answer."""
+
+    ASK = "ASK"
     DONE = "DONE"
     MISSING = "MISSING"
 
 
-class StopReason(StrEnum):
-    """Why a conversation ended."""
+class SessionMode(StrEnum):
+    """How a side keeps its context between turns."""
 
-    AGREED = "agreed"
-    TURN_LIMIT = "turn_limit"
+    RESUMED = "resumed"
+    REPLAYED = "replayed"
+
+
+class StopReason(StrEnum):
+    """Why a consultation ended."""
+
+    ANSWERED = "answered"
+    ROUND_LIMIT = "round_limit"
     TIMEOUT = "timeout"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
 
 
 EXIT_CODES: dict[StopReason, int] = {
-    StopReason.AGREED: 0,
+    StopReason.ANSWERED: 0,
     StopReason.FAILED: 1,
-    StopReason.TURN_LIMIT: 2,
+    StopReason.ROUND_LIMIT: 2,
     StopReason.TIMEOUT: 2,
     StopReason.INTERRUPTED: 130,
 }
@@ -105,41 +125,63 @@ EXIT_CODES: dict[StopReason, int] = {
 
 @dataclass(frozen=True)
 class Participant:
-    """One side of a conversation."""
+    """One side of a consultation."""
 
     tool: AIToolID
-    label: str
+    role: Role
     model: str | None = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.role.value} ({self.tool.value})"
 
 
 @dataclass(frozen=True)
 class ConverseTurn:
-    """One relayed reply."""
+    """One relayed message."""
 
     number: int
-    speaker: str
+    role: Role
     tool: AIToolID
     text: str
-    status: AgentStatus
+    next: Next | None
     duration_seconds: float
+    mode: SessionMode
+
+    @property
+    def is_final_answer(self) -> bool:
+        return self.role is Role.ASKER and self.next is Next.DONE
 
 
 @dataclass
 class ConversationResult:
-    """The full outcome of a conversation, including partial progress."""
+    """The full outcome of a consultation, including partial progress."""
 
     goal: str
-    participants: tuple[Participant, Participant]
-    max_turns: int
+    asker: Participant
+    responder: Participant
+    max_rounds: int
     started_at: datetime
     finished_at: datetime
     stop_reason: StopReason
     turns: list[ConverseTurn] = field(default_factory=list)
     error: str | None = None
+    answered_at_limit: bool = False
+    modes: dict[Role, SessionMode] = field(default_factory=dict)
 
     @property
-    def agreed(self) -> bool:
-        return self.stop_reason is StopReason.AGREED
+    def answered(self) -> bool:
+        return self.stop_reason is StopReason.ANSWERED
+
+    @property
+    def final_answer(self) -> str | None:
+        last = self.turns[-1] if self.turns else None
+        return last.text if last is not None and last.is_final_answer else None
+
+    @property
+    def rounds(self) -> int:
+        """Answers the responder gave."""
+        return sum(1 for turn in self.turns if turn.role is Role.RESPONDER)
 
     @property
     def exit_code(self) -> int:
@@ -258,54 +300,70 @@ def child_depth() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Participants and prompts
+# Capabilities, prompts and parsing
 # ---------------------------------------------------------------------------
 
 
+PromptFits = Callable[[AIToolID, str], bool]
+SupportsResume = Callable[[AIToolID], bool]
+
+
+def native_prompt_fits(tool: AIToolID, prompt: str) -> bool:
+    """Whether ``tool``'s unattended transport can receive ``prompt``."""
+    from crossby.ai_tools.base import AbstractAITool
+
+    return AbstractAITool.get(tool).headless_prompt_fits(prompt)
+
+
+def native_supports_resume(tool: AIToolID) -> bool:
+    """Whether ``tool`` declares verified unattended session resume."""
+    from crossby.ai_tools.base import AbstractAITool
+
+    headless = AbstractAITool.get(tool).capabilities().headless
+    try:
+        return headless.profile_for(HeadlessInteractionMode.UNATTENDED).supports_resume
+    except ValueError:
+        return False
+
+
 def make_participants(
-    tool_a: AIToolID,
-    tool_b: AIToolID,
+    asker: AIToolID,
+    responder: AIToolID,
     *,
-    model_a: str | None = None,
-    model_b: str | None = None,
+    asker_model: str | None = None,
+    responder_model: str | None = None,
 ) -> tuple[Participant, Participant]:
-    """Build both sides, disambiguating labels when the same tool talks to itself."""
-    if tool_a == tool_b:
-        labels = (f"{tool_a.value}-1", f"{tool_b.value}-2")
-    else:
-        labels = (tool_a.value, tool_b.value)
     return (
-        Participant(tool=tool_a, label=labels[0], model=model_a),
-        Participant(tool=tool_b, label=labels[1], model=model_b),
+        Participant(tool=asker, role=Role.ASKER, model=asker_model),
+        Participant(tool=responder, role=Role.RESPONDER, model=responder_model),
     )
 
 
-_STATUS_LINE = re.compile(
-    r"^[\s*_`>#-]*status\s*:\s*[*_`]*\s*(continue|done)\b[\s*_`.!]*$",
+_NEXT_LINE = re.compile(
+    r"^[\s*_`>#-]*next\s*:\s*[*_`]*\s*(ask|done)\b[\s*_`.!]*$",
     re.IGNORECASE,
 )
 
 
-def parse_status(text: str) -> tuple[str, AgentStatus]:
-    """Split an agent reply into ``(body, status)``.
+def parse_next(text: str) -> tuple[str, Next]:
+    """Split an asker reply into ``(body, next)``.
 
-    The status must be the last non-empty line. Markdown decoration such as
-    ``**STATUS: DONE**`` or a code span is tolerated. A reply without one is
-    treated as wanting to continue (``MISSING``), never as agreement.
+    The marker must be the last non-empty line; markdown decoration such as
+    ``**NEXT: DONE**`` is tolerated. A reply without one is ``MISSING`` and is
+    sent on as a message, never taken as a final answer.
     """
     lines = text.rstrip().splitlines()
     for index in range(len(lines) - 1, -1, -1):
         if lines[index].strip():
-            match = _STATUS_LINE.match(lines[index])
+            match = _NEXT_LINE.match(lines[index])
             if match is None:
-                return text.strip(), AgentStatus.MISSING
-            body = "\n".join(lines[:index]).strip()
-            return body, AgentStatus(match.group(1).upper())
-    return "", AgentStatus.MISSING
+                return text.strip(), Next.MISSING
+            return "\n".join(lines[:index]).strip(), Next(match.group(1).upper())
+    return "", Next.MISSING
 
 
 def _clip(text: str, limit: int) -> str:
-    """Keep the head and tail of an oversized reply."""
+    """Keep the head and tail of an oversized message."""
     if len(text) <= limit:
         return text
     marker = "\n[… {n} characters omitted …]\n"
@@ -316,18 +374,40 @@ def _clip(text: str, limit: int) -> str:
     return text[:head] + marker.format(n=omitted) + text[-tail:]
 
 
-def render_history(turns: Sequence[ConverseTurn], *, peer: str, budget_chars: int) -> str:
-    """Render the conversation so far, keeping the most recent turns that fit."""
-    if not turns:
-        return (
-            f"You speak first. Open the conversation with {peer}: give your initial "
-            "assessment of the goal and what you checked."
-        )
-    blocks = [
-        f"### {turn.speaker} (turn {turn.number}, STATUS: {turn.status.value})\n"
-        f"{turn.text or '(empty reply)'}"
-        for turn in turns
-    ]
+def _load(filename: str) -> str:
+    from crossby.handoff.prompts import load_bundled_prompt
+
+    return load_bundled_prompt(filename)
+
+
+def asker_opening(*, goal: str, responder: Participant, max_rounds: int) -> str:
+    return (
+        _load(ASKER_PROMPT_FILE)
+        .format(goal=goal, responder=responder.tool.value, max_rounds=max_rounds)
+        .strip()
+    )
+
+
+def responder_opening(message: str) -> str:
+    """Frame the first message to a responder (and every ``ask`` question).
+
+    The note is operational only: answer in the reply rather than through an
+    interactive prompt nobody can answer, and don't modify files. It does not
+    say who is asking.
+    """
+    return _load(RESPONDER_PROMPT_FILE).format(message=message.strip()).strip()
+
+
+def reply_for_asker(responder: Participant, reply: str, *, final: bool, max_rounds: int) -> str:
+    """What the asker receives after each responder answer."""
+    parts = [f"{responder.tool.value} replied:", "", reply]
+    if final:
+        parts += ["", FINAL_NUDGE.format(max_rounds=max_rounds)]
+    return "\n".join(parts)
+
+
+def _render_exchanges(blocks: Sequence[str], *, budget_chars: int, heading: str) -> tuple[str, int]:
+    """Keep the newest blocks that fit ``budget_chars``; return text and omitted count."""
     kept: list[str] = []
     used = 0
     for block in reversed(blocks):
@@ -339,40 +419,43 @@ def render_history(turns: Sequence[ConverseTurn], *, peer: str, budget_chars: in
         used += len(block) + 2
     kept.reverse()
     omitted = len(blocks) - len(kept)
-    parts = ["Conversation so far:", ""]
+    parts = [heading, ""]
     if omitted:
-        parts += [f"({omitted} earlier turn(s) omitted to fit the size limit.)", ""]
+        parts += [f"({omitted} earlier message(s) omitted to fit the size limit.)", ""]
     parts.append("\n\n".join(kept))
-    parts += ["", f"It is your turn. Reply to {peer}."]
-    return "\n".join(parts)
+    return "\n".join(parts), omitted
 
 
-def load_turn_template() -> str:
-    from crossby.handoff.prompts import load_bundled_prompt
-
-    return load_bundled_prompt(TURN_PROMPT_FILE)
-
-
-def build_turn_prompt(
+def replay_prompt(
+    role: Role,
     *,
-    template: str,
-    goal: str,
-    speaker: Participant,
-    peer: Participant,
-    turn: int,
-    max_turns: int,
-    history: Sequence[ConverseTurn],
-    history_chars: int,
+    opening: str,
+    turns: Sequence[ConverseTurn],
+    latest: str,
+    responder: Participant,
+    budget_chars: int,
 ) -> str:
-    rendered_history = render_history(history, peer=peer.label, budget_chars=history_chars)
-    return template.format(
-        speaker=speaker.label,
-        peer=peer.label,
-        goal=goal,
-        turn=turn,
-        max_turns=max_turns,
-        history=rendered_history,
-    ).strip()
+    """Rebuild a fresh session's context for a side whose tool cannot resume.
+
+    The prompt is that side's opening, then the earlier exchanges from its
+    point of view, then the message it is answering now.
+    """
+    if not turns:
+        return f"{opening}\n\n{latest}" if role is Role.ASKER else responder_opening(latest)
+    blocks: list[str] = []
+    for turn in turns:
+        if turn.role is Role.ASKER:
+            who = "You" if role is Role.ASKER else "Question"
+        else:
+            who = f"{responder.tool.value}" if role is Role.ASKER else "Your answer"
+        blocks.append(f"### {who}\n{turn.text}")
+    history, _omitted = _render_exchanges(
+        blocks, budget_chars=budget_chars, heading="Earlier in this conversation:"
+    )
+    if role is Role.ASKER:
+        return f"{opening}\n\n{history}\n\n{latest}"
+    note = _load(RESPONDER_PROMPT_FILE).split("{message}")[0].strip()
+    return f"{note}\n\n{history}\n\n### New message\n{latest}"
 
 
 def _request(
@@ -382,6 +465,7 @@ def _request(
     working_dir: Path,
     timeout_seconds: float,
     model: str | None = None,
+    resume_id: str | None = None,
 ) -> HeadlessSessionRequest:
     return HeadlessSessionRequest(
         prompt=prompt,
@@ -389,17 +473,12 @@ def _request(
         model=participant.model if participant is not None else model,
         interaction_mode=HeadlessInteractionMode.UNATTENDED,
         timeout_seconds=timeout_seconds,
+        resume_id=resume_id,
     )
 
 
-PromptFits = Callable[[AIToolID, str], bool]
-
-
-def native_prompt_fits(tool: AIToolID, prompt: str) -> bool:
-    """Whether ``tool``'s unattended transport can receive ``prompt``."""
-    from crossby.ai_tools.base import AbstractAITool
-
-    return AbstractAITool.get(tool).headless_prompt_fits(prompt)
+def _session_handle(result: HeadlessSessionResult) -> str | None:
+    return result.session_id or result.thread_id or result.conversation_id
 
 
 # ---------------------------------------------------------------------------
@@ -422,12 +501,13 @@ def ask_agent(
 
     if not prompt.strip():
         raise ConverseError("The question is empty.")
-    from crossby.handoff.prompts import load_bundled_prompt
-
     runner = runner or HeadlessTurnRunner()
-    framed = load_bundled_prompt(ASK_PROMPT_FILE).format(question=prompt.strip()).strip()
     request = _request(
-        None, prompt=framed, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
+        None,
+        prompt=responder_opening(prompt),
+        working_dir=working_dir,
+        timeout_seconds=timeout_seconds,
+        model=model,
     )
     started = clock()
     try:
@@ -449,73 +529,197 @@ def ask_agent(
 # ---------------------------------------------------------------------------
 
 
+class _StopError(Exception):
+    def __init__(self, reason: StopReason, error: str | None = None) -> None:
+        super().__init__(error)
+        self.reason = reason
+        self.error = error
+
+
+@dataclass
+class _Side:
+    participant: Participant
+    mode: SessionMode
+    session_id: str | None = None
+    opening: str = ""
+
+
 def run_conversation(
     goal: str,
     participants: tuple[Participant, Participant],
     *,
     working_dir: Path,
-    max_turns: int = DEFAULT_MAX_TURNS,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
     history_chars: int = DEFAULT_HISTORY_CHARS,
     runner: TurnRunner | None = None,
-    template: str | None = None,
     on_turn_start: Callable[[int, Participant], None] | None = None,
     on_turn: Callable[[ConverseTurn], None] | None = None,
     clock: Callable[[], float] = monotonic,
-    prompt_fits: PromptFits = native_prompt_fits,
+    prompt_fits: PromptFits | None = None,
+    supports_resume: SupportsResume | None = None,
 ) -> ConversationResult:
-    """Relay between two agents until they agree or a limit stops them.
+    """Let the asker consult the responder until it gives a final answer.
 
-    Agreement means two consecutive replies (one from each agent) ending in
-    ``STATUS: DONE``. Turn and time limits always stop the loop, and every
-    outcome, including failure and Ctrl-C, returns the turns completed so far.
+    The asker holds the goal and ends every reply with ``NEXT: ASK`` (send it
+    to the responder) or ``NEXT: DONE`` (its final answer). After the last
+    allowed round the asker is told to answer now; a limit, a failure or Ctrl-C
+    always returns the turns completed so far.
     """
     from crossby.ai_tools.headless import HeadlessSessionError
 
     if not goal.strip():
         raise ConverseError("The goal is empty.")
-    if max_turns < 2:
-        raise ConverseError("--max-turns must be at least 2 so both agents can reply.")
+    if max_rounds < 1:
+        raise ConverseError("--max-rounds must be at least 1.")
     if timeout_seconds <= 0 or turn_timeout_seconds <= 0:
         raise ConverseError("Timeouts must be positive.")
     if history_chars < MIN_HISTORY_CHARS:
         raise ConverseError(f"The history budget must be at least {MIN_HISTORY_CHARS} characters.")
+    asker, responder = participants
+    if asker.role is not Role.ASKER or responder.role is not Role.RESPONDER:
+        raise ConverseError("Participants must be (asker, responder).")
 
-    runner = runner or HeadlessTurnRunner()
-    template = template if template is not None else load_turn_template()
+    active_runner: TurnRunner = runner or HeadlessTurnRunner()
+    fits: PromptFits = prompt_fits or native_prompt_fits
+    resumes: SupportsResume = supports_resume or native_supports_resume
     started_at = datetime.now(tz=UTC)
     deadline = clock() + timeout_seconds
     turns: list[ConverseTurn] = []
+    sides = {
+        Role.ASKER: _Side(
+            asker,
+            SessionMode.RESUMED if resumes(asker.tool) else SessionMode.REPLAYED,
+            opening=asker_opening(goal=goal, responder=responder, max_rounds=max_rounds),
+        ),
+        Role.RESPONDER: _Side(
+            responder,
+            SessionMode.RESUMED if resumes(responder.tool) else SessionMode.REPLAYED,
+        ),
+    }
+    in_progress: int | None = None
+    answered_at_limit = False
 
     def finish(reason: StopReason, error: str | None = None) -> ConversationResult:
         return ConversationResult(
             goal=goal,
-            participants=participants,
-            max_turns=max_turns,
+            asker=asker,
+            responder=responder,
+            max_rounds=max_rounds,
             started_at=started_at,
             finished_at=datetime.now(tz=UTC),
             stop_reason=reason,
             turns=turns,
             error=error,
+            answered_at_limit=answered_at_limit,
+            modes={role: side.mode for role, side in sides.items()},
         )
 
-    def out_of_time(when: str) -> ConversationResult:
-        return finish(
-            StopReason.TIMEOUT,
-            f"conversation time limit of {timeout_seconds:g}s reached {when}",
+    def out_of_time(when: str) -> _StopError:
+        return _StopError(
+            StopReason.TIMEOUT, f"conversation time limit of {timeout_seconds:g}s reached {when}"
         )
 
-    in_progress: int | None = None
+    def build_prompt(side: _Side, message: str, budget: int) -> str:
+        """The prompt for this side's next turn, given the message it answers."""
+        if side.session_id is not None:  # resumed: only the new message
+            return _clip(message, budget)
+        if not turns:  # the very first turn: the asker's opening
+            return side.opening
+        if side.mode is SessionMode.RESUMED:  # first turn of a resumable responder
+            return responder_opening(_clip(message, budget))
+        # Replay: the latest turn is the message being answered, sent separately.
+        return replay_prompt(
+            side.participant.role,
+            opening=side.opening,
+            turns=turns[:-1],
+            latest=_clip(message, budget),
+            responder=responder,
+            budget_chars=budget,
+        )
 
-    def relay() -> ConversationResult:
+    def take_turn(role: Role, message: str) -> tuple[str, float]:
+        """Run one turn for ``role``; return its reply text and duration."""
         nonlocal in_progress
-        # Fail fast, before the first agent spends time, if either side cannot run.
-        # Preflights spend the same overall budget as the turns.
+        side = sides[role]
+        number = len(turns) + 1
+        remaining = deadline - clock()
+        if remaining < MIN_TURN_SECONDS:
+            raise out_of_time(f"before turn {number}")
+        bounded_by_deadline = remaining <= turn_timeout_seconds
+        budget = history_chars
+        while True:
+            prompt = build_prompt(side, message, budget)
+            if budget <= MIN_HISTORY_CHARS or fits(side.participant.tool, prompt):
+                break
+            budget = max(budget // 2, MIN_HISTORY_CHARS)
+        request = _request(
+            side.participant,
+            prompt=prompt,
+            working_dir=working_dir,
+            timeout_seconds=min(turn_timeout_seconds, remaining),
+            resume_id=side.session_id,
+        )
+        in_progress = number
+        if on_turn_start is not None:
+            on_turn_start(number, side.participant)
+        turn_started = clock()
+        label = side.participant.label
+        try:
+            result = active_runner.run(side.participant.tool, request, cancel_event)
+        except HeadlessSessionError as exc:
+            # The runtime re-probes the version before it starts and raises
+            # (rather than returning TIMED_OUT) when the deadline runs out there.
+            if clock() >= deadline:
+                raise out_of_time(f"during turn {number}") from None
+            raise _StopError(StopReason.FAILED, f"{label} turn {number}: {exc}") from None
+        if result.status is HeadlessTerminalStatus.TIMED_OUT:
+            if bounded_by_deadline:
+                raise out_of_time(f"during turn {number}")
+            raise _StopError(
+                StopReason.FAILED,
+                f"{label} turn {number} timed out after {turn_timeout_seconds:g}s",
+            )
+        if result.status is not HeadlessTerminalStatus.SUCCEEDED:
+            raise _StopError(
+                StopReason.FAILED, f"{label} turn {number} ended with status {result.status.value}"
+            )
+        text = (result.final_text or "").strip()
+        if not text:
+            raise _StopError(StopReason.FAILED, f"{label} turn {number} returned no text")
+        if side.mode is SessionMode.RESUMED:
+            handle = _session_handle(result)
+            if side.session_id is None and handle is None:
+                # The tool resumes in principle but gave no handle back; keep
+                # going by replaying, and say so in the transcript.
+                side.mode = SessionMode.REPLAYED
+            elif side.session_id is None:
+                side.session_id = handle
+        return text, clock() - turn_started
+
+    def record(role: Role, text: str, next_: Next | None, duration: float) -> ConverseTurn:
+        nonlocal in_progress
+        turn = ConverseTurn(
+            number=len(turns) + 1,
+            role=role,
+            tool=sides[role].participant.tool,
+            text=text,
+            next=next_,
+            duration_seconds=duration,
+            mode=sides[role].mode,
+        )
+        turns.append(turn)
+        in_progress = None
+        if on_turn is not None:
+            on_turn(turn)
+        return turn
+
+    def preflight() -> None:
         for participant in dict.fromkeys(participants):
             remaining = deadline - clock()
             if remaining < MIN_TURN_SECONDS:
-                return out_of_time("during preflight")
+                raise out_of_time("during preflight")
             probe = _request(
                 participant,
                 prompt="preflight",
@@ -523,102 +727,43 @@ def run_conversation(
                 timeout_seconds=min(turn_timeout_seconds, remaining),
             )
             try:
-                runner.preflight(participant.tool, probe)
+                active_runner.preflight(participant.tool, probe)
             except HeadlessSessionError as exc:
                 if clock() >= deadline:
-                    return out_of_time("during preflight")
-                return finish(StopReason.FAILED, f"{participant.label} cannot run headless: {exc}")
+                    raise out_of_time("during preflight") from None
+                raise _StopError(
+                    StopReason.FAILED, f"{participant.label} cannot run headless: {exc}"
+                ) from None
 
-        cancel_event = threading.Event()
-        with child_depth():
-            for number in range(1, max_turns + 1):
-                speaker = participants[(number - 1) % 2]
-                peer = participants[number % 2]
-                remaining = deadline - clock()
-                if remaining < MIN_TURN_SECONDS:
-                    return out_of_time(f"before turn {number}")
-                bounded_by_deadline = remaining <= turn_timeout_seconds
-                # Argument-transport tools have a byte limit, not a character
-                # one: halve the replayed history until the prompt fits.
-                budget = history_chars
-                while True:
-                    prompt = build_turn_prompt(
-                        template=template,
-                        goal=goal,
-                        speaker=speaker,
-                        peer=peer,
-                        turn=number,
-                        max_turns=max_turns,
-                        history=turns,
-                        history_chars=budget,
-                    )
-                    if budget <= MIN_HISTORY_CHARS or prompt_fits(speaker.tool, prompt):
-                        break
-                    budget = max(budget // 2, MIN_HISTORY_CHARS)
-                request = _request(
-                    speaker,
-                    prompt=prompt,
-                    working_dir=working_dir,
-                    timeout_seconds=min(turn_timeout_seconds, remaining),
-                )
-                in_progress = number
-                if on_turn_start is not None:
-                    on_turn_start(number, speaker)
-                turn_started = clock()
-                try:
-                    result = runner.run(speaker.tool, request, cancel_event)
-                except HeadlessSessionError as exc:
-                    # The managed runtime re-probes the version before it starts and
-                    # raises (rather than returning TIMED_OUT) when the deadline it
-                    # was given runs out there; that is still the overall time limit.
-                    if clock() >= deadline:
-                        return out_of_time(f"during turn {number}")
-                    return finish(StopReason.FAILED, f"{speaker.label} turn {number}: {exc}")
-                duration = clock() - turn_started
+    def relay() -> ConversationResult:
+        nonlocal answered_at_limit
+        preflight()
+        message_for_asker = ""  # the asker's first turn uses its opening
+        for round_number in range(1, max_rounds + 2):
+            final = round_number > max_rounds
+            raw, duration = take_turn(Role.ASKER, message_for_asker)
+            body, next_ = parse_next(raw)
+            record(Role.ASKER, body, next_, duration)
+            if next_ is Next.DONE:
+                answered_at_limit = final
+                return finish(StopReason.ANSWERED)
+            if final:
+                return finish(StopReason.ROUND_LIMIT)
+            answer, duration = take_turn(Role.RESPONDER, body)
+            record(Role.RESPONDER, answer, None, duration)
+            message_for_asker = reply_for_asker(
+                responder, answer, final=round_number == max_rounds, max_rounds=max_rounds
+            )
+        return finish(StopReason.ROUND_LIMIT)  # pragma: no cover - loop always returns
 
-                if result.status is HeadlessTerminalStatus.TIMED_OUT:
-                    if bounded_by_deadline:
-                        return out_of_time(f"during turn {number}")
-                    return finish(
-                        StopReason.FAILED,
-                        f"{speaker.label} turn {number} timed out after {turn_timeout_seconds:g}s",
-                    )
-                if result.status is not HeadlessTerminalStatus.SUCCEEDED:
-                    return finish(
-                        StopReason.FAILED,
-                        f"{speaker.label} turn {number} ended with status {result.status.value}",
-                    )
-                text = (result.final_text or "").strip()
-                if not text:
-                    return finish(
-                        StopReason.FAILED, f"{speaker.label} turn {number} returned no text"
-                    )
-
-                body, status = parse_status(text)
-                turn = ConverseTurn(
-                    number=number,
-                    speaker=speaker.label,
-                    tool=speaker.tool,
-                    text=body,
-                    status=status,
-                    duration_seconds=duration,
-                )
-                turns.append(turn)
-                in_progress = None
-                if on_turn is not None:
-                    on_turn(turn)
-                if (
-                    status is AgentStatus.DONE
-                    and len(turns) >= 2
-                    and turns[-2].status is AgentStatus.DONE
-                ):
-                    return finish(StopReason.AGREED)
-        return finish(StopReason.TURN_LIMIT)
-
+    cancel_event = threading.Event()
     # Ctrl-C can land anywhere: in a session, a preflight, or a caller's
     # callback while it prints a reply. Every case keeps the completed turns.
     try:
-        return relay()
+        with child_depth():
+            return relay()
+    except _StopError as stop:
+        return finish(stop.reason, stop.error)
     except KeyboardInterrupt:
         where = f"during turn {in_progress}" if in_progress else f"after {_turns(len(turns))}"
         return finish(StopReason.INTERRUPTED, f"interrupted {where}")
@@ -633,26 +778,34 @@ def _turns(count: int) -> str:
     return f"{count} turn" if count == 1 else f"{count} turns"
 
 
+def _rounds(count: int) -> str:
+    return f"{count} round" if count == 1 else f"{count} rounds"
+
+
 def describe_stop(result: ConversationResult) -> str:
-    done = _turns(len(result.turns))
-    if result.stop_reason is StopReason.AGREED:
-        return f"agreed: both agents declared the goal met after {done}"
-    if result.stop_reason is StopReason.TURN_LIMIT:
-        return f"turn limit reached ({_turns(result.max_turns)}) without agreement"
+    rounds = _rounds(result.rounds)
+    if result.stop_reason is StopReason.ANSWERED:
+        when = " at the round limit" if result.answered_at_limit else ""
+        return f"answered: the asker gave its final answer after {rounds}{when}"
+    if result.stop_reason is StopReason.ROUND_LIMIT:
+        return (
+            f"round limit reached ({_rounds(result.max_rounds)}) and the asker gave no final answer"
+        )
     detail = f": {result.error}" if result.error else ""
     if result.stop_reason is StopReason.TIMEOUT:
-        return f"stopped on the time limit after {done} without agreement{detail}"
+        return f"stopped on the time limit after {rounds}{detail}"
     if result.stop_reason is StopReason.INTERRUPTED:
-        return f"interrupted by the user after {done}{detail}"
-    return f"a session failed after {done}{detail}"
+        return f"interrupted by the user after {rounds}{detail}"
+    return f"a session failed after {rounds}{detail}"
 
 
 def render_transcript(result: ConversationResult) -> str:
-    """Render a finished conversation as markdown."""
+    """Render a finished consultation as markdown."""
     return _render_transcript(
         goal=result.goal,
-        participants=result.participants,
-        max_turns=result.max_turns,
+        asker=result.asker,
+        responder=result.responder,
+        max_rounds=result.max_rounds,
         started_at=result.started_at,
         finished_at=result.finished_at,
         turns=result.turns,
@@ -663,16 +816,18 @@ def render_transcript(result: ConversationResult) -> str:
 def render_partial_transcript(
     *,
     goal: str,
-    participants: tuple[Participant, Participant],
-    max_turns: int,
+    asker: Participant,
+    responder: Participant,
+    max_rounds: int,
     started_at: datetime,
     turns: Sequence[ConverseTurn],
 ) -> str:
-    """Render a conversation that is still running, so completed turns survive a crash."""
+    """Render a consultation that is still running, so completed turns survive a crash."""
     return _render_transcript(
         goal=goal,
-        participants=participants,
-        max_turns=max_turns,
+        asker=asker,
+        responder=responder,
+        max_rounds=max_rounds,
         started_at=started_at,
         finished_at=None,
         turns=turns,
@@ -683,57 +838,65 @@ def render_partial_transcript(
 def _render_transcript(
     *,
     goal: str,
-    participants: tuple[Participant, Participant],
-    max_turns: int,
+    asker: Participant,
+    responder: Participant,
+    max_rounds: int,
     started_at: datetime,
     finished_at: datetime | None,
     turns: Sequence[ConverseTurn],
     outcome: str,
 ) -> str:
-    a, b = participants
     lines = [
-        "# Conversation",
+        "# Consultation",
         "",
-        f"**Goal:** {goal}",
+        f"**Goal (seen only by the asker):** {goal}",
         "",
-        f"- Participants: {a.label}, {b.label}",
+        f"- Asker: {asker.tool.value}",
+        f"- Responder: {responder.tool.value}",
         f"- Started: {started_at.isoformat(timespec='seconds')}",
     ]
     if finished_at is not None:
         lines.append(f"- Finished: {finished_at.isoformat(timespec='seconds')}")
-    lines += [
-        f"- Turns: {len(turns)} of at most {max_turns}",
-        f"- Outcome: {outcome}",
-        "",
-    ]
+    lines += [f"- Rounds allowed: {max_rounds}", f"- Outcome: {outcome}", ""]
     for turn in turns:
+        if turn.is_final_answer:
+            heading = f"## {turn.number}. Final answer ({turn.tool.value})"
+        elif turn.role is Role.ASKER:
+            heading = f"## {turn.number}. asker ({turn.tool.value}) → responder"
+        else:
+            heading = f"## {turn.number}. responder ({turn.tool.value}) → asker"
+        marker = f"NEXT: {turn.next.value} · " if turn.next is not None else ""
         lines += [
-            f"## Turn {turn.number}: {turn.speaker}",
+            heading,
             "",
-            turn.text or "(empty reply)",
+            turn.text or "(empty message)",
             "",
-            f"*STATUS: {turn.status.value} · {turn.duration_seconds:.0f}s*",
+            f"*{marker}{turn.duration_seconds:.0f}s · session {turn.mode.value}*",
             "",
         ]
     return "\n".join(lines).rstrip() + "\n"
 
 
 def to_handoff_transcript(result: ConversationResult, path: Path) -> ConversationTranscript:
-    """Express the conversation in the handoff model so the summarizer can read it."""
+    """Express the consultation in the handoff model so the summarizer can read it."""
     from crossby.handoff.models import ConversationTranscript, ConversationTurn, SessionRef
+
+    def label(turn: ConverseTurn) -> str:
+        if turn.is_final_answer:
+            return f"asker ({turn.tool.value}), final answer"
+        return f"{turn.role.value} ({turn.tool.value})"
 
     return ConversationTranscript(
         session_ref=SessionRef(
-            tool_id=result.participants[0].tool,
+            tool_id=result.asker.tool,
             session_id=path.parent.name,
             path=path,
             started_at=result.started_at,
         ),
         turns=[
             ConversationTurn(
-                role="assistant",
-                content=f"{turn.speaker} (turn {turn.number}, STATUS: {turn.status.value}):\n"
-                f"{turn.text}",
+                role="user" if turn.role is Role.ASKER else "assistant",
+                content=f"{label(turn)}, turn {turn.number}:\n{turn.text}",
             )
             for turn in result.turns
         ],
@@ -756,15 +919,14 @@ def build_summary_prompt(
     within ``max_chars`` and ``fits`` accepts it; ``fits`` is the summarizer
     transport's own size check, so byte-limited argv tools always receive it.
     """
-    from crossby.handoff.prompts import load_bundled_prompt
     from crossby.handoff.summarizer import render_turn
     from crossby.handoff.truncate import truncate_transcript
 
-    a, b = result.participants
     header = (
-        load_bundled_prompt(SUMMARY_PROMPT_FILE)
+        _load(SUMMARY_PROMPT_FILE)
         .format(
-            participants=f"{a.label} and {b.label}",
+            asker=result.asker.tool.value,
+            responder=result.responder.tool.value,
             goal=result.goal,
             stop_reason=describe_stop(result),
         )
@@ -780,7 +942,7 @@ def build_summary_prompt(
         if truncated:
             lines.append(
                 "Note: earlier turns were dropped to fit the size limit. Rely on the "
-                "last turns for where the conversation ended.\n"
+                "last turns for where the consultation ended.\n"
             )
         lines.append("--- Transcript ---\n")
         for turn in turns:
@@ -820,7 +982,7 @@ def summarize_conversation(
     on_truncate: Callable[[int, int], None] | None = None,
     prompt_fits: PromptFits = native_prompt_fits,
 ) -> str:
-    """Summarize a finished conversation in one managed unattended session.
+    """Summarize a finished consultation in one managed unattended session.
 
     The summary runs through the same boundary as the turns, so it gets the
     runtime's deadline, cancellation, process-group cleanup and each tool's
@@ -855,11 +1017,11 @@ def summarize_conversation(
 
 
 def render_summary(result: ConversationResult, body: str) -> str:
-    a, b = result.participants
     return (
-        "# Conversation summary\n\n"
+        "# Consultation summary\n\n"
         f"**Goal:** {result.goal}\n\n"
-        f"- Participants: {a.label}, {b.label}\n"
+        f"- Asker: {result.asker.tool.value}\n"
+        f"- Responder: {result.responder.tool.value}\n"
         f"- Outcome: {describe_stop(result)}\n\n"
         f"{body.strip()}\n"
     )

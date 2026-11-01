@@ -316,6 +316,12 @@ def _adapter(monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]) -
         lambda self, **_kwargs: BinaryVersion(normalized, version),
         raising=True,
     )
+    if tool is AIToolID.CLAUDE:
+        # The recorded fixtures carry a real session ID; act as if the fake CLI
+        # honored the ``--session-id`` crossby pins on every new session.
+        from crossby.ai_tools import claude as claude_module
+
+        monkeypatch.setattr(claude_module, "_new_session_id", lambda: CLAUDE_RESULT["session_id"])
     return adapter
 
 

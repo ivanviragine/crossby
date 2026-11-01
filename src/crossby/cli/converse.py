@@ -39,10 +39,10 @@ def ask(
     """Ask another AI coding agent one question, headless, and print its answer.
 
     The agent runs unattended in the project: unexpected questions fail the
-    session and unapproved permissions are denied. The question is framed
-    with the same rules as a conversation turn: read and check, but do not
-    modify files. Each call is a fresh session, so include the context the
-    agent needs in the question.
+    session and unapproved permissions are denied. The question gets the same
+    short note as a consultation's first message: answer directly, ask for
+    clarification in the reply, and don't modify files. Each call is a fresh
+    session, so include the context the agent needs in the question.
 
     Examples::
 
@@ -84,70 +84,86 @@ def ask(
 
 
 def converse(
-    tool_a: str = typer.Argument(..., help="Agent that speaks first (e.g. codex)."),
-    tool_b: str = typer.Argument(..., help="Agent that replies (e.g. claude)."),
+    asker_tool: str = typer.Argument(
+        ..., metavar="ASKER", help="Agent that holds the goal and asks (e.g. claude)."
+    ),
+    responder_tool: str = typer.Argument(
+        ..., metavar="RESPONDER", help="Agent that answers (e.g. codex)."
+    ),
     goal: str | None = typer.Option(
-        None, "--goal", "-g", help="What the two agents should achieve together."
+        None, "--goal", "-g", help="What the asker should find out. Only the asker sees it."
     ),
     goal_file: Path | None = typer.Option(
         None, "--goal-file", help="Read the goal from this file instead."
     ),
-    max_turns: int = typer.Option(6, "--max-turns", help="Maximum replies across both agents."),
-    timeout: float = typer.Option(
-        1800.0, "--timeout", help="Seconds for the whole conversation (summary excluded)."
+    max_rounds: int = typer.Option(
+        5, "--max-rounds", help="Most questions the asker may send before it must answer."
     ),
-    turn_timeout: float = typer.Option(600.0, "--turn-timeout", help="Seconds per reply."),
-    model_a: str | None = typer.Option(None, "--model-a", help="Model for the first agent."),
-    model_b: str | None = typer.Option(None, "--model-b", help="Model for the second agent."),
+    timeout: float = typer.Option(
+        1800.0, "--timeout", help="Seconds for the whole consultation (summary excluded)."
+    ),
+    turn_timeout: float = typer.Option(600.0, "--turn-timeout", help="Seconds per message."),
+    asker_model: str | None = typer.Option(None, "--asker-model", help="Model for the asker."),
+    responder_model: str | None = typer.Option(
+        None, "--responder-model", help="Model for the responder."
+    ),
     history_chars: int = typer.Option(
         80_000,
         "--history-chars",
-        help="Character budget for the conversation replayed into each turn.",
+        help="Character budget for replayed history (tools without session resume).",
+    ),
+    summary: bool = typer.Option(
+        False, "--summary", help="Also write a neutral summary.md of the whole consultation."
     ),
     summarizer_tool: str | None = typer.Option(
         None,
         "--summarizer-tool",
-        help="Tool that writes the final summary (defaults to the first agent).",
+        help="Tool that writes the --summary (defaults to the asker's tool).",
     ),
-    no_summary: bool = typer.Option(False, "--no-summary", help="Skip the final summary."),
     output_dir: Path | None = typer.Option(
         None,
         "--output-dir",
-        help="Directory for transcript.md and summary.md "
-        "(default: .crossby/conversations/<timestamp>/).",
+        help="Directory for transcript.md (default: .crossby/conversations/<timestamp>/).",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON result object."),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Do not print turns as they arrive."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Do not print messages as they arrive."
+    ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
-    """Have two AI coding agents work toward a goal in a headless back-and-forth.
+    """Let one AI coding agent consult another, headless, until it has its answer.
 
-    Each agent ends every reply with STATUS: CONTINUE or STATUS: DONE. The
-    conversation stops when both agree in consecutive replies, or on the turn
-    or time limit. A neutral summary of the whole conversation is then written
-    next to the transcript and printed to stdout; progress goes to stderr.
+    The ASKER holds the goal. It decides what to ask, judges each answer,
+    asks follow-up questions, and ends with its final answer. The RESPONDER
+    never sees the goal; it only answers. Each side keeps its own session
+    (resumed where the tool supports it). The asker's final answer goes to
+    stdout; messages and progress go to stderr; transcript.md is saved after
+    every message.
 
-    Exit codes: 0 agreed, 2 stopped by the turn or time limit, 1 failed,
+    Exit codes: 0 answered, 2 stopped by the round or time limit, 1 failed,
     130 interrupted.
 
     Examples::
 
-        crossby converse codex claude --goal "Find why test_sync_hooks is flaky and agree on a fix"
-        crossby converse claude cursor --goal-file goal.md --max-turns 4 --json
+        crossby converse claude codex --goal "Check whether this diagnosis is sound: ..."
+        crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json
     """
     from crossby.services import converse as engine
 
     project_root = _project_root(path)
-    participant_ids = (_headless_tool(tool_a, "TOOL_A"), _headless_tool(tool_b, "TOOL_B"))
+    asker_id = _headless_tool(asker_tool, "ASKER")
+    responder_id = _headless_tool(responder_tool, "RESPONDER")
     goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
     summarizer_id: AIToolID | None = None
-    if not no_summary:
+    if summary:
         summarizer_id = (
             _headless_tool(summarizer_tool, "--summarizer-tool")
             if summarizer_tool is not None
-            else participant_ids[0]
+            else asker_id
         )
-    participants = engine.make_participants(*participant_ids, model_a=model_a, model_b=model_b)
+    asker, responder = engine.make_participants(
+        asker_id, responder_id, asker_model=asker_model, responder_model=responder_model
+    )
 
     started_at = datetime.now(tz=UTC)
     if output_dir is not None:
@@ -159,15 +175,16 @@ def converse(
 
     def on_turn_start(number: int, speaker: Participant) -> None:
         if not quiet:
-            _stderr(f"[step.count]\\[{number}/{max_turns}][/] {speaker.label} is replying…")
+            _stderr(f"[step.count]\\[{number}][/] {speaker.label} is writing…")
 
     def on_turn(turn: ConverseTurn) -> None:
         # Persist before printing, so a crash or Ctrl-C keeps every completed turn.
         completed.append(turn)
         partial = engine.render_partial_transcript(
             goal=goal_text,
-            participants=participants,
-            max_turns=max_turns,
+            asker=asker,
+            responder=responder,
+            max_rounds=max_rounds,
             started_at=started_at,
             turns=completed,
         )
@@ -175,7 +192,7 @@ def converse(
             _write(transcript_path, partial)
         except OSError as exc:
             # The previous transcript is intact (the write is atomic), and the
-            # next turn or the final write tries again; don't end the conversation.
+            # next turn or the final write tries again; don't end the consultation.
             console.warn(f"Could not save the transcript after turn {turn.number}: {exc}")
         if not quiet:
             _show_turn(turn)
@@ -184,9 +201,9 @@ def converse(
         engine.check_depth()
         result = engine.run_conversation(
             goal_text,
-            participants,
+            (asker, responder),
             working_dir=project_root,
-            max_turns=max_turns,
+            max_rounds=max_rounds,
             timeout_seconds=timeout,
             turn_timeout_seconds=turn_timeout,
             history_chars=history_chars,
@@ -304,9 +321,11 @@ def _write(path: Path, text: str) -> None:
 
 
 def _show_turn(turn: ConverseTurn) -> None:
-    sys.stderr.write(f"\n{turn.text or '(empty reply)'}\n\n")
+    sys.stderr.write(f"\n{turn.text or '(empty message)'}\n\n")
+    marker = f"NEXT: {turn.next.value} · " if turn.next is not None else ""
+    title = "final answer" if turn.is_final_answer else f"{turn.role.value} ({turn.tool.value})"
     _stderr(
-        f"[dim]      {turn.speaker} · STATUS: {turn.status.value} · {turn.duration_seconds:.0f}s[/]"
+        f"[dim]      {title} · {marker}{turn.duration_seconds:.0f}s · session {turn.mode.value}[/]"
     )
     sys.stderr.flush()
 
@@ -365,15 +384,23 @@ def _report(
         _print_json(
             {
                 "status": result.stop_reason.value,
-                "agreed": result.agreed,
+                "answered": result.answered,
+                "final_answer": result.final_answer,
                 "outcome": describe_stop(result),
                 "error": result.error,
+                "rounds": result.rounds,
+                "max_rounds": result.max_rounds,
                 "turns": len(result.turns),
-                "max_turns": result.max_turns,
-                "participants": [
-                    {"label": p.label, "tool": p.tool.value, "model": p.model}
-                    for p in result.participants
-                ],
+                "asker": {
+                    "tool": result.asker.tool.value,
+                    "model": result.asker.model,
+                    "session": result.modes[result.asker.role].value,
+                },
+                "responder": {
+                    "tool": result.responder.tool.value,
+                    "model": result.responder.model,
+                    "session": result.modes[result.responder.role].value,
+                },
                 "transcript_path": str(transcript_path),
                 "summary_path": str(summary_path) if summary_path else None,
                 "summary": summary_body,
@@ -382,14 +409,16 @@ def _report(
         )
         return
 
-    # stdout carries the result: the summary, or the last reply without one.
+    # stdout carries the result: the asker's final answer, and the summary when asked.
+    if result.final_answer is not None:
+        print(result.final_answer)
     if summary_body is not None:
+        if result.final_answer is not None:
+            print()
         print(summary_body.strip())
-    elif result.turns:
-        print(result.turns[-1].text)
 
     outcome = describe_stop(result)
-    if result.agreed:
+    if result.answered:
         _stderr(f"  [success]✓[/] {_escape(outcome)}")
     elif result.exit_code == 1:
         _stderr(f"  [error]✗ Error:[/] {_escape(outcome)}")

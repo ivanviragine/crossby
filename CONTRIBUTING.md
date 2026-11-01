@@ -1235,35 +1235,46 @@ worker thread, so Ctrl-C sets the runtime's `cancel_event` and the native
 process group is torn down before the interrupt propagates. Tests inject a
 fake runner and never start a native CLI.
 
-- **No native resume.** Unattended profiles declare `supports_resume=False`
-  on every adapter, so each turn replays the goal and the trimmed transcript
-  (`render_history`, which keeps the newest turns). If unattended resume ever
-  lands, the right change is passing `resume_id` per participant. It must not
-  route through brokered mode, whose transports and restrictions differ.
-- **Prompts:** `data/prompts/converse_turn.md` (turns), `converse_ask.md`
-  (frames an `ask` question with the same read-only rules) and
-  `converse_summary.md`. Fill templates with `str.format` on the template
-  only; goal and question text may contain braces.
-- **Summary:** `summarize_conversation()` is one more `UNATTENDED` session
-  through the same `TurnRunner`, never `HandoffSummarizer`'s plain
-  `subprocess.run()`, so it keeps the runtime's cancellation, process-group
-  cleanup and each tool's unattended permission policy. `build_summary_prompt()`
-  reuses the handoff `render_turn()` and `truncate_transcript()`, then trims
-  to `SUMMARY_PROMPT_CHARS` and to the summarizer's own transport limit.
-- **Prompt size:** Cursor, Copilot and Antigravity CLI receive the prompt as
+- **Roles.** The asker holds the goal (`converse_asker.md`) and ends each reply
+  with `NEXT: ASK` or `NEXT: DONE` (`parse_next`). The responder never sees
+  the goal; its first message is the question framed by
+  `converse_responder.md`, which `ask` reuses. A missing marker is sent on as
+  a message, never taken as the final answer.
+- **Sessions.** `native_supports_resume()` reads the unattended profile's
+  `supports_resume`. A resumable side passes `resume_id` from its second turn
+  on and sends only the other agent's latest message; a side that gets no
+  session handle back falls back to replay. Replay (`replay_prompt`) rebuilds
+  a fresh session's context from that side's earlier exchanges, newest kept
+  first; the message being answered is sent once, never also in the history.
+- **Claude resume.** Claude's unattended profile declares
+  `supports_resume=True`. Every new session gets `--session-id <uuid>`: a
+  `claude` started inside another Claude Code session otherwise inherits the
+  parent's session ID (`CLAUDE_CODE_SESSION_ID` and the hosting environment),
+  so two agents would share one session. `--resume` continues a session, a
+  reported ID that differs from the requested one is `INVALID_OUTPUT`, and
+  a non-UUID resume ID is rejected before spawning. Verified on 2.1.316.
+- **Stop rules.** `NEXT: DONE` ends with `ANSWERED` (exit 0). After the last
+  allowed round the asker gets `FINAL_NUDGE`; no answer then is `ROUND_LIMIT`
+  (exit 2). A turn that times out because the overall deadline bounded it, or
+  whose startup raises after the deadline, is `TIMEOUT` (exit 2); a turn that
+  hits its own `--turn-timeout` is `FAILED` (exit 1).
+- **Summary (opt-in).** `summarize_conversation()` is one more `UNATTENDED`
+  session through the same `TurnRunner`, never `HandoffSummarizer`'s plain
+  `subprocess.run()`. `build_summary_prompt()` reuses the handoff
+  `render_turn()` and `truncate_transcript()`, then trims to
+  `SUMMARY_PROMPT_CHARS` and the summarizer's own transport limit.
+- **Prompt size.** Cursor, Copilot and Antigravity CLI receive the prompt as
   an argument, which the runtime limits by encoded bytes (POSIX) or
   command-line units (Windows), not characters. Turn and summary prompts are
   shrunk until `AbstractAITool.headless_prompt_fits()` accepts them; it uses
   the same measure as `_validate_headless_request()`.
-- **Interrupts and persistence:** `run_conversation()` catches Ctrl-C around
+- **Interrupts and persistence.** `run_conversation()` catches Ctrl-C around
   the whole relay, including caller callbacks, and returns the completed
-  turns. The CLI rewrites `transcript.md` after every turn, before printing it, with `atomic_write_text()`: a plain `write_text()` truncates first, so one failed update would erase every saved turn. A failed per-turn save only warns; the next save or the final write retries.
-- **Stop rules:** two consecutive `DONE`s means agreement. A missing status
-  line is `MISSING`, never agreement. A turn that times out because the
-  overall deadline bounded it is `TIMEOUT` (exit 2); a turn that hits its own
-  `--turn-timeout` is `FAILED` (exit 1).
+  turns. The CLI rewrites `transcript.md` after every turn, before printing
+  it, with `atomic_write_text()`; a failed per-turn save only warns.
 - **Recursion guard:** `child_depth()` raises `CROSSBY_CONVERSE_DEPTH` for
-  child processes, and `check_depth()` refuses at `MAX_DEPTH`.
+  child processes, including the summarizer, and `check_depth()` refuses at
+  `MAX_DEPTH`.
 
 ### Library API (not exposed via CLI)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 from datetime import UTC, datetime
@@ -24,19 +25,25 @@ from crossby.models.ai import (
 from crossby.services import converse
 from crossby.services.converse import (
     DEPTH_ENV,
-    AgentStatus,
     ConversationResult,
     ConverseDepthError,
     ConverseError,
     ConverseTurn,
+    Next,
+    Role,
+    SessionMode,
     StopReason,
 )
 
 Reply = str | HeadlessTerminalStatus | BaseException
+GOAL = "Check whether the PFO diagnosis is sound"
 
 
 def _result(
-    tool: AIToolID, status: HeadlessTerminalStatus, text: str | None
+    tool: AIToolID,
+    status: HeadlessTerminalStatus,
+    text: str | None,
+    session_id: str | None = None,
 ) -> HeadlessSessionResult:
     return HeadlessSessionResult(
         tool=tool,
@@ -46,6 +53,7 @@ def _result(
             HeadlessEvent(sequence=1, kind=HeadlessEventKind.TERMINAL, terminal_status=status),
         ),
         final_text=text,
+        session_id=session_id,
         duration_seconds=1.0,
     )
 
@@ -65,6 +73,8 @@ class FakeClock:
 
 
 class FakeRunner:
+    """Replays scripted replies; new sessions get a fresh ID, resumed ones keep it."""
+
     def __init__(
         self,
         replies: list[Reply],
@@ -73,16 +83,19 @@ class FakeRunner:
         seconds_per_turn: float = 1.0,
         seconds_per_preflight: float = 0.0,
         preflight_error: BaseException | None = None,
+        issue_session_ids: bool = True,
     ) -> None:
         self.replies = list(replies)
         self.clock = clock
         self.seconds_per_turn = seconds_per_turn
-        self.preflight_error = preflight_error
         self.seconds_per_preflight = seconds_per_preflight
+        self.preflight_error = preflight_error
+        self.issue_session_ids = issue_session_ids
         self.preflights: list[AIToolID] = []
         self.preflight_timeouts: list[float] = []
         self.calls: list[tuple[AIToolID, HeadlessSessionRequest]] = []
         self.depths: list[str | None] = []
+        self.sessions_created = 0
 
     def preflight(self, tool: AIToolID, request: HeadlessSessionRequest) -> None:
         self.preflights.append(tool)
@@ -105,17 +118,31 @@ class FakeRunner:
         item = self.replies.pop(0)
         if isinstance(item, BaseException):
             raise item
+        session = request.resume_id
+        if session is None and self.issue_session_ids:
+            self.sessions_created += 1
+            session = f"session-{self.sessions_created}"
         if isinstance(item, HeadlessTerminalStatus):
             return _result(tool, item, None)
-        return _result(tool, HeadlessTerminalStatus.SUCCEEDED, item)
+        return _result(tool, HeadlessTerminalStatus.SUCCEEDED, item, session)
 
 
-PARTICIPANTS = converse.make_participants(AIToolID.CODEX, AIToolID.CLAUDE)
+PARTICIPANTS = converse.make_participants(AIToolID.CLAUDE, AIToolID.CODEX)
+ASKER, RESPONDER = PARTICIPANTS
+
+
+def _resumes(_tool: AIToolID) -> bool:
+    return True
+
+
+def _replays(_tool: AIToolID) -> bool:
+    return False
 
 
 def _run(runner: FakeRunner, tmp_path: Path, **kwargs: object) -> ConversationResult:
+    kwargs.setdefault("supports_resume", _resumes)
     return converse.run_conversation(
-        "Agree on a fix",
+        GOAL,
         PARTICIPANTS,
         working_dir=tmp_path,
         runner=runner,
@@ -129,183 +156,244 @@ def _no_inherited_depth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# parse_status
+# parse_next
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("text", "status"),
+    ("text", "expected"),
     [
-        ("Looks right.\nSTATUS: DONE", AgentStatus.DONE),
-        ("Not yet.\n\nSTATUS: CONTINUE\n\n", AgentStatus.CONTINUE),
-        ("ok\n**STATUS: DONE**", AgentStatus.DONE),
-        ("ok\n`STATUS: done`", AgentStatus.DONE),
-        ("ok\nStatus: Continue.", AgentStatus.CONTINUE),
-        ("STATUS: DONE is what I'd say later\nbut more to check", AgentStatus.MISSING),
-        ("no status line here", AgentStatus.MISSING),
-        ("ok\nSTATUS: MAYBE", AgentStatus.MISSING),
+        ("What is a PFO?\nNEXT: ASK", Next.ASK),
+        ("Verdict: sound.\n\nNEXT: DONE\n\n", Next.DONE),
+        ("ok\n**NEXT: DONE**", Next.DONE),
+        ("ok\n`next: ask`", Next.ASK),
+        ("ok\nNext: Done.", Next.DONE),
+        ("NEXT: DONE is what I'd say later\nbut not yet", Next.MISSING),
+        ("no marker here", Next.MISSING),
+        ("ok\nNEXT: MAYBE", Next.MISSING),
+        ("ok\nSTATUS: DONE", Next.MISSING),
     ],
 )
-def test_parse_status(text: str, status: AgentStatus) -> None:
-    assert converse.parse_status(text)[1] is status
+def test_parse_next(text: str, expected: Next) -> None:
+    assert converse.parse_next(text)[1] is expected
 
 
-def test_parse_status_strips_the_status_line_from_the_body() -> None:
-    body, status = converse.parse_status("Line one.\nLine two.\n\nSTATUS: DONE")
+def test_parse_next_strips_the_marker_line() -> None:
+    body, next_ = converse.parse_next("Line one.\nLine two.\n\nNEXT: DONE")
     assert body == "Line one.\nLine two."
-    assert status is AgentStatus.DONE
+    assert next_ is Next.DONE
 
 
 # ---------------------------------------------------------------------------
-# Prompts and history
+# The consultation loop (resumed sessions)
 # ---------------------------------------------------------------------------
 
-
-def _turn(number: int, speaker: str, text: str, status: AgentStatus) -> ConverseTurn:
-    tool = AIToolID.CODEX if speaker == "codex" else AIToolID.CLAUDE
-    return ConverseTurn(number, speaker, tool, text, status, 1.0)
-
-
-def test_first_turn_prompt_carries_goal_roles_and_status_rule() -> None:
-    a, b = PARTICIPANTS
-    template = converse.load_turn_template()
-    prompt = converse.build_turn_prompt(
-        template=template,
-        goal="Find the flaky test",
-        speaker=a,
-        peer=b,
-        turn=1,
-        max_turns=6,
-        history=[],
-        history_chars=10_000,
-    )
-    assert "You are codex" in prompt
-    assert "with claude" in prompt
-    assert "Goal: Find the flaky test" in prompt
-    assert "turn 1 of at most 6" in prompt
-    assert "STATUS: DONE" in prompt
-    assert "You speak first" in prompt
+ANSWERING = [
+    "What is a patent foramen ovale?\nNEXT: ASK",
+    "A flap-like opening between the atria.",
+    "How can it cause a paradoxical embolism?\nNEXT: ASK",
+    "A venous clot crosses right-to-left and bypasses the lungs.",
+    "Verdict: the responder understands the mechanism.\nNEXT: DONE",
+]
 
 
-def test_goal_with_braces_is_not_reinterpreted() -> None:
-    a, b = PARTICIPANTS
-    prompt = converse.build_turn_prompt(
-        template=converse.load_turn_template(),
-        goal="Fix {placeholder} handling in f'{x}'",
-        speaker=a,
-        peer=b,
-        turn=1,
-        max_turns=2,
-        history=[],
-        history_chars=10_000,
-    )
-    assert "Fix {placeholder} handling in f'{x}'" in prompt
-
-
-def test_history_keeps_most_recent_turns_within_budget() -> None:
-    turns = [
-        _turn(1, "codex", "A" * 900, AgentStatus.CONTINUE),
-        _turn(2, "claude", "B" * 900, AgentStatus.CONTINUE),
-        _turn(3, "codex", "C" * 900, AgentStatus.DONE),
-    ]
-    rendered = converse.render_history(turns, peer="claude", budget_chars=2000)
-    assert "A" * 900 not in rendered
-    assert "B" * 900 in rendered
-    assert "C" * 900 in rendered
-    assert "1 earlier turn(s) omitted" in rendered
-    assert "### codex (turn 3, STATUS: DONE)" in rendered
-    assert rendered.rstrip().endswith("It is your turn. Reply to claude.")
-
-
-def test_history_clips_a_single_oversized_reply() -> None:
-    turns = [_turn(1, "codex", "head" + "x" * 5000 + "tail", AgentStatus.CONTINUE)]
-    rendered = converse.render_history(turns, peer="claude", budget_chars=1000)
-    assert "characters omitted" in rendered
-    assert "head" in rendered
-    assert "tail" in rendered
-    assert len(rendered) < 1300
-
-
-def test_same_tool_on_both_sides_gets_distinct_labels() -> None:
-    a, b = converse.make_participants(AIToolID.CLAUDE, AIToolID.CLAUDE, model_b="other")
-    assert (a.label, b.label) == ("claude-1", "claude-2")
-    assert b.model == "other"
-
-
-# ---------------------------------------------------------------------------
-# run_conversation
-# ---------------------------------------------------------------------------
-
-
-def test_agreement_stops_after_consecutive_done(tmp_path: Path) -> None:
-    runner = FakeRunner(
-        [
-            "Cause is X.\nSTATUS: CONTINUE",
-            "Agree it is X; fix with Y.\nSTATUS: DONE",
-            "Y works.\nSTATUS: DONE",
-            "should never be asked",
-        ]
-    )
+def test_asker_consults_until_it_gives_a_final_answer(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
     result = _run(runner, tmp_path)
 
-    assert result.stop_reason is StopReason.AGREED
-    assert result.agreed
+    assert result.stop_reason is StopReason.ANSWERED
+    assert result.answered
     assert result.exit_code == 0
-    assert [t.speaker for t in result.turns] == ["codex", "claude", "codex"]
-    assert [t.status for t in result.turns] == [
-        AgentStatus.CONTINUE,
-        AgentStatus.DONE,
-        AgentStatus.DONE,
+    assert result.final_answer == "Verdict: the responder understands the mechanism."
+    assert result.rounds == 2
+    assert not result.answered_at_limit
+    assert [t.role for t in result.turns] == [
+        Role.ASKER,
+        Role.RESPONDER,
+        Role.ASKER,
+        Role.RESPONDER,
+        Role.ASKER,
     ]
-    assert result.turns[1].text == "Agree it is X; fix with Y."
-    assert len(runner.calls) == 3
+    assert [t.next for t in result.turns] == [Next.ASK, None, Next.ASK, None, Next.DONE]
+    assert [tool for tool, _req in runner.calls] == [
+        AIToolID.CLAUDE,
+        AIToolID.CODEX,
+        AIToolID.CLAUDE,
+        AIToolID.CODEX,
+        AIToolID.CLAUDE,
+    ]
+    assert result.modes == {Role.ASKER: SessionMode.RESUMED, Role.RESPONDER: SessionMode.RESUMED}
 
 
-def test_turns_alternate_and_replay_the_conversation(tmp_path: Path) -> None:
-    runner = FakeRunner(["first take\nSTATUS: CONTINUE", "reply\nSTATUS: CONTINUE"])
-    _run(runner, tmp_path, max_turns=2)
-
-    (tool_1, req_1), (tool_2, req_2) = runner.calls
-    assert (tool_1, tool_2) == (AIToolID.CODEX, AIToolID.CLAUDE)
-    assert "You speak first" in req_1.prompt
-    assert "### codex (turn 1, STATUS: CONTINUE)\nfirst take" in req_2.prompt
-    assert "first take" not in req_1.prompt
-    for request in (req_1, req_2):
-        assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
-        assert request.resume_id is None
-        assert request.working_dir == tmp_path
+def test_only_the_asker_sees_the_goal(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path)
+    asker_prompts = [req.prompt for tool, req in runner.calls if tool is AIToolID.CLAUDE]
+    responder_prompts = [req.prompt for tool, req in runner.calls if tool is AIToolID.CODEX]
+    assert GOAL in asker_prompts[0]
+    assert all(GOAL not in prompt for prompt in responder_prompts)
 
 
-def test_turn_limit_without_agreement(tmp_path: Path) -> None:
-    runner = FakeRunner([f"take {n}\nSTATUS: CONTINUE" for n in range(4)])
-    result = _run(runner, tmp_path, max_turns=4)
-    assert result.stop_reason is StopReason.TURN_LIMIT
-    assert result.exit_code == 2
-    assert len(result.turns) == 4
+def test_first_messages_and_resumed_messages(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path, max_rounds=4)
+    requests = [req for _tool, req in runner.calls]
+
+    opening = requests[0].prompt
+    assert f"Goal: {GOAL}" in opening
+    assert "consulting another AI coding agent (codex)" in opening
+    assert "NEXT: ASK" in opening and "NEXT: DONE" in opening
+    assert "at most 4 messages" in opening
+    assert requests[0].resume_id is None
+
+    # The responder's first message is the asker's question plus a short note.
+    assert requests[1].prompt == converse.responder_opening("What is a patent foramen ovale?")
+    assert "Don't use interactive prompts" in requests[1].prompt
+    assert "agent" not in requests[1].prompt.lower()
+    assert requests[1].resume_id is None
+
+    # Every later message resumes that side's own session and carries only the
+    # other agent's latest text.
+    assert requests[2].resume_id == "session-1"
+    assert requests[2].prompt == "codex replied:\n\nA flap-like opening between the atria."
+    assert requests[3].resume_id == "session-2"
+    assert requests[3].prompt == "How can it cause a paradoxical embolism?"
+    assert requests[4].resume_id == "session-1"
 
 
-def test_a_single_done_is_not_agreement(tmp_path: Path) -> None:
-    runner = FakeRunner(["done\nSTATUS: DONE", "no\nSTATUS: CONTINUE", "hmm\nSTATUS: DONE"])
-    result = _run(runner, tmp_path, max_turns=3)
-    assert result.stop_reason is StopReason.TURN_LIMIT
-
-
-def test_missing_status_line_counts_as_continue(tmp_path: Path) -> None:
-    runner = FakeRunner(["STATUS: DONE", "I forgot the status line", "STATUS: DONE"])
-    result = _run(runner, tmp_path, max_turns=3)
-    assert result.turns[1].status is AgentStatus.MISSING
-    assert result.stop_reason is StopReason.TURN_LIMIT
+def test_same_tool_on_both_sides_keeps_separate_sessions(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CLAUDE)
+    converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
+    )
+    resumes = [req.resume_id for _tool, req in runner.calls]
+    assert resumes == [None, None, "session-1", "session-2", "session-1"]
 
 
 def test_participant_models_reach_their_requests(tmp_path: Path) -> None:
     participants = converse.make_participants(
-        AIToolID.CODEX, AIToolID.CLAUDE, model_a="gpt-x", model_b="opus-y"
+        AIToolID.CLAUDE, AIToolID.CODEX, asker_model="opus-y", responder_model="gpt-x"
     )
-    runner = FakeRunner(["a\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE"])
+    runner = FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"])
     converse.run_conversation(
-        "goal", participants, working_dir=tmp_path, runner=runner, max_turns=2
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
     )
-    assert [req.model for _tool, req in runner.calls] == ["gpt-x", "opus-y"]
+    assert [req.model for _tool, req in runner.calls] == ["opus-y", "gpt-x", "opus-y"]
+
+
+def test_every_request_is_unattended_in_the_project(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path)
+    for _tool, request in runner.calls:
+        assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+        assert request.working_dir == tmp_path
+
+
+def test_answering_on_the_first_turn_is_allowed(tmp_path: Path) -> None:
+    result = _run(FakeRunner(["I already know: sound.\nNEXT: DONE"]), tmp_path)
+    assert result.answered
+    assert result.rounds == 0
+    assert result.final_answer == "I already know: sound."
+
+
+def test_missing_marker_is_sent_on_as_a_message(tmp_path: Path) -> None:
+    runner = FakeRunner(["What is a PFO?", "An opening.", "Fine.\nNEXT: DONE"])
+    result = _run(runner, tmp_path)
+    assert result.turns[0].next is Next.MISSING
+    assert runner.calls[1][1].prompt == converse.responder_opening("What is a PFO?")
+    assert result.answered
+
+
+# ---------------------------------------------------------------------------
+# Round limit
+# ---------------------------------------------------------------------------
+
+
+def test_round_limit_asks_for_a_final_answer(tmp_path: Path) -> None:
+    runner = FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK", "a2", "Final: sound.\nNEXT: DONE"])
+    result = _run(runner, tmp_path, max_rounds=2)
+
+    assert result.answered
+    assert result.answered_at_limit
+    assert result.final_answer == "Final: sound."
+    last_asker_prompt = runner.calls[4][1].prompt
+    assert last_asker_prompt.startswith("codex replied:\n\na2")
+    assert "You have used all 2 messages" in last_asker_prompt
+    assert "Write your final answer now" in last_asker_prompt
+    # The earlier reply carried no nudge.
+    assert "You have used all" not in runner.calls[2][1].prompt
+
+
+def test_asker_that_never_answers_stops_at_the_round_limit(tmp_path: Path) -> None:
+    runner = FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK", "unused"])
+    result = _run(runner, tmp_path, max_rounds=1)
+    assert result.stop_reason is StopReason.ROUND_LIMIT
+    assert result.exit_code == 2
+    assert result.final_answer is None
+    assert len(runner.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Replay fallback for tools without verified resume
+# ---------------------------------------------------------------------------
+
+
+def test_replay_rebuilds_each_sides_context(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    result = _run(runner, tmp_path, supports_resume=_replays)
+    requests = [req for _tool, req in runner.calls]
+
+    assert all(req.resume_id is None for req in requests)
+    assert result.modes == {
+        Role.ASKER: SessionMode.REPLAYED,
+        Role.RESPONDER: SessionMode.REPLAYED,
+    }
+    # The asker's replay: its opening, earlier exchanges, then the latest reply once.
+    asker_turn_2 = requests[2].prompt
+    assert f"Goal: {GOAL}" in asker_turn_2
+    assert asker_turn_2.endswith("codex replied:\n\nA flap-like opening between the atria.")
+    assert asker_turn_2.count("A flap-like opening") == 1
+    assert "### You\nWhat is a patent foramen ovale?" in asker_turn_2
+    # The responder's replay: the note, its earlier Q&A, then the new message.
+    responder_turn_2 = requests[3].prompt
+    assert GOAL not in responder_turn_2
+    assert "### Question\nWhat is a patent foramen ovale?" in responder_turn_2
+    assert "### Your answer\nA flap-like opening between the atria." in responder_turn_2
+    assert responder_turn_2.endswith("### New message\nHow can it cause a paradoxical embolism?")
+    assert responder_turn_2.count("How can it cause") == 1
+
+
+def test_resume_without_a_returned_handle_falls_back_to_replay(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING, issue_session_ids=False)
+    result = _run(runner, tmp_path)
+    assert all(req.resume_id is None for _tool, req in runner.calls)
+    assert result.modes[Role.ASKER] is SessionMode.REPLAYED
+    assert f"Goal: {GOAL}" in runner.calls[2][1].prompt
+
+
+def test_replay_keeps_the_newest_exchanges_within_budget(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        [
+            "q1 " + "A" * 900 + "\nNEXT: ASK",
+            "a1 " + "B" * 900,
+            "q2\nNEXT: ASK",
+            "a2 " + "C" * 900,
+            "q3\nNEXT: ASK",
+            "a3",
+            "done\nNEXT: DONE",
+        ]
+    )
+    _run(runner, tmp_path, supports_resume=_replays, history_chars=1500)
+    asker_turn_3 = runner.calls[4][1].prompt
+    assert "A" * 900 not in asker_turn_3
+    assert "earlier message(s) omitted" in asker_turn_3
+    assert "C" * 900 in asker_turn_3
+
+
+# ---------------------------------------------------------------------------
+# Failures, limits and interrupts
+# ---------------------------------------------------------------------------
 
 
 def test_preflight_failure_stops_before_any_turn(tmp_path: Path) -> None:
@@ -315,108 +403,42 @@ def test_preflight_failure_stops_before_any_turn(tmp_path: Path) -> None:
     result = _run(runner, tmp_path)
     assert result.stop_reason is StopReason.FAILED
     assert result.exit_code == 1
-    assert "codex cannot run headless: codex is too old" in (result.error or "")
+    assert "cannot run headless: codex is too old" in (result.error or "")
     assert runner.calls == []
 
 
-def test_preflights_spend_the_overall_budget(tmp_path: Path) -> None:
-    clock = FakeClock()
-    runner = FakeRunner(
-        ["a\nSTATUS: DONE", "b\nSTATUS: DONE"], clock=clock, seconds_per_preflight=8
-    )
-    result = _run(runner, tmp_path, timeout_seconds=30, turn_timeout_seconds=600, clock=clock)
-    assert result.agreed
-    assert runner.preflight_timeouts == [30, 22]
-    assert [req.timeout_seconds for _tool, req in runner.calls] == [14, 13]
-
-
-def test_slow_preflight_that_exhausts_the_budget_is_a_timeout(tmp_path: Path) -> None:
-    clock = FakeClock()
-    runner = FakeRunner(["unused"], clock=clock, seconds_per_preflight=18)
-    result = _run(runner, tmp_path, timeout_seconds=20, clock=clock)
-    assert result.stop_reason is StopReason.TIMEOUT
-    assert result.error == "conversation time limit of 20s reached during preflight"
-    assert runner.preflights == [AIToolID.CODEX]
-    assert runner.calls == []
-
-
-def test_preflight_error_after_the_deadline_is_a_timeout(tmp_path: Path) -> None:
-    clock = FakeClock()
-    runner = FakeRunner(
-        [],
-        clock=clock,
-        seconds_per_preflight=25,
-        preflight_error=_unsupported(AIToolID.CODEX, "version probe timed out"),
-    )
-    result = _run(runner, tmp_path, timeout_seconds=20, clock=clock)
-    assert result.stop_reason is StopReason.TIMEOUT
-    assert "during preflight" in (result.error or "")
-
-
-def test_session_error_mid_conversation_keeps_completed_turns(tmp_path: Path) -> None:
-    runner = FakeRunner(["a\nSTATUS: CONTINUE", _unsupported(AIToolID.CLAUDE, "boom")])
+def test_session_error_mid_consultation_keeps_completed_turns(tmp_path: Path) -> None:
+    runner = FakeRunner(["q\nNEXT: ASK", _unsupported(AIToolID.CODEX, "boom")])
     result = _run(runner, tmp_path)
     assert result.stop_reason is StopReason.FAILED
     assert len(result.turns) == 1
-    assert result.error == "claude turn 2: boom"
+    assert result.error == "responder (codex) turn 2: boom"
 
 
 @pytest.mark.parametrize(
     "status", [HeadlessTerminalStatus.FAILED, HeadlessTerminalStatus.INVALID_OUTPUT]
 )
-def test_failed_session_status_stops_the_conversation(
-    tmp_path: Path, status: HeadlessTerminalStatus
-) -> None:
-    runner = FakeRunner([status])
-    result = _run(runner, tmp_path)
+def test_failed_session_status_stops(tmp_path: Path, status: HeadlessTerminalStatus) -> None:
+    result = _run(FakeRunner([status]), tmp_path)
     assert result.stop_reason is StopReason.FAILED
-    assert result.error == f"codex turn 1 ended with status {status.value}"
-
-
-def test_reply_without_text_is_a_failure(tmp_path: Path) -> None:
-    # A successful session always carries final output; JSON without text is
-    # the only way to get no text, and the relay needs text.
-    runner = FakeRunner([])
-    json_only = HeadlessSessionResult(
-        tool=AIToolID.CODEX,
-        version="1.0.0",
-        status=HeadlessTerminalStatus.SUCCEEDED,
-        events=(
-            HeadlessEvent(
-                sequence=1,
-                kind=HeadlessEventKind.TERMINAL,
-                terminal_status=HeadlessTerminalStatus.SUCCEEDED,
-            ),
-        ),
-        final_json={"answer": 1},
-        duration_seconds=1.0,
-    )
-    runner.run = lambda tool, request, cancel_event: json_only  # type: ignore[method-assign]
-    result = _run(runner, tmp_path)
-    assert result.stop_reason is StopReason.FAILED
-    assert result.error == "codex turn 1 returned no text"
+    assert result.error == f"asker (claude) turn 1 ended with status {status.value}"
 
 
 def test_turn_timeout_inside_the_overall_budget_is_a_failure(tmp_path: Path) -> None:
     runner = FakeRunner([HeadlessTerminalStatus.TIMED_OUT])
     result = _run(runner, tmp_path, timeout_seconds=1000, turn_timeout_seconds=10)
     assert result.stop_reason is StopReason.FAILED
-    assert result.error == "codex turn 1 timed out after 10s"
+    assert result.error == "asker (claude) turn 1 timed out after 10s"
 
 
 def test_overall_deadline_bounds_each_turn_and_stops_as_timeout(tmp_path: Path) -> None:
     clock = FakeClock()
-    runner = FakeRunner(
-        ["a\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE", "unused"],
-        clock=clock,
-        seconds_per_turn=48,
-    )
+    runner = FakeRunner(["q\nNEXT: ASK", "a", "unused"], clock=clock, seconds_per_turn=48)
     result = _run(runner, tmp_path, timeout_seconds=100, turn_timeout_seconds=600, clock=clock)
     assert result.stop_reason is StopReason.TIMEOUT
     assert result.exit_code == 2
     assert len(result.turns) == 2
-    timeouts = [req.timeout_seconds for _tool, req in runner.calls]
-    assert timeouts == [100, 52]
+    assert [req.timeout_seconds for _tool, req in runner.calls] == [100, 52]
 
 
 def test_deadline_hit_during_a_turn_is_a_timeout(tmp_path: Path) -> None:
@@ -429,52 +451,54 @@ def test_deadline_hit_during_a_turn_is_a_timeout(tmp_path: Path) -> None:
 def test_startup_error_after_the_deadline_is_a_timeout(tmp_path: Path) -> None:
     clock = FakeClock()
     runner = FakeRunner(
-        ["a\nSTATUS: CONTINUE", _unsupported(AIToolID.CLAUDE, "version probe ran out of time")],
+        ["q\nNEXT: ASK", _unsupported(AIToolID.CODEX, "version probe ran out of time")],
         clock=clock,
         seconds_per_turn=30,
     )
     result = _run(runner, tmp_path, timeout_seconds=50, clock=clock)
     assert result.stop_reason is StopReason.TIMEOUT
-    assert result.exit_code == 2
     assert result.error == "conversation time limit of 50s reached during turn 2"
-    assert len(result.turns) == 1
 
 
-def test_keyboard_interrupt_returns_partial_result(tmp_path: Path) -> None:
-    runner = FakeRunner(["a\nSTATUS: CONTINUE", KeyboardInterrupt()])
-    result = _run(runner, tmp_path)
+def test_preflights_spend_the_overall_budget(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(["done\nNEXT: DONE"], clock=clock, seconds_per_preflight=8)
+    result = _run(runner, tmp_path, timeout_seconds=30, turn_timeout_seconds=600, clock=clock)
+    assert result.answered
+    assert runner.preflight_timeouts == [30, 22]
+    assert [req.timeout_seconds for _tool, req in runner.calls] == [14]
+
+
+def test_slow_preflight_that_exhausts_the_budget_is_a_timeout(tmp_path: Path) -> None:
+    clock = FakeClock()
+    runner = FakeRunner(["unused"], clock=clock, seconds_per_preflight=18)
+    result = _run(runner, tmp_path, timeout_seconds=20, clock=clock)
+    assert result.stop_reason is StopReason.TIMEOUT
+    assert result.error == "conversation time limit of 20s reached during preflight"
+    assert runner.calls == []
+
+
+def test_keyboard_interrupt_in_a_session_keeps_completed_turns(tmp_path: Path) -> None:
+    result = _run(FakeRunner(["q\nNEXT: ASK", KeyboardInterrupt()]), tmp_path)
     assert result.stop_reason is StopReason.INTERRUPTED
     assert result.exit_code == 130
     assert len(result.turns) == 1
+    assert result.error == "interrupted during turn 2"
 
 
-def test_interrupt_while_the_caller_prints_a_reply_keeps_completed_turns(
-    tmp_path: Path,
-) -> None:
+def test_interrupt_while_the_caller_prints_a_reply(tmp_path: Path) -> None:
     def on_turn(turn: ConverseTurn) -> None:
         if turn.number == 2:
             raise KeyboardInterrupt
 
-    runner = FakeRunner(["a\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE", "unused"])
-    result = _run(runner, tmp_path, on_turn=on_turn)
+    result = _run(FakeRunner(["q\nNEXT: ASK", "a", "unused"]), tmp_path, on_turn=on_turn)
     assert result.stop_reason is StopReason.INTERRUPTED
-    assert [t.text for t in result.turns] == ["a", "b"]
+    assert [t.text for t in result.turns] == ["q", "a"]
     assert result.error == "interrupted after 2 turns"
     assert DEPTH_ENV not in os.environ
 
 
-def test_interrupt_in_turn_start_callback_is_reported_for_that_turn(tmp_path: Path) -> None:
-    def on_turn_start(number: int, _speaker: object) -> None:
-        if number == 2:
-            raise KeyboardInterrupt
-
-    result = _run(FakeRunner(["a\nSTATUS: CONTINUE"]), tmp_path, on_turn_start=on_turn_start)
-    assert result.stop_reason is StopReason.INTERRUPTED
-    assert result.error == "interrupted during turn 2"
-    assert len(result.turns) == 1
-
-
-def test_interrupt_during_preflight_is_an_interruption(tmp_path: Path) -> None:
+def test_interrupt_during_preflight(tmp_path: Path) -> None:
     result = _run(FakeRunner([], preflight_error=KeyboardInterrupt()), tmp_path)
     assert result.stop_reason is StopReason.INTERRUPTED
     assert result.turns == []
@@ -482,20 +506,26 @@ def test_interrupt_during_preflight_is_an_interruption(tmp_path: Path) -> None:
 
 def test_turn_callbacks_fire_in_order(tmp_path: Path) -> None:
     events: list[str] = []
-    runner = FakeRunner(["a\nSTATUS: DONE", "b\nSTATUS: DONE"])
     _run(
-        runner,
+        FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"]),
         tmp_path,
-        on_turn_start=lambda n, p: events.append(f"start {n} {p.label}"),
-        on_turn=lambda t: events.append(f"done {t.number} {t.status.value}"),
+        on_turn_start=lambda n, p: events.append(f"start {n} {p.role.value}"),
+        on_turn=lambda t: events.append(f"done {t.number} {t.role.value}"),
     )
-    assert events == ["start 1 codex", "done 1 DONE", "start 2 claude", "done 2 DONE"]
+    assert events == [
+        "start 1 asker",
+        "done 1 asker",
+        "start 2 responder",
+        "done 2 responder",
+        "start 3 asker",
+        "done 3 asker",
+    ]
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"max_turns": 1}, "at least 2"),
+        ({"max_rounds": 0}, "at least 1"),
         ({"timeout_seconds": 0}, "positive"),
         ({"history_chars": 10}, "1000"),
     ],
@@ -507,326 +537,56 @@ def test_invalid_settings_are_rejected(
         _run(FakeRunner([]), tmp_path, **kwargs)
 
 
-def test_blank_goal_is_rejected(tmp_path: Path) -> None:
+def test_blank_goal_and_swapped_roles_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(ConverseError, match="goal is empty"):
         converse.run_conversation("  ", PARTICIPANTS, working_dir=tmp_path, runner=FakeRunner([]))
-
-
-# ---------------------------------------------------------------------------
-# Recursion guard
-# ---------------------------------------------------------------------------
-
-
-def test_agents_run_one_level_deeper_and_depth_is_restored(tmp_path: Path) -> None:
-    runner = FakeRunner(["a\nSTATUS: DONE", "b\nSTATUS: DONE"])
-    _run(runner, tmp_path)
-    assert runner.depths == ["1", "1"]
-    assert DEPTH_ENV not in os.environ
-
-
-def test_nested_consultation_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    converse.check_depth()
-    monkeypatch.setenv(DEPTH_ENV, "1")
-    with pytest.raises(ConverseDepthError, match="Nested consultations are disabled"):
-        converse.check_depth()
-
-
-def test_unparseable_depth_is_treated_as_top_level(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(DEPTH_ENV, "nope")
-    converse.check_depth()
-
-
-# ---------------------------------------------------------------------------
-# ask
-# ---------------------------------------------------------------------------
-
-
-def test_ask_returns_the_answer(tmp_path: Path) -> None:
-    runner = FakeRunner(["  The answer.  "])
-    result = converse.ask_agent(
-        AIToolID.CODEX, "Question?", working_dir=tmp_path, model="m", runner=runner
-    )
-    assert result.succeeded
-    assert result.text == "The answer."
-    ((_tool, request),) = runner.calls
-    assert request.prompt.endswith("Question:\n\nQuestion?")
-    assert "Do not modify, create, or delete files." in request.prompt
-    assert request.model == "m"
-    assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
-    assert runner.depths == ["1"]
-
-
-def test_ask_reports_failures(tmp_path: Path) -> None:
-    failed = converse.ask_agent(
-        AIToolID.CODEX,
-        "q",
-        working_dir=tmp_path,
-        runner=FakeRunner([HeadlessTerminalStatus.FAILED]),
-    )
-    assert not failed.succeeded
-    assert failed.error == "codex session ended with status failed"
-
-    errored = converse.ask_agent(
-        AIToolID.CODEX,
-        "q",
-        working_dir=tmp_path,
-        runner=FakeRunner([_unsupported(AIToolID.CODEX, "not installed")]),
-    )
-    assert errored.status is None
-    assert errored.error == "not installed"
-
-
-# ---------------------------------------------------------------------------
-# Transcript and summary
-# ---------------------------------------------------------------------------
-
-
-def _finished(reason: StopReason, *, error: str | None = None) -> ConversationResult:
-    return ConversationResult(
-        goal="Agree on a fix",
-        participants=PARTICIPANTS,
-        max_turns=6,
-        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
-        finished_at=datetime(2026, 10, 31, 12, 5, tzinfo=UTC),
-        stop_reason=reason,
-        turns=[
-            _turn(1, "codex", "Cause is X.", AgentStatus.CONTINUE),
-            _turn(2, "claude", "Agreed.", AgentStatus.DONE),
-        ],
-        error=error,
-    )
-
-
-def test_render_transcript() -> None:
-    text = converse.render_transcript(_finished(StopReason.AGREED))
-    assert "**Goal:** Agree on a fix" in text
-    assert "- Participants: codex, claude" in text
-    assert "- Outcome: agreed: both agents declared the goal met after 2 turns" in text
-    assert "## Turn 1: codex\n\nCause is X." in text
-    assert "*STATUS: DONE · 1s*" in text
-
-
-@pytest.mark.parametrize(
-    ("reason", "expected"),
-    [
-        (StopReason.TURN_LIMIT, "turn limit reached (6 turns) without agreement"),
-        (StopReason.TIMEOUT, "stopped on the time limit after 2 turns without agreement: late"),
-        (StopReason.FAILED, "a session failed after 2 turns: late"),
-        (StopReason.INTERRUPTED, "interrupted by the user after 2 turns: late"),
-    ],
-)
-def test_describe_stop(reason: StopReason, expected: str) -> None:
-    assert converse.describe_stop(_finished(reason, error="late")) == expected
-
-
-def test_summary_runs_as_a_managed_unattended_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import subprocess
-
-    def no_plain_subprocess(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("the summary must not bypass the managed runtime")
-
-    monkeypatch.setattr(subprocess, "run", no_plain_subprocess)
-    runner = FakeRunner(["## Outcome\nThey agreed.\n"])
-    body = converse.summarize_conversation(
-        _finished(StopReason.TURN_LIMIT),
-        transcript_path=tmp_path / "run" / "transcript.md",
-        tool=AIToolID.CLAUDE,
-        working_dir=tmp_path,
-        model="haiku",
-        timeout_seconds=42,
-        runner=runner,
-    )
-
-    assert body == "## Outcome\nThey agreed."
-    ((tool, request),) = runner.calls
-    assert tool is AIToolID.CLAUDE
-    assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
-    assert request.timeout_seconds == 42
-    assert request.model == "haiku"
-    assert request.working_dir == tmp_path
-    assert runner.depths == ["1"]
-    assert DEPTH_ENV not in os.environ
-
-
-def test_summary_prompt_carries_goal_stop_reason_rules_and_transcript(tmp_path: Path) -> None:
-    prompt = converse.build_summary_prompt(
-        _finished(StopReason.TURN_LIMIT), transcript_path=tmp_path / "t.md"
-    )
-    assert "Goal: Agree on a fix" in prompt
-    assert "Stop reason: turn limit reached (6 turns) without agreement" in prompt
-    assert "codex and claude" in prompt
-    assert "## Open Disagreements" in prompt
-    assert "Do not read, modify, create, or delete files" in prompt
-    assert "It is not independent verification." in prompt
-    assert "--- Transcript ---" in prompt
-    assert "codex (turn 1, STATUS: CONTINUE):\nCause is X." in prompt
-    assert "claude (turn 2, STATUS: DONE):\nAgreed." in prompt
-    assert "earlier turns were dropped" not in prompt
-
-
-def test_summary_prompt_fits_the_character_ceiling(tmp_path: Path) -> None:
-    result = _finished(StopReason.TURN_LIMIT)
-    result.turns = [
-        _turn(n, "codex" if n % 2 else "claude", str(n) * 30_000, AgentStatus.CONTINUE)
-        for n in range(1, 7)
-    ]
-    truncations: list[tuple[int, int]] = []
-    prompt = converse.build_summary_prompt(
-        result,
-        transcript_path=tmp_path / "t.md",
-        max_chars=70_000,
-        on_truncate=lambda total, kept: truncations.append((total, kept)),
-    )
-    assert len(prompt) <= 70_000
-    assert "earlier turns were dropped" in prompt
-    assert "6" * 30_000 in prompt
-    assert "1" * 30_000 not in prompt
-    assert truncations == [(6, 2)]
-
-
-def test_summary_prompt_clips_a_single_oversized_turn(tmp_path: Path) -> None:
-    result = _finished(StopReason.TURN_LIMIT)
-    result.turns = [_turn(1, "codex", "x" * 150_000, AgentStatus.CONTINUE)]
-    prompt = converse.build_summary_prompt(
-        result, transcript_path=tmp_path / "t.md", max_chars=50_000
-    )
-    assert len(prompt) <= 50_000
-    assert "characters omitted" in prompt
-
-
-@pytest.mark.parametrize(
-    ("reply", "message"),
-    [
-        (HeadlessTerminalStatus.TIMED_OUT, "claude summary session ended with status timed_out"),
-        (HeadlessTerminalStatus.FAILED, "claude summary session ended with status failed"),
-    ],
-)
-def test_summary_failures_raise_summary_errors(
-    tmp_path: Path, reply: HeadlessTerminalStatus, message: str
-) -> None:
-    with pytest.raises(converse.ConverseSummaryError, match=message):
-        converse.summarize_conversation(
-            _finished(StopReason.AGREED),
-            transcript_path=tmp_path / "t.md",
-            tool=AIToolID.CLAUDE,
-            working_dir=tmp_path,
-            runner=FakeRunner([reply]),
+    with pytest.raises(ConverseError, match="asker, responder"):
+        converse.run_conversation(
+            GOAL, (RESPONDER, ASKER), working_dir=tmp_path, runner=FakeRunner([])
         )
 
 
-def test_summary_session_errors_raise_summary_errors(tmp_path: Path) -> None:
-    with pytest.raises(converse.ConverseSummaryError, match="argv too long"):
-        converse.summarize_conversation(
-            _finished(StopReason.AGREED),
-            transcript_path=tmp_path / "t.md",
-            tool=AIToolID.CURSOR,
-            working_dir=tmp_path,
-            runner=FakeRunner([_unsupported(AIToolID.CURSOR, "argv too long")]),
-        )
+# ---------------------------------------------------------------------------
+# Prompt sizing for argument-transport tools
+# ---------------------------------------------------------------------------
 
-
-CJK = "\u4e2d"  # three UTF-8 bytes per character
+CJK = "中"  # three UTF-8 bytes per character
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_summary_prompt_fits_an_argv_tools_byte_limit(tmp_path: Path) -> None:
-    # Codex's scenario: three 25,000-character CJK replies fit the character
-    # ceiling (75,000 chars) but not Cursor's 120,000-byte argument limit.
-    result = _finished(StopReason.TURN_LIMIT)
-    result.turns = [
-        _turn(n, "codex" if n % 2 else "claude", CJK * 25_000, AgentStatus.CONTINUE)
-        for n in range(1, 4)
-    ]
-    runner = FakeRunner(["## Outcome\nok"])
-    converse.summarize_conversation(
-        result,
-        transcript_path=tmp_path / "t.md",
-        tool=AIToolID.CURSOR,
-        working_dir=tmp_path,
-        runner=runner,
+def test_resumed_message_is_clipped_for_an_argv_responder(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CURSOR)
+    runner = FakeRunner([CJK * 50_000 + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
+    converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
     )
-    ((_tool, request),) = runner.calls
-    assert len(request.prompt) <= converse.SUMMARY_PROMPT_CHARS
-    assert len(os.fsencode(request.prompt)) <= 120_000
-    assert AbstractAITool.get(AIToolID.CURSOR).headless_prompt_fits(request.prompt)
-
-
-def test_summary_prompt_for_a_stdin_tool_keeps_the_character_ceiling(tmp_path: Path) -> None:
-    result = _finished(StopReason.TURN_LIMIT)
-    result.turns = [
-        _turn(n, "codex" if n % 2 else "claude", CJK * 25_000, AgentStatus.CONTINUE)
-        for n in range(1, 4)
-    ]
-    runner = FakeRunner(["## Outcome\nok"])
-    converse.summarize_conversation(
-        result,
-        transcript_path=tmp_path / "t.md",
-        tool=AIToolID.CLAUDE,
-        working_dir=tmp_path,
-        runner=runner,
-    )
-    ((_tool, request),) = runner.calls
-    # Claude reads the prompt from stdin, so all three turns still fit.
-    assert request.prompt.count(CJK * 25_000) == 3
-
-
-def test_summary_clips_one_turn_until_the_transport_accepts_it(tmp_path: Path) -> None:
-    result = _finished(StopReason.TURN_LIMIT)
-    result.turns = [_turn(1, "codex", "x" * 90_000, AgentStatus.CONTINUE)]
-    prompt = converse.build_summary_prompt(
-        result, transcript_path=tmp_path / "t.md", fits=lambda text: len(text) <= 20_000
-    )
-    assert len(prompt) <= 20_000
-    assert "characters omitted" in prompt
+    cursor_prompt = runner.calls[1][1].prompt
+    assert len(os.fsencode(cursor_prompt)) <= 120_000
+    assert "characters omitted" in cursor_prompt
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_turn_prompts_shrink_history_for_an_argv_tool(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CODEX, AIToolID.CURSOR)
-    runner = FakeRunner([CJK * 50_000 + "\nSTATUS: CONTINUE", CJK * 100 + "\nSTATUS: CONTINUE"])
-    converse.run_conversation(
-        "goal", participants, working_dir=tmp_path, runner=runner, max_turns=2
+def test_replayed_history_shrinks_for_an_argv_tool(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
+    runner = FakeRunner(
+        [
+            "q1\nNEXT: ASK",
+            CJK * 30_000,
+            "q2 " + CJK * 30_000 + "\nNEXT: ASK",
+            "a2",
+            "x\nNEXT: DONE",
+        ]
     )
-    (_codex, _first), (tool, second) = runner.calls
-    assert tool is AIToolID.CURSOR
-    assert len(os.fsencode(second.prompt)) <= 120_000
-    assert "characters omitted" in second.prompt
-
-
-def test_turn_prompt_history_is_left_alone_when_it_fits(tmp_path: Path) -> None:
-    checked: list[tuple[AIToolID, int]] = []
-
-    def fits(tool: AIToolID, prompt: str) -> bool:
-        checked.append((tool, len(prompt)))
-        return True
-
-    runner = FakeRunner(["a" * 5000 + "\nSTATUS: CONTINUE", "b\nSTATUS: CONTINUE"])
     converse.run_conversation(
-        "goal", PARTICIPANTS, working_dir=tmp_path, runner=runner, max_turns=2, prompt_fits=fits
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_replays
     )
-    assert [tool for tool, _size in checked] == [AIToolID.CODEX, AIToolID.CLAUDE]
-    assert "a" * 5000 in runner.calls[1][1].prompt
-
-
-def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
-    cursor = AbstractAITool.get(AIToolID.CURSOR)
-    claude = AbstractAITool.get(AIToolID.CLAUDE)
-    assert cursor.headless_prompt_fits("short")
-    assert claude.headless_prompt_fits(CJK * 200_000)  # stdin: no argument limit
-    if not sys.platform.startswith("win"):
-        assert cursor.headless_prompt_fits(CJK * 40_000)
-        assert not cursor.headless_prompt_fits(CJK * 40_001)
+    copilot_turn_2 = runner.calls[3][1].prompt
+    assert len(os.fsencode(copilot_turn_2)) <= 120_000
 
 
 @pytest.fixture
 def simulated_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Measure argument prompts the way the runtime does on Windows.
-
-    The runtime quotes the prompt with ``subprocess.list2cmdline`` and counts
-    UTF-16 units against a 30,000-unit limit; both work on any platform.
-    """
+    """Measure argument prompts the way the runtime does on Windows."""
     from crossby.ai_tools import base
 
     monkeypatch.setattr(base.sys, "platform", "win32")
@@ -834,8 +594,6 @@ def simulated_windows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _windows_units(prompt: str) -> int:
-    import subprocess
-
     return len(subprocess.list2cmdline([prompt]).encode("utf-16-le")) // 2
 
 
@@ -855,20 +613,210 @@ EMOJI = "\U0001f600"  # two UTF-16 units
     ],
 )
 def test_headless_prompt_fits_uses_windows_quoting_and_utf16(prompt: str, fits: bool) -> None:
-    assert _windows_units(prompt) == (len(prompt) * 2 if prompt[0] != "x" else len(prompt))
     assert AbstractAITool.get(AIToolID.CURSOR).headless_prompt_fits(prompt) is fits
     assert AbstractAITool.get(AIToolID.CLAUDE).headless_prompt_fits(prompt)
 
 
 @pytest.mark.usefixtures("simulated_windows")
-@pytest.mark.parametrize("unit", ["a", EMOJI, '"'])
-def test_summary_prompt_fits_the_windows_argument_limit(tmp_path: Path, unit: str) -> None:
-    # The reviewer's case: a 40,000-character ASCII summary input is rejected
-    # on Windows; emoji and quotes cost two units each.
-    result = _finished(StopReason.TURN_LIMIT)
+def test_messages_fit_the_windows_argument_limit(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
+    runner = FakeRunner([EMOJI * 20_000 + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
+    converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
+    )
+    assert _windows_units(runner.calls[1][1].prompt) <= 30_000
+
+
+def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
+    cursor = AbstractAITool.get(AIToolID.CURSOR)
+    claude = AbstractAITool.get(AIToolID.CLAUDE)
+    assert cursor.headless_prompt_fits("short")
+    assert claude.headless_prompt_fits(CJK * 200_000)  # stdin: no argument limit
+    if not sys.platform.startswith("win"):
+        assert cursor.headless_prompt_fits(CJK * 40_000)
+        assert not cursor.headless_prompt_fits(CJK * 40_001)
+
+
+def test_native_supports_resume_matches_the_adapters() -> None:
+    assert converse.native_supports_resume(AIToolID.CLAUDE)
+    assert not converse.native_supports_resume(AIToolID.CURSOR)
+
+
+# ---------------------------------------------------------------------------
+# Recursion guard and ask
+# ---------------------------------------------------------------------------
+
+
+def test_agents_run_one_level_deeper_and_depth_is_restored(tmp_path: Path) -> None:
+    runner = FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"])
+    _run(runner, tmp_path)
+    assert runner.depths == ["1", "1", "1"]
+    assert DEPTH_ENV not in os.environ
+
+
+def test_nested_consultation_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    converse.check_depth()
+    monkeypatch.setenv(DEPTH_ENV, "1")
+    with pytest.raises(ConverseDepthError, match="Nested consultations are disabled"):
+        converse.check_depth()
+
+
+def test_unparseable_depth_is_treated_as_top_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DEPTH_ENV, "nope")
+    converse.check_depth()
+
+
+def test_ask_frames_the_question_like_a_first_message(tmp_path: Path) -> None:
+    runner = FakeRunner(["  The answer.  "])
+    result = converse.ask_agent(
+        AIToolID.CODEX, "Question?", working_dir=tmp_path, model="m", runner=runner
+    )
+    assert result.succeeded
+    assert result.text == "The answer."
+    ((_tool, request),) = runner.calls
+    assert request.prompt == converse.responder_opening("Question?")
+    assert request.prompt.endswith("Question?")
+    assert request.model == "m"
+    assert runner.depths == ["1"]
+
+
+def test_ask_reports_failures(tmp_path: Path) -> None:
+    failed = converse.ask_agent(
+        AIToolID.CODEX,
+        "q",
+        working_dir=tmp_path,
+        runner=FakeRunner([HeadlessTerminalStatus.FAILED]),
+    )
+    assert not failed.succeeded
+    assert failed.error == "codex session ended with status failed"
+    errored = converse.ask_agent(
+        AIToolID.CODEX,
+        "q",
+        working_dir=tmp_path,
+        runner=FakeRunner([_unsupported(AIToolID.CODEX, "not installed")]),
+    )
+    assert errored.status is None
+    assert errored.error == "not installed"
+
+
+# ---------------------------------------------------------------------------
+# Transcript and summary
+# ---------------------------------------------------------------------------
+
+
+def _turn(number: int, role: Role, text: str, next_: Next | None) -> ConverseTurn:
+    tool = AIToolID.CLAUDE if role is Role.ASKER else AIToolID.CODEX
+    return ConverseTurn(number, role, tool, text, next_, 1.0, SessionMode.RESUMED)
+
+
+def _finished(reason: StopReason, *, error: str | None = None) -> ConversationResult:
+    return ConversationResult(
+        goal=GOAL,
+        asker=ASKER,
+        responder=RESPONDER,
+        max_rounds=5,
+        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 10, 31, 12, 5, tzinfo=UTC),
+        stop_reason=reason,
+        turns=[
+            _turn(1, Role.ASKER, "What is a PFO?", Next.ASK),
+            _turn(2, Role.RESPONDER, "An opening between the atria.", None),
+            _turn(3, Role.ASKER, "It knows the anatomy.", Next.DONE),
+        ],
+        error=error,
+        modes={Role.ASKER: SessionMode.RESUMED, Role.RESPONDER: SessionMode.REPLAYED},
+    )
+
+
+def test_render_transcript() -> None:
+    text = converse.render_transcript(_finished(StopReason.ANSWERED))
+    assert f"**Goal (seen only by the asker):** {GOAL}" in text
+    assert "- Asker: claude" in text
+    assert "- Responder: codex" in text
+    assert "- Outcome: answered: the asker gave its final answer after 1 round" in text
+    assert "## 1. asker (claude) → responder\n\nWhat is a PFO?" in text
+    assert "## 2. responder (codex) → asker\n\nAn opening between the atria." in text
+    assert "## 3. Final answer (claude)\n\nIt knows the anatomy." in text
+    assert "*NEXT: ASK · 1s · session resumed*" in text
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            StopReason.ROUND_LIMIT,
+            "round limit reached (5 rounds) and the asker gave no final answer",
+        ),
+        (StopReason.TIMEOUT, "stopped on the time limit after 1 round: late"),
+        (StopReason.FAILED, "a session failed after 1 round: late"),
+        (StopReason.INTERRUPTED, "interrupted by the user after 1 round: late"),
+    ],
+)
+def test_describe_stop(reason: StopReason, expected: str) -> None:
+    assert converse.describe_stop(_finished(reason, error="late")) == expected
+
+
+def test_answered_at_the_limit_is_described() -> None:
+    result = _finished(StopReason.ANSWERED)
+    result.answered_at_limit = True
+    assert converse.describe_stop(result).endswith("after 1 round at the round limit")
+
+
+def test_partial_transcript_marks_the_consultation_in_progress() -> None:
+    text = converse.render_partial_transcript(
+        goal=GOAL,
+        asker=ASKER,
+        responder=RESPONDER,
+        max_rounds=5,
+        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
+        turns=[_turn(1, Role.ASKER, "What is a PFO?", Next.ASK)],
+    )
+    assert "- Outcome: in progress: 1 turn completed" in text
+    assert "- Finished:" not in text
+
+
+def test_summary_runs_as_a_managed_unattended_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_plain_subprocess(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the summary must not bypass the managed runtime")
+
+    monkeypatch.setattr(subprocess, "run", no_plain_subprocess)
+    runner = FakeRunner(["## Outcome\nSound."])
+    body = converse.summarize_conversation(
+        _finished(StopReason.ANSWERED),
+        transcript_path=tmp_path / "run" / "transcript.md",
+        tool=AIToolID.CLAUDE,
+        working_dir=tmp_path,
+        timeout_seconds=42,
+        runner=runner,
+    )
+    assert body == "## Outcome\nSound."
+    ((_tool, request),) = runner.calls
+    assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+    assert request.timeout_seconds == 42
+    assert runner.depths == ["1"]
+
+
+def test_summary_prompt_carries_roles_goal_and_transcript(tmp_path: Path) -> None:
+    prompt = converse.build_summary_prompt(
+        _finished(StopReason.ANSWERED), transcript_path=tmp_path / "t.md"
+    )
+    assert "The asker (claude) held the goal" in prompt
+    assert "the responder (codex) never saw the goal" in prompt
+    assert f"Goal: {GOAL}" in prompt
+    assert "Do not read, modify, create, or delete files" in prompt
+    assert "not independent verification" in prompt
+    assert "## Points of Disagreement" in prompt
+    assert "asker (claude), turn 1:\nWhat is a PFO?" in prompt
+    assert "asker (claude), final answer, turn 3:\nIt knows the anatomy." in prompt
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
+def test_summary_prompt_fits_an_argv_summarizer(tmp_path: Path) -> None:
+    result = _finished(StopReason.ROUND_LIMIT)
     result.turns = [
-        _turn(n, "codex" if n % 2 else "claude", unit * 20_000, AgentStatus.CONTINUE)
-        for n in range(1, 3)
+        _turn(n, Role.ASKER if n % 2 else Role.RESPONDER, CJK * 25_000, None) for n in range(1, 4)
     ]
     runner = FakeRunner(["## Outcome\nok"])
     converse.summarize_conversation(
@@ -878,40 +826,28 @@ def test_summary_prompt_fits_the_windows_argument_limit(tmp_path: Path, unit: st
         working_dir=tmp_path,
         runner=runner,
     )
-    ((_tool, request),) = runner.calls
-    assert _windows_units(request.prompt) <= 30_000
+    assert len(os.fsencode(runner.calls[0][1].prompt)) <= 120_000
 
 
-@pytest.mark.usefixtures("simulated_windows")
-def test_turn_prompts_fit_the_windows_argument_limit(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CODEX, AIToolID.COPILOT)
-    runner = FakeRunner([EMOJI * 20_000 + "\nSTATUS: CONTINUE", "ok\nSTATUS: CONTINUE"])
-    converse.run_conversation(
-        "goal", participants, working_dir=tmp_path, runner=runner, max_turns=2
-    )
-    (_codex, _first), (tool, second) = runner.calls
-    assert tool is AIToolID.COPILOT
-    assert _windows_units(second.prompt) <= 30_000
-
-
-def test_partial_transcript_marks_the_conversation_in_progress() -> None:
-    text = converse.render_partial_transcript(
-        goal="Agree on a fix",
-        participants=PARTICIPANTS,
-        max_turns=6,
-        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
-        turns=[_turn(1, "codex", "Cause is X.", AgentStatus.CONTINUE)],
-    )
-    assert "- Outcome: in progress: 1 turn completed" in text
-    assert "- Finished:" not in text
-    assert "## Turn 1: codex\n\nCause is X." in text
+@pytest.mark.parametrize("reply", [HeadlessTerminalStatus.TIMED_OUT, HeadlessTerminalStatus.FAILED])
+def test_summary_failures_raise_summary_errors(
+    tmp_path: Path, reply: HeadlessTerminalStatus
+) -> None:
+    with pytest.raises(converse.ConverseSummaryError, match="summary session ended"):
+        converse.summarize_conversation(
+            _finished(StopReason.ANSWERED),
+            transcript_path=tmp_path / "t.md",
+            tool=AIToolID.CLAUDE,
+            working_dir=tmp_path,
+            runner=FakeRunner([reply]),
+        )
 
 
 def test_render_summary_and_conversation_dir(tmp_path: Path) -> None:
-    result = _finished(StopReason.AGREED)
+    result = _finished(StopReason.ANSWERED)
     text = converse.render_summary(result, "## Outcome\nDone.")
-    assert text.startswith("# Conversation summary\n\n**Goal:** Agree on a fix")
-    assert "- Outcome: agreed" in text
+    assert text.startswith(f"# Consultation summary\n\n**Goal:** {GOAL}")
+    assert "- Asker: claude" in text
     assert text.endswith("## Outcome\nDone.\n")
     assert converse.conversation_dir(tmp_path, result.started_at) == (
         tmp_path / ".crossby" / "conversations" / "20261031T120000000000"

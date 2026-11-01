@@ -28,7 +28,7 @@ Any of the five direct-sync tools can be the source — `crossby sync --from cur
 | Give my other tools the same rules/agents/skills/MCP/hooks I already wrote | **Sync** | `crossby sync --plan --from claude` |
 | Run a tool with only the capabilities one task needs | **Scenes** | `crossby scene list` / `crossby launch --scene <name>` |
 | Continue my current session in a different tool | **Handoff** | `crossby handoff --from claude --to codex` |
-| Have two agents work a problem out between themselves, headless | **Converse** | `crossby converse codex claude --goal "…"` |
+| Have one agent consult another until it has its answer, headless | **Converse** | `crossby converse claude codex --goal "…"` |
 | Launch a tool and drive it from a browser instead of a shell | **Browser terminal** | `crossby ui` |
 
 Everything else in this README expands one of these. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
@@ -460,31 +460,39 @@ The default preset produces a structured six-section handoff (current task, key 
 
 ## Agent conversations
 
-`crossby converse` has two agents work toward a goal in a headless back-and-forth, then writes a neutral summary of the whole exchange. `crossby ask` is the single-question version.
+`crossby converse ASKER RESPONDER --goal "…"` lets one agent consult another. The **asker** holds the goal: it decides what to ask, judges each answer, asks follow-up questions, and ends with its final answer. The **responder** never sees the goal; it only answers. `crossby ask` is the single-question version.
 
 ```bash
-# Two agents investigate together until they agree, or a limit stops them
-crossby converse codex claude --goal "Find why test_sync_hooks is flaky and agree on a fix"
+# The asker (Claude) checks a diagnosis by questioning the responder (Codex)
+crossby converse claude codex --goal "Check whether this diagnosis is sound: …"
 
-# Script it: JSON on stdout, no live turns on stderr
-crossby converse claude cursor --goal-file goal.md --max-turns 4 --json --quiet
+# Script it: JSON on stdout, no live messages on stderr
+crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json --quiet
 
 # One question to another agent; '-' reads it from stdin
 crossby ask codex "Is there a race in src/cache.py invalidate()?"
 git diff | crossby ask claude -
 ```
 
-How a conversation runs:
+How a consultation runs:
 
-- The first agent opens. Each later turn goes to the other agent with the goal and the conversation so far, and every reply ends with `STATUS: CONTINUE` or `STATUS: DONE`.
-- It stops when two consecutive replies (one from each agent) say `DONE`, on `--max-turns` (default 6), on `--timeout` for the whole conversation (default 1800s), or when a session fails. A reply with no status line counts as `CONTINUE`, never as agreement.
-- "Agreed" means both agents *declared* the goal met. It is not independent verification: check the evidence they cite before acting on it.
-- Each turn is a fresh unattended [managed headless session](#managed-headless-sessions): unexpected questions fail it and unapproved permissions are denied. No headless adapter can resume a native session in unattended mode, so the conversation is replayed into every turn, trimmed to `--history-chars` (default 80,000) by dropping the oldest turns, and trimmed further for tools that take the prompt as a command-line argument (Cursor, Copilot, Antigravity CLI) until it fits their size limit. Agents don't keep their own working memory between turns; what they found has to be in their replies.
-- Conversation turns, `ask` questions and the summary all carry the same instruction: read and check, but do not modify files. That is an instruction, not a sandbox: Codex's headless sandbox still allows writes inside the workspace.
+| Step | Who | Receives |
+| --- | --- | --- |
+| 1 | asker (new session) | the goal and how the exchange works |
+| 2 | responder (new session) | the asker's question, plus one short note |
+| 3 | asker (resumed) | `<responder> replied:` and the answer |
+| 4 | responder (resumed) | the asker's next message, as written |
+| … | | repeats until the asker ends with its final answer |
 
-crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every completed turn, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Unless you pass `--no-summary`, it then writes `summary.md`, covering the outcome, key findings, agreed decisions, open disagreements and next steps. The summary is one more unattended managed headless session, with the same deadline, cancellation and cleanup as the turns; it reuses the [handoff](#session-handoff) transcript formatting and truncation. The summarizer is the first agent by default; pick another with `--summarizer-tool`. A conversation stopped by a limit or a failure is still summarized, so you can see where it got stuck. A Ctrl-C keeps the transcript and skips the summary.
+- Every asker reply ends with `NEXT: ASK` (send it to the responder) or `NEXT: DONE` (its final answer). A reply with no marker is sent on as a message, never taken as the answer.
+- The responder's note says only: answer directly, ask for clarification in your reply, don't use interactive prompts, and don't modify files. It does not say who is asking.
+- `--max-rounds` (default 5) caps the asker's questions. After the last answer the asker is told to give its final answer now. If it still doesn't, the consultation stops without one (exit 2). `--timeout` (default 1800s) bounds the whole consultation, including startup.
+- **Each side keeps its own session.** On Claude Code every message after the first resumes that side's exact session, so neither agent re-reads the conversation and each remembers what it already checked. Each new session gets its own `--session-id`, so two Claude agents never share one, even when crossby itself runs inside Claude Code. Tools whose unattended resume isn't verified yet (Codex, Cursor, Copilot, OpenCode, Antigravity CLI) replay instead: each turn is a fresh session whose prompt carries that side's earlier exchanges, trimmed to `--history-chars` (default 80,000) and to the tool's prompt-size limit. The transcript and `--json` say which mode each side used.
+- The asker's final answer is its own judgment, not independent verification: check what it says it verified. The read-only rule is an instruction, not a sandbox: Codex's headless sandbox still allows writes inside the workspace.
 
-Output is split for scripting: live turns and progress go to stderr, and stdout gets only the summary (or the last reply with `--no-summary`, or a JSON object with `--json`). Exit codes: `0` agreed, `2` stopped by the turn or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
+crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed unattended session, by default on the asker's tool (`--summarizer-tool` picks another), and reuses the [handoff](#session-handoff) transcript formatting and truncation.
+
+Output is split for scripting: live messages and progress go to stderr; stdout gets only the asker's final answer (followed by the summary with `--summary`), or a JSON object with `--json`. Exit codes: `0` answered, `2` stopped by the round or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
 
 `ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
 
