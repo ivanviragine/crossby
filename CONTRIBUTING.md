@@ -1235,11 +1235,17 @@ worker thread, so Ctrl-C sets the runtime's `cancel_event` and the native
 process group is torn down before the interrupt propagates. Tests inject a
 fake runner and never start a native CLI.
 
-- **Roles.** The asker holds the goal (`converse_asker.md`) and ends each reply
-  with `NEXT: ASK` or `NEXT: DONE` (`parse_next`). The responder never sees
-  the goal; its first message is the question framed by
-  `converse_responder.md`, which `ask` reuses. A missing marker is sent on as
-  a message, never taken as the final answer.
+- **Roles.** The asker's opening (`converse_asker.md`) is the goal plus the
+  bare mechanics: replies are sent as is, end each with `NEXT: ASK` or
+  `NEXT: DONE` (`parse_next`), and the message limit. Add no advice to either
+  side; behavior belongs in the user's goal. The responder never sees the
+  goal and gets the asker's messages verbatim, as `ask` sends its question;
+  the asker gets each answer verbatim, plus `FINAL_NUDGE` only after the last
+  allowed message. A missing marker is sent on as a message, never taken as
+  the final answer; a marker with no text fails the consultation.
+- **Folders.** The asker runs in `working_dir`, the responder in
+  `responder_dir` (`--responder-path`, default the same folder), each with
+  that folder's own files and setup. The transcript stays with the asker.
 - **Sessions.** `native_supports_resume()` reads the unattended profile's
   `supports_resume`. A resumable side passes `resume_id` from its second turn
   on and sends only the other agent's latest message; a side that gets no

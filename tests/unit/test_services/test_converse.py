@@ -234,31 +234,44 @@ def test_only_the_asker_sees_the_goal(tmp_path: Path) -> None:
     assert all(GOAL not in prompt for prompt in responder_prompts)
 
 
-def test_first_messages_and_resumed_messages(tmp_path: Path) -> None:
+def test_messages_are_relayed_as_written(tmp_path: Path) -> None:
     runner = FakeRunner(ANSWERING)
     _run(runner, tmp_path, max_rounds=4)
     requests = [req for _tool, req in runner.calls]
 
-    opening = requests[0].prompt
-    assert f"Goal: {GOAL}" in opening
-    assert "consulting another AI coding agent (codex)" in opening
-    assert "NEXT: ASK" in opening and "NEXT: DONE" in opening
-    assert "at most 4 messages" in opening
+    # The asker gets its goal and the bare mechanics of the exchange.
+    assert requests[0].prompt == converse.asker_opening(
+        goal=GOAL, responder=RESPONDER, max_rounds=4
+    )
+    assert requests[0].prompt.startswith(f"Goal: {GOAL}\n")
+    assert "NEXT: ASK" in requests[0].prompt and "NEXT: DONE" in requests[0].prompt
+    assert "at most 4 messages" in requests[0].prompt
     assert requests[0].resume_id is None
 
-    # The responder's first message is the asker's question plus a short note.
-    assert requests[1].prompt == converse.responder_opening("What is a patent foramen ovale?")
-    assert "Don't use interactive prompts" in requests[1].prompt
-    assert "agent" not in requests[1].prompt.lower()
+    # Everything else travels exactly as the other agent wrote it.
+    assert requests[1].prompt == "What is a patent foramen ovale?"
     assert requests[1].resume_id is None
-
-    # Every later message resumes that side's own session and carries only the
-    # other agent's latest text.
+    assert requests[2].prompt == "A flap-like opening between the atria."
     assert requests[2].resume_id == "session-1"
-    assert requests[2].prompt == "codex replied:\n\nA flap-like opening between the atria."
-    assert requests[3].resume_id == "session-2"
     assert requests[3].prompt == "How can it cause a paradoxical embolism?"
+    assert requests[3].resume_id == "session-2"
+    assert requests[4].prompt == "A venous clot crosses right-to-left and bypasses the lungs."
     assert requests[4].resume_id == "session-1"
+
+
+def test_asker_opening_has_no_advice() -> None:
+    opening = converse.asker_opening(goal=GOAL, responder=RESPONDER, max_rounds=5)
+    for advice in ("judge", "verify", "modify", "files", "follow-up", "challenge"):
+        assert advice not in opening.lower()
+
+
+def test_responder_runs_in_its_own_folder(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "responder-project"
+    elsewhere.mkdir()
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path, responder_dir=elsewhere)
+    folders = {(tool, req.working_dir) for tool, req in runner.calls}
+    assert folders == {(AIToolID.CLAUDE, tmp_path), (AIToolID.CODEX, elsewhere)}
 
 
 def test_same_tool_on_both_sides_keeps_separate_sessions(tmp_path: Path) -> None:
@@ -301,7 +314,7 @@ def test_missing_marker_is_sent_on_as_a_message(tmp_path: Path) -> None:
     runner = FakeRunner(["What is a PFO?", "An opening.", "Fine.\nNEXT: DONE"])
     result = _run(runner, tmp_path)
     assert result.turns[0].next is Next.MISSING
-    assert runner.calls[1][1].prompt == converse.responder_opening("What is a PFO?")
+    assert runner.calls[1][1].prompt == "What is a PFO?"
     assert result.answered
 
 
@@ -339,11 +352,11 @@ def test_round_limit_asks_for_a_final_answer(tmp_path: Path) -> None:
     assert result.answered_at_limit
     assert result.final_answer == "Final: sound."
     last_asker_prompt = runner.calls[4][1].prompt
-    assert last_asker_prompt.startswith("codex replied:\n\na2")
+    assert last_asker_prompt.startswith("a2\n\n")
     assert "You have used all 2 messages" in last_asker_prompt
     assert "Write your final answer now" in last_asker_prompt
     # The earlier reply carried no nudge.
-    assert "You have used all" not in runner.calls[2][1].prompt
+    assert runner.calls[2][1].prompt == "a1"
 
 
 def test_asker_that_never_answers_stops_at_the_round_limit(tmp_path: Path) -> None:
@@ -373,15 +386,16 @@ def test_replay_rebuilds_each_sides_context(tmp_path: Path) -> None:
     # The asker's replay: its opening, earlier exchanges, then the latest reply once.
     asker_turn_2 = requests[2].prompt
     assert f"Goal: {GOAL}" in asker_turn_2
-    assert asker_turn_2.endswith("codex replied:\n\nA flap-like opening between the atria.")
+    assert asker_turn_2.endswith("### codex\nA flap-like opening between the atria.")
     assert asker_turn_2.count("A flap-like opening") == 1
     assert "### You\nWhat is a patent foramen ovale?" in asker_turn_2
-    # The responder's replay: the note, its earlier Q&A, then the new message.
+    # The responder's replay: its earlier Q&A, then the new question.
     responder_turn_2 = requests[3].prompt
     assert GOAL not in responder_turn_2
     assert "### Question\nWhat is a patent foramen ovale?" in responder_turn_2
     assert "### Your answer\nA flap-like opening between the atria." in responder_turn_2
-    assert responder_turn_2.endswith("### New message\nHow can it cause a paradoxical embolism?")
+    assert responder_turn_2.startswith("Earlier in this conversation:")
+    assert responder_turn_2.endswith("### Question\nHow can it cause a paradoxical embolism?")
     assert responder_turn_2.count("How can it cause") == 1
 
 
@@ -687,7 +701,7 @@ def test_unparseable_depth_is_treated_as_top_level(monkeypatch: pytest.MonkeyPat
     converse.check_depth()
 
 
-def test_ask_frames_the_question_like_a_first_message(tmp_path: Path) -> None:
+def test_ask_sends_the_question_as_written(tmp_path: Path) -> None:
     runner = FakeRunner(["  The answer.  "])
     result = converse.ask_agent(
         AIToolID.CODEX, "Question?", working_dir=tmp_path, model="m", runner=runner
@@ -695,8 +709,7 @@ def test_ask_frames_the_question_like_a_first_message(tmp_path: Path) -> None:
     assert result.succeeded
     assert result.text == "The answer."
     ((_tool, request),) = runner.calls
-    assert request.prompt == converse.responder_opening("Question?")
-    assert request.prompt.endswith("Question?")
+    assert request.prompt == "Question?"
     assert request.model == "m"
     assert runner.depths == ["1"]
 

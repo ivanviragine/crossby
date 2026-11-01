@@ -38,11 +38,10 @@ def ask(
 ) -> None:
     """Ask another AI coding agent one question, headless, and print its answer.
 
-    The agent runs unattended in the project: unexpected questions fail the
-    session and unapproved permissions are denied. The question gets the same
-    short note as a consultation's first message: answer directly, ask for
-    clarification in the reply, and don't modify files. Each call is a fresh
-    session, so include the context the agent needs in the question.
+    The question is sent as is. The agent runs unattended in the project:
+    unexpected questions fail the session and unapproved permissions are
+    denied. Each call is a fresh session, so include the context the agent
+    needs in the question.
 
     Examples::
 
@@ -129,14 +128,20 @@ def converse(
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Do not print messages as they arrive."
     ),
-    path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
+    responder_path: Path | None = typer.Option(
+        None,
+        "--responder-path",
+        help="Folder the responder runs in, with its own files and setup (default: --path).",
+    ),
+    path: Path = typer.Option(Path("."), "--path", help="Project root directory (the asker's)."),
 ) -> None:
     """Let one AI coding agent consult another, headless, until it has its answer.
 
     The ASKER holds the goal. It decides what to ask, judges each answer,
     asks follow-up questions, and ends with its final answer. The RESPONDER
-    never sees the goal; it only answers. Each side keeps its own session
-    (resumed where the tool supports it). The asker's final answer goes to
+    never sees the goal; it gets the asker's messages as written and only
+    answers, from its own folder (--responder-path). Each side keeps its own
+    session (resumed where the tool supports it). The asker's final answer goes to
     stdout; messages and progress go to stderr; transcript.md is saved after
     every message.
 
@@ -151,6 +156,9 @@ def converse(
     from crossby.services import converse as engine
 
     project_root = _project_root(path)
+    responder_root = (
+        _project_root(responder_path, "--responder-path") if responder_path is not None else None
+    )
     asker_id = _headless_tool(asker_tool, "ASKER")
     responder_id = _headless_tool(responder_tool, "RESPONDER")
     goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
@@ -203,6 +211,7 @@ def converse(
             goal_text,
             (asker, responder),
             working_dir=project_root,
+            responder_dir=responder_root,
             max_rounds=max_rounds,
             timeout_seconds=timeout,
             turn_timeout_seconds=turn_timeout,
@@ -247,10 +256,10 @@ def converse(
 # ---------------------------------------------------------------------------
 
 
-def _project_root(path: Path) -> Path:
+def _project_root(path: Path, flag: str = "--path") -> Path:
     root = path.resolve()
     if not root.is_dir():
-        console.error(f"--path is not a directory: {root}")
+        console.error(f"{flag} is not a directory: {root}")
         raise typer.Exit(1)
     return root
 

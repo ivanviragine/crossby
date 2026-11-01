@@ -60,7 +60,6 @@ PREFLIGHT_TIMEOUT_SECONDS = 20.0
 MIN_TURN_SECONDS = 5.0
 
 ASKER_PROMPT_FILE = "converse_asker.md"
-RESPONDER_PROMPT_FILE = "converse_responder.md"
 SUMMARY_PROMPT_FILE = "converse_summary.md"
 # Character ceiling for the assembled summary prompt, before the summarizer
 # transport's own size check.
@@ -388,22 +387,15 @@ def asker_opening(*, goal: str, responder: Participant, max_rounds: int) -> str:
     )
 
 
-def responder_opening(message: str) -> str:
-    """Frame the first message to a responder (and every ``ask`` question).
+def reply_for_asker(reply: str, *, final: bool, max_rounds: int) -> str:
+    """What the asker receives: the responder's answer as is.
 
-    The note is operational only: answer in the reply rather than through an
-    interactive prompt nobody can answer, and don't modify files. It does not
-    say who is asking.
+    Only after the last allowed message is one line added, asking for the
+    final answer.
     """
-    return _load(RESPONDER_PROMPT_FILE).format(message=message.strip()).strip()
-
-
-def reply_for_asker(responder: Participant, reply: str, *, final: bool, max_rounds: int) -> str:
-    """What the asker receives after each responder answer."""
-    parts = [f"{responder.tool.value} replied:", "", reply]
-    if final:
-        parts += ["", FINAL_NUDGE.format(max_rounds=max_rounds)]
-    return "\n".join(parts)
+    if not final:
+        return reply
+    return f"{reply}\n\n{FINAL_NUDGE.format(max_rounds=max_rounds)}"
 
 
 def _render_exchanges(blocks: Sequence[str], *, budget_chars: int, heading: str) -> tuple[str, int]:
@@ -437,25 +429,25 @@ def replay_prompt(
 ) -> str:
     """Rebuild a fresh session's context for a side whose tool cannot resume.
 
-    The prompt is that side's opening, then the earlier exchanges from its
-    point of view, then the message it is answering now.
+    The prompt is the earlier exchanges from that side's point of view, then
+    the message it is answering now (after the asker's goal, for the asker).
     """
+    asker_side = role is Role.ASKER
     if not turns:
-        return f"{opening}\n\n{latest}" if role is Role.ASKER else responder_opening(latest)
+        return f"{opening}\n\n{latest}" if asker_side else latest
     blocks: list[str] = []
     for turn in turns:
         if turn.role is Role.ASKER:
-            who = "You" if role is Role.ASKER else "Question"
+            who = "You" if asker_side else "Question"
         else:
-            who = f"{responder.tool.value}" if role is Role.ASKER else "Your answer"
+            who = responder.tool.value if asker_side else "Your answer"
         blocks.append(f"### {who}\n{turn.text}")
     history, _omitted = _render_exchanges(
         blocks, budget_chars=budget_chars, heading="Earlier in this conversation:"
     )
-    if role is Role.ASKER:
-        return f"{opening}\n\n{history}\n\n{latest}"
-    note = _load(RESPONDER_PROMPT_FILE).split("{message}")[0].strip()
-    return f"{note}\n\n{history}\n\n### New message\n{latest}"
+    if asker_side:
+        return f"{opening}\n\n{history}\n\n### {responder.tool.value}\n{latest}"
+    return f"{history}\n\n### Question\n{latest}"
 
 
 def _request(
@@ -504,7 +496,7 @@ def ask_agent(
     runner = runner or HeadlessTurnRunner()
     request = _request(
         None,
-        prompt=responder_opening(prompt),
+        prompt=prompt.strip(),
         working_dir=working_dir,
         timeout_seconds=timeout_seconds,
         model=model,
@@ -549,6 +541,7 @@ def run_conversation(
     participants: tuple[Participant, Participant],
     *,
     working_dir: Path,
+    responder_dir: Path | None = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
@@ -561,6 +554,9 @@ def run_conversation(
     supports_resume: SupportsResume | None = None,
 ) -> ConversationResult:
     """Let the asker consult the responder until it gives a final answer.
+
+    The asker runs in ``working_dir`` and the responder in ``responder_dir``
+    (default: the same folder), each with that folder's own files and setup.
 
     The asker holds the goal and ends every reply with ``NEXT: ASK`` (send it
     to the responder) or ``NEXT: DONE`` (its final answer). After the last
@@ -582,6 +578,7 @@ def run_conversation(
         raise ConverseError("Participants must be (asker, responder).")
 
     active_runner: TurnRunner = runner or HeadlessTurnRunner()
+    folders = {Role.ASKER: working_dir, Role.RESPONDER: responder_dir or working_dir}
     fits: PromptFits = prompt_fits or native_prompt_fits
     resumes: SupportsResume = supports_resume or native_supports_resume
     started_at = datetime.now(tz=UTC)
@@ -628,7 +625,7 @@ def run_conversation(
         if not turns:  # the very first turn: the asker's opening
             return side.opening
         if side.mode is SessionMode.RESUMED:  # first turn of a resumable responder
-            return responder_opening(_clip(message, budget))
+            return _clip(message, budget)
         # Replay: the latest turn is the message being answered, sent separately.
         return replay_prompt(
             side.participant.role,
@@ -657,7 +654,7 @@ def run_conversation(
         request = _request(
             side.participant,
             prompt=prompt,
-            working_dir=working_dir,
+            working_dir=folders[role],
             timeout_seconds=min(turn_timeout_seconds, remaining),
             resume_id=side.session_id,
         )
@@ -723,7 +720,7 @@ def run_conversation(
             probe = _request(
                 participant,
                 prompt="preflight",
-                working_dir=working_dir,
+                working_dir=folders[participant.role],
                 timeout_seconds=min(turn_timeout_seconds, remaining),
             )
             try:
@@ -760,7 +757,7 @@ def run_conversation(
             answer, duration = take_turn(Role.RESPONDER, body)
             record(Role.RESPONDER, answer, None, duration)
             message_for_asker = reply_for_asker(
-                responder, answer, final=round_number == max_rounds, max_rounds=max_rounds
+                answer, final=round_number == max_rounds, max_rounds=max_rounds
             )
         return finish(StopReason.ROUND_LIMIT)  # pragma: no cover - loop always returns
 

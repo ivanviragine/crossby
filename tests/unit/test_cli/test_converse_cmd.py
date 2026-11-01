@@ -349,6 +349,53 @@ def test_converse_ctrl_c_during_summary_exits_130_with_transcript(
     assert not (run_dir / "summary.md").exists()
 
 
+def test_converse_runs_the_responder_in_its_own_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    elsewhere = tmp_path / "other-project"
+    elsewhere.mkdir()
+    result = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "-q",
+        "--responder-path",
+        str(elsewhere),
+    )
+    assert result.exit_code == 0, result.output
+    assert [req.working_dir for _tool, req in fake.calls] == [
+        tmp_path.resolve(),
+        elsewhere.resolve(),
+        tmp_path.resolve(),
+    ]
+    # The transcript stays with the asker's project.
+    assert (tmp_path / ".crossby" / "conversations").is_dir()
+    assert not (elsewhere / ".crossby").exists()
+
+
+def test_converse_rejects_a_missing_responder_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--responder-path",
+        str(tmp_path / "nope"),
+    )
+    assert result.exit_code == 1
+    assert "--responder-path is not a directory" in result.stderr
+    assert fake.calls == []
+
+
 def test_converse_reads_goal_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
     goal_file = tmp_path / "goal.md"
@@ -404,14 +451,14 @@ def test_ask_prints_answer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     result = _invoke(tmp_path, "ask", "codex", "Is there a race?")
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "It is a race."
-    assert fake.calls[0][1].prompt == converse.responder_opening("Is there a race?")
+    assert fake.calls[0][1].prompt == "Is there a race?"
 
 
 def test_ask_reads_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _use_runner(monkeypatch, FakeRunner(["Looks fine."]))
     result = _invoke(tmp_path, "ask", "claude", "-", input="diff --git a b\n")
     assert result.exit_code == 0, result.output
-    assert fake.calls[0][1].prompt.endswith("diff --git a b")
+    assert fake.calls[0][1].prompt == "diff --git a b"
 
 
 def test_ask_json_and_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

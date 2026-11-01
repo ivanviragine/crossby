@@ -478,17 +478,18 @@ How a consultation runs:
 
 | Step | Who | Receives |
 | --- | --- | --- |
-| 1 | asker (new session) | the goal and how the exchange works |
-| 2 | responder (new session) | the asker's question, plus one short note |
-| 3 | asker (resumed) | `<responder> replied:` and the answer |
+| 1 | asker (new session) | the goal, plus the two markers and the message limit |
+| 2 | responder (new session) | the asker's question, as written |
+| 3 | asker (resumed) | the responder's answer, as written |
 | 4 | responder (resumed) | the asker's next message, as written |
 | … | | repeats until the asker ends with its final answer |
 
 - Every asker reply ends with `NEXT: ASK` (send it to the responder) or `NEXT: DONE` (its final answer). A reply with no marker is sent on as a message, never taken as the answer.
-- The responder's note says only: answer directly, ask for clarification in your reply, don't use interactive prompts, and don't modify files. It does not say who is asking.
+- Nothing else is added to either side. The responder gets the asker's messages exactly as written (`ask` sends its question as written too), and the asker gets each answer as written. How the asker should behave, for example "challenge every point", belongs in the goal.
+- `--responder-path DIR` runs the responder in its own folder, with that folder's files, instructions, skills, MCP servers and any active scene. It may have no access to the asker's files. The transcript stays in the asker's project (`--path`).
 - `--max-rounds` (default 5) caps the asker's questions. After the last answer the asker is told to give its final answer now. If it still doesn't, the consultation stops without one (exit 2). `--timeout` (default 1800s) bounds the whole consultation, including startup.
 - **Each side keeps its own session.** On Claude Code every message after the first resumes that side's exact session, so neither agent re-reads the conversation and each remembers what it already checked. Each new session gets its own `--session-id`, so two Claude agents never share one, even when crossby itself runs inside Claude Code. Tools whose unattended resume isn't verified yet (Codex, Cursor, Copilot, OpenCode, Antigravity CLI) replay instead: each turn is a fresh session whose prompt carries that side's earlier exchanges, trimmed to `--history-chars` (default 80,000) and to the tool's prompt-size limit. The transcript and `--json` say which mode each side used.
-- The asker's final answer is its own judgment, not independent verification: check what it says it verified. The read-only rule is an instruction, not a sandbox: Codex's headless sandbox still allows writes inside the workspace.
+- The asker's final answer is its own judgment, not independent verification: check what it says it verified. Neither side is told not to change files. Unattended sessions deny actions that need approval, but Codex's headless sandbox still allows writes inside its workspace.
 
 crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed unattended session, by default on the asker's tool (`--summarizer-tool` picks another), and reuses the [handoff](#session-handoff) transcript formatting and truncation.
 
