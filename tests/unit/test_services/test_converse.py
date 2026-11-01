@@ -588,16 +588,53 @@ def test_blank_goal_and_swapped_roles_are_rejected(tmp_path: Path) -> None:
 CJK = "中"  # three UTF-8 bytes per character
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_resumed_message_is_clipped_for_an_argv_responder(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CURSOR)
-    runner = FakeRunner([CJK * 50_000 + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
-    converse.run_conversation(
+def test_long_messages_reach_a_stdin_tool_whole(tmp_path: Path) -> None:
+    # The reviewer's case: a 90,062-character question with a requirement in
+    # the middle used to be cut to the 80,000-character history budget.
+    question = "A" * 45_000 + " REQUIREMENT-IN-THE-MIDDLE " + "B" * 45_035
+    answer = "C" * 45_000 + " DETAIL-IN-THE-MIDDLE " + "D" * 45_000
+    assert len(question) == 90_062
+    runner = FakeRunner([question + "\nNEXT: ASK", answer, "done\nNEXT: DONE"])
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CLAUDE)
+    result = converse.run_conversation(
         GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
     )
-    cursor_prompt = runner.calls[1][1].prompt
-    assert len(os.fsencode(cursor_prompt)) <= 120_000
-    assert "characters omitted" in cursor_prompt
+    assert result.answered
+    assert runner.calls[1][1].prompt == question
+    assert runner.calls[2][1].prompt == answer
+    assert all("characters omitted" not in req.prompt for _tool, req in runner.calls)
+
+
+def test_long_messages_survive_replay_and_only_history_shrinks(tmp_path: Path) -> None:
+    long_question = "q2 " + "Q" * 90_000
+    runner = FakeRunner(
+        [
+            "q1 " + "H" * 50_000 + "\nNEXT: ASK",
+            "a1",
+            long_question + "\nNEXT: ASK",
+            "a2",
+            "x\nNEXT: DONE",
+        ]
+    )
+    _run(runner, tmp_path, supports_resume=_replays)
+    responder_turn_2 = runner.calls[3][1].prompt
+    assert responder_turn_2.endswith("### Question\n" + long_question)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
+def test_message_too_large_for_an_argv_tool_fails_explicitly(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CURSOR)
+    runner = FakeRunner([CJK * 50_000 + "\nNEXT: ASK", "unused"])
+    result = converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
+    )
+    assert result.stop_reason is StopReason.FAILED
+    assert result.error == (
+        "responder (cursor) turn 2: the message (50,000 characters) is too large "
+        "for cursor's command-line prompt limit"
+    )
+    assert len(runner.calls) == 1  # nothing was sent to cursor
+    assert result.turns[0].text == CJK * 50_000
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
@@ -653,13 +690,27 @@ def test_headless_prompt_fits_uses_windows_quoting_and_utf16(prompt: str, fits: 
 
 
 @pytest.mark.usefixtures("simulated_windows")
-def test_messages_fit_the_windows_argument_limit(tmp_path: Path) -> None:
+def test_windows_limit_fails_explicitly_instead_of_cutting(tmp_path: Path) -> None:
     participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
-    runner = FakeRunner([EMOJI * 20_000 + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
+    runner = FakeRunner([EMOJI * 20_000 + "\nNEXT: ASK", "unused"])
+    result = converse.run_conversation(
+        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
+    )
+    assert result.stop_reason is StopReason.FAILED
+    assert "too large for copilot's command-line prompt limit" in (result.error or "")
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.usefixtures("simulated_windows")
+def test_messages_within_the_windows_limit_go_whole(tmp_path: Path) -> None:
+    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
+    question = EMOJI * 10_000
+    runner = FakeRunner([question + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
     converse.run_conversation(
         GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
     )
-    assert _windows_units(runner.calls[1][1].prompt) <= 30_000
+    assert runner.calls[1][1].prompt == question
+    assert _windows_units(question) <= 30_000
 
 
 def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
@@ -764,7 +815,7 @@ def _finished(reason: StopReason, *, error: str | None = None) -> ConversationRe
 
 def test_render_transcript() -> None:
     text = converse.render_transcript(_finished(StopReason.ANSWERED))
-    assert f"**Goal (seen only by the asker):** {GOAL}" in text
+    assert f"**Goal (sent only to the asker):** {GOAL}" in text
     assert "- Asker: claude" in text
     assert "- Responder: codex" in text
     assert "- Outcome: answered: the asker gave its final answer after 1 round" in text

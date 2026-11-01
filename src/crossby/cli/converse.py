@@ -139,7 +139,7 @@ def converse(
 
     The ASKER holds the goal. It decides what to ask, judges each answer,
     asks follow-up questions, and ends with its final answer. The RESPONDER
-    never sees the goal; it gets the asker's messages as written and only
+    is never sent the goal; it gets the asker's messages as written and only
     answers, from its own folder (--responder-path). Each side keeps its own
     session (resumed where the tool supports it). The asker's final answer goes to
     stdout; messages and progress go to stderr; transcript.md is saved after

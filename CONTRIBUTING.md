@@ -1271,9 +1271,12 @@ fake runner and never start a native CLI.
   `SUMMARY_PROMPT_CHARS` and the summarizer's own transport limit.
 - **Prompt size.** Cursor, Copilot and Antigravity CLI receive the prompt as
   an argument, which the runtime limits by encoded bytes (POSIX) or
-  command-line units (Windows), not characters. Turn and summary prompts are
-  shrunk until `AbstractAITool.headless_prompt_fits()` accepts them; it uses
-  the same measure as `_validate_headless_request()`.
+  command-line units (Windows), not characters;
+  `AbstractAITool.headless_prompt_fits()` applies the same measure as
+  `_validate_headless_request()`. A turn's current message is never shortened:
+  only replayed history halves until the prompt fits, and a message that still
+  does not fit fails the consultation with an explicit error. The opt-in
+  summary prompt, a separate artifact, drops and clips old turns instead.
 - **Interrupts and persistence.** `run_conversation()` catches Ctrl-C around
   the whole relay, including caller callbacks, and returns the completed
   turns. The CLI rewrites `transcript.md` after every turn, before printing

@@ -619,19 +619,23 @@ def run_conversation(
         )
 
     def build_prompt(side: _Side, message: str, budget: int) -> str:
-        """The prompt for this side's next turn, given the message it answers."""
+        """The prompt for this side's next turn, given the message it answers.
+
+        The message itself is never shortened; ``budget`` bounds only the
+        replayed history of a side whose tool cannot resume.
+        """
         if side.session_id is not None:  # resumed: only the new message
-            return _clip(message, budget)
+            return message
         if not turns:  # the very first turn: the asker's opening
             return side.opening
         if side.mode is SessionMode.RESUMED:  # first turn of a resumable responder
-            return _clip(message, budget)
+            return message
         # Replay: the latest turn is the message being answered, sent separately.
         return replay_prompt(
             side.participant.role,
             opening=side.opening,
             turns=turns[:-1],
-            latest=_clip(message, budget),
+            latest=message,
             responder=responder,
             budget_chars=budget,
         )
@@ -645,11 +649,20 @@ def run_conversation(
         if remaining < MIN_TURN_SECONDS:
             raise out_of_time(f"before turn {number}")
         bounded_by_deadline = remaining <= turn_timeout_seconds
+        # Only replayed history shrinks to fit the transport; a message that
+        # still does not fit stops the consultation instead of being cut.
         budget = history_chars
         while True:
             prompt = build_prompt(side, message, budget)
-            if budget <= MIN_HISTORY_CHARS or fits(side.participant.tool, prompt):
+            if fits(side.participant.tool, prompt):
                 break
+            if budget <= MIN_HISTORY_CHARS:
+                raise _StopError(
+                    StopReason.FAILED,
+                    f"{side.participant.label} turn {number}: the message "
+                    f"({len(message):,} characters) is too large for "
+                    f"{side.participant.tool.value}'s command-line prompt limit",
+                )
             budget = max(budget // 2, MIN_HISTORY_CHARS)
         request = _request(
             side.participant,
@@ -854,7 +867,7 @@ def _render_transcript(
     lines = [
         "# Consultation",
         "",
-        f"**Goal (seen only by the asker):** {goal}",
+        f"**Goal (sent only to the asker):** {goal}",
         "",
         f"- Asker: {asker.tool.value}",
         f"- Responder: {responder.tool.value}",

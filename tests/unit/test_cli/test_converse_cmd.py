@@ -86,7 +86,7 @@ def test_converse_prints_the_final_answer_and_writes_the_transcript(
 
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "**Goal (seen only by the asker):** Check the PFO answer" in transcript
+    assert "**Goal (sent only to the asker):** Check the PFO answer" in transcript
     assert "## 3. Final answer (claude)\n\nVerdict: it knows the anatomy." in transcript
     assert not (run_dir / "summary.md").exists()
     assert [tool for tool, _req in fake.calls] == [
