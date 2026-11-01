@@ -743,6 +743,14 @@ def run_conversation(
             final = round_number > max_rounds
             raw, duration = take_turn(Role.ASKER, message_for_asker)
             body, next_ = parse_next(raw)
+            if not body:
+                # A bare marker is neither an answer nor a message to send.
+                what = "final answer" if next_ is Next.DONE else "message"
+                raise _StopError(
+                    StopReason.FAILED,
+                    f"{asker.label} turn {len(turns) + 1} sent only the NEXT marker, "
+                    f"with no {what}",
+                )
             record(Role.ASKER, body, next_, duration)
             if next_ is Next.DONE:
                 answered_at_limit = final

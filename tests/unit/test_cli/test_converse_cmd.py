@@ -121,6 +121,16 @@ def test_converse_round_limit_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "round limit reached (1 round) and the asker gave no final answer" in result.stderr
 
 
+def test_converse_marker_only_answer_is_not_reported_as_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_runner(monkeypatch, FakeRunner(["q\nNEXT: ASK", "a", "NEXT: DONE"]))
+    result = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "-q")
+    assert result.exit_code == 1
+    assert result.stdout.strip() == ""
+    assert "sent only the NEXT marker, with no final answer" in result.stderr
+
+
 def test_converse_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_runner(monkeypatch, FakeRunner(CONSULTING))
     out_dir = tmp_path / "out"

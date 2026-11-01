@@ -305,6 +305,27 @@ def test_missing_marker_is_sent_on_as_a_message(tmp_path: Path) -> None:
     assert result.answered
 
 
+@pytest.mark.parametrize(
+    ("reply", "what"),
+    [
+        ("NEXT: DONE", "final answer"),
+        ("**NEXT: ASK**", "message"),
+        ("\n NEXT: done \n", "final answer"),
+    ],
+)
+def test_marker_only_reply_is_a_failure_not_an_answer(
+    tmp_path: Path, reply: str, what: str
+) -> None:
+    runner = FakeRunner(["q\nNEXT: ASK", "a", reply])
+    result = _run(runner, tmp_path)
+    assert result.stop_reason is StopReason.FAILED
+    assert result.exit_code == 1
+    assert result.final_answer is None
+    assert result.error == f"asker (claude) turn 3 sent only the NEXT marker, with no {what}"
+    assert len(result.turns) == 2
+    assert len(runner.calls) == 3  # nothing empty was sent to the responder
+
+
 # ---------------------------------------------------------------------------
 # Round limit
 # ---------------------------------------------------------------------------
