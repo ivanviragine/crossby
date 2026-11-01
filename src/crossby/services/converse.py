@@ -305,6 +305,7 @@ def child_depth() -> Iterator[None]:
 
 PromptFits = Callable[[AIToolID, str], bool]
 SupportsResume = Callable[[AIToolID], bool]
+ResumeSupportedOn = Callable[[AIToolID, str], bool]
 
 
 def native_prompt_fits(tool: AIToolID, prompt: str) -> bool:
@@ -323,6 +324,13 @@ def native_supports_resume(tool: AIToolID) -> bool:
         return headless.profile_for(HeadlessInteractionMode.UNATTENDED).supports_resume
     except ValueError:
         return False
+
+
+def native_resume_supported_on(tool: AIToolID, version: str) -> bool:
+    """Whether the CLI build that just ran (``version``) can resume its session."""
+    from crossby.ai_tools.base import AbstractAITool
+
+    return AbstractAITool.get(tool).headless_resume_supported(version)
 
 
 def make_participants(
@@ -555,6 +563,7 @@ def run_conversation(
     clock: Callable[[], float] = monotonic,
     prompt_fits: PromptFits | None = None,
     supports_resume: SupportsResume | None = None,
+    resume_supported_on: ResumeSupportedOn | None = None,
 ) -> ConversationResult:
     """Let the asker consult the responder until it gives a final answer.
 
@@ -584,6 +593,7 @@ def run_conversation(
     folders = {Role.ASKER: working_dir, Role.RESPONDER: responder_dir or working_dir}
     fits: PromptFits = prompt_fits or native_prompt_fits
     resumes: SupportsResume = supports_resume or native_supports_resume
+    resumes_on: ResumeSupportedOn = resume_supported_on or native_resume_supported_on
     started_at = datetime.now(tz=UTC)
     deadline = clock() + timeout_seconds
     turns: list[ConverseTurn] = []
@@ -702,13 +712,13 @@ def run_conversation(
         text = (result.final_text or "").strip()
         if not text:
             raise _StopError(StopReason.FAILED, f"{label} turn {number} returned no text")
-        if side.mode is SessionMode.RESUMED:
+        if side.mode is SessionMode.RESUMED and side.session_id is None:
             handle = _session_handle(result)
-            if side.session_id is None and handle is None:
-                # The tool resumes in principle but gave no handle back; keep
-                # going by replaying, and say so in the transcript.
+            if handle is None or not resumes_on(side.participant.tool, result.version):
+                # No handle came back, or this CLI build's resume isn't
+                # verified: keep going by replaying, and say so in the transcript.
                 side.mode = SessionMode.REPLAYED
-            elif side.session_id is None:
+            else:
                 side.session_id = handle
         return text, clock() - turn_started
 

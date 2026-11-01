@@ -1258,7 +1258,12 @@ fake runner and never start a native CLI.
   parent's session ID (`CLAUDE_CODE_SESSION_ID` and the hosting environment),
   so two agents would share one session. `--resume` continues a session, a
   reported ID that differs from the requested one is `INVALID_OUTPUT`, and
-  a non-UUID resume ID is rejected before spawning. Verified on 2.1.316.
+  a non-UUID resume ID is rejected before spawning. Verified on 2.1.316,
+  later than the unattended floor (2.1.263), so `headless_resume_supported()`
+  allows resume only from 2.1.316 and `_validate_headless_mode_version()`
+  refuses a resume request on an older build. `converse` reads the version
+  each side's first turn ran on (`native_resume_supported_on`) and replays
+  instead of resuming on an older build.
 - **Stop rules.** `NEXT: DONE` ends with `ANSWERED` (exit 0). After the last
   allowed round the asker gets `FINAL_NUDGE`; no answer then is `ROUND_LIMIT`
   (exit 2). A turn that times out because the overall deadline bounded it, or

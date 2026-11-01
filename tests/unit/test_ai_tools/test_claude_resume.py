@@ -23,6 +23,7 @@ from crossby.models.ai import (
     HeadlessNativeOutput,
     HeadlessTerminalStatus,
 )
+from crossby.utils.versioning import BinaryVersion
 from tests.unit.test_ai_tools.test_headless_adapters import (
     CLAUDE_RESULT,
     _adapter,
@@ -40,6 +41,13 @@ def _recording_adapter(
 ) -> tuple[AbstractAITool, list[dict[str, Any]]]:
     stdout = json.dumps(payload) if payload is not None else text
     adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=stdout))
+    # Resume is verified from 2.1.316, later than the unattended floor.
+    monkeypatch.setattr(
+        type(adapter),
+        "_detect_headless_version",
+        lambda self, **_kwargs: BinaryVersion((2, 1, 316), "2.1.316"),
+        raising=True,
+    )
     stub = type(adapter)._headless_command  # type: ignore[attr-defined]
     calls: list[dict[str, Any]] = []
 
@@ -127,3 +135,32 @@ def test_a_non_uuid_resume_id_is_rejected_before_spawning(tmp_path: Path, bad: s
     adapter = AbstractAITool.get(AIToolID.CLAUDE)
     with pytest.raises(HeadlessRequestError, match="UUID"):
         adapter._validate_headless_requirements(_request(tmp_path, resume_id=bad))
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [("2.1.316", True), ("2.2.0", True), ("2.1.315", False), ("2.1.263", False), (None, False)],
+)
+def test_unattended_resume_is_limited_to_the_verified_build(
+    version: str | None, supported: bool
+) -> None:
+    adapter = AbstractAITool.get(AIToolID.CLAUDE)
+    assert adapter.headless_resume_supported(version) is supported
+
+
+def test_resume_on_an_unverified_build_is_refused_before_spawning(tmp_path: Path) -> None:
+    from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+    adapter = AbstractAITool.get(AIToolID.CLAUDE)
+    old = BinaryVersion((2, 1, 300), "2.1.300")
+    with pytest.raises(HeadlessUnsupportedError, match=r"verified on 2\.1\.316"):
+        adapter._validate_headless_mode_version(_request(tmp_path, resume_id=SESSION), old)
+    # The same build still runs new sessions, and a verified build resumes.
+    adapter._validate_headless_mode_version(_request(tmp_path), old)
+    adapter._validate_headless_mode_version(
+        _request(tmp_path, resume_id=SESSION), BinaryVersion((2, 1, 316), "2.1.316")
+    )
+
+
+def test_tools_without_resume_report_none() -> None:
+    assert not AbstractAITool.get(AIToolID.CURSOR).headless_resume_supported("9.9.9")

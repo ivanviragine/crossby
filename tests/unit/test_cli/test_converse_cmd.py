@@ -31,6 +31,7 @@ def _no_inherited_depth(monkeypatch: pytest.MonkeyPatch) -> None:
 def _use_runner(monkeypatch: pytest.MonkeyPatch, fake: FakeRunner) -> FakeRunner:
     monkeypatch.setattr(converse, "HeadlessTurnRunner", lambda: fake)
     monkeypatch.setattr(converse, "native_supports_resume", lambda _tool: True)
+    monkeypatch.setattr(converse, "native_resume_supported_on", lambda _tool, _version: True)
     return fake
 
 

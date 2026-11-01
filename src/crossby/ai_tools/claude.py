@@ -110,6 +110,9 @@ def _open_or_create_posix_directories(parent_fd: int, components: tuple[str, ...
 
 
 _PLACEHOLDER_SESSION_ID = "00000000-0000-4000-8000-000000000000"
+# Unattended ``--print --resume`` and ``--session-id`` were verified on this
+# build; the unattended floor (2.1.263) predates that verification.
+_RESUME_VERIFIED_VERSION = "2.1.316"
 
 
 def _new_session_id() -> str:
@@ -311,6 +314,41 @@ class ClaudeAdapter(AbstractAITool):
                     capability=self.capabilities().headless,
                 ) from None
         return super()._validate_headless_request(request, **kwargs)
+
+    def headless_resume_supported(
+        self,
+        version: str | None,
+        interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
+    ) -> bool:
+        """Unattended resume only on builds where it was verified."""
+        if not super().headless_resume_supported(version, interaction_mode):
+            return False
+        if interaction_mode is not HeadlessInteractionMode.UNATTENDED:
+            return True
+        from crossby.utils.versioning import parse_semver
+
+        detected = parse_semver(version or "")
+        floor = parse_semver(_RESUME_VERIFIED_VERSION)
+        return detected is not None and floor is not None and detected >= floor
+
+    def _validate_headless_mode_version(
+        self, request: HeadlessSessionRequest, detected: Any
+    ) -> None:
+        super()._validate_headless_mode_version(request, detected)
+        if (
+            request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+            and request.resume_id is not None
+            and not self.headless_resume_supported(detected.text)
+        ):
+            from crossby.ai_tools.headless import HeadlessUnsupportedError
+
+            raise HeadlessUnsupportedError(
+                "Resuming an unattended Claude Code session was verified on "
+                f"{_RESUME_VERIFIED_VERSION}; the installed build is {detected.text}. "
+                "Upgrade Claude Code to resume sessions.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Reject schema requests Claude cannot answer with structured output."""

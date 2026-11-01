@@ -610,6 +610,21 @@ class AbstractAITool(ABC):
         )
         return result
 
+    def headless_resume_supported(
+        self,
+        version: str | None,
+        interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
+    ) -> bool:
+        """Whether a session run by CLI ``version`` can be resumed in this mode.
+
+        The default is the mode's declared ``supports_resume``; an adapter whose
+        resume was verified later than its mode floor narrows it by version.
+        """
+        try:
+            return self.capabilities().headless.profile_for(interaction_mode).supports_resume
+        except ValueError:
+            return False
+
     def headless_prompt_fits(
         self,
         prompt: str,

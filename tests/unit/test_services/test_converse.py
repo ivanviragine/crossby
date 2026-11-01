@@ -153,6 +153,9 @@ def _run(runner: FakeRunner, tmp_path: Path, **kwargs: object) -> ConversationRe
 @pytest.fixture(autouse=True)
 def _no_inherited_depth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(DEPTH_ENV, raising=False)
+    # The fake runner reports version 1.0.0; the per-version resume check has
+    # its own tests, so engine tests treat every build as resumable.
+    monkeypatch.setattr(converse, "native_resume_supported_on", lambda _tool, _version: True)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +408,24 @@ def test_resume_without_a_returned_handle_falls_back_to_replay(tmp_path: Path) -
     assert all(req.resume_id is None for _tool, req in runner.calls)
     assert result.modes[Role.ASKER] is SessionMode.REPLAYED
     assert f"Goal: {GOAL}" in runner.calls[2][1].prompt
+
+
+def test_an_unverified_cli_build_falls_back_to_replay(tmp_path: Path) -> None:
+    seen: list[tuple[AIToolID, str]] = []
+
+    def resumes_on(tool: AIToolID, version: str) -> bool:
+        seen.append((tool, version))
+        return False
+
+    runner = FakeRunner(ANSWERING)
+    result = _run(runner, tmp_path, resume_supported_on=resumes_on)
+    assert all(req.resume_id is None for _tool, req in runner.calls)
+    assert result.modes == {
+        Role.ASKER: SessionMode.REPLAYED,
+        Role.RESPONDER: SessionMode.REPLAYED,
+    }
+    assert seen == [(AIToolID.CLAUDE, "1.0.0"), (AIToolID.CODEX, "1.0.0")]
+    assert result.answered
 
 
 def test_replay_keeps_the_newest_exchanges_within_budget(tmp_path: Path) -> None:
