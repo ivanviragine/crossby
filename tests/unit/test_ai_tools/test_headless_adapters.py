@@ -316,6 +316,12 @@ def _adapter(monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]) -
         lambda self, **_kwargs: BinaryVersion(normalized, version),
         raising=True,
     )
+    if tool is AIToolID.CLAUDE:
+        # The recorded fixtures carry a real session ID; act as if the fake CLI
+        # honored the ``--session-id`` crossby pins on every new session.
+        from crossby.ai_tools import claude as claude_module
+
+        monkeypatch.setattr(claude_module, "_new_session_id", lambda: CLAUDE_RESULT["session_id"])
     return adapter
 
 
@@ -859,15 +865,74 @@ def test_claude_rejects_conflicting_provenance_in_unterminated_final_frame(
     _assert_prompt_is_private(result)
 
 
-def test_claude_text_output_returns_the_response(
+def test_claude_text_output_returns_the_json_envelope_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout="OK\n"))
+    # TEXT runs --output-format json so the envelope's checks still apply.
+    request = _request(tmp_path)
+    command = _command(AIToolID.CLAUDE, request)
+    payload = {**CLAUDE_RESULT, "result": "OK"}
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=json.dumps(payload)))
+
+    result = adapter.run_headless_session(request)
+
+    assert command[command.index("--output-format") + 1] == "json"
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "OK" and not result.final_json_present
+    assert result.session_id == CLAUDE_RESULT["session_id"]
+
+
+def test_claude_text_output_fails_on_a_native_error_that_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _adapter(
+        monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=json.dumps(CLAUDE_ERROR_RESULT))
+    )
 
     result = adapter.run_headless_session(_request(tmp_path))
 
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.final_text is None
+    assert any("native error result" in warning for warning in result.warnings)
+
+
+def test_antigravity_text_output_returns_the_json_envelope_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TEXT runs --output-format json so the conversation ID and status are checked.
+    request = _request(tmp_path)
+    payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
+    payload["response"] = "OK\n"
+    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
+
+    result = adapter.run_headless_session(request)
+
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "OK"
+    assert result.conversation_id == AGY_CONVERSATION
+
+
+@pytest.mark.parametrize(
+    ("update", "status"),
+    [
+        pytest.param({"conversation_id": None}, HeadlessTerminalStatus.INVALID_OUTPUT, id="no-id"),
+        pytest.param({"status": "ERROR"}, HeadlessTerminalStatus.FAILED, id="native-failure"),
+    ],
+)
+def test_antigravity_text_output_applies_the_envelope_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    update: dict[str, Any],
+    status: HeadlessTerminalStatus,
+) -> None:
+    payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
+    payload = {key: value for key, value in {**payload, **update}.items() if value is not None}
+    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is status
+    assert result.final_text is None
 
 
 def test_codex_turn_events_are_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -972,6 +1037,51 @@ def test_codex_rejects_item_events_after_its_terminal_turn(
     assert result.final_text is None and not result.final_json_present
     assert any("frame after its terminal turn event" in warning for warning in result.warnings)
     _assert_prompt_is_private(result)
+
+
+@pytest.mark.parametrize(
+    ("items", "expected"),
+    [
+        pytest.param(
+            (
+                {"id": "item_0", "type": "agent_message", "text": "I'll read calc.py."},
+                {"id": "item_1", "type": "command_execution", "command": "cat calc.py"},
+                {"id": "item_2", "type": "reasoning", "text": "add subtracts"},
+                {"id": "item_3", "type": "agent_message", "text": "Yes, add subtracts."},
+                {"id": "item_4", "type": "agent_message", "text": "Use a + b."},
+            ),
+            "Yes, add subtracts.\nUse a + b.",
+            id="drops-commentary-before-tools",
+        ),
+        pytest.param(
+            (
+                {"id": "item_0", "type": "agent_message", "text": "Editing now."},
+                {"id": "item_1", "type": "file_change", "changes": []},
+            ),
+            "Editing now.",
+            id="keeps-messages-when-run-ends-on-a-tool",
+        ),
+    ],
+)
+def test_codex_final_text_is_the_answer_after_the_last_tool_item(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    items: tuple[dict[str, Any], ...],
+    expected: str,
+) -> None:
+    thread_started, turn_started, _message, turn_completed = CODEX_EVENTS
+    events = (
+        thread_started,
+        turn_started,
+        *({"type": "item.completed", "item": item} for item in items),
+        turn_completed,
+    )
+    adapter = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(events), exit_code=0))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == expected
 
 
 def test_codex_rejects_error_events_after_its_terminal_turn(
@@ -2119,6 +2229,69 @@ def test_codex_headless_argv_passes_the_schema_file(tmp_path: Path) -> None:
     assert command[command.index("--output-schema") + 1] == str(schema_path)
 
 
+def test_cursor_text_output_reads_the_stream_json_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cursor's own text format has no terminal status, so TEXT rides the
+    # stream-json wire and returns the result envelope's text.
+    request = _request(tmp_path, native_output=HeadlessNativeOutput.TEXT)
+    command = _command(AIToolID.CURSOR, request)
+    adapter = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout=_jsonl(CURSOR_STREAM)))
+
+    result = adapter.run_headless_session(request)
+
+    assert command[:4] == ["agent", "--print", "--output-format", "stream-json"]
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == "OK" and not result.final_json_present
+    assert result.session_id == CURSOR_RESULT["session_id"]
+    assert any(event.kind is HeadlessEventKind.PROGRESS for event in result.events)
+
+
+def _cursor_assistant(text: str) -> dict[str, Any]:
+    return {
+        "type": "assistant",
+        "session_id": CURSOR_RESULT["session_id"],
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("result_text", "expected"),
+    [
+        pytest.param(
+            "I'll read calc.py.Yes, add subtracts.",
+            "Yes, add subtracts.",
+            id="drops-commentary-before-tools",
+        ),
+        pytest.param(
+            "Cursor's own summary.",
+            "Cursor's own summary.",
+            id="keeps-a-result-that-does-not-end-with-the-answer",
+        ),
+    ],
+)
+def test_cursor_text_output_is_the_answer_after_the_last_tool_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_text: str, expected: str
+) -> None:
+    session = CURSOR_RESULT["session_id"]
+    frames = (
+        CURSOR_STREAM[0],
+        _cursor_assistant("I'll read calc.py."),
+        {"type": "tool_call", "subtype": "started", "session_id": session},
+        {"type": "tool_call", "subtype": "completed", "session_id": session},
+        _cursor_assistant("Yes, add subtracts."),
+        {**CURSOR_RESULT, "result": result_text},
+    )
+    adapter = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout=_jsonl(frames)))
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.TEXT)
+    )
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert result.final_text == expected
+
+
 def test_cursor_headless_argv_trusts_the_workspace_without_forcing_edits(
     tmp_path: Path,
 ) -> None:
@@ -2185,7 +2358,8 @@ def test_antigravity_print_timeout_uses_the_whole_run_deadline(
     soon as the shorter idle window elapsed.
     """
     recorded: list[int] = []
-    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout="OK\n"))
+    payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
+    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
     stub: Callable[..., list[str]] = type(adapter)._headless_command  # type: ignore[attr-defined]
 
     def record(self: AbstractAITool, request: HeadlessSessionRequest, **kwargs: Any) -> list[str]:

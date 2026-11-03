@@ -343,7 +343,9 @@ class AntigravityCLIAdapter(AbstractAITool):
     ) -> list[str]:
         """Build the exact unattended ``agy --print`` invocation."""
         native_formats = {
-            HeadlessNativeOutput.TEXT: "text",
+            # TEXT is read from the JSON result envelope: plain text carries no
+            # conversation ID, native status or waiting state to check.
+            HeadlessNativeOutput.TEXT: "json",
             HeadlessNativeOutput.JSON: "json",
             HeadlessNativeOutput.JSONL: "stream-json",
         }
@@ -426,24 +428,9 @@ class AntigravityCLIAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
-        if request.native_output is HeadlessNativeOutput.TEXT:
-            # agy's text wire carries no conversation ID, status, or usage.
-            return complete_session(
-                context,
-                request,
-                status=(
-                    HeadlessTerminalStatus.SUCCEEDED
-                    if output.returncode == 0
-                    else HeadlessTerminalStatus.FAILED
-                ),
-                exit_code=output.returncode,
-                response_text=output.stdout.strip() or None,
-                warnings=warnings,
-            )
-
         conversation_id: str | None = None
         envelope: dict[str, Any] | None = None
-        if request.native_output is HeadlessNativeOutput.JSON:
+        if not streaming:  # TEXT and JSON both run --output-format json
             envelope = parse_json_object(output.stdout)
         else:
             frames = parse_json_lines(output.stdout)
@@ -535,7 +522,8 @@ class AntigravityCLIAdapter(AbstractAITool):
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,
-            response_text=non_blank_text(envelope.get("response")),
+            # Stripped as the plain-text wire was; agy ends ``response`` with a newline.
+            response_text=(non_blank_text(envelope.get("response")) or "").strip() or None,
             native_object=envelope,
             structured_output=envelope.get("structured_output", MISSING),
             native_status=native_status,

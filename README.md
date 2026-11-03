@@ -28,6 +28,7 @@ Any of the five direct-sync tools can be the source — `crossby sync --from cur
 | Give my other tools the same rules/agents/skills/MCP/hooks I already wrote | **Sync** | `crossby sync --plan --from claude` |
 | Run a tool with only the capabilities one task needs | **Scenes** | `crossby scene list` / `crossby launch --scene <name>` |
 | Continue my current session in a different tool | **Handoff** | `crossby handoff --from claude --to codex` |
+| Have one agent consult another until it has its answer, headless | **Converse** | `crossby converse claude codex --goal "…"` |
 | Launch a tool and drive it from a browser instead of a shell | **Browser terminal** | `crossby ui` |
 
 Everything else in this README expands one of these. Jump to [What crossby supports](#what-crossby-supports) for the exact per-tool coverage.
@@ -457,6 +458,49 @@ The default preset produces a structured six-section handoff (current task, key 
 - **Claude, Cursor, Codex, Copilot, OpenCode, Antigravity CLI** are launched with the handoff pre-loaded.
 - **VS Code and the Antigravity IDE** can't receive an initial message, so crossby writes the handoff file and prints its path for you to open by hand.
 
+## Agent conversations
+
+`crossby converse ASKER RESPONDER --goal "…"` lets one agent consult another. The **asker** holds the goal: it decides what to ask, judges each answer, asks follow-up questions, and ends with its final answer. The goal is never sent to the **responder**; it only answers. `crossby ask` is the single-question version.
+
+```bash
+# The asker (Claude) checks a diagnosis by questioning the responder (Codex)
+crossby converse claude codex --goal "Check whether this diagnosis is sound: …"
+
+# Script it: JSON on stdout, no live messages on stderr
+crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json --quiet
+
+# One question to another agent; '-' reads it from stdin
+crossby ask codex "Is there a race in src/cache.py invalidate()?"
+git diff | crossby ask claude -
+```
+
+How a consultation runs:
+
+| Step | Who | Receives |
+| --- | --- | --- |
+| 1 | asker (new session) | the goal, plus the two markers and the message limit |
+| 2 | responder (new session) | the asker's question, as written |
+| 3 | asker (resumed) | the responder's answer, as written |
+| 4 | responder (resumed) | the asker's next message, as written |
+| … | | repeats until the asker ends with its final answer |
+
+- Every asker reply ends with `NEXT: ASK` (send it to the responder) or `NEXT: DONE` (its final answer). A reply with no marker is sent on as a message, never taken as the answer.
+- Nothing else is added to either side. The responder gets the asker's messages exactly as written (`ask` sends its question as written too), and the asker gets each answer as written. How the asker should behave, for example "challenge every point", belongs in the goal.
+- `--responder-path DIR` runs the responder in its own folder, with that folder's files, instructions, skills, MCP servers and any active scene. It may have no access to the asker's files; if the asker needs to know that, say so in the goal (for example, "the responder can't see your files, so quote what it needs"). The transcript stays in the asker's project (`--path`).
+- "Never sent" is routing, not secrecy: a responder sharing the asker's folder can still read the goal from the asker's `transcript.md` or any other shared file. Use `--responder-path` to keep them apart.
+- `--max-rounds` (default 5) caps the asker's questions. After the last answer the asker is told to give its final answer now. If it still doesn't, the consultation stops without one (exit 2). `--timeout` (default 1800s) bounds the whole consultation, including startup.
+- **Each side keeps its own session.** On Claude Code 2.1.316 or newer, where unattended resume was verified, every message after the first resumes that side's exact session, so neither agent re-reads the conversation and each remembers what it already checked. Each new session gets its own `--session-id`, so two Claude agents never share one, even when crossby itself runs inside Claude Code. Older Claude Code builds and tools whose unattended resume isn't verified yet (Codex, Cursor, Copilot, OpenCode, Antigravity CLI) replay instead: each turn is a fresh session whose prompt carries that side's earlier exchanges, with that history trimmed to `--history-chars` (default 80,000) and to the tool's prompt-size limit. The transcript and `--json` say which mode each side used.
+- **Messages are never cut.** Each question and answer reaches the other side whole; only replayed history is trimmed. If a message alone is too big for a tool that takes its prompt as a command-line argument (Cursor, Copilot, Antigravity CLI), the consultation stops with an error saying so, rather than sending part of it.
+- The asker's final answer is its own judgment, not independent verification: check what it says it verified. Neither side is told not to change files. Unattended sessions deny actions that need approval, but Codex's headless sandbox still allows writes inside its workspace.
+
+crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed unattended session, by default on the asker's tool (`--summarizer-tool` picks another), and reuses the [handoff](#session-handoff) transcript formatting and truncation.
+
+Output is split for scripting: live messages and progress go to stderr; stdout gets only the asker's final answer (followed by the summary with `--summary`), or a JSON object with `--json`. Exit codes: `0` answered, `2` stopped by the round or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
+
+`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
+
+Both commands accept the managed-headless tools: **Claude, Codex, Cursor, Copilot, OpenCode, Antigravity CLI**.
+
 ## Launch options
 
 `crossby launch` runs any supported tool with one unified set of flags. Ordinary
@@ -529,12 +573,12 @@ adapter's remediation rather than running with a guessed contract.
 
 | Tool | Verified build | Native command | Prompt | Native outputs | Response schema | Unattended policy |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | 2.1.263 | `claude --print` | stdin | text, json, stream-json | `--json-schema` | `--permission-prompts none` denies anything that would prompt; `permission_denials` are reported |
+| Claude Code | 2.1.263 | `claude --print` | stdin | text (from the json result), json, stream-json | `--json-schema` | `--permission-prompts none` denies anything that would prompt; `permission_denials` are reported |
 | Codex CLI | 0.154.0 | `codex exec --json` | stdin (`-`) | text, jsonl | `--output-schema` | no approval channel exists in `exec`; the requested `--sandbox` and pinned `network_access` are the whole policy |
-| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
+| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | text (from the stream-json result), json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
 | GitHub Copilot CLI | 1.0.83 | `copilot --prompt -s` | argument | text | not supported | `--no-ask-user` removes `ask_user`; `--allow-all-tools` is never emitted, so tools outside the session command policy are denied |
 | OpenCode | 1.18.31 | `opencode run --format json` | stdin | text, jsonl | not supported | `--auto` is never emitted, so OpenCode's own noninteractive permission behavior stands |
-| Antigravity CLI | 1.2.6 | `agy --print` | argument | text, json, stream-json | `--json-schema` | `--print-timeout` carries the session's overall Crossby deadline (it bounds the whole run, not one idle stretch); a native waiting state fails the session instead of stalling |
+| Antigravity CLI | 1.2.6 | `agy --print` | argument | text (from the json result), json, stream-json | `--json-schema` | `--print-timeout` carries the session's overall Crossby deadline (it bounds the whole run, not one idle stretch); a native waiting state fails the session instead of stalling |
 
 Unattended behavior is uniform above the adapters. An unattended run never
 inherits parent stdin — a prompt is written to a pipe that is then closed, and

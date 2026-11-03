@@ -591,6 +591,9 @@ class CodexAdapter(AbstractAITool):
         # Progress and thread provenance were already emitted live by the streamer.
         thread_id: str | None = None
         agent_items: list[dict[str, Any]] = []
+        # Agent messages after the last tool item: the answer, without the
+        # "I'll read X" commentary Codex emits before running tools.
+        answer_items: list[dict[str, Any]] = []
         terminal_events: list[str] = []
         native_errors = 0
         usage_values: Any = None
@@ -617,8 +620,12 @@ class CodexAdapter(AbstractAITool):
                 thread_id = thread_id or observed_thread_id
             elif kind == "item.completed":
                 item = frame.get("item")
-                if isinstance(item, dict) and non_blank_text(item.get("type")) == "agent_message":
+                item_type = non_blank_text(item.get("type")) if isinstance(item, dict) else None
+                if isinstance(item, dict) and item_type == "agent_message":
                     agent_items.append(item)
+                    answer_items.append(item)
+                elif item_type not in {None, "reasoning"}:
+                    answer_items = []
             elif kind == "turn.completed":
                 terminal_events.append(kind)
                 usage_values = frame.get("usage")
@@ -657,11 +664,16 @@ class CodexAdapter(AbstractAITool):
         if terminal == "turn.failed":
             warnings = (*warnings, "Codex CLI turn failed.")
 
-        texts = [
-            text
-            for item in agent_items
-            if (text := non_blank_text(item.get("text")) or non_blank_text(item.get("message")))
-        ]
+        def _item_texts(items: list[dict[str, Any]]) -> list[str]:
+            return [
+                text
+                for item in items
+                if (text := non_blank_text(item.get("text")) or non_blank_text(item.get("message")))
+            ]
+
+        texts = _item_texts(agent_items)
+        # A run that ends on a tool item has no trailing answer; keep every message.
+        answer_texts = _item_texts(answer_items) or texts
         if len(agent_items) > 1 and request.native_output is HeadlessNativeOutput.JSONL:
             warnings = (
                 *warnings,
@@ -686,7 +698,7 @@ class CodexAdapter(AbstractAITool):
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,
-            response_text="\n".join(texts) or None,
+            response_text="\n".join(answer_texts) or None,
             native_object=agent_items[-1] if agent_items else MISSING,
             structured_output=structured,
             native_status=terminal,

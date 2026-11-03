@@ -43,6 +43,17 @@ def load_user_prompt(path: Path) -> str:
         raise PromptNotFoundError(f"Cannot read prompt file {path}: {exc}") from exc
 
 
+def load_bundled_prompt(filename: str) -> str:
+    """Return the contents of a bundled prompt file under ``data/prompts/``."""
+    path = _PROMPTS_DIR / filename
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise PromptNotFoundError(
+            f"Bundled prompt {filename!r} is missing at {path}. This is a packaging bug."
+        ) from exc
+
+
 def load_launch_template() -> str:
     """Return the launch-time initial-message template with a ``{path}`` placeholder."""
     path = _PROMPTS_DIR / _LAUNCH_TEMPLATE_FILE
