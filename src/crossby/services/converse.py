@@ -65,6 +65,11 @@ SUMMARY_PROMPT_FILE = "converse_summary.md"
 # transport's own size check.
 SUMMARY_PROMPT_CHARS = 100_000
 
+ASKER_REPLAY_HEADING = "Earlier in this conversation:"
+RESPONDER_REPLAY_HEADING = (
+    "Earlier in this conversation (your previous sessions, in this same folder):"
+)
+
 FINAL_NUDGE = (
     "You have used all {max_rounds} messages. Write your final answer now and end "
     "with the line `NEXT: DONE`."
@@ -453,9 +458,14 @@ def replay_prompt(
         else:
             who = responder.tool.value if asker_side else "Your answer"
         blocks.append(f"### {who}\n{turn.text}")
-    history, _omitted = _render_exchanges(
-        blocks, budget_chars=budget_chars, heading="Earlier in this conversation:"
-    )
+    # Tell the responder its earlier sessions ran in this same folder: without
+    # it, a replayed answer reads like a closed document, and Codex answered
+    # follow-ups from the replayed text alone ("not specified in the
+    # conversation") instead of checking its files. The asker's replay starts
+    # with its goal, and the note there leaked into final answers ("the
+    # previous sessions already got both answers").
+    heading = ASKER_REPLAY_HEADING if asker_side else RESPONDER_REPLAY_HEADING
+    history, _omitted = _render_exchanges(blocks, budget_chars=budget_chars, heading=heading)
     if asker_side:
         return f"{opening}\n\n{history}\n\n### {responder.tool.value}\n{latest}"
     return f"{history}\n\n### Question\n{latest}"

@@ -392,12 +392,20 @@ def test_replay_rebuilds_each_sides_context(tmp_path: Path) -> None:
     assert asker_turn_2.endswith("### codex\nA flap-like opening between the atria.")
     assert asker_turn_2.count("A flap-like opening") == 1
     assert "### You\nWhat is a patent foramen ovale?" in asker_turn_2
+    # Only the responder is told its earlier sessions ran in this folder; on the
+    # asker the note leaked into final answers.
+    assert "\n\nEarlier in this conversation:\n" in asker_turn_2
+    assert "previous sessions" not in asker_turn_2
     # The responder's replay: its earlier Q&A, then the new question.
     responder_turn_2 = requests[3].prompt
     assert GOAL not in responder_turn_2
     assert "### Question\nWhat is a patent foramen ovale?" in responder_turn_2
     assert "### Your answer\nA flap-like opening between the atria." in responder_turn_2
-    assert responder_turn_2.startswith("Earlier in this conversation:")
+    # The heading tells a replaying tool its earlier answers came from this same
+    # folder, so it checks its files instead of answering from the replay alone.
+    assert responder_turn_2.startswith(
+        "Earlier in this conversation (your previous sessions, in this same folder):"
+    )
     assert responder_turn_2.endswith("### Question\nHow can it cause a paradoxical embolism?")
     assert responder_turn_2.count("How can it cause") == 1
 
