@@ -123,11 +123,23 @@ def test_a_different_reported_session_is_invalid_output(
 def test_text_output_reports_the_pinned_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter, _calls = _recording_adapter(monkeypatch, text="OK\n")
+    adapter, _calls = _recording_adapter(monkeypatch, {**CLAUDE_RESULT, "result": "OK"})
     result = adapter.run_headless_session(_request(tmp_path, resume_id=SESSION))
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "OK"
     assert result.session_id == SESSION
+
+
+def test_text_output_rejects_a_different_reported_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Text is read from the JSON envelope, so the session check applies to it
+    # too: converse, which always asks for text, depends on it.
+    adapter, _calls = _recording_adapter(monkeypatch, {**CLAUDE_RESULT, "result": "OK"})
+    result = adapter.run_headless_session(_request(tmp_path, resume_id=OTHER))
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None
+    assert any("different session" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize("bad", ["latest", "not-a-uuid", "1492F340-106A-4548-B7BA-6C3ABA132018x"])

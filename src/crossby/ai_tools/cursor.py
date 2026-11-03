@@ -112,6 +112,21 @@ def _cursor_acp_prompt_params(session_id: str, prompt: str) -> dict[str, Any]:
     return {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}
 
 
+def _assistant_texts(frame: dict[str, Any]) -> list[str]:
+    """Text blocks of one stream-json ``assistant`` frame."""
+    message = frame.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ]
+
+
 def _effort_template(model: str) -> tuple[str, EffortLevel | None, bool]:
     """Split a Cursor model ID into an effort template and its effort.
 
@@ -308,9 +323,13 @@ class CursorAdapter(AbstractAITool):
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
                 prompt_transport=HeadlessPromptTransport.ARGUMENT,
                 # Cursor's print mode has no verified stdin contract, and its
-                # plain-text output carries no terminal status, so only the two
-                # execution-output formats are offered.
-                native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
+                # plain-text output carries no terminal status, so TEXT is served
+                # from the stream-json result envelope, never ``--output-format text``.
+                native_outputs=(
+                    HeadlessNativeOutput.TEXT,
+                    HeadlessNativeOutput.JSON,
+                    HeadlessNativeOutput.JSONL,
+                ),
                 interaction_modes=(
                     HeadlessInteractionMode.UNATTENDED,
                     HeadlessInteractionMode.BROKERED,
@@ -606,7 +625,8 @@ class CursorAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import child_environment
 
-        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        # TEXT shares the stream-json wire with JSONL (see _headless_command).
+        streaming = request.native_output is not HeadlessNativeOutput.JSON
         output = run_managed_command(
             context,
             argv=self._headless_command(request),
@@ -644,6 +664,9 @@ class CursorAdapter(AbstractAITool):
 
         session_id: str | None = None
         envelope: dict[str, Any] | None = None
+        # Assistant text after the last tool call (stream-json only): the
+        # answer, without the "I'll read X" commentary ``result`` prepends.
+        answer_parts: list[str] = []
         if request.native_output is HeadlessNativeOutput.JSON:
             envelope = parse_json_object(output.stdout)
             if envelope is not None and envelope.get("type") != "result":
@@ -675,9 +698,14 @@ class CursorAdapter(AbstractAITool):
                         session_id=session_id,
                         warnings=(*warnings, warning),
                     )
-                if non_blank_text(frame.get("type")) == "result":
+                frame_type = non_blank_text(frame.get("type"))
+                if frame_type == "result":
                     envelope = frame
                     saw_result = True
+                elif frame_type == "tool_call":
+                    answer_parts = []
+                elif frame_type == "assistant":
+                    answer_parts.extend(_assistant_texts(frame))
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
@@ -688,6 +716,10 @@ class CursorAdapter(AbstractAITool):
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
         response_text = non_blank_text(envelope.get("result"))
+        answer = non_blank_text("".join(answer_parts))
+        # Trim only a prefix of Cursor's own result; otherwise keep it whole.
+        if response_text is not None and answer is not None and response_text.endswith(answer):
+            response_text = answer.strip()
         native_error = envelope.get("is_error")
         if not isinstance(native_error, bool):
             return context.complete(

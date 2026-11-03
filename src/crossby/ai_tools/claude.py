@@ -399,7 +399,9 @@ class ClaudeAdapter(AbstractAITool):
         inherit the parent's session ID, so two agents could share one session.
         """
         native_formats = {
-            HeadlessNativeOutput.TEXT: "text",
+            # TEXT is read from the JSON result envelope: plain text carries no
+            # session ID, is_error or permission_denials to check.
+            HeadlessNativeOutput.TEXT: "json",
             HeadlessNativeOutput.JSON: "json",
             HeadlessNativeOutput.JSONL: "stream-json",
         }
@@ -499,26 +501,9 @@ class ClaudeAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
-        if request.native_output is HeadlessNativeOutput.TEXT:
-            return complete_session(
-                context,
-                request,
-                status=(
-                    HeadlessTerminalStatus.SUCCEEDED
-                    if output.returncode == 0
-                    else HeadlessTerminalStatus.FAILED
-                ),
-                exit_code=output.returncode,
-                response_text=output.stdout.strip() or None,
-                # Text output carries no envelope; the session is the one
-                # crossby pinned with --session-id or --resume.
-                session_id=expected_session if output.returncode == 0 else None,
-                warnings=warnings,
-            )
-
         session_id: str | None = None
         envelope: dict[str, Any] | None = None
-        if request.native_output is HeadlessNativeOutput.JSON:
+        if not streaming:  # TEXT and JSON both run --output-format json
             envelope = parse_json_object(output.stdout)
             if envelope is not None and envelope.get("type") != "result":
                 envelope = None
@@ -587,7 +572,8 @@ class ClaudeAdapter(AbstractAITool):
                 f"Claude Code reported {len(denials)} permission denials under "
                 "--permission-prompts none"
             )
-        response_text = non_blank_text(envelope.get("result"))
+        # Stripped as the plain-text wire was.
+        response_text = (non_blank_text(envelope.get("result")) or "").strip() or None
         # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so
         # ``is_error`` is the only authoritative native failure signal.
         native_error = envelope.get("is_error")
