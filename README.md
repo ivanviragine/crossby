@@ -581,7 +581,7 @@ Every result reports each channel as `enforced`, `not_enforced` or `unknown`, re
 | `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
 | `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
 | `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
-| `mcp_tools` | unknown | unknown | unknown | unknown | unknown | unknown |
+| `mcp_tools` | unknown | unknown | unknown | not enforced | unknown | unknown |
 | `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
 
 So a persona that must not change anything or run hooks (`require_blocked={file_edits, shell_writes, hooks}`) can run on Claude Code and Codex today. An empty persona folder isolates nothing by itself: on most tools the agent can still read elsewhere, reach the web, and use the user's MCP servers and connectors.

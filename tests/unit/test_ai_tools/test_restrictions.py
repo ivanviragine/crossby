@@ -87,6 +87,7 @@ VERIFIED: dict[AIToolID, dict[RestrictionChannel, RestrictionState]] = {
         C.SHELL_COMMANDS: E,
         C.SHELL_WRITES: E,
         C.HOOKS: N,
+        C.MCP_TOOLS: N,
     },
     AIToolID.OPENCODE: {
         C.FILE_EDITS: E,
@@ -244,8 +245,9 @@ def test_an_unmet_requirement_is_refused_before_the_cli_starts(
         adapter.run_headless_session(request)
     assert not record.exists()
     assert [item.channel for item in raised.value.unmet] == [C.MCP_TOOLS]
-    assert raised.value.unmet[0].state is U
-    assert "mcp_tools (unknown)" in str(raised.value)
+    state = VERIFIED[tool].get(C.MCP_TOOLS, U)
+    assert raised.value.unmet[0].state is state
+    assert f"mcp_tools ({state.value})" in str(raised.value)
     assert len(raised.value.restrictions) == len(RestrictionChannel)
     # The same refusal surfaces at preflight.
     with pytest.raises(HeadlessRequirementError):

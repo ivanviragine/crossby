@@ -65,6 +65,10 @@ class CopilotAdapter(AbstractAITool):
             RestrictionState.NOT_ENFORCED,
             "the read-only profile leaves hooks enabled",
         ),
+        RestrictionChannel.MCP_TOOLS: (
+            RestrictionState.NOT_ENFORCED,
+            "the built-in GitHub MCP server stays connected",
+        ),
     }
 
     def capabilities(self) -> AIToolCapabilities:

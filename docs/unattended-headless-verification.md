@@ -227,7 +227,7 @@ refused before anything is spawned.
 | `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
 | `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
 | `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
-| `mcp_tools` | unknown | unknown | unknown | unknown | unknown | unknown |
+| `mcp_tools` | unknown | unknown | unknown | not enforced | unknown | unknown |
 | `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
 
 `enforced` is claimed only where the mechanism is crossby's own profile and
@@ -269,8 +269,11 @@ token from a file in a sibling folder:
 Hooks are enforced only where the profile disables them (Claude's
 `disableAllHooks`, Codex's `--disable hooks`); OpenCode's plugins load and their
 event hooks run (a plugin's update checker printed to stdout during these
-runs). MCP servers, account connectors and the other tools' plugins were not
-probed, so they stay unknown.
+runs). Copilot's JSONL stream (`--output-format json`, 1.0.109) shows its
+built-in `github-mcp-server` connecting and loading 5 tools under the
+read-only deny rules, so its MCP channel is not enforced. Other MCP servers,
+account connectors and the other tools' plugins were not probed, so they stay
+unknown.
 
 ## Prompts on stdin
 
