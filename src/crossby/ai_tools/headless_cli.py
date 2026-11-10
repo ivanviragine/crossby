@@ -202,7 +202,16 @@ def run_managed_command(
     partial result when the overall deadline fires.
     """
     context.checkpoint()
-    stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
+    try:
+        # surrogateescape writes a filename decoded by os.fsdecode back as its
+        # original bytes, exactly as os.fsencode would have put it on argv.
+        stdin_bytes = (
+            stdin_text.encode("utf-8", "surrogateescape") if stdin_text is not None else None
+        )
+    except UnicodeEncodeError:
+        raise context.transport_error(
+            "The prompt contains text that cannot be written to the native CLI's stdin."
+        ) from None
     proc: subprocess.Popen[bytes] | None = None
     workers: list[threading.Thread] = []
     input_stream: IO[bytes] | None = None

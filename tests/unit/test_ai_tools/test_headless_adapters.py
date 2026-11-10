@@ -664,6 +664,57 @@ def test_codex_schema_decoder_value_error_is_invalid_native_output(
     _assert_prompt_is_private(result)
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX filesystem encoding")
+@pytest.mark.parametrize(
+    ("tool", "native_output"),
+    [
+        (AIToolID.CLAUDE, HeadlessNativeOutput.TEXT),
+        (AIToolID.CURSOR, HeadlessNativeOutput.JSON),
+        (AIToolID.COPILOT, HeadlessNativeOutput.TEXT),
+    ],
+)
+def test_a_surrogate_escaped_prompt_reaches_stdin_as_its_original_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: AIToolID,
+    native_output: HeadlessNativeOutput,
+) -> None:
+    """A filename decoded by os.fsdecode is written back as the bytes it came from."""
+    record = tmp_path / "stdin.bin"
+    program = (
+        f"import sys; open({str(record)!r}, 'wb').write(sys.stdin.buffer.read()); "
+        "sys.stdout.write('{}')"
+    )
+    adapter = _adapter(monkeypatch, tool, [sys.executable, "-c", program])
+
+    adapter.run_headless_session(
+        _request(
+            tmp_path, prompt=os.fsdecode(b"read filename-\xff now"), native_output=native_output
+        )
+    )
+
+    assert record.read_bytes() == b"read filename-\xff now"
+
+
+def test_antigravity_escapes_any_prompt_into_valid_json() -> None:
+    prompt = os.fsdecode(b"read filename-\xff now") + " \U0001f680 and a lone \ud800"
+    line = _stream_input(prompt)
+    assert line.isascii() and line.endswith("\n")
+    assert json.loads(line)["message"]["content"] == prompt
+
+
+def test_an_unencodable_prompt_fails_the_transport_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = tmp_path / "started.txt"
+    adapter = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout="{}", stdin_record=started))
+
+    with pytest.raises(HeadlessTransportError, match="cannot be written"):
+        adapter.run_headless_session(_request(tmp_path, prompt="a lone \ud800 surrogate"))
+
+    assert not started.exists()
+
+
 @pytest.mark.parametrize(
     ("tool", "stdout"),
     [

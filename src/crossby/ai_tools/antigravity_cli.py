@@ -96,9 +96,13 @@ _READ_ONLY_SETTINGS = '{"permissions":{"allow":[]}}'
 
 
 def _stream_input(prompt: str) -> str:
-    """The prompt as agy's one-turn ``--input-format stream-json`` message."""
+    """The prompt as agy's one-turn ``--input-format stream-json`` message.
+
+    ASCII-escaped, so the line is valid JSON whatever the prompt holds,
+    including a lone surrogate from a filename decoded with ``os.fsdecode``.
+    """
     message = {"event": "user", "message": {"role": "user", "content": prompt}}
-    return json.dumps(message, ensure_ascii=False) + "\n"
+    return json.dumps(message) + "\n"
 
 
 def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
