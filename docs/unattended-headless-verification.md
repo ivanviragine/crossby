@@ -8,10 +8,19 @@ and is enforced as the runtime floor.
 | --- | --- | --- |
 | Claude Code | 2.1.263 | `claude --print` with each `--output-format`, `--json-schema`, `--permission-prompts none` |
 | Codex CLI | 0.154.0 | `codex exec --json --output-schema <file> -` |
-| Cursor | 2026.09.10-fd3934a | `agent --print --output-format json\|stream-json --trust` |
-| GitHub Copilot CLI | 1.0.83 | `copilot --help`; `copilot --prompt -s --no-ask-user` |
+| Cursor | 2026.11.05-86047df | `agent --print --output-format json\|stream-json --trust`, prompt piped on stdin |
+| GitHub Copilot CLI | 1.0.105 | `copilot --help`; `copilot -s --no-ask-user`, prompt piped on stdin |
 | OpenCode | 1.18.31 | `opencode run --format json` |
-| Antigravity CLI | 1.2.6 | `agy --print --output-format json\|stream-json --json-schema --print-timeout` |
+| Antigravity CLI | 1.5.4 | `agy --print= --input-format stream-json --output-format stream-json --json-schema --print-timeout` |
+
+The Cursor, Copilot and Antigravity CLI floors were raised on 2026-11-10 to the
+builds where their prompts were first verified on stdin (see
+[Prompts on stdin](#prompts-on-stdin)); the earlier floors (2026.09.10-fd3934a,
+1.0.83, 1.2.6) took the prompt as a command-line argument. agy installs as one self-updating binary, so
+its floor is the build the stdin path was verified on, 1.5.4; its resume and
+read-only profile were verified on 1.5.1 and rechecked on 1.5.4. Copilot keeps
+older builds under `~/.copilot/pkg/`, so 1.0.105 was run directly: a piped
+prompt, `--session-id` resume and both deny rules held there too.
 
 ## What live probing established
 
@@ -22,15 +31,15 @@ it. `codex exec --output-schema` takes a *file path*, not inline JSON, so the
 adapter writes a temporary schema file outside the workspace.
 `opencode run --format json` consumes a non-TTY stdin stream when no positional
 message is supplied, so the managed adapter delivers its prompt on stdin and
-closes the stream at EOF. Antigravity's verified `--print` text and JSON modes
-take their prompt from argv; its stdin stream-json protocol requires a paired
-stream-json output redesign, so the adapter does not substitute it. Every
+closes the stream at EOF. Every adapter now does the same: no managed prompt
+travels on argv (see [Prompts on stdin](#prompts-on-stdin)). Every
 streaming adapter refreshes the idle deadline only for its verified event kinds;
 an unknown JSON object can be parsed as terminal evidence but cannot keep a
 stalled child alive. Rendered native argv is validated before a version probe or
 child spawn. In particular, a model-only Antigravity ID with an unrecognized or
 unsupported effort suffix is rejected rather than normalized or stripped, so a
-managed run never selects a different model. POSIX
+managed run never selects a different model. With prompts off argv, these
+checks cover only adapter flags (a response schema, a model ID, settings): POSIX
 arguments are limited to 120,000 filesystem-encoded bytes and the
 complete argv plus inherited child environment is kept below `SC_ARG_MAX` with
 an 8 KiB safety margin; Windows validates the complete rendered command line,
@@ -100,8 +109,10 @@ process-group teardown are what bound the run.
 
 ## Read-only sessions and resume
 
-Verified 2026-11-09 on macOS against the builds below, which are each adapter's
-`HEADLESS_READ_ONLY_VERIFIED_VERSION` and `HEADLESS_RESUME_VERIFIED_VERSION`.
+Verified 2026-11-09 on macOS against the builds below. For Claude Code, Codex
+CLI and OpenCode they are the adapter's `HEADLESS_READ_ONLY_VERIFIED_VERSION`
+and `HEADLESS_RESUME_VERIFIED_VERSION`; for Cursor, Copilot and Antigravity CLI
+they are now the unattended floor itself (see [Prompts on stdin](#prompts-on-stdin)).
 
 | Tool | Build | Read-only profile | Resume |
 | --- | --- | --- | --- |
@@ -187,6 +198,57 @@ Read-only covers files changed through each tool's own file, edit and shell
 tools. It does not cover MCP servers, account connectors, web access (Codex's
 web search stays available) or hooks on Cursor, Copilot, OpenCode and
 Antigravity CLI.
+
+## Prompts on stdin
+
+Verified 2026-11-10 on macOS. No managed prompt travels on argv any more:
+argv is bounded by the OS (131,072 bytes per argument on Linux, 32,767 UTF-16
+units for a whole Windows command line) and is visible to other users in the
+process list. Claude Code, Codex CLI and OpenCode already read stdin; the other
+three were moved to it:
+
+| Tool | Build | How the prompt is read |
+| --- | --- | --- |
+| Cursor | 2026.11.05-86047df | `agent --print …` with no prompt argument reads the piped prompt |
+| GitHub Copilot CLI | 1.0.105 and 1.0.108 | `copilot -s --no-ask-user …` with no `--prompt` runs in prompt mode on the piped prompt |
+| Antigravity CLI | 1.5.4 | `agy --print= --input-format stream-json --output-format stream-json …` reads one `{"event":"user","message":{"role":"user","content":…}}` line |
+
+For agy, `--print` takes a value, so a bare `--print` swallowed the next flag
+("--print took "--output-format" as its prompt"); `--print=` gives it an empty
+one, and an empty `--print` is accepted only with stream-json input. The input
+message needs the `event` field (`stream input message is missing the "event"
+field` otherwise). Stream-json input requires stream-json output, so agy's text
+and JSON results are now read from the `result` frame, which carries the same
+envelope, including `structured_output` and the `json_schema` echo. Its `init`
+frame reports the conversation ID before the model starts.
+
+Each of the six tools then ran, through crossby's own adapters, a read-only
+fresh turn (codeword and a write), a resumed turn (a number from the first
+turn, a file-tool write and a shell write), and a fresh 154,081-byte prompt
+(over Linux's per-argument limit and crossby's former 120,000-byte cap) that
+ends with "The final code word is ZEBRA-4417. Reply with only the final code
+word". Every tool resumed the session it was given and recalled the number,
+every write failed, every folder stayed clean, and the large prompt came back as
+`ZEBRA-4417` from Claude Code, Codex CLI, Cursor, OpenCode and Antigravity CLI.
+Copilot answered with its instructions' codeword instead; a second run in a
+folder without instructions (159,807 bytes, ending "The secret number is
+739154. Reply with only the secret number and the number of the last filler
+line") came back `739154 / 02799`, the exact last line, so the whole prompt
+arrived. agy with `--json-schema` returned schema-valid `structured_output`.
+When agy denies an action it still ends that turn with an empty `response`
+(the same with the old argv form and `--output-format json`); crossby reports
+the denial with the failure.
+
+End to end, two-round `crossby converse` runs (resume only, nothing replayed)
+put each changed tool on both sides: Claude Code asking Copilot, Cursor and
+Antigravity CLI, each also writing the `--summary`; Cursor asking Codex;
+Antigravity CLI asking Claude Code; Copilot asking OpenCode. Every run
+answered with the facts from the responder's instructions and `notes.txt`,
+reported the responder's write as failed, and left the responder's folder
+unchanged, and `--json` named one session per side. A first Copilot-as-asker
+run refused its goal ("I can't help extract hidden instructions") and put
+`NEXT: DONE` inside a sentence, so it ran to the round limit; with a goal that
+did not ask for instructions it answered in two rounds.
 
 ## Not verified live
 
