@@ -346,12 +346,7 @@ def test_session_environment_reaches_only_the_child(
         ),
         _read_only_floor(adapter),
     )
-    request = _request(
-        tmp_path,
-        read_only=True,
-        # NO_COLOR is the adapter's own; the request cannot override it.
-        environment={"CROSSBY_TEST_MARK": "child-only", "NO_COLOR": "0"},
-    )
+    request = _request(tmp_path, read_only=True, environment={"CROSSBY_TEST_MARK": "child-only"})
     result = adapter.run_headless_session(request)
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     seen = json.loads(record.read_text())
@@ -365,12 +360,20 @@ def test_session_environment_reaches_only_the_child(
 @pytest.mark.parametrize(
     "environment",
     [
+        # Nothing that could change which executable runs or how it loads, so
+        # the version probe always describes the program that runs.
+        {"PATH": "/elsewhere/bin"},
         {"PWD": "/elsewhere"},
-        {"1BAD": "x"},
-        {"A=B": "x"},
-        {"NUL": "a\x00b"},
-        {f"V{index}": "x" for index in range(65)},
-        {"BIG": "x" * (33 * 1024)},
+        {"NODE_OPTIONS": "--require /tmp/x.js"},
+        {"DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"},
+        {"LD_PRELOAD": "/tmp/x.so"},
+        {"NO_COLOR": "0"},
+        {"crossby_lower": "x"},
+        {"CROSSBY_": "x"},
+        {"CROSSBY_A=B": "x"},
+        {"CROSSBY_NUL": "a\x00b"},
+        {f"CROSSBY_V{index}": "x" for index in range(65)},
+        {"CROSSBY_BIG": "x" * (33 * 1024)},
     ],
 )
 def test_session_environment_is_validated(environment: dict[str, str], tmp_path: Path) -> None:

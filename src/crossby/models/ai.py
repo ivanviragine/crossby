@@ -18,7 +18,7 @@ _HEADLESS_FINAL_PAYLOAD_LIMIT = 8 * 1024 * 1024
 _HEADLESS_DIAGNOSTIC_LIMIT = 16 * 1024
 _HEADLESS_ENVIRONMENT_ENTRIES = 64
 _HEADLESS_ENVIRONMENT_BYTES = 32 * 1024
-_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENVIRONMENT_NAME = re.compile(r"CROSSBY_[A-Z0-9_]+")
 
 
 class EffortLevel(StrEnum):
@@ -730,10 +730,13 @@ class HeadlessSessionRequest(BaseModel):
     # runtime resolves them after its version probe and refuses to start the
     # session when any is not enforced; unknown counts as not enforced.
     require_blocked: frozenset[RestrictionChannel] = frozenset()
-    # Variables added to the native process's environment, for this session
-    # only: the parent process environment is never changed. Only the
-    # unattended CLI transport passes them on; other transports reject them.
-    # Adapter-owned variables (and PWD) take precedence.
+    # crossby's own ``CROSSBY_*`` markers for this session's native process
+    # (such as the consultation depth), added to its environment only: the
+    # parent process environment is never changed. Other names are rejected,
+    # so a session can never change which executable runs or how it loads
+    # (PATH, NODE_OPTIONS, loader variables), and the version probe always
+    # describes the program that runs. Only the unattended CLI transport
+    # passes them on; other transports reject them.
     environment: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: float = 600.0
     idle_timeout_seconds: float | None = None
@@ -753,8 +756,11 @@ class HeadlessSessionRequest(BaseModel):
             raise ValueError("a headless session environment has too many variables")
         size = 0
         for name, item in value.items():
-            if not _ENVIRONMENT_NAME.fullmatch(name) or name == "PWD":
-                raise ValueError(f"{name!r} is not a variable a session environment may set")
+            if not _ENVIRONMENT_NAME.fullmatch(name):
+                raise ValueError(
+                    f"{name!r} is not a variable a session environment may set: only "
+                    "CROSSBY_* markers are allowed"
+                )
             if "\x00" in item:
                 raise ValueError(f"environment variable {name} contains a NUL character")
             size += len(name.encode("utf-8", "surrogateescape")) + len(

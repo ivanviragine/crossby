@@ -526,9 +526,12 @@ block. `require_blocked` is checked in `_validate_headless_mode_version`, after
 the version probe and before any spawn, so a requirement is always resolved
 against the build that would run.
 
-`HeadlessSessionRequest.environment` adds variables to one session's child
-process. Only `HEADLESS_CLI` transports pass it on; others reject a nonempty
-environment at validation. `run_managed_command(extra_env=...)` merges
+`HeadlessSessionRequest.environment` adds crossby's own `CROSSBY_*` markers to
+one session's child process. Any other name is rejected, so a session can never
+change which executable runs or how it loads (`PATH`, `NODE_OPTIONS`, loader
+variables) and the version probe always describes the program that runs. Only
+`HEADLESS_CLI` transports pass it on; others reject a nonempty environment at
+validation. `run_managed_command(extra_env=...)` merges
 `os.environ`, then the request's `environment`, then the adapter's own
 `extra_env`, then `PWD`, so an adapter-owned variable such as `NO_COLOR` or
 OpenCode's session config always wins. Never mutate `os.environ` to reach a
