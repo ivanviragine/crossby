@@ -25,7 +25,7 @@ import os
 import queue
 import re
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -165,6 +165,8 @@ class ConversationResult:
     answered_at_limit: bool = False
     # Each side's native session (``None`` until its first turn reported one).
     sessions: dict[Role, str | None] = field(default_factory=dict)
+    # The folder each side ran in.
+    folders: dict[Role, Path] = field(default_factory=dict)
 
     @property
     def answered(self) -> bool:
@@ -392,6 +394,16 @@ def _read_only(participant: Participant) -> bool:
     return participant.role is Role.RESPONDER
 
 
+def _status(result: HeadlessSessionResult) -> str:
+    """``failed``, or ``failed (native: api_error)`` when the tool reported its own status.
+
+    The native status is a short token the adapter already validated, never
+    native output, so it is safe to show.
+    """
+    native = f" (native: {result.native_status})" if result.native_status else ""
+    return f"{result.status.value}{native}"
+
+
 def _session_handle(result: HeadlessSessionResult) -> str | None:
     return result.session_id or result.thread_id or result.conversation_id
 
@@ -439,7 +451,7 @@ def ask_agent(
     text = (result.final_text or "").strip()
     error = None
     if result.status is not HeadlessTerminalStatus.SUCCEEDED:
-        error = f"{tool.value} session ended with status {result.status.value}"
+        error = f"{tool.value} session ended with status {_status(result)}"
     elif not text:
         error = f"{tool.value} returned no text"
     return AskResult(tool, result.status, text, clock() - started, error=error)
@@ -532,6 +544,7 @@ def run_conversation(
             error=error,
             answered_at_limit=answered_at_limit,
             sessions={role: side.session_id for role, side in sides.items()},
+            folders=dict(folders),
         )
 
     def out_of_time(when: str) -> _StopError:
@@ -586,7 +599,7 @@ def run_conversation(
         if result.status is not HeadlessTerminalStatus.SUCCEEDED:
             raise _StopError(
                 StopReason.FAILED,
-                f"{label} turn {number} ended with status {result.status.value}{denied}",
+                f"{label} turn {number} ended with status {_status(result)}{denied}",
             )
         text = (result.final_text or "").strip()
         if not text:
@@ -725,6 +738,8 @@ def render_transcript(result: ConversationResult) -> str:
         finished_at=result.finished_at,
         turns=result.turns,
         outcome=describe_stop(result),
+        folders=result.folders,
+        sessions=result.sessions,
     )
 
 
@@ -736,6 +751,7 @@ def render_partial_transcript(
     max_rounds: int,
     started_at: datetime,
     turns: Sequence[ConverseTurn],
+    folders: Mapping[Role, Path] | None = None,
 ) -> str:
     """Render a consultation that is still running, so completed turns survive a crash."""
     return _render_transcript(
@@ -747,7 +763,27 @@ def render_partial_transcript(
         finished_at=None,
         turns=turns,
         outcome=f"in progress: {_turns(len(turns))} completed",
+        folders=folders or {},
+        sessions={},
     )
+
+
+def _fenced(text: str) -> str:
+    """``text`` verbatim in a code fence no line of it can close."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def _side_line(
+    label: str, participant: Participant, folder: Path | None, *, read_only: bool
+) -> str:
+    facts = [participant.tool.value + (f" ({participant.model})" if participant.model else "")]
+    if read_only:
+        facts.append("read-only")
+    if folder is not None:
+        facts.append(f"in `{folder}`")
+    return f"- {label}: {', '.join(facts)}"
 
 
 def _render_transcript(
@@ -760,27 +796,42 @@ def _render_transcript(
     finished_at: datetime | None,
     turns: Sequence[ConverseTurn],
     outcome: str,
+    folders: Mapping[Role, Path],
+    sessions: Mapping[Role, str | None],
 ) -> str:
+    """The transcript: run facts, the goal, then every message as written.
+
+    The goal sits in a code fence and each turn under a numbered "Turn"
+    heading after a rule, so headings inside the goal or a message never read
+    as the transcript's own structure.
+    """
     lines = [
         "# Consultation",
         "",
-        f"**Goal (sent only to the asker):** {goal}",
-        "",
-        f"- Asker: {asker.tool.value}",
-        f"- Responder: {responder.tool.value}",
+        _side_line("Asker", asker, folders.get(Role.ASKER), read_only=False),
+        _side_line("Responder", responder, folders.get(Role.RESPONDER), read_only=True),
         f"- Started: {started_at.isoformat(timespec='seconds')}",
     ]
     if finished_at is not None:
         lines.append(f"- Finished: {finished_at.isoformat(timespec='seconds')}")
-    lines += [f"- Rounds allowed: {max_rounds}", f"- Outcome: {outcome}", ""]
+    lines += [f"- Rounds allowed: {max_rounds}", f"- Outcome: {outcome}"]
+    known = [
+        f"{side.tool.value} `{sessions[side.role]}`"
+        for side in (asker, responder)
+        if sessions.get(side.role)
+    ]
+    if known:
+        lines.append(f"- Sessions: {', '.join(known)}")
+    lines += ["", "## Goal (sent only to the asker)", "", _fenced(goal), ""]
     for turn in turns:
         if turn.is_final_answer:
-            heading = f"## {turn.number}. Final answer ({turn.tool.value})"
+            heading = f"## Turn {turn.number} · final answer ({turn.tool.value})"
         elif turn.role is Role.ASKER:
-            heading = f"## {turn.number}. asker ({turn.tool.value}) → responder"
+            heading = f"## Turn {turn.number} · asker ({turn.tool.value}) → responder"
         else:
-            heading = f"## {turn.number}. responder ({turn.tool.value}) → asker"
-        lines += [heading, "", turn.text or "(empty message)", "", f"*{turn_footer(turn)}*", ""]
+            heading = f"## Turn {turn.number} · responder ({turn.tool.value}) → asker"
+        body = turn.text or "(empty message)"
+        lines += ["---", "", heading, "", body, "", f"*{turn_footer(turn)}*", ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -878,7 +929,7 @@ def summarize_conversation(
         raise ConverseSummaryError(str(exc)) from None
     if session.status is not HeadlessTerminalStatus.SUCCEEDED:
         raise ConverseSummaryError(
-            f"{tool.value} summary session ended with status {session.status.value}"
+            f"{tool.value} summary session ended with status {_status(session)}"
         )
     text = (session.final_text or "").strip()
     if not text:

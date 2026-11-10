@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,6 +20,9 @@ import typer
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
+    from rich.console import RenderableType
+    from rich.live import Live
+
     from crossby.models.ai import AIToolID
     from crossby.services.converse import ConversationResult, ConverseTurn, Participant
 
@@ -56,9 +62,10 @@ def ask(
         question, question_file, what="question", hint="an argument, '-' for stdin, or --file"
     )
     try:
-        result = ask_agent(
-            tool_id, prompt, working_dir=project_root, model=model, timeout_seconds=timeout
-        )
+        with _waiting(f"Asking {tool_id.value} (read-only)…"):
+            result = ask_agent(
+                tool_id, prompt, working_dir=project_root, model=model, timeout_seconds=timeout
+            )
     except ConverseError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
@@ -137,9 +144,9 @@ def converse(
     answers, from its own folder (--responder-path), read-only: it can read and
     search but not change files. Each side keeps its own session, resumed every
     turn and sent only the newest message, whole; a CLI build whose resume was
-    not verified is refused before anything starts. The asker's final answer
-    goes to stdout; messages and progress go to stderr; transcript.md is saved
-    after every message.
+    not verified is refused before anything starts. Messages and progress go to
+    stderr and the asker's final answer to stdout (in a terminal, where both
+    show, it appears once); transcript.md is saved after every message.
 
     Exit codes: 0 answered, 2 stopped by the round or time limit, 1 failed,
     130 interrupted.
@@ -175,13 +182,29 @@ def converse(
     else:
         out_dir = engine.conversation_dir(project_root, started_at)
     transcript_path = out_dir / "transcript.md"
+    folders = {
+        engine.Role.ASKER: project_root,
+        engine.Role.RESPONDER: responder_root or project_root,
+    }
     completed: list[ConverseTurn] = []
+    waiting = _TurnWait()
+
+    if not quiet:
+        _show_start(asker, responder, folders[engine.Role.RESPONDER], project_root)
+        _stderr(f"[dim]      limits: up to {max_rounds} messages, {_duration(timeout)} in all[/]")
+        _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
 
     def on_turn_start(number: int, speaker: Participant) -> None:
-        if not quiet:
+        if quiet:
+            return
+        if console.err.is_terminal:
+            # The line updates with the elapsed time and is replaced by the turn.
+            waiting.start(f"[{number}] {speaker.label} is writing…")
+        else:
             _stderr(f"[step.count]\\[{number}][/] {speaker.label} is writing…")
 
     def on_turn(turn: ConverseTurn) -> None:
+        waiting.stop()
         # Persist before printing, so a crash or Ctrl-C keeps every completed turn.
         completed.append(turn)
         partial = engine.render_partial_transcript(
@@ -191,6 +214,7 @@ def converse(
             max_rounds=max_rounds,
             started_at=started_at,
             turns=completed,
+            folders=folders,
         )
         try:
             _write(transcript_path, partial)
@@ -199,7 +223,7 @@ def converse(
             # next turn or the final write tries again; don't end the consultation.
             console.warn(f"Could not save the transcript after turn {turn.number}: {exc}")
         if not quiet:
-            _show_turn(turn)
+            _show_turn(turn, heading=console.err.is_terminal)
 
     try:
         result = engine.run_conversation(
@@ -216,6 +240,8 @@ def converse(
     except engine.ConverseError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
+    finally:
+        waiting.stop()  # a failed or interrupted turn never reaches on_turn
 
     _write(transcript_path, engine.render_transcript(result))
 
@@ -240,6 +266,9 @@ def converse(
         summary_body=summary_body,
         summary_error=summary_error,
         as_json=as_json,
+        # In a terminal stdout and stderr share the screen, where the final
+        # answer was just shown as the last message: print it only once.
+        answer_shown=not quiet and sys.stdout.isatty() and console.err.is_terminal,
     )
     if exit_code:
         raise typer.Exit(exit_code)
@@ -267,16 +296,16 @@ def _headless_tool(value: str, name: str) -> AIToolID:
         for tid in AbstractAITool.available_tools()
         if AbstractAITool.get(tid).capabilities().headless.managed_supported
     )
+    choices = f"Choose one of: {', '.join(usable)}."
     try:
         tool_id = AIToolID(value)
     except ValueError:
-        console.error(f"Unknown tool for {name}: {value!r}. Valid: {', '.join(usable)}")
+        where = "" if name == "TOOL" else f" for {name}"
+        console.error(f"Unknown tool {value!r}{where}. {choices}")
         raise typer.Exit(1) from None
     if tool_id.value not in usable:
-        console.error(
-            f"{tool_id.value} cannot run a managed headless session. Choose one of: "
-            f"{', '.join(usable)}"
-        )
+        role = "" if name == "TOOL" else f", so it can't be the {name}"
+        console.error(f"{tool_id.value} can't run headless sessions{role}. {choices}")
         raise typer.Exit(1)
     return tool_id
 
@@ -323,13 +352,97 @@ def _write(path: Path, text: str) -> None:
     atomic_write_text(path, text.encode("utf-8", "replace").decode("utf-8"))
 
 
-def _show_turn(turn: ConverseTurn) -> None:
+def _show_start(asker: Participant, responder: Participant, folder: Path, root: Path) -> None:
+    """One line on who consults whom, and where the read-only responder runs."""
+
+    def name(participant: Participant) -> str:
+        model = f" ({participant.model})" if participant.model else ""
+        return f"{participant.tool.value}{model}"
+
+    where = "the asker's folder" if folder == root else str(folder)
+    _stderr(
+        f"  [step]▸[/] {_escape(name(asker))} asks {_escape(name(responder))}"
+        f" [dim](read-only, in {_escape(where)})[/]"
+    )
+
+
+def _show_turn(turn: ConverseTurn, *, heading: bool = False) -> None:
+    """Print a finished turn; ``heading`` replaces the live "is writing" line."""
     from crossby.services.converse import turn_footer
 
+    who = "final answer" if turn.is_final_answer else turn.role.value
+    title = f"{who} ({turn.tool.value})"
+    if heading:
+        _stderr(f"[step.count]\\[{turn.number}][/] {_escape(title)}")
     sys.stderr.write(f"\n{turn.text or '(empty message)'}\n\n")
-    title = "final answer" if turn.is_final_answer else f"{turn.role.value} ({turn.tool.value})"
-    _stderr(f"[dim]      {_escape(f'{title} · {turn_footer(turn)}')}[/]")
+    footer = turn_footer(turn) if heading else f"{title} · {turn_footer(turn)}"
+    _stderr(f"[dim]      {_escape(footer)}[/]")
     sys.stderr.flush()
+
+
+def _duration(seconds: float) -> str:
+    """``42s``, ``3m 05s``, ``30m``, ``1h 02m``."""
+    whole = int(seconds)
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m" if not secs else f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+class _Elapsed:
+    """A spinner with a label and the time since it started."""
+
+    def __init__(self, label: str) -> None:
+        from rich.spinner import Spinner
+
+        self._label = label
+        self._started = time.monotonic()
+        self._spinner = Spinner("dots", style="step")
+
+    def __rich__(self) -> RenderableType:
+        from rich.text import Text
+
+        elapsed = _duration(time.monotonic() - self._started)
+        self._spinner.update(text=Text(f" {self._label} {elapsed}", style="dim"))
+        return self._spinner
+
+
+class _TurnWait:
+    """The live line under a running turn, on a terminal only; safe to stop twice."""
+
+    def __init__(self) -> None:
+        self._live: Live | None = None
+
+    def start(self, label: str) -> None:
+        from rich.live import Live
+
+        self.stop()
+        self._live = Live(
+            _Elapsed(label), console=console.err, transient=True, refresh_per_second=4
+        )
+        self._live.start()
+
+    def stop(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+
+@contextmanager
+def _waiting(label: str) -> Iterator[None]:
+    """Show ``label`` with the elapsed time while waiting, on a terminal only."""
+    if not console.err.is_terminal:
+        yield
+        return
+    wait = _TurnWait()
+    wait.start(label)
+    try:
+        yield
+    finally:
+        wait.stop()
 
 
 def _side_json(result: ConversationResult, participant: Participant) -> dict[str, Any]:
@@ -361,15 +474,17 @@ def _summarize(
     """Return ``(summary, error, interrupted)``; the transcript is already written."""
     from crossby.services.converse import ConverseSummaryError, summarize_conversation
 
-    if not quiet:
-        _stderr(f"  [step]▸[/] Summarizing with {tool.value}…")
+    label = f"Summarizing with {tool.value}…"
+    if not quiet and not console.err.is_terminal:
+        _stderr(f"  [step]▸[/] {label}")
     try:
-        body = summarize_conversation(
-            result,
-            transcript_path=transcript_path,
-            tool=tool,
-            working_dir=project_root,
-        )
+        with _waiting(label) if not quiet else _nothing():
+            body = summarize_conversation(
+                result,
+                transcript_path=transcript_path,
+                tool=tool,
+                working_dir=project_root,
+            )
     except ConverseSummaryError as exc:
         console.warn(f"Summary failed: {exc}")
         return None, str(exc), False
@@ -377,6 +492,11 @@ def _summarize(
         console.warn("Summary interrupted; the transcript is saved.")
         return None, "interrupted", True
     return body, None, False
+
+
+@contextmanager
+def _nothing() -> Iterator[None]:
+    yield
 
 
 def _report(
@@ -387,6 +507,7 @@ def _report(
     summary_body: str | None,
     summary_error: str | None,
     as_json: bool,
+    answer_shown: bool = False,
 ) -> None:
     from crossby.services.converse import describe_stop
 
@@ -412,10 +533,11 @@ def _report(
         return
 
     # stdout carries the result: the asker's final answer, and the summary when asked.
-    if result.final_answer is not None:
-        print(result.final_answer)
+    answer = None if answer_shown else result.final_answer
+    if answer is not None:
+        print(answer)
     if summary_body is not None:
-        if result.final_answer is not None:
+        if answer is not None:
             print()
         print(summary_body.strip())
 

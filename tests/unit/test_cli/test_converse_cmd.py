@@ -85,8 +85,8 @@ def test_converse_prints_the_final_answer_and_writes_the_transcript(
 
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "**Goal (sent only to the asker):** Check the PFO answer" in transcript
-    assert "## 3. Final answer (claude)\n\nVerdict: it knows the anatomy." in transcript
+    assert "## Goal (sent only to the asker)\n\n```text\nCheck the PFO answer\n```" in transcript
+    assert "## Turn 3 · final answer (claude)\n\nVerdict: it knows the anatomy." in transcript
     assert not (run_dir / "summary.md").exists()
     assert [tool for tool, _req in fake.calls] == [
         AIToolID.CLAUDE,
@@ -94,6 +94,79 @@ def test_converse_prints_the_final_answer_and_writes_the_transcript(
         AIToolID.CLAUDE,
     ]
     assert fake.calls[2][1].resume_id == "session-1"
+
+
+def test_converse_opens_with_who_consults_whom_and_where_the_transcript_goes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(tmp_path, "converse", "claude", "codex", "--goal", "g", "--max-rounds", "3")
+    assert result.exit_code == 0, result.output
+    head = result.stderr.splitlines()[:3]
+    assert "claude asks codex (read-only, in the asker's folder)" in head[0]
+    assert "limits: up to 3 messages, 30m in all" in head[1]
+    assert "transcript: " in head[2] and head[2].endswith("transcript.md")
+
+
+def test_quiet_converse_prints_no_opening(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(tmp_path, "converse", "claude", "codex", "--goal", "g", "-q")
+    assert result.exit_code == 0, result.output
+    assert "asks codex" not in result.stderr
+    assert result.stdout.strip() == "Verdict: it knows the anatomy."
+
+
+def test_the_final_answer_is_not_repeated_where_it_was_just_shown(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    from crossby.cli import converse as cli
+
+    finished = converse.ConversationResult(
+        goal="g",
+        asker=converse.Participant(AIToolID.CLAUDE, converse.Role.ASKER),
+        responder=converse.Participant(AIToolID.CODEX, converse.Role.RESPONDER),
+        max_rounds=5,
+        started_at=converse.datetime(2026, 11, 10, tzinfo=converse.UTC),
+        finished_at=converse.datetime(2026, 11, 10, tzinfo=converse.UTC),
+        stop_reason=converse.StopReason.ANSWERED,
+        turns=[
+            converse.ConverseTurn(
+                1, converse.Role.ASKER, AIToolID.CLAUDE, "Final.", converse.Next.DONE, 1.0
+            )
+        ],
+    )
+    common = {
+        "transcript_path": tmp_path / "t.md",
+        "summary_path": None,
+        "summary_body": None,
+        "summary_error": None,
+        "as_json": False,
+    }
+    cli._report(finished, answer_shown=True, **common)
+    assert capsys.readouterr().out == ""
+    cli._report(finished, answer_shown=False, **common)
+    assert capsys.readouterr().out == "Final.\n"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(0, "0s"), (42.9, "42s"), (60, "1m"), (185, "3m 05s"), (1800, "30m"), (3720, "1h 02m")],
+)
+def test_durations_read_naturally(seconds: float, text: str) -> None:
+    from crossby.cli import converse as cli
+
+    assert cli._duration(seconds) == text
+
+
+def test_the_live_wait_line_is_a_no_op_off_a_terminal(capsys: pytest.CaptureFixture[str]) -> None:
+    from crossby.cli import converse as cli
+
+    with cli._waiting("Asking codex…"):
+        pass
+    wait = cli._TurnWait()
+    wait.stop()  # stopping before or twice is safe
+    wait.stop()
+    assert capsys.readouterr().err == ""
 
 
 def test_converse_summary_is_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -199,7 +272,7 @@ def test_converse_failure_exits_1_and_keeps_the_transcript(
     assert "responder (codex) turn 2 ended with status failed" in result.stderr
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "## 1. asker (claude) → responder" in transcript
+    assert "## Turn 1 · asker (claude) → responder" in transcript
 
 
 def test_converse_persists_each_turn_before_the_next_starts(
@@ -221,9 +294,9 @@ def test_converse_persists_each_turn_before_the_next_starts(
 
     assert result.exit_code == 0, result.output
     assert seen[0] == ""
-    assert "## 1. asker (claude) → responder\n\nWhat is a patent foramen ovale?" in seen[1]
+    assert "## Turn 1 · asker (claude) → responder\n\nWhat is a patent foramen ovale?" in seen[1]
     assert "- Outcome: in progress: 1 turn completed" in seen[1]
-    assert "## 2. responder (codex) → asker" in seen[2]
+    assert "## Turn 2 · responder (codex) → asker" in seen[2]
     final = (out_dir / "transcript.md").read_text(encoding="utf-8")
     assert "- Outcome: answered" in final
 
@@ -315,7 +388,7 @@ def test_failed_per_turn_save_warns_and_the_consultation_continues(
     assert "Could not save the transcript after turn 2" in result.stderr
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     final = (run_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "## 3. Final answer (claude)" in final
+    assert "## Turn 3 · final answer (claude)" in final
 
 
 def test_converse_ctrl_c_while_printing_keeps_the_transcript(
@@ -325,7 +398,7 @@ def test_converse_ctrl_c_while_printing_keeps_the_transcript(
 
     _use_runner(monkeypatch, FakeRunner(CONSULTING))
 
-    def interrupted_print(turn: Any) -> None:
+    def interrupted_print(turn: Any, **_kwargs: Any) -> None:
         if turn.number == 2:
             raise KeyboardInterrupt
 
@@ -335,7 +408,7 @@ def test_converse_ctrl_c_while_printing_keeps_the_transcript(
     assert result.exit_code == 130
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
-    assert "## 2. responder (codex) → asker\n\nA flap-like opening" in transcript
+    assert "## Turn 2 · responder (codex) → asker\n\nA flap-like opening" in transcript
     assert "- Outcome: interrupted by the user after 1 round" in transcript
 
 
@@ -422,12 +495,15 @@ def test_converse_reads_goal_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     [
         (["converse", "claude", "codex"], "A goal is required"),
         (["converse", "claude", "codex", "-g", "   "], "The goal is empty"),
-        (["converse", "nope", "codex", "-g", "x"], "Unknown tool for ASKER"),
-        (["converse", "claude", "vscode", "-g", "x"], "vscode cannot run a managed headless"),
+        (["converse", "nope", "codex", "-g", "x"], "Unknown tool 'nope' for ASKER"),
+        (
+            ["converse", "claude", "vscode", "-g", "x"],
+            "vscode can't run headless sessions, so it can't be the RESPONDER",
+        ),
         (["converse", "claude", "codex", "-g", "x", "--max-rounds", "0"], "at least 1"),
         (
             ["converse", "claude", "codex", "-g", "x", "--summary", "--summarizer-tool", "nope"],
-            "Unknown tool for --summarizer-tool",
+            "Unknown tool 'nope' for --summarizer-tool",
         ),
     ],
 )

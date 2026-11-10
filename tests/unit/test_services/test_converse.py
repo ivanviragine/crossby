@@ -470,6 +470,24 @@ def test_messages_of_any_size_are_sent_whole(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_a_failed_turn_names_the_tools_own_status(tmp_path: Path) -> None:
+    class NativeFailure(FakeRunner):
+        def run(
+            self, tool: AIToolID, request: HeadlessSessionRequest, cancel_event: threading.Event
+        ) -> HeadlessSessionResult:
+            result = super().run(tool, request, cancel_event)
+            if tool is AIToolID.CODEX:
+                return result.model_copy(
+                    update={"status": HeadlessTerminalStatus.FAILED, "native_status": "turn.failed"}
+                )
+            return result
+
+    result = _run(NativeFailure(["q\nNEXT: ASK", "a"]), tmp_path)
+    assert result.error == (
+        "responder (codex) turn 2 ended with status failed (native: turn.failed)"
+    )
+
+
 def test_preflight_failure_stops_before_any_turn(tmp_path: Path) -> None:
     runner = FakeRunner(
         ["unused"], preflight_error=_unsupported(AIToolID.CODEX, "codex is too old")
@@ -741,14 +759,46 @@ def _finished(reason: StopReason, *, error: str | None = None) -> ConversationRe
 
 def test_render_transcript() -> None:
     text = converse.render_transcript(_finished(StopReason.ANSWERED))
-    assert f"**Goal (sent only to the asker):** {GOAL}" in text
+    assert f"## Goal (sent only to the asker)\n\n```text\n{GOAL}\n```" in text
     assert "- Asker: claude" in text
     assert "- Responder: codex" in text
     assert "- Outcome: answered: the asker gave its final answer after 1 round" in text
-    assert "## 1. asker (claude) → responder\n\nWhat is a PFO?" in text
-    assert "## 2. responder (codex) → asker\n\nAn opening between the atria." in text
-    assert "## 3. Final answer (claude)\n\nIt knows the anatomy." in text
+    assert "## Turn 1 · asker (claude) → responder\n\nWhat is a PFO?" in text
+    assert "## Turn 2 · responder (codex) → asker\n\nAn opening between the atria." in text
+    assert "## Turn 3 · final answer (claude)\n\nIt knows the anatomy." in text
     assert "*NEXT: ASK · 1s*" in text
+
+
+def test_transcript_keeps_headings_in_the_goal_and_messages_out_of_its_structure(
+    tmp_path: Path,
+) -> None:
+    result = _finished(StopReason.ANSWERED)
+    result.goal = "# Brief\n\n## 1. Context\n\n```python\nprint('hi')\n```"
+    result.turns[1] = _turn(2, Role.RESPONDER, "## 1. Decisions\n\nUse X.", None)
+    result.asker = converse.Participant(AIToolID.CLAUDE, Role.ASKER, model="opus-y")
+    result.folders = {Role.ASKER: tmp_path / "a", Role.RESPONDER: tmp_path / "r"}
+    text = converse.render_transcript(result)
+
+    # The goal sits in a fence longer than any backtick run inside it.
+    assert f"````text\n{result.goal}\n````" in text
+    # Each turn starts after a rule, under its own "Turn" heading.
+    assert "---\n\n## Turn 2 · responder (codex) → asker\n\n## 1. Decisions" in text
+    assert f"- Asker: claude (opus-y), in `{tmp_path / 'a'}`" in text
+    assert f"- Responder: codex, read-only, in `{tmp_path / 'r'}`" in text
+    assert "- Sessions: claude `session-1`, codex `session-2`" in text
+
+
+def test_partial_transcript_has_no_sessions_yet() -> None:
+    text = converse.render_partial_transcript(
+        goal=GOAL,
+        asker=ASKER,
+        responder=RESPONDER,
+        max_rounds=5,
+        started_at=datetime(2026, 10, 31, 12, 0, tzinfo=UTC),
+        turns=[],
+    )
+    assert "- Sessions:" not in text
+    assert "- Responder: codex, read-only" in text
 
 
 @pytest.mark.parametrize(
