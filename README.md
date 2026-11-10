@@ -489,15 +489,38 @@ How a consultation runs:
 - `--responder-path DIR` runs the responder in its own folder, with that folder's files, instructions, skills, MCP servers and any active scene. It may have no access to the asker's files; if the asker needs to know that, say so in the goal (for example, "the responder can't see your files, so quote what it needs"). The transcript stays in the asker's project (`--path`).
 - "Never sent" is routing, not secrecy: a responder sharing the asker's folder can still read the goal from the asker's `transcript.md` or any other shared file. Use `--responder-path` to keep them apart.
 - `--max-rounds` (default 5) caps the asker's questions. After the last answer the asker is told to give its final answer now. If it still doesn't, the consultation stops without one (exit 2). `--timeout` (default 1800s) bounds the whole consultation, including startup.
-- **Each side keeps its own session.** On Claude Code 2.1.316 or newer, where unattended resume was verified, every message after the first resumes that side's exact session, so neither agent re-reads the conversation and each remembers what it already checked. Each new session gets its own `--session-id`, so two Claude agents never share one, even when crossby itself runs inside Claude Code. Older Claude Code builds and tools whose unattended resume isn't verified yet (Codex, Cursor, Copilot, OpenCode, Antigravity CLI) replay instead: each turn is a fresh session whose prompt carries that side's earlier exchanges, with that history trimmed to `--history-chars` (default 80,000) and to the tool's prompt-size limit. The transcript and `--json` say which mode each side used.
-- **Messages are never cut.** Each question and answer reaches the other side whole; only replayed history is trimmed. If a message alone is too big for a tool that takes its prompt as a command-line argument (Cursor, Copilot, Antigravity CLI), the consultation stops with an error saying so, rather than sending part of it.
-- The asker's final answer is its own judgment, not independent verification: check what it says it verified. Neither side is told not to change files. Unattended sessions deny actions that need approval, but Codex's headless sandbox still allows writes inside its workspace.
+- **Each side keeps its own session.** Every message after the first resumes that side's exact native session, so neither agent re-reads the conversation and each remembers what it already checked. Resume was verified live per tool, and a build older than the one below replays instead: each turn is then a fresh session whose prompt carries that side's earlier exchanges, trimmed to `--history-chars` (default 80,000) and to the tool's prompt-size limit. The transcript and `--json` say which mode each side used, and how many earlier messages a replayed turn left out.
 
-crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed unattended session, by default on the asker's tool (`--summarizer-tool` picks another), and reuses the [handoff](#session-handoff) transcript formatting and truncation.
+  | Tool | Resumes with | Verified on |
+  | --- | --- | --- |
+  | Claude Code | `--session-id` for a new session, `--resume <id>` after | 2.1.316 |
+  | Codex CLI | `codex exec resume <thread>` | 0.166.0 |
+  | Cursor | `--resume <chat>` | 2026.11.05 |
+  | GitHub Copilot | `--session-id <uuid>`, chosen by crossby, for a new session and to resume it | 1.0.105 |
+  | OpenCode | `--session <id>` | 1.19.5 |
+  | Antigravity CLI | `--conversation <id>` | 1.5.1 |
+
+  crossby chooses the ID where the tool allows it (Claude Code, Copilot), so two agents never share a session, even when crossby itself runs inside one of those tools. A resumed turn must report the same session it was given, or it fails.
+- **The responder is read-only.** Every responder turn, `crossby ask` and the `--summary` session run with the tool's own read-only profile, applied natively on every turn, resumed or not. A tool or build without a verified profile is refused before any agent starts; crossby never falls back to telling the agent not to write.
+
+  | Tool | Read-only profile | Verified on |
+  | --- | --- | --- |
+  | Claude Code | a closed tool set, `--tools Read,Grep,Glob,Skill`, with hooks disabled | 2.1.317 |
+  | Codex CLI | the OS `read-only` sandbox, with `approval_policy="never"` pinned and hooks disabled | 0.166.0 |
+  | Cursor | a closed tool set of read, search and list tools (`--allowed-tools`) | 2026.11.05 |
+  | GitHub Copilot | `--deny-tool write --deny-tool shell` | 1.0.105 |
+  | OpenCode | a session-only agent with edit, bash, subagents and questions denied | 1.19.5 |
+  | Antigravity CLI | session-only settings with an empty allow list, in plan mode | 1.5.1 |
+
+  Each profile was checked by forcing the agent to write through its file tool and its shell, and by confirming that the folder's own instructions and skills still load. The profiles also hold against ambient settings that widen them: a Codex `approvals_reviewer` that auto-approves escalations, Antigravity allow rules for commands such as `uv`, and Claude allow rules in `settings.local.json`. Read-only covers files changed through the tool's own file, edit and shell tools. It does not cover MCP servers or account connectors, web access (Codex keeps its web search), or hooks on Cursor, Copilot, OpenCode and Antigravity CLI. A read-only Claude Code or Cursor responder has no shell, so it reads with its file and search tools. The asker is the user's own agent and keeps its folder's normal unattended policy.
+- **Messages are never cut.** Each question and answer reaches the other side whole; only replayed history is trimmed. If a message alone is too big for a tool that takes its prompt as a command-line argument (Cursor, Copilot, Antigravity CLI), the consultation stops with an error saying so, rather than sending part of it.
+- The asker's final answer is its own judgment, not independent verification: check what it says it verified. Permissions a tool denied during a turn are shown under that turn in the transcript and listed in `--json`.
+
+crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message, atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed read-only session, by default on the asker's tool (`--summarizer-tool` picks another), and reuses the [handoff](#session-handoff) transcript formatting and truncation.
 
 Output is split for scripting: live messages and progress go to stderr; stdout gets only the asker's final answer (followed by the summary with `--summary`), or a JSON object with `--json`. Exit codes: `0` answered, `2` stopped by the round or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
 
-`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
+`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. The library functions behind them (`ask_agent`, `run_conversation`) enforce the same check. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
 
 Both commands accept the managed-headless tools: **Claude, Codex, Cursor, Copilot, OpenCode, Antigravity CLI**.
 
@@ -575,10 +598,22 @@ adapter's remediation rather than running with a guessed contract.
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | 2.1.263 | `claude --print` | stdin | text (from the json result), json, stream-json | `--json-schema` | `--permission-prompts none` denies anything that would prompt; `permission_denials` are reported |
 | Codex CLI | 0.154.0 | `codex exec --json` | stdin (`-`) | text, jsonl | `--output-schema` | no approval channel exists in `exec`; the requested `--sandbox` and pinned `network_access` are the whole policy |
-| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | text (from the stream-json result), json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so edits can remain proposals |
+| Cursor | 2026.09.10-fd3934a | `agent --print` | argument | text (from the stream-json result), json, stream-json | not supported | `--trust` clears the workspace-trust gate; `--force`/`--yolo` is never granted, so shell commands are refused, but print mode still applies file edits (use `read_only`) |
 | GitHub Copilot CLI | 1.0.83 | `copilot --prompt -s` | argument | text | not supported | `--no-ask-user` removes `ask_user`; `--allow-all-tools` is never emitted, so tools outside the session command policy are denied |
 | OpenCode | 1.18.31 | `opencode run --format json` | stdin | text, jsonl | not supported | `--auto` is never emitted, so OpenCode's own noninteractive permission behavior stands |
 | Antigravity CLI | 1.2.6 | `agy --print` | argument | text (from the json result), json, stream-json | `--json-schema` | `--print-timeout` carries the session's overall Crossby deadline (it bounds the whole run, not one idle stretch); a native waiting state fails the session instead of stalling |
+
+Two request fields need a newer build than the row above; each adapter checks
+it before spawning anything and names the build where it was verified.
+`resume_id` continues that exact native session; the result must report the
+same session, or it is invalid output. `read_only=True` applies the adapter's
+verified read-only profile, or refuses the request; it is never approximated
+with prompt text. Both are listed per tool, with their verified builds, under
+[Agent conversations](#agent-conversations), and the live evidence is in
+[unattended verification](docs/unattended-headless-verification.md). Every
+unattended child also gets `PWD` set to its working directory: OpenCode takes
+its working directory from an inherited `PWD` rather than from the process
+cwd, so it would otherwise act on the caller's folder.
 
 Unattended behavior is uniform above the adapters. An unattended run never
 inherits parent stdin — a prompt is written to a pipe that is then closed, and

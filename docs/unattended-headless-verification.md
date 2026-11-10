@@ -98,6 +98,96 @@ expect, Codex emitting five WebSocket and five HTTPS reconnect attempts before
 `turn.failed`. A native timeout alone is not enough; Crossby's deadline and
 process-group teardown are what bound the run.
 
+## Read-only sessions and resume
+
+Verified 2026-11-09 on macOS against the builds below, which are each adapter's
+`HEADLESS_READ_ONLY_VERIFIED_VERSION` and `HEADLESS_RESUME_VERIFIED_VERSION`.
+
+| Tool | Build | Read-only profile | Resume |
+| --- | --- | --- | --- |
+| Claude Code | 2.1.317 (resume: 2.1.316) | `--tools Read,Grep,Glob,Skill --settings '{"disableAllHooks":true}'` | `--session-id` new, `--resume <id>` after |
+| Codex CLI | 0.166.0 | `--sandbox read-only -c sandbox_mode="read-only" -c approval_policy="never" --disable hooks` | `codex exec resume <thread> … -` |
+| Cursor | 2026.11.05-86047df | `--allowed-tools read_tool_call,grep_tool_call,glob_tool_call,ls_tool_call,sem_search_tool_call` | `--resume <chatId>` |
+| GitHub Copilot CLI | 1.0.105 | `--deny-tool write --deny-tool shell` | `--session-id <uuid>` for both |
+| OpenCode | 1.19.5 | `--agent crossby-read-only`, defined in `OPENCODE_CONFIG_CONTENT` with edit, bash, task and question denied | `--session <id>` |
+| Antigravity CLI | 1.5.1 | `--mode plan --settings '{"permissions":{"allow":[]}}'` | `--conversation <id>` |
+
+Each profile was probed in a scratch git repository whose instruction files
+(`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.github/copilot-instructions.md`)
+named a codeword and whose `.claude/skills/` held one skill. Two turns ran per
+tool. The fresh turn asked for the codeword and for a file write. The resumed
+turn asked for a number given in the fresh turn, a write through the file tool,
+a write through the shell, and the skill's content. A second pass told each
+agent it was an authorized test and that it must call both tools, so a model
+that merely declined could not pass. `git status` stayed clean for every
+profile below, every tool recalled the number on its resumed turn, and every
+resumed run reported the session it was given.
+
+What the probes established:
+
+- **Claude Code.** `--restricted` removes Bash and WebFetch and ignores the
+  settings files, but on 2.1.317 the folder's `CLAUDE.md` did not load under
+  it ("There's no project codeword in my instructions"). `--setting-sources ""`
+  likewise drops the user's `CLAUDE.md` and skills. A closed `--tools` set
+  keeps the folder's `CLAUDE.md` and skills (the codeword and the skill's
+  content both came back) and leaves no write or shell tool to call, whatever
+  the ambient allow rules say.
+- **Codex CLI.** `--sandbox read-only` alone was not enough: with
+  `approvals_reviewer = "auto_review"` in the user's `config.toml`, an
+  `apply_patch` outside the sandbox was escalated, approved and written. With
+  `approval_policy="never"` pinned, the shell write failed with
+  `operation not permitted` and the patch was rejected, on fresh and resumed
+  turns. `codex exec resume` takes no `--sandbox`, `--color` or `--add-dir`,
+  so the policy goes through `-c` on every turn; its `thread.started` reports
+  the resumed thread.
+- **Cursor.** Neither `--mode ask` nor `--mode plan` is read-only in print mode:
+  a forced edit wrote the file under both (the shell was refused, since
+  `--force` is never passed). The hidden `--allowed-tools` flag takes Cursor's
+  proto tool names and rejects unknown ones (`Invalid --allowed-tools
+  value(s)…`). With read, grep, glob, list and semantic search only, the agent
+  reported having Grep, Read and Glob and nothing to write with, and still read
+  the instructions. `--resume <chatId>` continues the chat named in the result
+  envelope's `session_id`.
+- **GitHub Copilot CLI.** Both forced writes were refused natively: "Permission
+  to run this tool was denied due to the following rules: `shell`" and
+  "`write`". `--session-id <uuid>` creates a session with that ID in text mode,
+  and the same flag resumes it, so crossby pins the ID itself; text output
+  carries no session ID to read back.
+- **OpenCode.** OpenCode takes its working directory from an inherited `PWD`,
+  not from the process cwd: started in one folder with `PWD=/tmp`, it answered
+  `/private/tmp`, and it created its session there. The managed runtime now
+  sets `PWD` for every unattended child. The built-in `plan` agent is not
+  read-only: its resolved rules start with `* allow`, so bash is allowed, and
+  edits are allowed under `.opencode/plans/` inside the project. A
+  session-only agent with edit, bash, task and question denied makes OpenCode
+  stop offering its write, edit, patch and bash tools ("I don't have bash or
+  write tools available"), while `AGENTS.md` and the project skill still load.
+  A plugin's update checker printed a plain-text line to stdout before the
+  first event; such lines are now ignored with a warning, while a malformed
+  event line is still invalid output.
+- **Antigravity CLI.** Without a profile, an allow rule in the user's settings
+  (`command(uv)`) let a default-mode turn write a file through
+  `uv run python -c …`. Session-only `--settings` replace the ambient
+  `permissions.allow` list, so with an empty list agy auto-denied the command
+  and reported it in `denied_actions`. When agy denies an action it ends the
+  turn with an empty `response`, so plan mode is added to keep the agent from
+  attempting edits: it writes its plan outside the project
+  (`~/.gemini/antigravity-cli/brain/…`) and asks for approval. Approving the plan
+  on the resumed turn did not get past the empty allow list: the write was
+  denied and no file was created.
+
+End to end, `crossby converse claude <tool>` ran two-round consultations with
+each tool as the responder in its own folder. Both sides resumed, the asker
+recovered the codeword from the responder's instructions and a date from its
+`notes.txt`, the responder's write attempt failed, and the responder's folder
+had no changes. Copilot's model declined to quote its instructions, a model
+choice, but it did report that the write permission was denied.
+
+Read-only covers files changed through each tool's own file, edit and shell
+tools. It does not cover MCP servers, account connectors, web access (Codex's
+web search stays available) or hooks on Cursor, Copilot, OpenCode and
+Antigravity CLI.
+
 ## Not verified live
 
 - **GitHub Copilot CLI stdout envelope.** The account available for probing is
