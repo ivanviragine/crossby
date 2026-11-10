@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self, cast
@@ -15,6 +16,9 @@ _HEADLESS_EVENT_MESSAGE_LIMIT = 64 * 1024
 _HEADLESS_EVENT_PAYLOAD_LIMIT = 256 * 1024
 _HEADLESS_FINAL_PAYLOAD_LIMIT = 8 * 1024 * 1024
 _HEADLESS_DIAGNOSTIC_LIMIT = 16 * 1024
+_HEADLESS_ENVIRONMENT_ENTRIES = 64
+_HEADLESS_ENVIRONMENT_BYTES = 32 * 1024
+_ENVIRONMENT_NAME = re.compile(r"CROSSBY_[A-Z0-9_]+")
 
 
 class EffortLevel(StrEnum):
@@ -281,6 +285,63 @@ class HeadlessPreflightDeferredCheck(StrEnum):
     TRANSPORT_STARTUP = "transport_startup"
     PROTOCOL_NEGOTIATION = "protocol_negotiation"
     OUTPUT_COLLECTION = "output_collection"
+
+
+class RestrictionChannel(StrEnum):
+    """A way a session could act beyond answering, reported per session.
+
+    Each channel is reported for the native profile a session actually ran
+    with (see :class:`Restriction`); a channel that is not reported as
+    enforced may be available to the agent, whatever the prompt says.
+    """
+
+    FILE_EDITS = "file_edits"
+    """Creating, editing or deleting files through the tool's own file tools."""
+    SHELL_COMMANDS = "shell_commands"
+    """Running any shell command, even one that changes nothing."""
+    SHELL_WRITES = "shell_writes"
+    """Changing files through shell commands."""
+    HOOKS = "hooks"
+    """User or project hooks the tool runs around its own actions."""
+    MCP_TOOLS = "mcp_tools"
+    """Calling tools of configured MCP servers."""
+    CONNECTORS = "connectors"
+    """Account-level connectors or apps attached to the user's login."""
+    PLUGINS = "plugins"
+    """Plugins or extensions that load code into the tool."""
+    WEB = "web"
+    """Fetching or searching the web through the tool's own web tools."""
+    READS_OUTSIDE_WORKSPACE = "reads_outside_workspace"
+    """Reading files outside the session's working directory."""
+
+
+class RestrictionState(StrEnum):
+    """Whether a channel is blocked for a session.
+
+    ``UNKNOWN`` never means blocked: it is what every channel reports unless
+    crossby verified the native mechanism that blocks it on this build.
+    """
+
+    ENFORCED = "enforced"
+    NOT_ENFORCED = "not_enforced"
+    UNKNOWN = "unknown"
+
+
+class Restriction(BaseModel):
+    """One channel's state for one session, with the evidence behind it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    channel: RestrictionChannel
+    state: RestrictionState
+    # The native mechanism, e.g. "--sandbox read-only"; None when unknown.
+    mechanism: str | None = None
+    # The oldest CLI build the state was verified on; None when unknown.
+    verified_on: str | None = None
+
+    @property
+    def enforced(self) -> bool:
+        return self.state is RestrictionState.ENFORCED
 
 
 class ModelTier(StrEnum):
@@ -665,6 +726,18 @@ class HeadlessSessionRequest(BaseModel):
     # a closed tool set, or native deny rules), or rejects the request: it is
     # never approximated with prompt text.
     read_only: bool = False
+    # Channels that must be verified blocked for this build and profile. The
+    # runtime resolves them after its version probe and refuses to start the
+    # session when any is not enforced; unknown counts as not enforced.
+    require_blocked: frozenset[RestrictionChannel] = frozenset()
+    # crossby's own ``CROSSBY_*`` markers for this session's native process
+    # (such as the consultation depth), added to its environment only: the
+    # parent process environment is never changed. Other names are rejected,
+    # so a session can never change which executable runs or how it loads
+    # (PATH, NODE_OPTIONS, loader variables), and the version probe always
+    # describes the program that runs. Only the unattended CLI transport
+    # passes them on; other transports reject them.
+    environment: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: float = 600.0
     idle_timeout_seconds: float | None = None
     interaction_timeout_seconds: float = 60.0
@@ -674,6 +747,27 @@ class HeadlessSessionRequest(BaseModel):
     def _prompt_is_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("a headless session requires a non-blank prompt")
+        return value
+
+    @field_validator("environment")
+    @classmethod
+    def _environment_is_bounded(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > _HEADLESS_ENVIRONMENT_ENTRIES:
+            raise ValueError("a headless session environment has too many variables")
+        size = 0
+        for name, item in value.items():
+            if not _ENVIRONMENT_NAME.fullmatch(name):
+                raise ValueError(
+                    f"{name!r} is not a variable a session environment may set: only "
+                    "CROSSBY_* markers are allowed"
+                )
+            if "\x00" in item:
+                raise ValueError(f"environment variable {name} contains a NUL character")
+            size += len(name.encode("utf-8", "surrogateescape")) + len(
+                item.encode("utf-8", "surrogateescape")
+            )
+        if size > _HEADLESS_ENVIRONMENT_BYTES:
+            raise ValueError("a headless session environment exceeded its byte limit")
         return value
 
     @field_validator("model", "resume_id")
@@ -1185,6 +1279,9 @@ class HeadlessSessionPreflight(BaseModel):
     trusted_dirs: tuple[Path, ...] = ()
     checked: tuple[HeadlessPreflightCheck, ...]
     deferred: tuple[HeadlessPreflightDeferredCheck, ...]
+    # Every channel's state for the profile this request would run with on
+    # the detected build (see AbstractAITool.headless_restrictions).
+    restrictions: tuple[Restriction, ...] = ()
 
     @field_validator("detected_version")
     @classmethod

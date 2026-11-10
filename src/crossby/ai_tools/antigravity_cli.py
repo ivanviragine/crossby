@@ -7,6 +7,7 @@ import math
 import subprocess
 import time
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -49,6 +50,8 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    RestrictionChannel,
+    RestrictionState,
     TokenUsage,
 )
 
@@ -142,6 +145,36 @@ class AntigravityCLIAdapter(AbstractAITool):
     launches the Antigravity IDE."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.ANTIGRAVITY_CLI
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (
+            RestrictionState.ENFORCED,
+            '--mode plan with --settings {"permissions": {"allow": []}}',
+        ),
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.ENFORCED,
+            'commands are auto-denied under {"permissions": {"allow": []}}',
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.ENFORCED,
+            'commands are auto-denied under {"permissions": {"allow": []}}',
+        ),
+        RestrictionChannel.HOOKS: (
+            RestrictionState.NOT_ENFORCED,
+            "the read-only profile leaves hooks enabled",
+        ),
+        RestrictionChannel.WEB: (
+            RestrictionState.NOT_ENFORCED,
+            "the search_web tool stays available",
+        ),
+        RestrictionChannel.READS_OUTSIDE_WORKSPACE: (
+            RestrictionState.NOT_ENFORCED,
+            "the file tools read any path",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -422,7 +455,6 @@ class AntigravityCLIAdapter(AbstractAITool):
             run_managed_command,
             usage_from,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         output = run_managed_command(
             context,
@@ -437,7 +469,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                 conversation_id=request.resume_id,
             ),
             cwd=request.working_dir,
-            env=child_environment({"NO_COLOR": "1"}),
+            extra_env={"NO_COLOR": "1"},
             stdin_text=_stream_input(request.prompt),
             on_stdout_lines=frame_streamer(
                 context,
@@ -598,7 +630,6 @@ class AntigravityCLIAdapter(AbstractAITool):
             run_managed_command,
             usage_from,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         owner = ResumableManagedCLIController(context)
         conversation_id = request.resume_id
@@ -616,7 +647,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                     conversation_id=conversation_id,
                 ),
                 cwd=request.working_dir,
-                env=child_environment({"NO_COLOR": "1"}),
+                extra_env={"NO_COLOR": "1"},
                 # A callback answer continues the conversation in place of the
                 # original prompt, on the same unbounded stdin channel.
                 stdin_text=_stream_input(answer if answer is not None else request.prompt),

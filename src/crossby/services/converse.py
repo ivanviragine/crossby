@@ -3,8 +3,8 @@
 ``crossby converse ASKER RESPONDER --goal ...`` lets one agent consult another.
 The asker holds the goal: it decides what to ask, judges each answer, asks
 follow-up questions, and decides when it has enough. The responder never sees
-the goal; it only answers the asker's messages. ``crossby ask`` is the
-single-question primitive underneath.
+the goal; it only answers the asker's messages. ``crossby ask`` (see
+:mod:`crossby.services.ask`) is the single-question primitive.
 
 Each side keeps its own native session: every turn after its first resumes
 that session and carries only the other agent's latest message, whole. Nothing
@@ -22,11 +22,9 @@ normal unattended policy.
 from __future__ import annotations
 
 import os
-import queue
 import re
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -187,21 +185,6 @@ class ConversationResult:
         return EXIT_CODES[self.stop_reason]
 
 
-@dataclass(frozen=True)
-class AskResult:
-    """The outcome of a single ``ask`` turn."""
-
-    tool: AIToolID
-    status: HeadlessTerminalStatus | None
-    text: str
-    duration_seconds: float
-    error: str | None = None
-
-    @property
-    def succeeded(self) -> bool:
-        return self.status is HeadlessTerminalStatus.SUCCEEDED and self.error is None
-
-
 class TurnRunner(Protocol):
     """Runs managed headless sessions; injectable so tests need no real CLIs."""
 
@@ -229,36 +212,10 @@ class HeadlessTurnRunner:
         request: HeadlessSessionRequest,
         cancel_event: threading.Event,
     ) -> HeadlessSessionResult:
-        """Run one session in a worker so Ctrl-C cancels it cleanly.
+        """Run one session in a worker so Ctrl-C cancels it cleanly."""
+        from crossby.services.ask import run_cancellable
 
-        ``KeyboardInterrupt`` only reaches the main thread. Waiting here and
-        setting ``cancel_event`` on interrupt lets the managed runtime tear down
-        the native process group before the interrupt propagates.
-        """
-        from crossby.ai_tools.base import AbstractAITool
-
-        adapter = AbstractAITool.get(tool)
-        box: queue.Queue[HeadlessSessionResult | BaseException] = queue.Queue(1)
-
-        def work() -> None:
-            try:
-                box.put(adapter.run_headless_session(request, cancel_event=cancel_event))
-            except BaseException as exc:
-                box.put(exc)
-
-        worker = threading.Thread(target=work, daemon=True, name=f"crossby-converse-{tool}")
-        worker.start()
-        try:
-            while worker.is_alive():
-                worker.join(0.1)
-        except KeyboardInterrupt:
-            cancel_event.set()
-            worker.join(30)
-            raise
-        value = box.get_nowait()
-        if isinstance(value, BaseException):
-            raise value
-        return value
+        return run_cancellable(tool, request, cancel_event)
 
 
 # ---------------------------------------------------------------------------
@@ -284,18 +241,14 @@ def check_depth() -> None:
         )
 
 
-@contextmanager
-def child_depth() -> Iterator[None]:
-    """Mark processes started inside this block as one level deeper."""
-    previous = os.environ.get(DEPTH_ENV)
-    os.environ[DEPTH_ENV] = str(current_depth() + 1)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(DEPTH_ENV, None)
-        else:
-            os.environ[DEPTH_ENV] = previous
+def child_environment() -> dict[str, str]:
+    """The variables that mark an agent crossby starts as one level deeper.
+
+    They travel in each session request, so only that agent's process gets
+    them: the caller's own environment never changes, and concurrent
+    consultations in one process cannot see or undo each other's.
+    """
+    return {DEPTH_ENV: str(current_depth() + 1)}
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +335,7 @@ def _request(
         timeout_seconds=timeout_seconds,
         resume_id=resume_id,
         read_only=read_only,
+        environment=child_environment(),
     )
 
 
@@ -406,55 +360,6 @@ def _status(result: HeadlessSessionResult) -> str:
 
 def _session_handle(result: HeadlessSessionResult) -> str | None:
     return result.session_id or result.thread_id or result.conversation_id
-
-
-# ---------------------------------------------------------------------------
-# ask
-# ---------------------------------------------------------------------------
-
-
-def ask_agent(
-    tool: AIToolID,
-    prompt: str,
-    *,
-    working_dir: Path,
-    model: str | None = None,
-    timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
-    runner: TurnRunner | None = None,
-    clock: Callable[[], float] = monotonic,
-) -> AskResult:
-    """Ask one agent one question in a read-only unattended headless session.
-
-    The asked agent is a responder: it answers from its folder and never
-    changes it. A tool without a verified read-only profile is refused.
-    """
-    from crossby.ai_tools.headless import HeadlessSessionError
-
-    check_depth()
-    if not prompt.strip():
-        raise ConverseError("The question is empty.")
-    runner = runner or HeadlessTurnRunner()
-    request = _request(
-        None,
-        prompt=prompt.strip(),
-        working_dir=working_dir,
-        timeout_seconds=timeout_seconds,
-        model=model,
-        read_only=True,
-    )
-    started = clock()
-    try:
-        with child_depth():
-            result = runner.run(tool, request, threading.Event())
-    except HeadlessSessionError as exc:
-        return AskResult(tool, None, "", clock() - started, error=str(exc))
-    text = (result.final_text or "").strip()
-    error = None
-    if result.status is not HeadlessTerminalStatus.SUCCEEDED:
-        error = f"{tool.value} session ended with status {_status(result)}"
-    elif not text:
-        error = f"{tool.value} returned no text"
-    return AskResult(tool, result.status, text, clock() - started, error=error)
 
 
 # ---------------------------------------------------------------------------
@@ -688,8 +593,7 @@ def run_conversation(
     # Ctrl-C can land anywhere: in a session, a preflight, or a caller's
     # callback while it prints a reply. Every case keeps the completed turns.
     try:
-        with child_depth():
-            return relay()
+        return relay()
     except _StopError as stop:
         return finish(stop.reason, stop.error)
     except KeyboardInterrupt:
@@ -923,8 +827,7 @@ def summarize_conversation(
     )
     runner = runner or HeadlessTurnRunner()
     try:
-        with child_depth():
-            session = runner.run(tool, request, threading.Event())
+        session = runner.run(tool, request, threading.Event())
     except HeadlessSessionError as exc:
         raise ConverseSummaryError(str(exc)) from None
     if session.status is not HeadlessTerminalStatus.SUCCEEDED:

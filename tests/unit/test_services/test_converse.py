@@ -99,6 +99,7 @@ class FakeRunner:
         self.preflight_timeouts: list[float] = []
         self.calls: list[tuple[AIToolID, HeadlessSessionRequest]] = []
         self.depths: list[str | None] = []
+        self.parent_depths: list[str | None] = []
         self.sessions_created = 0
 
     def preflight(self, tool: AIToolID, request: HeadlessSessionRequest) -> None:
@@ -117,7 +118,8 @@ class FakeRunner:
         cancel_event: threading.Event,
     ) -> HeadlessSessionResult:
         self.calls.append((tool, request))
-        self.depths.append(os.environ.get(DEPTH_ENV))
+        self.depths.append(request.environment.get(DEPTH_ENV))
+        self.parent_depths.append(os.environ.get(DEPTH_ENV))
         if self.clock is not None:
             self.clock.now += self.seconds_per_turn
         item = self.replies.pop(0)
@@ -657,15 +659,29 @@ def test_a_long_message_with_a_requirement_in_the_middle_arrives_whole(tmp_path:
 
 
 # ---------------------------------------------------------------------------
-# Recursion guard and ask
+# Recursion guard
 # ---------------------------------------------------------------------------
 
 
-def test_agents_run_one_level_deeper_and_depth_is_restored(tmp_path: Path) -> None:
+def test_agents_run_one_level_deeper_without_changing_the_parent(tmp_path: Path) -> None:
     runner = FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"])
     _run(runner, tmp_path)
+    # The depth travels in each session request, never in this process's
+    # environment, so concurrent consultations cannot see or undo each other's.
     assert runner.depths == ["1", "1", "1"]
+    assert runner.parent_depths == [None, None, None]
     assert DEPTH_ENV not in os.environ
+
+
+def test_the_depth_counts_up_from_the_callers_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(converse, "MAX_DEPTH", 3)
+    monkeypatch.setenv(DEPTH_ENV, "2")
+    runner = FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"])
+    _run(runner, tmp_path)
+    assert runner.depths == ["3", "3", "3"]
+    assert os.environ[DEPTH_ENV] == "2"
 
 
 def test_nested_consultation_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -680,52 +696,16 @@ def test_unparseable_depth_is_treated_as_top_level(monkeypatch: pytest.MonkeyPat
     converse.check_depth()
 
 
-def test_ask_sends_the_question_as_written(tmp_path: Path) -> None:
-    runner = FakeRunner(["  The answer.  "])
-    result = converse.ask_agent(
-        AIToolID.CODEX, "Question?", working_dir=tmp_path, model="m", runner=runner
-    )
-    assert result.succeeded
-    assert result.text == "The answer."
-    ((_tool, request),) = runner.calls
-    assert request.prompt == "Question?"
-    assert request.model == "m"
-    # The asked agent is a responder: it never changes the project.
-    assert request.read_only
-    assert runner.depths == ["1"]
-
-
 def test_library_calls_enforce_the_recursion_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The guard lives in the engine, not only in the CLI, so a product that
-    # imports the library is covered too.
+    # imports the library is covered too (``ask`` is covered in test_ask.py).
     monkeypatch.setenv(DEPTH_ENV, "1")
     runner = FakeRunner(["unused"])
     with pytest.raises(ConverseDepthError):
-        converse.ask_agent(AIToolID.CODEX, "q", working_dir=tmp_path, runner=runner)
-    with pytest.raises(ConverseDepthError):
         _run(runner, tmp_path)
     assert runner.calls == []
-
-
-def test_ask_reports_failures(tmp_path: Path) -> None:
-    failed = converse.ask_agent(
-        AIToolID.CODEX,
-        "q",
-        working_dir=tmp_path,
-        runner=FakeRunner([HeadlessTerminalStatus.FAILED]),
-    )
-    assert not failed.succeeded
-    assert failed.error == "codex session ended with status failed"
-    errored = converse.ask_agent(
-        AIToolID.CODEX,
-        "q",
-        working_dir=tmp_path,
-        runner=FakeRunner([_unsupported(AIToolID.CODEX, "not installed")]),
-    )
-    assert errored.status is None
-    assert errored.error == "not installed"
 
 
 # ---------------------------------------------------------------------------

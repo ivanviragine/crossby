@@ -1706,6 +1706,8 @@ def test_managed_cli_kills_new_child_when_rotation_fails(
     killed: list[object] = []
 
     class FakeContext:
+        request = HeadlessSessionRequest(prompt="fixture", working_dir=tmp_path)
+
         def checkpoint(self) -> None:
             return None
 

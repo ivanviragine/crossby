@@ -41,6 +41,8 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    RestrictionChannel,
+    RestrictionState,
     TokenUsage,
 )
 
@@ -133,6 +135,30 @@ class OpenCodeAdapter(AbstractAITool):
     # on 1.19.5, after the unattended floor (1.18.31).
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (
+            RestrictionState.ENFORCED,
+            "session agent crossby-read-only denies edit",
+        ),
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.ENFORCED,
+            "session agent crossby-read-only denies bash",
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.ENFORCED,
+            "session agent crossby-read-only denies bash",
+        ),
+        RestrictionChannel.HOOKS: (RestrictionState.NOT_ENFORCED, "plugin event hooks still run"),
+        RestrictionChannel.PLUGINS: (RestrictionState.NOT_ENFORCED, "plugins still load"),
+        RestrictionChannel.WEB: (
+            RestrictionState.NOT_ENFORCED,
+            "the webfetch tool stays available",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -393,13 +419,12 @@ class OpenCodeAdapter(AbstractAITool):
             recognized_frame_kind,
             run_managed_command,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         output = run_managed_command(
             context,
             argv=self._headless_command(request),
             cwd=request.working_dir,
-            env=child_environment(self._headless_environment(request)),
+            extra_env=self._headless_environment(request),
             stdin_text=request.prompt,
             on_stdout_lines=frame_streamer(
                 context,

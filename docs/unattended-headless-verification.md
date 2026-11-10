@@ -150,7 +150,14 @@ What the probes established:
   `operation not permitted` and the patch was rejected, on fresh and resumed
   turns. `codex exec resume` takes no `--sandbox`, `--color` or `--add-dir`,
   so the policy goes through `-c` on every turn; its `thread.started` reports
-  the resumed thread.
+  the resumed thread. Outside a git repository `codex exec` refuses to start
+  ("Not inside a trusted directory and --skip-git-repo-check was not
+  specified"), a guard for files nothing could restore. A read-only session
+  cannot change files, so it passes `--skip-git-repo-check` (both `exec` and
+  `exec resume` take it); rechecked 2026-11-10 in a plain folder, where the
+  fresh turn read a file and its shell and `apply_patch` writes both failed,
+  the resumed turn recalled its number, and the folder was unchanged. A
+  session that can write keeps the guard.
 - **Cursor.** Neither `--mode ask` nor `--mode plan` is read-only in print mode:
   a forced edit wrote the file under both (the shell was refused, since
   `--force` is never passed). The hidden `--allowed-tools` flag takes Cursor's
@@ -197,7 +204,76 @@ choice, but it did report that the write permission was denied.
 Read-only covers files changed through each tool's own file, edit and shell
 tools. It does not cover MCP servers, account connectors, web access (Codex's
 web search stays available) or hooks on Cursor, Copilot, OpenCode and
-Antigravity CLI.
+Antigravity CLI. The next section reports each of these per channel.
+
+## What read-only blocks
+
+Verified 2026-11-10 on macOS. Every session reports the state of each channel
+(`RestrictionChannel`) for the profile it actually ran with:
+`AbstractAITool.headless_restrictions()` returns the adapter's
+`HEADLESS_READ_ONLY_RESTRICTIONS` only for an unattended read-only session on a
+build at or above the read-only floor, and `unknown` for every other session
+and every channel the declaration leaves out. A caller's `require_blocked`
+channels are checked by the runtime after its version probe, so a session
+whose required channel is not `enforced` on the build that would run is
+refused before anything is spawned.
+
+| Channel | Claude Code | Codex CLI | Cursor | Copilot | OpenCode | Antigravity CLI |
+| --- | --- | --- | --- | --- | --- | --- |
+| `file_edits` | enforced | enforced | enforced | enforced | enforced | enforced |
+| `shell_writes` | enforced | enforced | enforced | enforced | enforced | enforced |
+| `shell_commands` | enforced | not enforced | enforced | enforced | enforced | enforced |
+| `hooks` | enforced | enforced | not enforced | not enforced | not enforced | not enforced |
+| `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
+| `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
+| `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
+| `mcp_tools` | unknown | unknown | unknown | not enforced | unknown | unknown |
+| `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
+
+`enforced` is claimed only where the mechanism is crossby's own profile and
+holds whatever the user's settings say: a closed tool set, an OS sandbox, or a
+session-only deny rule. A tool's default that the user's own configuration can
+loosen is reported as `unknown`, even when it blocked the probe below.
+
+The file and shell rows come from the forced-write probes in the previous
+section. Web access and reads outside the working directory were probed with
+one read-only turn per tool in a fresh git folder, which had to fetch
+`https://api.github.com/repos/ivanviragine/crossby/commits/main` and quote its
+`sha` (that day's merge commit, which no model can know) and read a random
+token from a file in a sibling folder:
+
+- **Claude Code 2.1.317.** "No web fetch or web search tool was available in
+  this session": the closed `--tools` set has neither. The outside read "was
+  denied automatically because the path is outside the allowed working
+  directories" (one permission denial reported), but a user allow rule can
+  grant such reads, so the state is unknown.
+- **Codex CLI 0.166.0.** It called its web tool (`web__run`), so web access is
+  available even though the search could not return the API's JSON. It read
+  the token through `exec_command`: the read-only sandbox restricts writes,
+  not reads.
+- **Cursor 2026.11.05-86047df.** "No WebFetch/WebSearch available"; the read
+  tool returned the token.
+- **GitHub Copilot CLI 1.0.109.** `web_fetch` and `view` on the outside path
+  were both denied natively, without `--allow-all-tools`. The URL and path
+  approvals they need can come from the user's own configuration, so both
+  states are unknown.
+- **OpenCode 1.19.5.** `webfetch` returned the commit (its JSON came back in
+  the tool result). The outside read stopped at "permission requested:
+  external_directory (…); auto-rejecting", which the user's configuration can
+  allow, so the state is unknown. After that rejection OpenCode exits 0
+  without its terminal `step_finish`, so the session ends as invalid output:
+  the answer is lost, not just the read.
+- **Antigravity CLI 1.5.4.** It called `search_web` and read the token with
+  `read_file`.
+
+Hooks are enforced only where the profile disables them (Claude's
+`disableAllHooks`, Codex's `--disable hooks`); OpenCode's plugins load and their
+event hooks run (a plugin's update checker printed to stdout during these
+runs). Copilot's JSONL stream (`--output-format json`, 1.0.109) shows its
+built-in `github-mcp-server` connecting and loading 5 tools under the
+read-only deny rules, so its MCP channel is not enforced. Other MCP servers,
+account connectors and the other tools' plugins were not probed, so they stay
+unknown.
 
 ## Prompts on stdin
 

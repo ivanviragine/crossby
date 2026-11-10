@@ -182,7 +182,7 @@ def run_managed_command(
     *,
     argv: list[str],
     cwd: Path,
-    env: dict[str, str] | None = None,
+    extra_env: Mapping[str, str] | None = None,
     stdin_text: str | None = None,
     on_stdout_lines: StdoutLineHandler | None = None,
     controller: ResumableManagedCLIController | None = None,
@@ -195,6 +195,11 @@ def run_managed_command(
     child receives ``/dev/null``: an unattended session never inherits arbitrary
     parent terminal input, so a native prompt can never block on a caller that
     is not there.
+
+    The child inherits the parent's environment plus, in increasing
+    precedence, the request's ``environment``, the adapter's ``extra_env`` and
+    a truthful ``PWD``. The parent's own environment is never changed, so
+    concurrent sessions can each carry their own variables.
 
     ``on_stdout_lines`` receives every complete native line while the child is
     still running, from this same thread.  Live delivery is what lets a long
@@ -218,7 +223,12 @@ def run_managed_command(
     # A CLI may take its working directory from an inherited PWD rather than
     # from the process cwd (OpenCode does, verified on 1.19.5), and would then
     # act on the caller's folder instead of ``cwd``. Keep PWD truthful.
-    child_env = {**(env if env is not None else os.environ), "PWD": os.path.abspath(cwd)}
+    child_env = {
+        **os.environ,
+        **context.request.environment,
+        **(extra_env or {}),
+        "PWD": os.path.abspath(cwd),
+    }
     # Register before Popen. A continuation reuses this same hook chain.
     owner = controller or ResumableManagedCLIController(context)
     try:

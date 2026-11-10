@@ -185,7 +185,16 @@ def test_codex_read_only_pins_the_sandbox_and_approvals(tmp_path: Path) -> None:
         _request(tmp_path, read_only=True, trusted_dirs=(tmp_path,)),
         schema_path=None,
     )
-    assert command[:7] == ["codex", "exec", "--json", "--color", "never", "--sandbox", "read-only"]
+    assert command[:8] == [
+        "codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--color",
+        "never",
+        "--sandbox",
+        "read-only",
+    ]
     assert 'sandbox_mode="read-only"' in command
     # Ambient approval settings (an auto reviewer) must not approve escalations.
     assert 'approval_policy="never"' in command
@@ -200,12 +209,21 @@ def test_codex_resume_continues_the_thread_with_config_overrides(tmp_path: Path)
     command = _command(
         AIToolID.CODEX, _request(tmp_path, resume_id=UUID, read_only=True), schema_path=None
     )
-    assert command[:4] == ["codex", "exec", "resume", "--json"]
+    assert command[:5] == ["codex", "exec", "resume", "--json", "--skip-git-repo-check"]
     # ``codex exec resume`` takes no --sandbox, --color or --add-dir.
     assert "--sandbox" not in command and "--color" not in command
     assert 'sandbox_mode="read-only"' in command
     assert 'approval_policy="never"' in command
     assert command[-2:] == [UUID, "-"]
+
+
+def test_only_a_read_only_codex_session_may_run_outside_a_git_repository(
+    tmp_path: Path,
+) -> None:
+    # The guard protects files no version control can restore; a session that
+    # can write keeps it, fresh or resumed.
+    for request in (_request(tmp_path), _request(tmp_path, resume_id=UUID)):
+        assert "--skip-git-repo-check" not in _command(AIToolID.CODEX, request, schema_path=None)
 
 
 def test_codex_resume_carries_writable_roots_as_config(tmp_path: Path) -> None:
