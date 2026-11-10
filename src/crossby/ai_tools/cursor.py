@@ -6,6 +6,7 @@ import io
 import shutil
 import time
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -59,6 +60,8 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    RestrictionChannel,
+    RestrictionState,
 )
 
 if TYPE_CHECKING:
@@ -305,6 +308,36 @@ class CursorAdapter(AbstractAITool):
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (
+            RestrictionState.ENFORCED,
+            "--allowed-tools read, grep, glob, ls and semantic search only",
+        ),
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.ENFORCED,
+            "--allowed-tools leaves out the shell tool",
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.ENFORCED,
+            "--allowed-tools leaves out the shell tool",
+        ),
+        RestrictionChannel.HOOKS: (
+            RestrictionState.NOT_ENFORCED,
+            "the read-only profile leaves hooks enabled",
+        ),
+        RestrictionChannel.WEB: (
+            RestrictionState.ENFORCED,
+            "--allowed-tools leaves out the web tools",
+        ),
+        RestrictionChannel.READS_OUTSIDE_WORKSPACE: (
+            RestrictionState.NOT_ENFORCED,
+            "the read tool opens any path",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -644,7 +677,6 @@ class CursorAdapter(AbstractAITool):
             run_managed_command,
             usage_from,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         # TEXT shares the stream-json wire with JSONL (see _headless_command).
         streaming = request.native_output is not HeadlessNativeOutput.JSON
@@ -652,7 +684,7 @@ class CursorAdapter(AbstractAITool):
             context,
             argv=self._headless_command(request),
             cwd=request.working_dir,
-            env=child_environment({"NO_COLOR": "1"}),
+            extra_env={"NO_COLOR": "1"},
             stdin_text=request.prompt,
             on_stdout_lines=(
                 frame_streamer(

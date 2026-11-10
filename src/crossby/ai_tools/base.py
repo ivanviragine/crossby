@@ -48,6 +48,7 @@ from crossby.models.ai import (
     AIToolID,
     EffortLevel,
     HeadlessInteractionMode,
+    HeadlessNativeTransport,
     HeadlessPreflightCheck,
     HeadlessPreflightDeferredCheck,
     HeadlessSessionPreflight,
@@ -69,6 +70,9 @@ from crossby.models.ai import (
     PlanSessionPreflight,
     PlanSessionRequest,
     PlanSessionResult,
+    Restriction,
+    RestrictionChannel,
+    RestrictionState,
     SubagentSpawnEvidence,
     SubagentSpawnReason,
     SubagentSpawnState,
@@ -102,13 +106,13 @@ def _build_at_least(version: str | None, floor: str | None) -> bool:
     return detected is not None and minimum is not None and detected >= minimum
 
 
-def _headless_posix_exec_size(argv: list[str]) -> int:
+def _headless_posix_exec_size(argv: list[str], added: Mapping[str, str] | None = None) -> int:
     """Return a conservative byte count for the child argv and environment."""
-    # Every managed native adapter inherits the current environment and pins
-    # NO_COLOR for its child. Include NUL terminators and pointer slots so the
-    # preflight remains below execve's aggregate allocation, not just below its
-    # maximum single-argument limit.
-    environment = {**os.environ, "NO_COLOR": "1"}
+    # Every managed native adapter inherits the current environment plus the
+    # request's added variables and pins NO_COLOR for its child. Include NUL
+    # terminators and pointer slots so the preflight remains below execve's
+    # aggregate allocation, not just below its maximum single-argument limit.
+    environment = {**os.environ, **(added or {}), "NO_COLOR": "1"}
     strings = sum(len(os.fsencode(argument)) + 1 for argument in argv)
     strings += sum(
         len(os.fsencode(name)) + len(os.fsencode(value)) + 2 for name, value in environment.items()
@@ -142,6 +146,12 @@ class AbstractAITool(ABC):
     # the unattended mode's own floor. ``None`` means the mode floor applies.
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = None
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = None
+    # What the unattended read-only profile does to each channel, verified
+    # live on the read-only floor: ``(state, native mechanism)``. A channel
+    # missing here is reported as unknown. See headless_restrictions().
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {}
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -663,6 +673,43 @@ class AbstractAITool(ABC):
             version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION or profile.verified_version
         )
 
+    def headless_restrictions(
+        self, request: HeadlessSessionRequest, version: str | None
+    ) -> tuple[Restriction, ...]:
+        """Every channel's state for ``request`` run by CLI ``version``.
+
+        States are resolved for the profile the session actually gets: only an
+        unattended read-only session on a build at or above the read-only floor
+        carries the adapter's verified ``HEADLESS_READ_ONLY_RESTRICTIONS``.
+        Every other session, and every channel the declaration leaves out, is
+        ``UNKNOWN``: crossby does not characterize a tool's default policy.
+        """
+        mode = request.interaction_mode
+        declared: Mapping[RestrictionChannel, tuple[RestrictionState, str]] = {}
+        verified_on: str | None = None
+        if (
+            request.read_only
+            and mode is HeadlessInteractionMode.UNATTENDED
+            and self.headless_read_only_supported(version, mode)
+        ):
+            declared = self.HEADLESS_READ_ONLY_RESTRICTIONS
+            verified_on = (
+                self.HEADLESS_READ_ONLY_VERIFIED_VERSION
+                or self.capabilities().headless.profile_for(mode).verified_version
+            )
+        restrictions: list[Restriction] = []
+        for channel in RestrictionChannel:
+            if channel in declared:
+                state, mechanism = declared[channel]
+                restrictions.append(
+                    Restriction(
+                        channel=channel, state=state, mechanism=mechanism, verified_on=verified_on
+                    )
+                )
+            else:
+                restrictions.append(Restriction(channel=channel, state=RestrictionState.UNKNOWN))
+        return tuple(restrictions)
+
     def preflight_headless_session(
         self,
         request: HeadlessSessionRequest,
@@ -706,6 +753,7 @@ class AbstractAITool(ABC):
             mode_capability=self.capabilities().headless.profile_for(normalized.interaction_mode),
             working_dir=normalized.working_dir,
             trusted_dirs=normalized.trusted_dirs,
+            restrictions=self.headless_restrictions(normalized, detected.text),
             checked=(
                 HeadlessPreflightCheck.SESSION_CAPABILITY,
                 HeadlessPreflightCheck.REQUEST_COMPATIBILITY,
@@ -756,6 +804,13 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         mode = capability.profile_for(request.interaction_mode)
+        if request.environment and mode.transport is not HeadlessNativeTransport.HEADLESS_CLI:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} cannot pass a session environment through its "
+                f"{mode.transport.value} transport.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             if interaction_handler is None:
                 raise HeadlessRequestError(
@@ -873,7 +928,11 @@ class AbstractAITool(ABC):
         self, request: HeadlessSessionRequest, detected: BinaryVersion
     ) -> None:
         """Apply the selected mode's verified floor after the shared CLI probe."""
-        from crossby.ai_tools.headless import HeadlessAdapterContractError, HeadlessUnsupportedError
+        from crossby.ai_tools.headless import (
+            HeadlessAdapterContractError,
+            HeadlessRequirementError,
+            HeadlessUnsupportedError,
+        )
         from crossby.utils.versioning import parse_semver
 
         capability = self.capabilities().headless
@@ -919,6 +978,23 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        if request.require_blocked:
+            restrictions = self.headless_restrictions(request, detected.text)
+            unmet = tuple(
+                item
+                for item in restrictions
+                if item.channel in request.require_blocked and not item.enforced
+            )
+            if unmet:
+                states = ", ".join(f"{item.channel.value} ({item.state.value})" for item in unmet)
+                raise HeadlessRequirementError(
+                    f"{name} {detected.text} cannot run this session with the required channels "
+                    f"blocked: {states}.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                    unmet=unmet,
+                    restrictions=restrictions,
+                )
 
     def _validate_headless_launch_context(self, request: HeadlessSessionRequest) -> None:
         from crossby.ai_tools.headless import HeadlessUnsupportedError
@@ -1083,7 +1159,7 @@ class AbstractAITool(ABC):
                     capability=capability,
                 )
 
-        exec_size = _headless_posix_exec_size(argv)
+        exec_size = _headless_posix_exec_size(argv, request.environment)
         exec_limit = _headless_posix_exec_limit()
         if exec_size > exec_limit - _HEADLESS_POSIX_EXEC_SAFETY_MARGIN:
             raise HeadlessRequestError(

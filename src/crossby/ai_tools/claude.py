@@ -9,6 +9,7 @@ import stat
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -52,6 +53,8 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    RestrictionChannel,
+    RestrictionState,
     SubagentSpawnStatus,
     SubagentSpawnSupport,
     TokenUsage,
@@ -140,6 +143,32 @@ class ClaudeAdapter(AbstractAITool):
     # (2.1.263) predates both.
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "2.1.316"
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "2.1.317"
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (
+            RestrictionState.ENFORCED,
+            "closed --tools set (Read, Grep, Glob, Skill) has no write or edit tool",
+        ),
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.ENFORCED,
+            "closed --tools set has no Bash tool",
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.ENFORCED,
+            "closed --tools set has no Bash tool",
+        ),
+        RestrictionChannel.HOOKS: (
+            RestrictionState.ENFORCED,
+            '--settings {"disableAllHooks": true}',
+        ),
+        RestrictionChannel.WEB: (
+            RestrictionState.ENFORCED,
+            "closed --tools set has no WebFetch or WebSearch tool",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         from crossby.ai_tools.claude_sdk import brokered_profile
@@ -459,7 +488,6 @@ class ClaudeAdapter(AbstractAITool):
             run_managed_command,
             usage_from,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         streaming = request.native_output is HeadlessNativeOutput.JSONL
         expected_session = request.resume_id or _new_session_id()
@@ -467,7 +495,7 @@ class ClaudeAdapter(AbstractAITool):
             context,
             argv=self._headless_command(request, session_id=expected_session),
             cwd=request.working_dir,
-            env=child_environment({"NO_COLOR": "1"}),
+            extra_env={"NO_COLOR": "1"},
             stdin_text=request.prompt,
             on_stdout_lines=(
                 frame_streamer(

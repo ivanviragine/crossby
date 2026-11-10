@@ -472,6 +472,9 @@ crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json --quiet
 # One question to another agent; '-' reads it from stdin
 crossby ask codex "Is there a race in src/cache.py invalidate()?"
 git diff | crossby ask claude -
+
+# Instructions in the documented envelope, and a channel that must be blocked
+crossby ask claude "Would you buy this?" --instructions-file persona.md --require-blocked hooks
 ```
 
 How a consultation runs:
@@ -506,13 +509,13 @@ How a consultation runs:
   | Tool | Read-only profile | Verified on |
   | --- | --- | --- |
   | Claude Code | a closed tool set, `--tools Read,Grep,Glob,Skill`, with hooks disabled | 2.1.317 |
-  | Codex CLI | the OS `read-only` sandbox, with `approval_policy="never"` pinned and hooks disabled | 0.166.0 |
+  | Codex CLI | the OS `read-only` sandbox, with `approval_policy="never"` pinned and hooks disabled; it also runs outside a git repository (`--skip-git-repo-check`) | 0.166.0 |
   | Cursor | a closed tool set of read, search and list tools (`--allowed-tools`) | 2026.11.05 |
   | GitHub Copilot | `--deny-tool write --deny-tool shell` | 1.0.105 |
   | OpenCode | a session-only agent with edit, bash, subagents and questions denied | 1.19.5 |
   | Antigravity CLI | session-only settings with an empty allow list, in plan mode | 1.5.4 |
 
-  Each profile was checked by forcing the agent to write through its file tool and its shell, and by confirming that the folder's own instructions and skills still load. The profiles also hold against ambient settings that widen them: a Codex `approvals_reviewer` that auto-approves escalations, Antigravity allow rules for commands such as `uv`, and Claude allow rules in `settings.local.json`. Read-only covers files changed through the tool's own file, edit and shell tools. It does not cover MCP servers or account connectors, web access (Codex keeps its web search), or hooks on Cursor, Copilot, OpenCode and Antigravity CLI. A read-only Claude Code or Cursor responder has no shell, so it reads with its file and search tools. The asker is the user's own agent and keeps its folder's normal unattended policy.
+  Each profile was checked by forcing the agent to write through its file tool and its shell, and by confirming that the folder's own instructions and skills still load. The profiles also hold against ambient settings that widen them: a Codex `approvals_reviewer` that auto-approves escalations, Antigravity allow rules for commands such as `uv`, and Claude allow rules in `settings.local.json`. Read-only covers files changed through the tool's own file, edit and shell tools. It does not cover MCP servers or account connectors, web access (Codex keeps its web search), or hooks on Cursor, Copilot, OpenCode and Antigravity CLI; see [what each profile blocks](#what-each-read-only-profile-blocks) for every channel. A read-only Claude Code or Cursor responder has no shell, so it reads with its file and search tools. The asker is the user's own agent and keeps its folder's normal unattended policy.
 - **Nothing is cut or budgeted.** Each question and answer reaches the other side whole, and every tool reads its prompt from stdin, never from the command line, so no OS argument limit applies. The only limit is each model's own context, which its tool manages.
 - The asker's final answer is its own judgment, not independent verification: check what it says it verified. Permissions a tool denied during a turn are shown under that turn in the transcript and listed in `--json`.
 
@@ -520,9 +523,68 @@ crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-
 
 Output is split for scripting: live messages and progress go to stderr; stdout gets only the asker's final answer (followed by the summary with `--summary`), or a JSON object with `--json`. In a terminal, `converse` opens with who consults whom, the limits and the transcript path, shows the elapsed time while each message is being written (as does `ask`), and prints the final answer once, since both streams share the screen. Exit codes: `0` answered, `2` stopped by the round or time limit, `1` a session failed, `130` interrupted. Neither command ever prompts.
 
-`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. The library functions behind them (`ask_agent`, `run_conversation`) enforce the same check. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
+`ask` and `converse` set `CROSSBY_CONVERSE_DEPTH` for every agent they start, the summarizer included, and both refuse to run when it is already set, so a consulted agent can't start another consultation. The variable is added to each agent's own process environment only; crossby's environment never changes, so parallel calls can't see or undo each other's. The library entry points (`crossby.api.ask`, `run_conversation`) enforce the same check. This works only if the agent's shell passes the variable through, which is typical but not guaranteed.
+
+`crossby ask` options: `--model`, `--effort`, `--timeout`, `--path`, `--instructions-file FILE` (sent in the [instructions envelope](#python-api)), and `--require-blocked CHANNEL` (repeatable: refuse to start unless that channel is verified blocked on the installed build). `--json` adds which build ran, the usage it reported and every channel's restriction state to the `tool`, `status`, `answer`, `error` and `duration_seconds` keys.
 
 Both commands accept the managed-headless tools: **Claude, Codex, Cursor, Copilot, OpenCode, Antigravity CLI**.
+
+## Python API
+
+`crossby.api` is the supported interface for programs that use crossby as a library. Everything it exports is the contract; every other module is internal. Before 1.0, patch releases keep it compatible and a minor release may change it only with a migration note, so pin a minor series (for example `crossby>=0.46,<0.47`). Serialized results carry a `schema_version` of their own.
+
+```python
+from pathlib import Path
+
+from crossby.api import AskRequest, CliBackend, ProjectWorkspace, RestrictionChannel, ask
+
+result = ask(
+    AskRequest(
+        backend=CliBackend(tool="claude", model="opus"),
+        prompt="What would make you reject this pricing page?",
+        workspace=ProjectWorkspace(path=Path("personas/cto"), instructions=persona_text),
+        require_blocked=frozenset({RestrictionChannel.FILE_EDITS, RestrictionChannel.HOOKS}),
+    )
+)
+if result.succeeded:
+    print(result.text)
+```
+
+- **An ask is one fresh session**, unattended and under the tool's read-only profile, in `workspace.path`. Nothing is resumed or replayed. `timeout_seconds` (default 600) bounds the whole call, from validation and the version probe to the answer.
+- **The question is sent as written.** With `instructions`, which is always literal text and never a path, the first message is envelope version 1, exactly:
+
+  ```text
+  <instructions>
+  {instructions}
+  </instructions>
+
+  {prompt}
+  ```
+
+  The result records it: `delivery` is `"prompt"` or `"prompt_envelope"`, with `envelope_version`.
+- **Refusals raise before any agent starts:** `AskRequestError` (an invalid request or missing folder), `AskUnsupportedError` (a tool, build or option that can't run it), `RequirementNotMetError` (a `require_blocked` channel that isn't enforced on the installed build; its `unmet` lists them), and `NestedAskError`. Once the agent starts, every outcome is an `AskResult`, including `failed`, `cancelled`, `timed_out` and `invalid_output`, with whatever the run reported.
+- **An `AskResult` carries its evidence:** `output` (`TextOutput` or `JsonOutput`, where JSON `null` still counts as present), `usage` (tokens as the tool reported them, or `None`; an unreported field is never zero), `provenance` (the tool, installed and verified builds, transport, requested and observed model, native session IDs), `restrictions` (every channel's state, below), `denials` and `warnings`. It round-trips through JSON (`model_dump_json()` / `AskResult.model_validate_json()`).
+- `preflight(request)` reports the same provenance and restrictions, plus the required channels that would be refused, without starting the agent.
+- **Calls are independent and safe to run in parallel threads.** Each session gets its own process group, environment and cancellation: pass `cancel=threading.Event()` and set it to stop that session alone. The tools' own global state (logins, settings, session stores) is still shared between parallel sessions.
+- `response_schema=` asks for structured output, validated by the runtime, on tools whose read-only profile supports it.
+
+### What each read-only profile blocks
+
+Every result reports each channel as `enforced`, `not_enforced` or `unknown`, resolved for the build and profile that actually ran. `enforced` means crossby's own profile blocks it whatever the user's settings say; a tool default the user's configuration can loosen is `unknown`, and `unknown` never counts as blocked. Verified on each tool's read-only floor ([evidence](docs/unattended-headless-verification.md#what-read-only-blocks)):
+
+| Channel | Claude Code | Codex CLI | Cursor | Copilot | OpenCode | Antigravity CLI |
+| --- | --- | --- | --- | --- | --- | --- |
+| `file_edits` | enforced | enforced | enforced | enforced | enforced | enforced |
+| `shell_writes` | enforced | enforced | enforced | enforced | enforced | enforced |
+| `shell_commands` | enforced | not enforced (sandboxed) | enforced | enforced | enforced | enforced |
+| `hooks` | enforced | enforced | not enforced | not enforced | not enforced | not enforced |
+| `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
+| `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
+| `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
+| `mcp_tools` | unknown | unknown | unknown | unknown | unknown | unknown |
+| `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
+
+So a persona that must not change anything or run hooks (`require_blocked={file_edits, shell_writes, hooks}`) can run on Claude Code and Codex today. An empty persona folder isolates nothing by itself: on most tools the agent can still read elsewhere, reach the web, and use the user's MCP servers and connectors.
 
 ## Launch options
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -29,6 +30,8 @@ from crossby.models.ai import (
     PlanModeActivation,
     PlanModeCapability,
     PlanRequestBehavior,
+    RestrictionChannel,
+    RestrictionState,
     TokenUsage,
 )
 
@@ -50,6 +53,19 @@ class CopilotAdapter(AbstractAITool):
     """Adapter for GitHub Copilot CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.COPILOT
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (RestrictionState.ENFORCED, "--deny-tool write"),
+        RestrictionChannel.SHELL_COMMANDS: (RestrictionState.ENFORCED, "--deny-tool shell"),
+        RestrictionChannel.SHELL_WRITES: (RestrictionState.ENFORCED, "--deny-tool shell"),
+        RestrictionChannel.HOOKS: (
+            RestrictionState.NOT_ENFORCED,
+            "the read-only profile leaves hooks enabled",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         from crossby.ai_tools.copilot_sdk import brokered_profile
@@ -402,14 +418,13 @@ class CopilotAdapter(AbstractAITool):
             complete_session,
             run_managed_command,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         session_id = request.resume_id or str(uuid.uuid4())
         output = run_managed_command(
             context,
             argv=self._headless_command(request, session_id=session_id),
             cwd=request.working_dir,
-            env=child_environment({"NO_COLOR": "1"}),
+            extra_env={"NO_COLOR": "1"},
             stdin_text=request.prompt,
         )
         warnings = capture_failure_warnings(output)

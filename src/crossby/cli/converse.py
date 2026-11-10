@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from rich.console import RenderableType
     from rich.live import Live
 
-    from crossby.models.ai import AIToolID
+    from crossby.models.ai import AIToolID, EffortLevel, RestrictionChannel
     from crossby.services.converse import ConversationResult, ConverseTurn, Participant
 
 
@@ -36,6 +36,22 @@ def ask(
         None, "--file", help="Read the question from this file instead."
     ),
     model: str | None = typer.Option(None, "--model", help="Model for the asked tool."),
+    effort: str | None = typer.Option(
+        None, "--effort", help="Reasoning effort, where the tool supports it."
+    ),
+    instructions_file: Path | None = typer.Option(
+        None,
+        "--instructions-file",
+        help="Send this file's text as instructions, in the documented envelope.",
+    ),
+    require_blocked: list[str] = typer.Option(
+        [],
+        "--require-blocked",
+        help=(
+            "Refuse to start unless this channel is verified blocked on the installed "
+            "build. Repeatable."
+        ),
+    ),
     timeout: float = typer.Option(
         600.0, "--timeout", help="Seconds before the session is stopped."
     ),
@@ -49,39 +65,73 @@ def ask(
     fail the session and unapproved permissions are denied. Each call is a
     fresh session, so include the context the agent needs in the question.
 
+    --json also reports which build ran, the usage it reported, and each
+    channel's restriction state (file_edits, shell_commands, shell_writes,
+    hooks, mcp_tools, connectors, plugins, web, reads_outside_workspace).
+
     Examples::
 
         crossby ask codex "Is there a race in src/cache.py invalidate()?"
         git diff | crossby ask claude -
+        crossby ask claude "Review this plan" --require-blocked hooks
     """
-    from crossby.services.converse import ConverseError, ask_agent
+    from crossby.api import (
+        AskError,
+        AskRequest,
+        CliBackend,
+        ProjectWorkspace,
+        RequirementNotMetError,
+    )
+    from crossby.api import (
+        ask as run_ask,
+    )
 
     project_root = _project_root(path)
     tool_id = _headless_tool(tool, "TOOL")
     prompt = _read_text_input(
         question, question_file, what="question", hint="an argument, '-' for stdin, or --file"
     )
+    instructions = _read_instructions(instructions_file)
+    try:
+        request = AskRequest(
+            backend=CliBackend(tool=tool_id, model=model, effort=_effort(effort)),
+            prompt=prompt,
+            workspace=ProjectWorkspace(path=project_root, instructions=instructions),
+            timeout_seconds=timeout,
+            require_blocked=frozenset(_channel(value) for value in require_blocked),
+        )
+    except ValueError as exc:
+        console.error(_validation_message(exc))
+        raise typer.Exit(1) from None
     try:
         with _waiting(f"Asking {tool_id.value} (read-only)…"):
-            result = ask_agent(
-                tool_id, prompt, working_dir=project_root, model=model, timeout_seconds=timeout
-            )
-    except ConverseError as exc:
+            result = run_ask(request)
+    except RequirementNotMetError as exc:
+        console.error(str(exc))
+        console.hint(
+            "Run without that --require-blocked, or ask a tool that blocks it "
+            "(see `crossby ask --json` for each channel's state)."
+        )
+        raise typer.Exit(1) from None
+    except AskError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
 
+    text = result.text
     if as_json:
+        payload = result.model_dump(mode="json")
         _print_json(
             {
                 "tool": tool_id.value,
-                "status": result.status.value if result.status else "failed",
-                "answer": result.text,
-                "error": result.error,
-                "duration_seconds": round(result.duration_seconds, 1),
+                "status": payload.pop("status"),
+                "answer": text or "",
+                "error": payload.pop("error"),
+                "duration_seconds": round(payload.pop("duration_seconds"), 1),
+                **payload,
             }
         )
-    elif result.text:
-        print(result.text)
+    elif text:
+        print(text)
     if not result.succeeded:
         if not as_json:
             console.error(result.error or f"{tool_id.value} did not answer.")
@@ -337,6 +387,55 @@ def _read_text_input(
         console.error(f"The {what} is empty.")
         raise typer.Exit(1)
     return text.strip()
+
+
+def _read_instructions(file: Path | None) -> str | None:
+    """The instructions file's text, verbatim, or ``None`` without one."""
+    if file is None:
+        return None
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError as exc:
+        console.error(f"Cannot read instructions file {file}: {exc}")
+        raise typer.Exit(1) from None
+    if not text.strip():
+        console.error(f"The instructions file {file} is empty.")
+        raise typer.Exit(1)
+    return text
+
+
+def _effort(value: str | None) -> EffortLevel | None:
+    from crossby.models.ai import EffortLevel
+
+    if value is None:
+        return None
+    try:
+        return EffortLevel(value)
+    except ValueError:
+        choices = ", ".join(level.value for level in EffortLevel)
+        console.error(f"Unknown effort {value!r}. Choose one of: {choices}.")
+        raise typer.Exit(1) from None
+
+
+def _channel(value: str) -> RestrictionChannel:
+    from crossby.models.ai import RestrictionChannel
+
+    try:
+        return RestrictionChannel(value.strip().lower().replace("-", "_"))
+    except ValueError:
+        choices = ", ".join(channel.value for channel in RestrictionChannel)
+        console.error(f"Unknown channel {value!r} for --require-blocked. Choose one of: {choices}.")
+        raise typer.Exit(1) from None
+
+
+def _validation_message(exc: ValueError) -> str:
+    """The first validation message, without pydantic's framing."""
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError) and exc.errors():
+        message = str(exc.errors()[0].get("msg", exc))
+        return message.removeprefix("Value error, ")
+    return str(exc)
 
 
 def _write(path: Path, text: str) -> None:

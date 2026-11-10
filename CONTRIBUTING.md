@@ -511,12 +511,47 @@ existing Plan imports and safety-limit patches compatible. Carry the runtime's
 absolute deadline and cancellation event into version probes, prompt writes,
 protocol reads/writes, parsing, and final collection.
 
+#### Restrictions, `require_blocked` and session environments
+
+`HEADLESS_READ_ONLY_RESTRICTIONS` declares, per `RestrictionChannel`, what an
+adapter's unattended read-only profile does, as `(state, native mechanism)`.
+`headless_restrictions()` returns it only for an unattended read-only request
+on a build at or above the read-only floor; every other session, and every
+channel left out, is `UNKNOWN`. Claim `ENFORCED` only for a mechanism crossby
+itself passes that holds whatever the user's configuration says (a closed tool
+set, an OS sandbox, a session-only deny rule), verified live on the read-only
+floor and recorded in `docs/unattended-headless-verification.md`. A native
+default the user's settings can loosen is `UNKNOWN`, even when a probe saw it
+block. `require_blocked` is checked in `_validate_headless_mode_version`, after
+the version probe and before any spawn, so a requirement is always resolved
+against the build that would run.
+
+`HeadlessSessionRequest.environment` adds variables to one session's child
+process. Only `HEADLESS_CLI` transports pass it on; others reject a nonempty
+environment at validation. `run_managed_command(extra_env=...)` merges
+`os.environ`, then the request's `environment`, then the adapter's own
+`extra_env`, then `PWD`, so an adapter-owned variable such as `NO_COLOR` or
+OpenCode's session config always wins. Never mutate `os.environ` to reach a
+child: concurrent sessions in one process would see and undo each other's
+values (`ask`/`converse` pass `CROSSBY_CONVERSE_DEPTH` this way).
+
+#### The public API (`crossby.api`)
+
+`src/crossby/api.py` is the only supported library surface besides the
+`crossby.ai_tools` exports; it re-exports from `services/ask.py`. Before 1.0 a
+change to an exported name or signature needs a migration note in the release
+notes. Bump `SCHEMA_VERSION` when a serialized `AskResult` or `PreflightReport`
+changes shape, and `ENVELOPE_VERSION` when the instructions envelope's text
+changes; the README documents the envelope word for word. Public API tests
+(`tests/unit/test_services/test_ask.py`) import the product's use case from
+`crossby.api` only.
+
 #### The shared unattended CLI transport
 
 Every terminal adapter runs its native non-interactive CLI through
 `ai_tools/headless_cli.py`, never its own `subprocess` call. `run_managed_command`
 owns one child process group, gives the child a stdin pipe it closes right after
-delivering the prompt (or `/dev/null` when the prompt travels in argv), registers
+delivering the prompt (or `/dev/null` when there is nothing to deliver), registers
 the cleanup sequence *before* the first blocking read, and takes every wait
 budget from `context.remaining_seconds()`.
 

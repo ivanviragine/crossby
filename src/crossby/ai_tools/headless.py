@@ -27,6 +27,7 @@ from crossby.models.ai import (
     HeadlessTerminalStatus,
     PlanInteractionKind,
     PlanInteractionOutcome,
+    Restriction,
     SessionInteraction,
     SessionInteractionResponse,
     TokenUsage,
@@ -125,6 +126,28 @@ class HeadlessUnsupportedError(HeadlessPreflightError):
             tool_id=tool_id,
             capability=capability,
         )
+
+
+class HeadlessRequirementError(HeadlessUnsupportedError):
+    """A channel the caller required blocked is not enforced on this build.
+
+    ``unmet`` holds the required channels' resolved states (not enforced or
+    unknown), and ``restrictions`` every channel's state, for the profile the
+    request would have run with on the detected build.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_id: AIToolID,
+        capability: HeadlessCapability,
+        unmet: tuple[Restriction, ...],
+        restrictions: tuple[Restriction, ...],
+    ) -> None:
+        super().__init__(message, tool_id=tool_id, capability=capability)
+        self.unmet = unmet
+        self.restrictions = restrictions
 
 
 class HeadlessAdapterContractError(HeadlessPreflightError):

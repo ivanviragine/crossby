@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -64,6 +64,8 @@ from crossby.models.ai import (
     PlanSessionRequest,
     PlanSessionResult,
     PlanSessionTransport,
+    RestrictionChannel,
+    RestrictionState,
     SubagentSpawnStatus,
     SubagentSpawnSupport,
 )
@@ -182,6 +184,30 @@ class CodexAdapter(AbstractAITool):
     # live on 0.166.0, after the unattended floor (0.154.0).
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "0.166.0"
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "0.166.0"
+    # Verified live on the read-only floor; see
+    # docs/unattended-headless-verification.md#what-read-only-blocks.
+    HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.FILE_EDITS: (
+            RestrictionState.ENFORCED,
+            '--sandbox read-only with approval_policy="never"',
+        ),
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.NOT_ENFORCED,
+            "commands run inside the read-only sandbox",
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.ENFORCED,
+            '--sandbox read-only with approval_policy="never"',
+        ),
+        RestrictionChannel.HOOKS: (RestrictionState.ENFORCED, "--disable hooks"),
+        RestrictionChannel.WEB: (RestrictionState.NOT_ENFORCED, "web search stays available"),
+        RestrictionChannel.READS_OUTSIDE_WORKSPACE: (
+            RestrictionState.NOT_ENFORCED,
+            "the read-only sandbox allows reads anywhere",
+        ),
+    }
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -502,6 +528,13 @@ class CodexAdapter(AbstractAITool):
             sandbox_mode = "danger-full-access"
         resuming = request.resume_id is not None
         command = ["codex", "exec", *(["resume"] if resuming else []), "--json"]
+        if request.read_only:
+            # Codex refuses to start outside a Git repository or trusted folder
+            # ("Not inside a trusted directory and --skip-git-repo-check was not
+            # specified"), a guard for files no version control can restore. A
+            # read-only session cannot change files, so it may run in any folder,
+            # such as an empty one made for a consulted agent (0.166.0).
+            command.append("--skip-git-repo-check")
         if not resuming:
             command.extend(("--color", "never", "--sandbox", sandbox_mode))
         command.extend(("-c", f'sandbox_mode="{sandbox_mode}"'))
@@ -571,7 +604,6 @@ class CodexAdapter(AbstractAITool):
             run_managed_command,
             usage_from,
         )
-        from crossby.ai_tools.plan_process import child_environment
 
         schema_root: str | None = None
         schema_path: Path | None = None
@@ -594,7 +626,7 @@ class CodexAdapter(AbstractAITool):
                     cancel_event=context.cancel_event,
                 ),
                 cwd=request.working_dir,
-                env=child_environment({"NO_COLOR": "1"}),
+                extra_env={"NO_COLOR": "1"},
                 stdin_text=request.prompt,
                 on_stdout_lines=frame_streamer(
                     context,

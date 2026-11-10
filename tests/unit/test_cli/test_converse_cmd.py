@@ -8,14 +8,18 @@ unless a test says otherwise.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
+from crossby.ai_tools.base import AbstractAITool
+from crossby.ai_tools.headless import HeadlessRequirementError
 from crossby.cli.main import app
-from crossby.models.ai import AIToolID, HeadlessTerminalStatus
+from crossby.models.ai import AIToolID, HeadlessTerminalStatus, RestrictionChannel
+from crossby.services import ask as ask_service
 from crossby.services import converse
 from crossby.services.converse import DEPTH_ENV
 from tests.unit.test_services.test_converse import FakeRunner
@@ -531,23 +535,47 @@ def test_converse_refuses_to_nest(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 
+class _AskBridge:
+    """Runs ``crossby ask`` sessions through a scripted FakeRunner."""
+
+    def __init__(self, fake: FakeRunner) -> None:
+        self.fake = fake
+
+    def preflight(self, *_args: Any) -> Any:  # pragma: no cover - not used by ask
+        raise AssertionError("ask does not preflight separately")
+
+    def run(self, tool: AIToolID, request: Any, cancel: threading.Event | None) -> Any:
+        return self.fake.run(tool, request, cancel or threading.Event())
+
+    def restrictions(self, tool: AIToolID, request: Any, version: str | None) -> Any:
+        return AbstractAITool.get(tool).headless_restrictions(request, version)
+
+
+def _use_ask_runner(monkeypatch: pytest.MonkeyPatch, fake: FakeRunner) -> FakeRunner:
+    monkeypatch.setattr(ask_service, "AdapterRunner", lambda: _AskBridge(fake))
+    return fake
+
+
 def test_ask_prints_answer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake = _use_runner(monkeypatch, FakeRunner(["It is a race."]))
+    fake = _use_ask_runner(monkeypatch, FakeRunner(["It is a race."]))
     result = _invoke(tmp_path, "ask", "codex", "Is there a race?")
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "It is a race."
-    assert fake.calls[0][1].prompt == "Is there a race?"
+    ((_tool, request),) = fake.calls
+    assert request.prompt == "Is there a race?"
+    assert request.read_only
+    assert fake.depths == ["1"]
 
 
 def test_ask_reads_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake = _use_runner(monkeypatch, FakeRunner(["Looks fine."]))
+    fake = _use_ask_runner(monkeypatch, FakeRunner(["Looks fine."]))
     result = _invoke(tmp_path, "ask", "claude", "-", input="diff --git a b\n")
     assert result.exit_code == 0, result.output
     assert fake.calls[0][1].prompt == "diff --git a b"
 
 
 def test_ask_json_and_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _use_runner(monkeypatch, FakeRunner([HeadlessTerminalStatus.TIMED_OUT]))
+    _use_ask_runner(monkeypatch, FakeRunner([HeadlessTerminalStatus.TIMED_OUT]))
     result = _invoke(tmp_path, "ask", "codex", "q", "--json")
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
@@ -555,16 +583,90 @@ def test_ask_json_and_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert payload["error"] == "codex session ended with status timed_out"
 
 
+def test_ask_json_reports_the_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_ask_runner(monkeypatch, FakeRunner(["It is a race."]))
+    result = _invoke(tmp_path, "ask", "codex", "q", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    # The keys #221 printed are kept, first.
+    assert list(payload)[:5] == ["tool", "status", "answer", "error", "duration_seconds"]
+    assert payload["answer"] == "It is a race."
+    assert payload["schema_version"] == 1
+    assert payload["delivery"] == "prompt"
+    assert payload["provenance"]["installed_version"] == "1.0.0"
+    channels = {item["channel"]: item["state"] for item in payload["restrictions"]}
+    assert channels["file_edits"] == "enforced"
+    assert channels["hooks"] == "enforced"
+    assert channels["mcp_tools"] == "unknown"
+
+
+def test_ask_sends_instructions_in_the_envelope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_ask_runner(monkeypatch, FakeRunner(["ok"]))
+    persona = tmp_path / "persona.md"
+    persona.write_text("You are a skeptical buyer.\n")
+    result = _invoke(tmp_path, "ask", "codex", "q", "--instructions-file", str(persona))
+    assert result.exit_code == 0, result.output
+    assert fake.calls[0][1].prompt == (
+        "<instructions>\nYou are a skeptical buyer.\n\n</instructions>\n\nq"
+    )
+
+
+def test_ask_refuses_an_unmet_requirement_before_starting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_ask_runner(
+        monkeypatch,
+        FakeRunner(
+            [
+                HeadlessRequirementError(
+                    "Cursor 2026.11.05-86047df cannot run this session with the required "
+                    "channels blocked: hooks (not_enforced).",
+                    tool_id=AIToolID.CURSOR,
+                    capability=AbstractAITool.get(AIToolID.CURSOR).capabilities().headless,
+                    unmet=(),
+                    restrictions=(),
+                )
+            ]
+        ),
+    )
+    result = _invoke(tmp_path, "ask", "cursor", "q", "--require-blocked", "hooks")
+    assert result.exit_code == 1
+    assert "hooks (not_enforced)" in result.stderr
+    assert fake.calls[0][1].require_blocked == frozenset({RestrictionChannel.HOOKS})
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--require-blocked", "telepathy"], "Unknown channel 'telepathy' for --require-blocked"),
+        (["--effort", "extreme"], "Unknown effort 'extreme'"),
+        (["--instructions-file", "missing.md"], "Cannot read instructions file"),
+        (["--timeout", "0"], "timeout_seconds must be positive and finite"),
+    ],
+)
+def test_ask_rejects_bad_options_without_starting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: list[str], message: str
+) -> None:
+    fake = _use_ask_runner(monkeypatch, FakeRunner([]))
+    result = _invoke(tmp_path, "ask", "codex", "q", *args)
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert fake.calls == []
+
+
 def test_ask_requires_a_question(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _use_runner(monkeypatch, FakeRunner([]))
+    _use_ask_runner(monkeypatch, FakeRunner([]))
     result = _invoke(tmp_path, "ask", "codex")
     assert result.exit_code == 1
     assert "A question is required" in result.stderr
 
 
 def test_ask_refuses_to_nest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake = _use_runner(monkeypatch, FakeRunner(["x"]))
+    fake = _use_ask_runner(monkeypatch, FakeRunner(["x"]))
     monkeypatch.setenv(DEPTH_ENV, "1")
     result = _invoke(tmp_path, "ask", "codex", "q")
     assert result.exit_code == 1
+    assert "Nested consultations are disabled" in result.stderr
     assert fake.calls == []
