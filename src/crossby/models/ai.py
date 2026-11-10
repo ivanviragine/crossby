@@ -223,12 +223,16 @@ class HeadlessNativeOutput(StrEnum):
 
 
 class HeadlessPromptTransport(StrEnum):
-    """How a prompt is delivered without transferring process ownership."""
+    """How a prompt is delivered without transferring process ownership.
+
+    There is deliberately no command-line argument transport: argv is bounded
+    by the OS and visible in the process list, so every managed session gets
+    its prompt on a channel with no size limit.
+    """
 
     STDIN = "stdin"
     PROTOCOL = "protocol"
     API = "api"
-    ARGUMENT = "argument"
 
 
 class HeadlessEventKind(StrEnum):

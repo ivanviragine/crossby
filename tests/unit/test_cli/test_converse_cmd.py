@@ -30,8 +30,6 @@ def _no_inherited_depth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _use_runner(monkeypatch: pytest.MonkeyPatch, fake: FakeRunner) -> FakeRunner:
     monkeypatch.setattr(converse, "HeadlessTurnRunner", lambda: fake)
-    monkeypatch.setattr(converse, "native_supports_resume", lambda _tool: True)
-    monkeypatch.setattr(converse, "native_resume_supported_on", lambda _tool, _version: True)
     return fake
 
 
@@ -81,7 +79,7 @@ def test_converse_prints_the_final_answer_and_writes_the_transcript(
     assert "asker (claude) is writing" in result.stderr
     assert "responder (codex) is writing" in result.stderr
     assert "A flap-like opening between the atria." in result.stderr
-    assert "session resumed" in result.stderr
+    assert "NEXT: ASK" in result.stderr
     assert "answered: the asker gave its final answer after 1 round" in result.stderr
     assert summaries == []  # the summary is opt-in
 
@@ -161,15 +159,13 @@ def test_converse_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert payload["asker"] == {
         "tool": "claude",
         "model": None,
-        "session": "resumed",
-        "replay_omitted": 0,
+        "session_id": "session-1",
         "denials": [],
     }
     assert payload["responder"] == {
         "tool": "codex",
         "model": "gpt-x",
-        "session": "resumed",
-        "replay_omitted": 0,
+        "session_id": "session-2",
         "denials": [],
     }
     assert payload["transcript_path"] == str(out_dir.resolve() / "transcript.md")

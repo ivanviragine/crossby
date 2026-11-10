@@ -32,6 +32,7 @@ from tests.unit.test_ai_tools.test_headless_adapters import (
     CURSOR_RESULT,
     OPENCODE_EVENTS,
     _adapter,
+    _agy_result,
     _command,
     _fake_cli,
     _request,
@@ -52,13 +53,26 @@ def _jsonl(*frames: dict[str, Any]) -> str:
     return "\n".join(json.dumps(frame) for frame in frames) + "\n"
 
 
+def _unattended_floor(adapter: AbstractAITool) -> str:
+    floor = adapter.capabilities().headless.verified_version
+    assert floor is not None
+    return floor
+
+
+def _resume_floor(adapter: AbstractAITool) -> str:
+    return type(adapter).HEADLESS_RESUME_VERIFIED_VERSION or _unattended_floor(adapter)
+
+
+def _read_only_floor(adapter: AbstractAITool) -> str:
+    return type(adapter).HEADLESS_READ_ONLY_VERIFIED_VERSION or _unattended_floor(adapter)
+
+
 def _at_verified_build(
     monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]
 ) -> AbstractAITool:
     """An adapter running ``argv`` whose CLI reports its resume-verified build."""
     adapter = _adapter(monkeypatch, tool, argv)
-    version = type(adapter).HEADLESS_RESUME_VERIFIED_VERSION
-    assert version is not None
+    version = _resume_floor(adapter)
     normalized = parse_semver(version)
     assert normalized is not None
     monkeypatch.setattr(
@@ -80,15 +94,36 @@ def test_every_managed_tool_resumes_and_runs_read_only_on_its_verified_build(
     tool: AIToolID,
 ) -> None:
     adapter = AbstractAITool.get(tool)
-    resume_floor = type(adapter).HEADLESS_RESUME_VERIFIED_VERSION
-    read_only_floor = type(adapter).HEADLESS_READ_ONLY_VERIFIED_VERSION
-    assert resume_floor is not None and read_only_floor is not None
-    assert adapter.headless_resume_supported(resume_floor)
-    assert adapter.headless_read_only_supported(read_only_floor)
-    # The unattended floor predates both verifications.
-    floor = adapter.capabilities().headless.verified_version
+    assert adapter.headless_resume_supported(_resume_floor(adapter))
+    assert adapter.headless_read_only_supported(_read_only_floor(adapter))
+    assert not adapter.headless_resume_supported("0.0.1")
+    assert not adapter.headless_read_only_supported("0.0.1")
+
+
+@pytest.mark.parametrize("tool", (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.OPENCODE))
+def test_resume_and_read_only_were_verified_after_the_unattended_floor(tool: AIToolID) -> None:
+    adapter = AbstractAITool.get(tool)
+    floor = _unattended_floor(adapter)
     assert not adapter.headless_resume_supported(floor)
     assert not adapter.headless_read_only_supported(floor)
+
+
+@pytest.mark.parametrize(
+    ("tool", "build"),
+    [
+        (AIToolID.CURSOR, "2026.11.05-86047df"),
+        (AIToolID.COPILOT, "1.0.105"),
+        (AIToolID.ANTIGRAVITY_CLI, "1.5.4"),
+    ],
+)
+def test_stdin_prompt_tools_verified_everything_on_one_unattended_floor(
+    tool: AIToolID, build: str
+) -> None:
+    """The piped prompt, resume and read-only were verified together on one build."""
+    adapter = AbstractAITool.get(tool)
+    assert _unattended_floor(adapter) == build
+    assert type(adapter).HEADLESS_RESUME_VERIFIED_VERSION is None
+    assert type(adapter).HEADLESS_READ_ONLY_VERIFIED_VERSION is None
 
 
 def test_an_older_build_refuses_resume_and_read_only(tmp_path: Path) -> None:
@@ -219,7 +254,7 @@ def test_cursor_read_only_is_a_closed_tool_set_and_resume_names_the_chat(
     # Neither mode stops print mode's edit tool, so neither stands in for it.
     assert "--mode" not in command
     assert command[command.index("--resume") + 1] == UUID
-    assert command[-1] == _request(tmp_path).prompt
+    assert _request(tmp_path).prompt not in command  # piped on stdin
 
 
 def test_cursor_resume_must_report_the_resumed_chat(
@@ -419,7 +454,7 @@ def test_antigravity_resume_continues_the_conversation(
     payload.pop("json_schema")
     payload.pop("structured_output")
     adapter = _at_verified_build(
-        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload))
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(payload))
     )
     other = adapter.run_headless_session(_request(tmp_path, resume_id=UUID))
     assert other.status is HeadlessTerminalStatus.INVALID_OUTPUT

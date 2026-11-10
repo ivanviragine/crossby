@@ -6,13 +6,12 @@ follow-up questions, and decides when it has enough. The responder never sees
 the goal; it only answers the asker's messages. ``crossby ask`` is the
 single-question primitive underneath.
 
-Each side keeps its own native session. On a CLI build where the adapter's
-unattended resume was verified (every managed-headless tool declares one),
-every turn after the first resumes that side's session and carries only the
-other agent's latest message. An older build falls back to replay: each turn
-is a fresh session whose prompt replays that side's earlier exchanges, bounded
-by a character budget and the transport's size limit. The transcript records
-which mode each side used and how much a replay left out.
+Each side keeps its own native session: every turn after its first resumes
+that session and carries only the other agent's latest message, whole. Nothing
+is replayed, budgeted or cut, so the only limit on a conversation is each
+model's own context, which its tool manages. A CLI build whose unattended
+resume was not verified is refused at preflight, with the build to upgrade to,
+and a turn that reports no session to resume stops the conversation.
 
 The responder never changes files: its turns (and ``ask`` and the summary) run
 with the adapter's verified read-only profile, and a tool without one is
@@ -55,25 +54,18 @@ MAX_DEPTH = 1
 DEFAULT_MAX_ROUNDS = 5
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 600.0
-DEFAULT_HISTORY_CHARS = 80_000
-MIN_HISTORY_CHARS = 1000
 DEFAULT_SUMMARY_TIMEOUT_SECONDS = 300.0
-DEFAULT_SUMMARY_TOKEN_BUDGET = 32_000
 PREFLIGHT_TIMEOUT_SECONDS = 20.0
 # A turn needs a realistic minimum to start a native CLI and answer; with less
 # than this left on the overall deadline the conversation stops as timed out.
 MIN_TURN_SECONDS = 5.0
+# Preflight validates each side as the resumed session every turn after its
+# first will be: the adapter then refuses a build whose resume is unverified.
+# Only the ID's shape is checked (some tools require a UUID); nothing is opened.
+PREFLIGHT_RESUME_ID = "00000000-0000-4000-8000-000000000000"
 
 ASKER_PROMPT_FILE = "converse_asker.md"
 SUMMARY_PROMPT_FILE = "converse_summary.md"
-# Character ceiling for the assembled summary prompt, before the summarizer
-# transport's own size check.
-SUMMARY_PROMPT_CHARS = 100_000
-
-ASKER_REPLAY_HEADING = "Earlier in this conversation:"
-RESPONDER_REPLAY_HEADING = (
-    "Earlier in this conversation (your previous sessions, in this same folder):"
-)
 
 FINAL_NUDGE = (
     "You have used all {max_rounds} messages. Write your final answer now and end "
@@ -104,13 +96,6 @@ class Next(StrEnum):
     ASK = "ASK"
     DONE = "DONE"
     MISSING = "MISSING"
-
-
-class SessionMode(StrEnum):
-    """How a side keeps its context between turns."""
-
-    RESUMED = "resumed"
-    REPLAYED = "replayed"
 
 
 class StopReason(StrEnum):
@@ -155,13 +140,9 @@ class ConverseTurn:
     text: str
     next: Next | None
     duration_seconds: float
-    mode: SessionMode
     # What the tool reported denying during this turn (bounded, count-only
     # diagnostics from the adapter, never the denied input).
     denials: tuple[str, ...] = ()
-    # Earlier messages left out of this turn's replayed history to fit the
-    # budget or the transport; always 0 for a resumed session.
-    omitted: int = 0
 
     @property
     def is_final_answer(self) -> bool:
@@ -182,7 +163,8 @@ class ConversationResult:
     turns: list[ConverseTurn] = field(default_factory=list)
     error: str | None = None
     answered_at_limit: bool = False
-    modes: dict[Role, SessionMode] = field(default_factory=dict)
+    # Each side's native session (``None`` until its first turn reported one).
+    sessions: dict[Role, str | None] = field(default_factory=dict)
 
     @property
     def answered(self) -> bool:
@@ -319,36 +301,6 @@ def child_depth() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-PromptFits = Callable[[AIToolID, str], bool]
-SupportsResume = Callable[[AIToolID], bool]
-ResumeSupportedOn = Callable[[AIToolID, str], bool]
-
-
-def native_prompt_fits(tool: AIToolID, prompt: str) -> bool:
-    """Whether ``tool``'s unattended transport can receive ``prompt``."""
-    from crossby.ai_tools.base import AbstractAITool
-
-    return AbstractAITool.get(tool).headless_prompt_fits(prompt)
-
-
-def native_supports_resume(tool: AIToolID) -> bool:
-    """Whether ``tool`` declares verified unattended session resume."""
-    from crossby.ai_tools.base import AbstractAITool
-
-    headless = AbstractAITool.get(tool).capabilities().headless
-    try:
-        return headless.profile_for(HeadlessInteractionMode.UNATTENDED).supports_resume
-    except ValueError:
-        return False
-
-
-def native_resume_supported_on(tool: AIToolID, version: str) -> bool:
-    """Whether the CLI build that just ran (``version``) can resume its session."""
-    from crossby.ai_tools.base import AbstractAITool
-
-    return AbstractAITool.get(tool).headless_resume_supported(version)
-
-
 def make_participants(
     asker: AIToolID,
     responder: AIToolID,
@@ -385,18 +337,6 @@ def parse_next(text: str) -> tuple[str, Next]:
     return "", Next.MISSING
 
 
-def _clip(text: str, limit: int) -> str:
-    """Keep the head and tail of an oversized message."""
-    if len(text) <= limit:
-        return text
-    marker = "\n[… {n} characters omitted …]\n"
-    keep = max(limit - len(marker.format(n=len(text))), 2)
-    head = keep // 2
-    tail = keep - head
-    omitted = len(text) - head - tail
-    return text[:head] + marker.format(n=omitted) + text[-tail:]
-
-
 def _load(filename: str) -> str:
     from crossby.handoff.prompts import load_bundled_prompt
 
@@ -420,86 +360,6 @@ def reply_for_asker(reply: str, *, final: bool, max_rounds: int) -> str:
     if not final:
         return reply
     return f"{reply}\n\n{FINAL_NUDGE.format(max_rounds=max_rounds)}"
-
-
-def _render_exchanges(blocks: Sequence[str], *, budget_chars: int, heading: str) -> tuple[str, int]:
-    """Keep the newest blocks that fit ``budget_chars``; return text and omitted count.
-
-    A budget of zero keeps no blocks at all, leaving only the omission note.
-    """
-    kept: list[str] = []
-    used = 0
-    for block in reversed(blocks if budget_chars > 0 else ()):
-        if kept and used + len(block) > budget_chars:
-            break
-        if not kept:
-            block = _clip(block, budget_chars)
-        kept.append(block)
-        used += len(block) + 2
-    kept.reverse()
-    omitted = len(blocks) - len(kept)
-    parts = [heading, ""]
-    if omitted:
-        parts += [f"({omitted} earlier message(s) omitted to fit the size limit.)", ""]
-    parts.append("\n\n".join(kept))
-    return "\n".join(parts), omitted
-
-
-def replay_prompt(
-    role: Role,
-    *,
-    opening: str,
-    turns: Sequence[ConverseTurn],
-    latest: str,
-    responder: Participant,
-    budget_chars: int,
-) -> str:
-    """Rebuild a fresh session's context for a side whose tool cannot resume.
-
-    The prompt is the earlier exchanges from that side's point of view, then
-    the message it is answering now (after the asker's goal, for the asker).
-    """
-    return _replay(
-        role,
-        opening=opening,
-        turns=turns,
-        latest=latest,
-        responder=responder,
-        budget_chars=budget_chars,
-    )[0]
-
-
-def _replay(
-    role: Role,
-    *,
-    opening: str,
-    turns: Sequence[ConverseTurn],
-    latest: str,
-    responder: Participant,
-    budget_chars: int,
-) -> tuple[str, int]:
-    """:func:`replay_prompt`, plus how many earlier messages were left out."""
-    asker_side = role is Role.ASKER
-    if not turns:
-        return (f"{opening}\n\n{latest}" if asker_side else latest), 0
-    blocks: list[str] = []
-    for turn in turns:
-        if turn.role is Role.ASKER:
-            who = "You" if asker_side else "Question"
-        else:
-            who = responder.tool.value if asker_side else "Your answer"
-        blocks.append(f"### {who}\n{turn.text}")
-    # Tell the responder its earlier sessions ran in this same folder: without
-    # it, a replayed answer reads like a closed document, and Codex answered
-    # follow-ups from the replayed text alone ("not specified in the
-    # conversation") instead of checking its files. The asker's replay starts
-    # with its goal, and the note there leaked into final answers ("the
-    # previous sessions already got both answers").
-    heading = ASKER_REPLAY_HEADING if asker_side else RESPONDER_REPLAY_HEADING
-    history, omitted = _render_exchanges(blocks, budget_chars=budget_chars, heading=heading)
-    if asker_side:
-        return f"{opening}\n\n{history}\n\n### {responder.tool.value}\n{latest}", omitted
-    return f"{history}\n\n### Question\n{latest}", omitted
 
 
 def _request(
@@ -600,9 +460,7 @@ class _StopError(Exception):
 @dataclass
 class _Side:
     participant: Participant
-    mode: SessionMode
     session_id: str | None = None
-    opening: str = ""
 
 
 @dataclass(frozen=True)
@@ -612,7 +470,6 @@ class _Reply:
     text: str
     duration: float
     denials: tuple[str, ...]
-    omitted: int
 
 
 def run_conversation(
@@ -624,14 +481,10 @@ def run_conversation(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
-    history_chars: int = DEFAULT_HISTORY_CHARS,
     runner: TurnRunner | None = None,
     on_turn_start: Callable[[int, Participant], None] | None = None,
     on_turn: Callable[[ConverseTurn], None] | None = None,
     clock: Callable[[], float] = monotonic,
-    prompt_fits: PromptFits | None = None,
-    supports_resume: SupportsResume | None = None,
-    resume_supported_on: ResumeSupportedOn | None = None,
 ) -> ConversationResult:
     """Let the asker consult the responder until it gives a final answer.
 
@@ -652,31 +505,17 @@ def run_conversation(
         raise ConverseError("--max-rounds must be at least 1.")
     if timeout_seconds <= 0 or turn_timeout_seconds <= 0:
         raise ConverseError("Timeouts must be positive.")
-    if history_chars < MIN_HISTORY_CHARS:
-        raise ConverseError(f"The history budget must be at least {MIN_HISTORY_CHARS} characters.")
     asker, responder = participants
     if asker.role is not Role.ASKER or responder.role is not Role.RESPONDER:
         raise ConverseError("Participants must be (asker, responder).")
 
     active_runner: TurnRunner = runner or HeadlessTurnRunner()
     folders = {Role.ASKER: working_dir, Role.RESPONDER: responder_dir or working_dir}
-    fits: PromptFits = prompt_fits or native_prompt_fits
-    resumes: SupportsResume = supports_resume or native_supports_resume
-    resumes_on: ResumeSupportedOn = resume_supported_on or native_resume_supported_on
     started_at = datetime.now(tz=UTC)
     deadline = clock() + timeout_seconds
     turns: list[ConverseTurn] = []
-    sides = {
-        Role.ASKER: _Side(
-            asker,
-            SessionMode.RESUMED if resumes(asker.tool) else SessionMode.REPLAYED,
-            opening=asker_opening(goal=goal, responder=responder, max_rounds=max_rounds),
-        ),
-        Role.RESPONDER: _Side(
-            responder,
-            SessionMode.RESUMED if resumes(responder.tool) else SessionMode.REPLAYED,
-        ),
-    }
+    sides = {Role.ASKER: _Side(asker), Role.RESPONDER: _Side(responder)}
+    opening = asker_opening(goal=goal, responder=responder, max_rounds=max_rounds)
     in_progress: int | None = None
     answered_at_limit = False
 
@@ -692,7 +531,7 @@ def run_conversation(
             turns=turns,
             error=error,
             answered_at_limit=answered_at_limit,
-            modes={role: side.mode for role, side in sides.items()},
+            sessions={role: side.session_id for role, side in sides.items()},
         )
 
     def out_of_time(when: str) -> _StopError:
@@ -700,30 +539,12 @@ def run_conversation(
             StopReason.TIMEOUT, f"conversation time limit of {timeout_seconds:g}s reached {when}"
         )
 
-    def build_prompt(side: _Side, message: str, budget: int) -> tuple[str, int]:
-        """The prompt for this side's next turn, and the replayed messages it omits.
-
-        The message itself is never shortened; ``budget`` bounds only the
-        replayed history of a side whose tool cannot resume.
-        """
-        if side.session_id is not None:  # resumed: only the new message
-            return message, 0
-        if not turns:  # the very first turn: the asker's opening
-            return side.opening, 0
-        if side.mode is SessionMode.RESUMED:  # first turn of a resumable responder
-            return message, 0
-        # Replay: the latest turn is the message being answered, sent separately.
-        return _replay(
-            side.participant.role,
-            opening=side.opening,
-            turns=turns[:-1],
-            latest=message,
-            responder=responder,
-            budget_chars=budget,
-        )
-
     def take_turn(role: Role, message: str) -> _Reply:
-        """Run one turn for ``role`` and return its reply."""
+        """Run one turn for ``role`` and return its reply.
+
+        The prompt is the message itself, whole: the session holds everything
+        said before. Only the asker's very first turn sends its opening.
+        """
         nonlocal in_progress
         side = sides[role]
         number = len(turns) + 1
@@ -731,25 +552,9 @@ def run_conversation(
         if remaining < MIN_TURN_SECONDS:
             raise out_of_time(f"before turn {number}")
         bounded_by_deadline = remaining <= turn_timeout_seconds
-        # Only replayed history shrinks to fit the transport; a message that
-        # still does not fit stops the consultation instead of being cut.
-        budget = history_chars
-        while True:
-            prompt, omitted = build_prompt(side, message, budget)
-            if fits(side.participant.tool, prompt):
-                break
-            if budget == 0:  # even with no replayed history, it does not fit
-                raise _StopError(
-                    StopReason.FAILED,
-                    f"{side.participant.label} turn {number}: the message "
-                    f"({len(message):,} characters) is too large for "
-                    f"{side.participant.tool.value}'s command-line prompt limit",
-                )
-            # Halve the history down to the floor, then drop it entirely.
-            budget = 0 if budget <= MIN_HISTORY_CHARS else max(budget // 2, MIN_HISTORY_CHARS)
         request = _request(
             side.participant,
-            prompt=prompt,
+            prompt=message if turns else opening,
             working_dir=folders[role],
             timeout_seconds=min(turn_timeout_seconds, remaining),
             resume_id=side.session_id,
@@ -786,15 +591,17 @@ def run_conversation(
         text = (result.final_text or "").strip()
         if not text:
             raise _StopError(StopReason.FAILED, f"{label} turn {number} returned no text{denied}")
-        if side.mode is SessionMode.RESUMED and side.session_id is None:
+        if side.session_id is None:
             handle = _session_handle(result)
-            if handle is None or not resumes_on(side.participant.tool, result.version):
-                # No handle came back, or this CLI build's resume isn't
-                # verified: keep going by replaying, and say so in the transcript.
-                side.mode = SessionMode.REPLAYED
-            else:
-                side.session_id = handle
-        return _Reply(text, clock() - turn_started, tuple(result.denials), omitted)
+            if handle is None:
+                # Its next turn could only start over without the conversation.
+                raise _StopError(
+                    StopReason.FAILED,
+                    f"{label} turn {number}: {side.participant.tool.value} reported no "
+                    "session to resume, so the conversation cannot continue",
+                )
+            side.session_id = handle
+        return _Reply(text, clock() - turn_started, tuple(result.denials))
 
     def record(role: Role, reply: _Reply, body: str, next_: Next | None) -> ConverseTurn:
         nonlocal in_progress
@@ -805,9 +612,7 @@ def run_conversation(
             text=body,
             next=next_,
             duration_seconds=reply.duration,
-            mode=sides[role].mode,
             denials=reply.denials,
-            omitted=reply.omitted,
         )
         turns.append(turn)
         in_progress = None
@@ -825,6 +630,7 @@ def run_conversation(
                 prompt="preflight",
                 working_dir=folders[participant.role],
                 timeout_seconds=min(turn_timeout_seconds, remaining),
+                resume_id=PREFLIGHT_RESUME_ID,
                 read_only=_read_only(participant),
             )
             try:
@@ -979,14 +785,9 @@ def _render_transcript(
 
 
 def turn_footer(turn: ConverseTurn) -> str:
-    """The one-line run facts shown under a turn: marker, time, session, losses."""
+    """The one-line run facts shown under a turn: marker, time, denials."""
     parts = [f"NEXT: {turn.next.value}"] if turn.next is not None else []
-    parts += [f"{turn.duration_seconds:.0f}s", f"session {turn.mode.value}"]
-    if turn.omitted:
-        parts.append(
-            f"{turn.omitted} earlier message{'s' if turn.omitted != 1 else ''} "
-            "left out of the replay"
-        )
+    parts.append(f"{turn.duration_seconds:.0f}s")
     parts += [f"denied: {denial}" for denial in turn.denials]
     return " · ".join(parts)
 
@@ -1017,24 +818,13 @@ def to_handoff_transcript(result: ConversationResult, path: Path) -> Conversatio
     )
 
 
-def build_summary_prompt(
-    result: ConversationResult,
-    *,
-    transcript_path: Path,
-    token_budget: int = DEFAULT_SUMMARY_TOKEN_BUDGET,
-    max_chars: int = SUMMARY_PROMPT_CHARS,
-    fits: Callable[[str], bool] | None = None,
-    on_truncate: Callable[[int, int], None] | None = None,
-) -> str:
-    """Assemble the summary prompt with the handoff formatting and truncation.
+def build_summary_prompt(result: ConversationResult, *, transcript_path: Path) -> str:
+    """Assemble the summary prompt: the instructions, then the whole transcript.
 
-    The handoff token budget keeps the most recent turns. Further old turns
-    are then dropped (and a single oversized turn clipped) until the prompt is
-    within ``max_chars`` and ``fits`` accepts it; ``fits`` is the summarizer
-    transport's own size check, so byte-limited argv tools always receive it.
+    Nothing is dropped or clipped; a transcript too large for the summarizer's
+    model fails in that tool, which reports it.
     """
     from crossby.handoff.summarizer import render_turn
-    from crossby.handoff.truncate import truncate_transcript
 
     header = (
         _load(SUMMARY_PROMPT_FILE)
@@ -1046,42 +836,10 @@ def build_summary_prompt(
         )
         .strip()
     )
-    transcript = to_handoff_transcript(result, transcript_path)
-    prepared = truncate_transcript(transcript, token_budget)
-    turns = list(prepared.turns)
-    truncated = prepared.truncated
-
-    def assemble() -> str:
-        lines = [header, ""]
-        if truncated:
-            lines.append(
-                "Note: earlier turns were dropped to fit the size limit. Rely on the "
-                "last turns for where the consultation ended.\n"
-            )
-        lines.append("--- Transcript ---\n")
-        for turn in turns:
-            lines += [render_turn(turn), ""]
-        return "\n".join(lines)
-
-    def too_big(text: str) -> bool:
-        return len(text) > max_chars or (fits is not None and not fits(text))
-
-    prompt = assemble()
-    while too_big(prompt) and len(turns) > 1:
-        turns.pop(0)
-        truncated = True
-        prompt = assemble()
-    if too_big(prompt) and turns:
-        only = turns[0]
-        room = min(len(only.content), max_chars)
-        while too_big(prompt) and room > MIN_HISTORY_CHARS:
-            room = max(room // 2, MIN_HISTORY_CHARS)
-            turns = [only.model_copy(update={"content": _clip(only.content, room)})]
-            truncated = True
-            prompt = assemble()
-    if truncated and on_truncate is not None:
-        on_truncate(len(transcript.turns), len(turns))
-    return prompt
+    lines = [header, "", "--- Transcript ---\n"]
+    for turn in to_handoff_transcript(result, transcript_path).turns:
+        lines += [render_turn(turn), ""]
+    return "\n".join(lines)
 
 
 def summarize_conversation(
@@ -1093,8 +851,6 @@ def summarize_conversation(
     model: str | None = None,
     timeout_seconds: float = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
     runner: TurnRunner | None = None,
-    on_truncate: Callable[[int, int], None] | None = None,
-    prompt_fits: PromptFits = native_prompt_fits,
 ) -> str:
     """Summarize a finished consultation in one managed read-only session.
 
@@ -1105,12 +861,7 @@ def summarize_conversation(
     """
     from crossby.ai_tools.headless import HeadlessSessionError
 
-    prompt = build_summary_prompt(
-        result,
-        transcript_path=transcript_path,
-        fits=lambda text: prompt_fits(tool, text),
-        on_truncate=on_truncate,
-    )
+    prompt = build_summary_prompt(result, transcript_path=transcript_path)
     request = _request(
         None,
         prompt=prompt,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +30,6 @@ from crossby.services.converse import (
     ConverseTurn,
     Next,
     Role,
-    SessionMode,
     StopReason,
 )
 
@@ -139,16 +137,7 @@ PARTICIPANTS = converse.make_participants(AIToolID.CLAUDE, AIToolID.CODEX)
 ASKER, RESPONDER = PARTICIPANTS
 
 
-def _resumes(_tool: AIToolID) -> bool:
-    return True
-
-
-def _replays(_tool: AIToolID) -> bool:
-    return False
-
-
 def _run(runner: FakeRunner, tmp_path: Path, **kwargs: object) -> ConversationResult:
-    kwargs.setdefault("supports_resume", _resumes)
     return converse.run_conversation(
         GOAL,
         PARTICIPANTS,
@@ -161,9 +150,6 @@ def _run(runner: FakeRunner, tmp_path: Path, **kwargs: object) -> ConversationRe
 @pytest.fixture(autouse=True)
 def _no_inherited_depth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(DEPTH_ENV, raising=False)
-    # The fake runner reports version 1.0.0; the per-version resume check has
-    # its own tests, so engine tests treat every build as resumable.
-    monkeypatch.setattr(converse, "native_resume_supported_on", lambda _tool, _version: True)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +219,7 @@ def test_asker_consults_until_it_gives_a_final_answer(tmp_path: Path) -> None:
         AIToolID.CODEX,
         AIToolID.CLAUDE,
     ]
-    assert result.modes == {Role.ASKER: SessionMode.RESUMED, Role.RESPONDER: SessionMode.RESUMED}
+    assert result.sessions == {Role.ASKER: "session-1", Role.RESPONDER: "session-2"}
 
 
 def test_only_the_asker_sees_the_goal(tmp_path: Path) -> None:
@@ -288,9 +274,7 @@ def test_responder_runs_in_its_own_folder(tmp_path: Path) -> None:
 def test_same_tool_on_both_sides_keeps_separate_sessions(tmp_path: Path) -> None:
     runner = FakeRunner(ANSWERING)
     participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CLAUDE)
-    converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
+    converse.run_conversation(GOAL, participants, working_dir=tmp_path, runner=runner)
     resumes = [req.resume_id for _tool, req in runner.calls]
     assert resumes == [None, None, "session-1", "session-2", "session-1"]
 
@@ -300,9 +284,7 @@ def test_participant_models_reach_their_requests(tmp_path: Path) -> None:
         AIToolID.CLAUDE, AIToolID.CODEX, asker_model="opus-y", responder_model="gpt-x"
     )
     runner = FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"])
-    converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
+    converse.run_conversation(GOAL, participants, working_dir=tmp_path, runner=runner)
     assert [req.model for _tool, req in runner.calls] == ["opus-y", "gpt-x", "opus-y"]
 
 
@@ -335,7 +317,7 @@ def test_denials_are_recorded_on_their_turn_and_shown(tmp_path: Path) -> None:
     result = _run(runner, tmp_path)
     assert [turn.denials for turn in result.turns] == [(), (denial,), (), (), ()]
     transcript = converse.render_transcript(result)
-    assert f"session resumed · denied: {denial}*" in transcript
+    assert f"s · denied: {denial}*" in transcript
 
 
 def test_an_empty_reply_after_denials_names_them(tmp_path: Path) -> None:
@@ -416,91 +398,71 @@ def test_asker_that_never_answers_stops_at_the_round_limit(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Replay fallback for tools without verified resume
+# Resume only: nothing is replayed
 # ---------------------------------------------------------------------------
 
 
-def test_replay_rebuilds_each_sides_context(tmp_path: Path) -> None:
+def test_every_turn_after_a_sides_first_resumes_and_sends_only_the_new_message(
+    tmp_path: Path,
+) -> None:
     runner = FakeRunner(ANSWERING)
-    result = _run(runner, tmp_path, supports_resume=_replays)
+    _run(runner, tmp_path)
     requests = [req for _tool, req in runner.calls]
+    # Only the asker's first turn carries the goal; nothing earlier is repeated.
+    assert GOAL in requests[0].prompt
+    assert all(GOAL not in req.prompt for req in requests[1:])
+    assert [req.resume_id for req in requests] == [
+        None,
+        None,
+        "session-1",
+        "session-2",
+        "session-1",
+    ]
+    assert requests[3].prompt == "How can it cause a paradoxical embolism?"
 
-    assert all(req.resume_id is None for req in requests)
-    assert result.modes == {
-        Role.ASKER: SessionMode.REPLAYED,
-        Role.RESPONDER: SessionMode.REPLAYED,
-    }
-    # The asker's replay: its opening, earlier exchanges, then the latest reply once.
-    asker_turn_2 = requests[2].prompt
-    assert f"Goal: {GOAL}" in asker_turn_2
-    assert asker_turn_2.endswith("### codex\nA flap-like opening between the atria.")
-    assert asker_turn_2.count("A flap-like opening") == 1
-    assert "### You\nWhat is a patent foramen ovale?" in asker_turn_2
-    # Only the responder is told its earlier sessions ran in this folder; on the
-    # asker the note leaked into final answers.
-    assert "\n\nEarlier in this conversation:\n" in asker_turn_2
-    assert "previous sessions" not in asker_turn_2
-    # The responder's replay: its earlier Q&A, then the new question.
-    responder_turn_2 = requests[3].prompt
-    assert GOAL not in responder_turn_2
-    assert "### Question\nWhat is a patent foramen ovale?" in responder_turn_2
-    assert "### Your answer\nA flap-like opening between the atria." in responder_turn_2
-    # The heading tells a replaying tool its earlier answers came from this same
-    # folder, so it checks its files instead of answering from the replay alone.
-    assert responder_turn_2.startswith(
-        "Earlier in this conversation (your previous sessions, in this same folder):"
+
+def test_preflight_validates_each_side_as_a_resumed_session(tmp_path: Path) -> None:
+    """The adapter then refuses a build whose resume is unverified, before any turn."""
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path)
+    assert [req.resume_id for req in runner.preflight_requests] == [
+        converse.PREFLIGHT_RESUME_ID,
+        converse.PREFLIGHT_RESUME_ID,
+    ]
+
+
+def test_a_build_that_cannot_resume_is_refused_before_any_turn(tmp_path: Path) -> None:
+    message = (
+        "Resuming an unattended Codex CLI session was verified on 0.166.0; the installed "
+        "build is 0.160.0. Upgrade Codex CLI to resume sessions."
     )
-    assert responder_turn_2.endswith("### Question\nHow can it cause a paradoxical embolism?")
-    assert responder_turn_2.count("How can it cause") == 1
+    runner = FakeRunner(["unused"], preflight_error=_unsupported(AIToolID.CODEX, message))
+    result = _run(runner, tmp_path)
+    assert result.stop_reason is StopReason.FAILED
+    assert "Upgrade Codex CLI to resume sessions" in (result.error or "")
+    assert runner.calls == []
 
 
-def test_resume_without_a_returned_handle_falls_back_to_replay(tmp_path: Path) -> None:
+def test_a_turn_that_reports_no_session_stops_the_conversation(tmp_path: Path) -> None:
     runner = FakeRunner(ANSWERING, issue_session_ids=False)
     result = _run(runner, tmp_path)
-    assert all(req.resume_id is None for _tool, req in runner.calls)
-    assert result.modes[Role.ASKER] is SessionMode.REPLAYED
-    assert f"Goal: {GOAL}" in runner.calls[2][1].prompt
-
-
-def test_an_unverified_cli_build_falls_back_to_replay(tmp_path: Path) -> None:
-    seen: list[tuple[AIToolID, str]] = []
-
-    def resumes_on(tool: AIToolID, version: str) -> bool:
-        seen.append((tool, version))
-        return False
-
-    runner = FakeRunner(ANSWERING)
-    result = _run(runner, tmp_path, resume_supported_on=resumes_on)
-    assert all(req.resume_id is None for _tool, req in runner.calls)
-    assert result.modes == {
-        Role.ASKER: SessionMode.REPLAYED,
-        Role.RESPONDER: SessionMode.REPLAYED,
-    }
-    assert seen == [(AIToolID.CLAUDE, "1.0.0"), (AIToolID.CODEX, "1.0.0")]
-    assert result.answered
-
-
-def test_replay_keeps_the_newest_exchanges_within_budget(tmp_path: Path) -> None:
-    runner = FakeRunner(
-        [
-            "q1 " + "A" * 900 + "\nNEXT: ASK",
-            "a1 " + "B" * 900,
-            "q2\nNEXT: ASK",
-            "a2 " + "C" * 900,
-            "q3\nNEXT: ASK",
-            "a3",
-            "done\nNEXT: DONE",
-        ]
+    assert result.stop_reason is StopReason.FAILED
+    assert result.error == (
+        "asker (claude) turn 1: claude reported no session to resume, so the "
+        "conversation cannot continue"
     )
-    result = _run(runner, tmp_path, supports_resume=_replays, history_chars=1500)
-    asker_turn_3 = runner.calls[4][1].prompt
-    assert "A" * 900 not in asker_turn_3
-    assert "earlier message(s) omitted" in asker_turn_3
-    assert "C" * 900 in asker_turn_3
-    # The loss is recorded on the turn and shown in the transcript, not hidden.
-    assert result.turns[4].omitted > 0
-    assert result.turns[0].omitted == 0
-    assert "left out of the replay" in converse.render_transcript(result)
+    assert len(runner.calls) == 1
+    assert result.sessions == {Role.ASKER: None, Role.RESPONDER: None}
+
+
+def test_messages_of_any_size_are_sent_whole(tmp_path: Path) -> None:
+    question = "Q" * 2_000_000
+    answer = "A" * 2_000_000
+    runner = FakeRunner([f"{question}\nNEXT: ASK", answer, "done\nNEXT: DONE"])
+    result = _run(runner, tmp_path)
+    assert result.answered
+    assert runner.calls[1][1].prompt == question
+    assert runner.calls[2][1].prompt == answer
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +601,6 @@ def test_turn_callbacks_fire_in_order(tmp_path: Path) -> None:
     [
         ({"max_rounds": 0}, "at least 1"),
         ({"timeout_seconds": 0}, "positive"),
-        ({"history_chars": 10}, "1000"),
     ],
 )
 def test_invalid_settings_are_rejected(
@@ -659,179 +620,22 @@ def test_blank_goal_and_swapped_roles_are_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prompt sizing for argument-transport tools
+# Message size: nothing is budgeted or cut
 # ---------------------------------------------------------------------------
 
-CJK = "中"  # three UTF-8 bytes per character
 
-
-def test_long_messages_reach_a_stdin_tool_whole(tmp_path: Path) -> None:
+def test_a_long_message_with_a_requirement_in_the_middle_arrives_whole(tmp_path: Path) -> None:
     # The reviewer's case: a 90,062-character question with a requirement in
     # the middle used to be cut to the 80,000-character history budget.
     question = "A" * 45_000 + " REQUIREMENT-IN-THE-MIDDLE " + "B" * 45_035
     answer = "C" * 45_000 + " DETAIL-IN-THE-MIDDLE " + "D" * 45_000
     assert len(question) == 90_062
     runner = FakeRunner([question + "\nNEXT: ASK", answer, "done\nNEXT: DONE"])
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CLAUDE)
-    result = converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
+    result = _run(runner, tmp_path)
     assert result.answered
     assert runner.calls[1][1].prompt == question
     assert runner.calls[2][1].prompt == answer
     assert all("characters omitted" not in req.prompt for _tool, req in runner.calls)
-
-
-def test_long_messages_survive_replay_and_only_history_shrinks(tmp_path: Path) -> None:
-    long_question = "q2 " + "Q" * 90_000
-    runner = FakeRunner(
-        [
-            "q1 " + "H" * 50_000 + "\nNEXT: ASK",
-            "a1",
-            long_question + "\nNEXT: ASK",
-            "a2",
-            "x\nNEXT: DONE",
-        ]
-    )
-    _run(runner, tmp_path, supports_resume=_replays)
-    responder_turn_2 = runner.calls[3][1].prompt
-    assert responder_turn_2.endswith("### Question\n" + long_question)
-
-
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_history_is_dropped_entirely_before_a_message_is_rejected(tmp_path: Path) -> None:
-    # Codex's case: a 119,500-character question fits Copilot's 120,000-byte
-    # limit on its own, but not with even the 1,000-character history floor.
-    question = "Q" * 119_500
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
-    runner = FakeRunner(
-        ["q1\nNEXT: ASK", "A" * 3_000, question + "\nNEXT: ASK", "a2", "done\nNEXT: DONE"]
-    )
-    result = converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_replays
-    )
-    assert result.answered, result.error
-    copilot_turn_2 = runner.calls[3][1].prompt
-    assert copilot_turn_2.endswith("### Question\n" + question)
-    assert "2 earlier message(s) omitted" in copilot_turn_2
-    assert "A" * 100 not in copilot_turn_2
-    assert len(os.fsencode(copilot_turn_2)) <= 120_000
-
-
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_message_too_large_for_an_argv_tool_fails_explicitly(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.CURSOR)
-    runner = FakeRunner([CJK * 50_000 + "\nNEXT: ASK", "unused"])
-    result = converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
-    assert result.stop_reason is StopReason.FAILED
-    assert result.error == (
-        "responder (cursor) turn 2: the message (50,000 characters) is too large "
-        "for cursor's command-line prompt limit"
-    )
-    assert len(runner.calls) == 1  # nothing was sent to cursor
-    assert result.turns[0].text == CJK * 50_000
-
-
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_replayed_history_shrinks_for_an_argv_tool(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
-    runner = FakeRunner(
-        [
-            "q1\nNEXT: ASK",
-            CJK * 30_000,
-            "q2 " + CJK * 30_000 + "\nNEXT: ASK",
-            "a2",
-            "x\nNEXT: DONE",
-        ]
-    )
-    converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_replays
-    )
-    copilot_turn_2 = runner.calls[3][1].prompt
-    assert len(os.fsencode(copilot_turn_2)) <= 120_000
-
-
-@pytest.fixture
-def simulated_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Measure argument prompts the way the runtime does on Windows."""
-    from crossby.ai_tools import base
-
-    monkeypatch.setattr(base.sys, "platform", "win32")
-    monkeypatch.setattr(base, "_MAX_HEADLESS_ARGUMENT_PROMPT", 30_000)
-
-
-def _windows_units(prompt: str) -> int:
-    return len(subprocess.list2cmdline([prompt]).encode("utf-16-le")) // 2
-
-
-EMOJI = "\U0001f600"  # two UTF-16 units
-
-
-@pytest.mark.usefixtures("simulated_windows")
-@pytest.mark.parametrize(
-    ("prompt", "fits"),
-    [
-        ("x" * 30_000, True),
-        ("x" * 30_001, False),
-        ('"' * 15_000, True),  # each quote is escaped as \" (two units)
-        ('"' * 15_001, False),
-        (EMOJI * 15_000, True),
-        (EMOJI * 15_001, False),
-    ],
-)
-def test_headless_prompt_fits_uses_windows_quoting_and_utf16(prompt: str, fits: bool) -> None:
-    assert AbstractAITool.get(AIToolID.CURSOR).headless_prompt_fits(prompt) is fits
-    assert AbstractAITool.get(AIToolID.CLAUDE).headless_prompt_fits(prompt)
-
-
-@pytest.mark.usefixtures("simulated_windows")
-def test_windows_limit_fails_explicitly_instead_of_cutting(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
-    runner = FakeRunner([EMOJI * 20_000 + "\nNEXT: ASK", "unused"])
-    result = converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
-    assert result.stop_reason is StopReason.FAILED
-    assert "too large for copilot's command-line prompt limit" in (result.error or "")
-    assert len(runner.calls) == 1
-
-
-@pytest.mark.usefixtures("simulated_windows")
-def test_messages_within_the_windows_limit_go_whole(tmp_path: Path) -> None:
-    participants = converse.make_participants(AIToolID.CLAUDE, AIToolID.COPILOT)
-    question = EMOJI * 10_000
-    runner = FakeRunner([question + "\nNEXT: ASK", "a", "done\nNEXT: DONE"])
-    converse.run_conversation(
-        GOAL, participants, working_dir=tmp_path, runner=runner, supports_resume=_resumes
-    )
-    assert runner.calls[1][1].prompt == question
-    assert _windows_units(question) <= 30_000
-
-
-def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
-    cursor = AbstractAITool.get(AIToolID.CURSOR)
-    claude = AbstractAITool.get(AIToolID.CLAUDE)
-    assert cursor.headless_prompt_fits("short")
-    assert claude.headless_prompt_fits(CJK * 200_000)  # stdin: no argument limit
-    if not sys.platform.startswith("win"):
-        assert cursor.headless_prompt_fits(CJK * 40_000)
-        assert not cursor.headless_prompt_fits(CJK * 40_001)
-
-
-def test_native_supports_resume_matches_the_adapters() -> None:
-    # Every managed-headless tool resumes its unattended sessions on the build
-    # where that was verified; an older build falls back to replay per run.
-    for tool in (
-        AIToolID.CLAUDE,
-        AIToolID.CODEX,
-        AIToolID.CURSOR,
-        AIToolID.COPILOT,
-        AIToolID.OPENCODE,
-        AIToolID.ANTIGRAVITY_CLI,
-    ):
-        assert converse.native_supports_resume(tool), tool
 
 
 # ---------------------------------------------------------------------------
@@ -913,7 +717,7 @@ def test_ask_reports_failures(tmp_path: Path) -> None:
 
 def _turn(number: int, role: Role, text: str, next_: Next | None) -> ConverseTurn:
     tool = AIToolID.CLAUDE if role is Role.ASKER else AIToolID.CODEX
-    return ConverseTurn(number, role, tool, text, next_, 1.0, SessionMode.RESUMED)
+    return ConverseTurn(number, role, tool, text, next_, 1.0)
 
 
 def _finished(reason: StopReason, *, error: str | None = None) -> ConversationResult:
@@ -931,7 +735,7 @@ def _finished(reason: StopReason, *, error: str | None = None) -> ConversationRe
             _turn(3, Role.ASKER, "It knows the anatomy.", Next.DONE),
         ],
         error=error,
-        modes={Role.ASKER: SessionMode.RESUMED, Role.RESPONDER: SessionMode.REPLAYED},
+        sessions={Role.ASKER: "session-1", Role.RESPONDER: "session-2"},
     )
 
 
@@ -944,7 +748,7 @@ def test_render_transcript() -> None:
     assert "## 1. asker (claude) → responder\n\nWhat is a PFO?" in text
     assert "## 2. responder (codex) → asker\n\nAn opening between the atria." in text
     assert "## 3. Final answer (claude)\n\nIt knows the anatomy." in text
-    assert "*NEXT: ASK · 1s · session resumed*" in text
+    assert "*NEXT: ASK · 1s*" in text
 
 
 @pytest.mark.parametrize(
@@ -1020,11 +824,12 @@ def test_summary_prompt_carries_roles_goal_and_transcript(tmp_path: Path) -> Non
     assert "asker (claude), final answer, turn 3:\nIt knows the anatomy." in prompt
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX byte limit")
-def test_summary_prompt_fits_an_argv_summarizer(tmp_path: Path) -> None:
+def test_summary_prompt_carries_the_whole_transcript_uncut(tmp_path: Path) -> None:
     result = _finished(StopReason.ROUND_LIMIT)
+    texts = [f"turn-{n} " + "x" * 400_000 + f" end-of-turn-{n}" for n in range(1, 4)]
     result.turns = [
-        _turn(n, Role.ASKER if n % 2 else Role.RESPONDER, CJK * 25_000, None) for n in range(1, 4)
+        _turn(n, Role.ASKER if n % 2 else Role.RESPONDER, text, None)
+        for n, text in enumerate(texts, start=1)
     ]
     runner = FakeRunner(["## Outcome\nok"])
     converse.summarize_conversation(
@@ -1034,7 +839,9 @@ def test_summary_prompt_fits_an_argv_summarizer(tmp_path: Path) -> None:
         working_dir=tmp_path,
         runner=runner,
     )
-    assert len(os.fsencode(runner.calls[0][1].prompt)) <= 120_000
+    prompt = runner.calls[0][1].prompt
+    assert all(text in prompt for text in texts)
+    assert "dropped" not in prompt and "omitted" not in prompt
 
 
 @pytest.mark.parametrize("reply", [HeadlessTerminalStatus.TIMED_OUT, HeadlessTerminalStatus.FAILED])

@@ -34,7 +34,11 @@ import pytest
 
 from crossby.ai_tools import base as base_mod
 from crossby.ai_tools import plan_process
-from crossby.ai_tools.antigravity_cli import AntigravityCLIAdapter, _whole_run_timeout_seconds
+from crossby.ai_tools.antigravity_cli import (
+    AntigravityCLIAdapter,
+    _stream_input,
+    _whole_run_timeout_seconds,
+)
 from crossby.ai_tools.base import AbstractAITool
 from crossby.ai_tools.claude import ClaudeAdapter
 from crossby.ai_tools.headless import (
@@ -48,6 +52,7 @@ from crossby.models.ai import (
     HeadlessEventKind,
     HeadlessInteractionMode,
     HeadlessNativeOutput,
+    HeadlessPromptTransport,
     HeadlessSessionRequest,
     HeadlessSessionResult,
     HeadlessTerminalStatus,
@@ -233,6 +238,11 @@ AGY_WAITING: dict[str, Any] = {
 
 def _jsonl(frames: tuple[dict[str, Any], ...]) -> str:
     return "".join(f"{json.dumps(frame)}\n" for frame in frames)
+
+
+def _agy_result(payload: dict[str, Any]) -> str:
+    """agy's stream-json wire carrying only its final result envelope."""
+    return _jsonl(({"event": "result", "result": payload},))
 
 
 def _fake_cli(
@@ -899,11 +909,14 @@ def test_claude_text_output_fails_on_a_native_error_that_exits_zero(
 def test_antigravity_text_output_returns_the_json_envelope_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # TEXT runs --output-format json so the conversation ID and status are checked.
+    # TEXT is read from the stream-json result, so the conversation ID and status
+    # are checked.
     request = _request(tmp_path)
     payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
     payload["response"] = "OK\n"
-    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
+    adapter = _adapter(
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(payload))
+    )
 
     result = adapter.run_headless_session(request)
 
@@ -927,7 +940,9 @@ def test_antigravity_text_output_applies_the_envelope_checks(
 ) -> None:
     payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
     payload = {key: value for key, value in {**payload, **update}.items() if value is not None}
-    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
+    adapter = _adapter(
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(payload))
+    )
 
     result = adapter.run_headless_session(_request(tmp_path))
 
@@ -1370,7 +1385,7 @@ def test_antigravity_json_envelope_validates_the_schema_echo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _adapter(
-        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(AGY_RESULT))
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(AGY_RESULT))
     )
 
     result = adapter.run_headless_session(
@@ -1390,7 +1405,7 @@ def test_antigravity_rejects_a_mismatched_schema_echo(
     tampered = json.loads(json.dumps(AGY_RESULT))
     tampered["json_schema"] = {"type": "object"}
     adapter = _adapter(
-        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(tampered))
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(tampered))
     )
 
     result = adapter.run_headless_session(
@@ -1407,7 +1422,7 @@ def test_antigravity_rejects_a_schema_echo_with_an_oversized_integer(
     tampered = json.loads(json.dumps(AGY_RESULT))
     tampered["json_schema"] = f'{{"value": {"9" * 4_301}}}'
     adapter = _adapter(
-        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(tampered))
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(tampered))
     )
 
     result = adapter.run_headless_session(
@@ -1436,7 +1451,7 @@ def test_antigravity_waiting_state_fails_an_unattended_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _adapter(
-        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(AGY_WAITING))
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(AGY_WAITING))
     )
 
     result = adapter.run_headless_session(
@@ -1463,25 +1478,25 @@ def test_antigravity_waiting_state_fails_an_unattended_session(
         (AIToolID.ANTIGRAVITY_CLI, HeadlessNativeOutput.TEXT),
     ],
 )
-def test_unattended_sessions_never_inherit_parent_stdin(
+def test_unattended_sessions_deliver_exactly_the_prompt_on_stdin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tool: AIToolID,
     native_output: HeadlessNativeOutput,
 ) -> None:
-    """A native CLI that reads stdin gets EOF, never the caller's terminal."""
+    """Every native CLI reads its prompt, and only its prompt, from a closed pipe.
+
+    It never inherits the caller's terminal, and never takes the prompt on argv.
+    """
     delivered = tmp_path / f"{tool.value}-stdin.txt"
     adapter = _adapter(monkeypatch, tool, _fake_cli(stdout="{}", stdin_record=delivered))
 
     adapter.run_headless_session(_request(tmp_path, native_output=native_output))
 
-    prompt_transport = adapter.capabilities().headless.prompt_transport
-    assert prompt_transport is not None
-    if prompt_transport.value == "stdin":
-        assert delivered.read_text() == PROMPT
-    else:
-        # /dev/null, so the child reads EOF immediately instead of blocking.
-        assert delivered.read_text() == ""
+    assert adapter.capabilities().headless.prompt_transport is HeadlessPromptTransport.STDIN
+    # agy reads one stream-json message; every other tool reads the raw prompt.
+    expected = _stream_input(PROMPT) if tool is AIToolID.ANTIGRAVITY_CLI else PROMPT
+    assert delivered.read_text() == expected
 
 
 @pytest.mark.parametrize(
@@ -1564,7 +1579,6 @@ def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_versio
 
     request = _request(
         tmp_path,
-        prompt="p" * 80_000,
         native_output=HeadlessNativeOutput.JSON,
         response_schema={"type": "object", "description": "s" * 80_000},
     )
@@ -1580,10 +1594,7 @@ def test_antigravity_aggregate_argv_and_environment_overflow_fails_before_versio
     with pytest.raises(HeadlessRequestError, match="native argv and environment"):
         adapter.run_headless_session(request)
 
-    assert (
-        max(len(argument.encode("utf-8")) for argument in argv)
-        < base_mod._MAX_HEADLESS_ARGUMENT_PROMPT
-    )
+    assert max(len(argument.encode("utf-8")) for argument in argv) < base_mod._MAX_HEADLESS_ARGUMENT
     assert version_probes == 0
 
 
@@ -1635,10 +1646,7 @@ def test_codex_aggregate_argv_overflow_fails_before_version_probe(
     with pytest.raises(HeadlessRequestError, match="native argv and environment"):
         adapter.run_headless_session(request)
 
-    assert (
-        max(len(argument.encode("utf-8")) for argument in argv)
-        < base_mod._MAX_HEADLESS_ARGUMENT_PROMPT
-    )
+    assert max(len(argument.encode("utf-8")) for argument in argv) < base_mod._MAX_HEADLESS_ARGUMENT
     assert version_probes == 0
 
 
@@ -1921,9 +1929,8 @@ def test_antigravity_windows_command_overflow_fails_before_version_probe(
         adapter.run_headless_session(
             _request(
                 tmp_path,
-                prompt="x" * 30_000,
                 native_output=HeadlessNativeOutput.JSON,
-                response_schema={"type": "object", "description": "x" * 3_000},
+                response_schema={"type": "object", "description": "x" * 33_000},
             )
         )
 
@@ -1982,15 +1989,38 @@ def test_windows_complete_argument_argv_overflow_fails_before_version_probe(
 
     with pytest.raises(HeadlessRequestError, match="native command line"):
         adapter.run_headless_session(
-            _request(
-                tmp_path,
-                prompt="x" * 30_000,
-                model="m" * 3_000,
-                native_output=native_output,
-            )
+            _request(tmp_path, model="m" * 33_000, native_output=native_output)
         )
 
     assert version_probes == 0
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+@pytest.mark.parametrize(
+    "tool",
+    [
+        AIToolID.CLAUDE,
+        AIToolID.CODEX,
+        AIToolID.CURSOR,
+        AIToolID.COPILOT,
+        AIToolID.OPENCODE,
+        AIToolID.ANTIGRAVITY_CLI,
+    ],
+)
+def test_prompt_size_is_never_bounded_by_the_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: AIToolID, platform: str
+) -> None:
+    """A prompt far beyond every argv limit stays off argv and passes validation."""
+    prompt = "x" * 1_000_000
+    request = _request(tmp_path, prompt=prompt)
+    adapter = AbstractAITool.get(tool)
+    monkeypatch.setattr(base_mod.sys, "platform", platform)
+
+    argv = adapter._headless_argv_for_validation(request)
+
+    assert argv is not None
+    assert all(prompt not in argument for argument in argv)
+    adapter._validate_headless_argv(request)  # raises on any OS limit
 
 
 @pytest.mark.parametrize("tool", [AIToolID.CLAUDE, AIToolID.ANTIGRAVITY_CLI])
@@ -2302,14 +2332,16 @@ def test_cursor_headless_argv_trusts_the_workspace_without_forcing_edits(
     assert "--trust" in command
     assert command[command.index("--sandbox") + 1] == "enabled"
     assert "--force" not in command and "--yolo" not in command
-    # Cursor takes its prompt as the trailing positional argument.
-    assert command[-1] == PROMPT
+    # The prompt is piped on stdin, never a positional argument.
+    assert PROMPT not in command
 
 
 def test_copilot_headless_argv_removes_the_question_tool(tmp_path: Path) -> None:
     command = _command(AIToolID.COPILOT, _request(tmp_path))
 
-    assert command[:3] == ["copilot", "--prompt", PROMPT]
+    # Prompt mode reads the piped prompt: no --prompt argument at all.
+    assert command[0] == "copilot"
+    assert "--prompt" not in command and PROMPT not in command
     # -s keeps stdout to the response; --no-ask-user removes the ask_user tool
     # so the agent cannot stall on a question nobody can answer.
     assert "-s" in command
@@ -2343,8 +2375,16 @@ def test_antigravity_headless_argv_carries_the_schema_and_print_timeout(
         print_timeout_seconds=120,
     )
 
-    assert command[:4] == ["agy", "--print", PROMPT, "--output-format"]
-    assert command[4] == "json"
+    # One stream-json message on stdin; --print= cannot swallow the next flag.
+    assert command[:6] == [
+        "agy",
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]
+    assert PROMPT not in command
     assert command[command.index("--print-timeout") + 1] == "120s"
     assert command[command.index("--json-schema") + 1] == json.dumps(SCHEMA, separators=(",", ":"))
 
@@ -2359,7 +2399,9 @@ def test_antigravity_print_timeout_uses_the_whole_run_deadline(
     """
     recorded: list[int] = []
     payload = {key: value for key, value in AGY_RESULT.items() if key != "json_schema"}
-    adapter = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=json.dumps(payload)))
+    adapter = _adapter(
+        monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_agy_result(payload))
+    )
     stub: Callable[..., list[str]] = type(adapter)._headless_command  # type: ignore[attr-defined]
 
     def record(self: AbstractAITool, request: HeadlessSessionRequest, **kwargs: Any) -> list[str]:

@@ -305,10 +305,6 @@ class CursorAdapter(AbstractAITool):
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
-    # Unattended ``--resume <chatId>`` and the read-only tool set were verified
-    # live on this build, after the unattended floor (2026.09.10).
-    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "2026.11.05-86047df"
-    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "2026.11.05-86047df"
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -328,9 +324,9 @@ class CursorAdapter(AbstractAITool):
             supports_yolo=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
-                # Cursor's print mode has no verified stdin contract, and its
-                # plain-text output carries no terminal status, so TEXT is served
+                # Print mode reads a piped prompt when no prompt argument is given.
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                # Plain-text output carries no terminal status, so TEXT is served
                 # from the stream-json result envelope, never ``--output-format text``.
                 native_outputs=(
                     HeadlessNativeOutput.TEXT,
@@ -371,12 +367,14 @@ class CursorAdapter(AbstractAITool):
                 approval_behavior=PlanRequestBehavior.PRESERVED,
                 command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
                 version_requirement=(
-                    "Cursor Agent exposing --print with --output-format json|stream-json "
-                    "and --trust."
+                    "Cursor Agent reading a piped prompt in --print with --output-format "
+                    "json|stream-json, --trust, --resume, and --allowed-tools."
                 ),
-                verified_version="2026.09.10-fd3934a",
+                # A piped prompt, --resume, and the read-only tool set were all
+                # verified live on this build.
+                verified_version="2026.11.05-86047df",
                 remediation=(
-                    "Upgrade Cursor Agent to the 2026.09.10 build or newer. Cursor exposes no "
+                    "Upgrade Cursor Agent to the 2026.11.05 build or newer. Cursor exposes no "
                     "final-response JSON Schema flag, so schema-constrained sessions must use "
                     "Claude Code, Codex CLI, or Antigravity CLI."
                 ),
@@ -588,13 +586,17 @@ class CursorAdapter(AbstractAITool):
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
-        """Return Cursor's complete command, including its argument-delivered prompt."""
+        """Return Cursor's complete command; the prompt itself is piped on stdin."""
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             return ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"]
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
-        """Build the exact unattended ``agent --print`` invocation."""
+        """Build the exact unattended ``agent --print`` invocation.
+
+        There is no prompt argument: print mode reads the piped prompt, so its
+        size is not bounded by the command line.
+        """
         command = [
             "agent",
             "--print",
@@ -620,7 +622,6 @@ class CursorAdapter(AbstractAITool):
         model = self.resolve_effort_model(request.model, request.effort)
         if model:
             command.extend(("--model", model))
-        command.append(request.prompt)
         return command
 
     def _run_headless_session(
@@ -652,6 +653,7 @@ class CursorAdapter(AbstractAITool):
             argv=self._headless_command(request),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
             on_stdout_lines=(
                 frame_streamer(
                     context,

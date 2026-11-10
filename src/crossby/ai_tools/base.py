@@ -50,7 +50,6 @@ from crossby.models.ai import (
     HeadlessInteractionMode,
     HeadlessPreflightCheck,
     HeadlessPreflightDeferredCheck,
-    HeadlessPromptTransport,
     HeadlessSessionPreflight,
     HeadlessSessionRequest,
     HeadlessSessionResult,
@@ -81,24 +80,15 @@ from crossby.models.config import ComplexityModelMapping
 
 logger = structlog.get_logger()
 
-# Argument-delivered prompts and adapter-supplied argv values must fit the
-# native process contract before an adapter begins version probing or spawns a
-# child. POSIX limits one argument to 131,072 bytes on Linux; Windows limits
-# the rendered *whole* command line to 32,767 UTF-16 code units, including its
-# terminating NUL. These ceilings leave room for the adapter's fixed flags
-# while keeping stdin and protocol transports unlimited. POSIX additionally
-# caps the aggregate argv and environment passed to execve.
-_MAX_HEADLESS_ARGUMENT_PROMPT = 30_000 if sys.platform.startswith("win") else 120_000
+# Prompts never travel on argv (see HeadlessPromptTransport), but adapter
+# flags such as a response schema or session settings still must fit the
+# native process contract before a child is spawned. POSIX limits one argument
+# to 131,072 bytes on Linux; Windows limits the rendered *whole* command line
+# to 32,767 UTF-16 code units, including its terminating NUL. POSIX
+# additionally caps the aggregate argv and environment passed to execve.
+_MAX_HEADLESS_ARGUMENT = 30_000 if sys.platform.startswith("win") else 120_000
 _MAX_HEADLESS_WINDOWS_COMMAND_LINE = 32_767
 _HEADLESS_POSIX_EXEC_SAFETY_MARGIN = 8 * 1024
-
-
-def _argument_prompt_length(prompt: str) -> int:
-    """Return the native argv space used by one argument-delivered prompt."""
-    if sys.platform.startswith("win"):
-        rendered = subprocess.list2cmdline([prompt])
-        return len(rendered.encode("utf-16-le")) // 2
-    return len(os.fsencode(prompt))
 
 
 def _build_at_least(version: str | None, floor: str | None) -> bool:
@@ -635,7 +625,8 @@ class AbstractAITool(ABC):
 
         The mode must declare ``supports_resume``; in unattended mode the build
         must also be at least ``HEADLESS_RESUME_VERIFIED_VERSION`` when the
-        adapter sets one, because resume was verified later than the mode floor.
+        adapter sets one (resume was verified later than the mode floor), and
+        otherwise at least the mode's own verified floor.
         """
         try:
             profile = self.capabilities().headless.profile_for(interaction_mode)
@@ -645,7 +636,9 @@ class AbstractAITool(ABC):
             return False
         if interaction_mode is not HeadlessInteractionMode.UNATTENDED:
             return True
-        return _build_at_least(version, self.HEADLESS_RESUME_VERIFIED_VERSION)
+        return _build_at_least(
+            version, self.HEADLESS_RESUME_VERIFIED_VERSION or profile.verified_version
+        )
 
     def headless_read_only_supported(
         self,
@@ -656,7 +649,7 @@ class AbstractAITool(ABC):
 
         The mode must declare ``supports_read_only``; in unattended mode the
         build must also be at least ``HEADLESS_READ_ONLY_VERIFIED_VERSION``
-        when the adapter sets one.
+        when the adapter sets one, and otherwise the mode's own verified floor.
         """
         try:
             profile = self.capabilities().headless.profile_for(interaction_mode)
@@ -666,28 +659,9 @@ class AbstractAITool(ABC):
             return False
         if interaction_mode is not HeadlessInteractionMode.UNATTENDED:
             return True
-        return _build_at_least(version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION)
-
-    def headless_prompt_fits(
-        self,
-        prompt: str,
-        interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
-    ) -> bool:
-        """Whether ``prompt`` passes the managed runtime's prompt-size check.
-
-        Only argument-delivered prompts are bounded: the limit is measured in
-        filesystem-encoded bytes on POSIX and command-line units on Windows,
-        exactly as :meth:`_validate_headless_request` measures it. Callers that
-        build large prompts use this to shrink them before starting a session.
-        """
-        try:
-            mode = self.capabilities().headless.profile_for(interaction_mode)
-        except ValueError:
-            # The runtime reports an unsupported mode itself.
-            return True
-        if mode.prompt_transport is not HeadlessPromptTransport.ARGUMENT:
-            return True
-        return _argument_prompt_length(prompt) <= _MAX_HEADLESS_ARGUMENT_PROMPT
+        return _build_at_least(
+            version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION or profile.verified_version
+        )
 
     def preflight_headless_session(
         self,
@@ -782,17 +756,6 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         mode = capability.profile_for(request.interaction_mode)
-        if mode.prompt_transport is HeadlessPromptTransport.ARGUMENT:
-            prompt_length = _argument_prompt_length(request.prompt)
-            if prompt_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
-                raise HeadlessRequestError(
-                    f"{caps.display_name} cannot safely deliver a {prompt_length}-unit prompt "
-                    f"through its native argv transport (limit: "
-                    f"{_MAX_HEADLESS_ARGUMENT_PROMPT}). Use an adapter with stdin or protocol "
-                    "prompt delivery, or shorten the prompt.",
-                    tool_id=self.TOOL_ID,
-                    capability=capability,
-                )
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             if interaction_handler is None:
                 raise HeadlessRequestError(
@@ -1101,8 +1064,8 @@ class AbstractAITool(ABC):
                 raise HeadlessRequestError(
                     f"{caps.display_name} cannot safely deliver a {command_length}-unit "
                     "native command line "
-                    f"(limit: {_MAX_HEADLESS_WINDOWS_COMMAND_LINE}). Shorten the prompt, "
-                    "response schema, or other command arguments.",
+                    f"(limit: {_MAX_HEADLESS_WINDOWS_COMMAND_LINE}). Shorten the response "
+                    "schema or other command arguments.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
@@ -1110,12 +1073,12 @@ class AbstractAITool(ABC):
 
         for argument in argv:
             argument_length = len(os.fsencode(argument))
-            if argument_length > _MAX_HEADLESS_ARGUMENT_PROMPT:
+            if argument_length > _MAX_HEADLESS_ARGUMENT:
                 raise HeadlessRequestError(
                     f"{caps.display_name} cannot safely deliver a {argument_length}-byte "
                     "native argv argument "
-                    f"(limit: {_MAX_HEADLESS_ARGUMENT_PROMPT}). Shorten the prompt, "
-                    "response schema, or other command arguments.",
+                    f"(limit: {_MAX_HEADLESS_ARGUMENT}). Shorten the response schema or "
+                    "other command arguments.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
@@ -1125,8 +1088,8 @@ class AbstractAITool(ABC):
         if exec_size > exec_limit - _HEADLESS_POSIX_EXEC_SAFETY_MARGIN:
             raise HeadlessRequestError(
                 f"{caps.display_name} cannot safely deliver a {exec_size}-byte native argv "
-                f"and environment (limit: {exec_limit} bytes). Shorten the prompt, "
-                "response schema, or other command arguments.",
+                f"and environment (limit: {exec_limit} bytes). Shorten the response "
+                "schema or other command arguments.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

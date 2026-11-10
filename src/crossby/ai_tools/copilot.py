@@ -50,11 +50,6 @@ class CopilotAdapter(AbstractAITool):
     """Adapter for GitHub Copilot CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.COPILOT
-    # Unattended ``--session-id`` (pin a new session, or resume one) and the
-    # read-only deny rules were verified live on 1.0.105, after the unattended
-    # floor (1.0.83).
-    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.0.105"
-    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.0.105"
 
     def capabilities(self) -> AIToolCapabilities:
         from crossby.ai_tools.copilot_sdk import brokered_profile
@@ -75,7 +70,8 @@ class CopilotAdapter(AbstractAITool):
             supports_trusted_dirs=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # Prompt mode reads a piped prompt when --prompt is omitted.
+                prompt_transport=HeadlessPromptTransport.STDIN,
                 # 1.0.83 advertises --output-format json (JSONL), but its event
                 # schema is not verified, so the managed transport stays on the
                 # documented text response rather than guessing a shape.
@@ -98,11 +94,14 @@ class CopilotAdapter(AbstractAITool):
                 # is auto-approved because --allow-all-tools is never emitted.
                 command_policy_support=PlanCommandPolicySupport.NATIVE,
                 version_requirement=(
-                    "GitHub Copilot CLI exposing --prompt, --silent, and --no-ask-user."
+                    "GitHub Copilot CLI reading a piped prompt with --silent, --no-ask-user, "
+                    "--session-id, and --deny-tool."
                 ),
-                verified_version="1.0.83",
+                # A piped prompt, --session-id resume, and the read-only deny
+                # rules were all verified live on this build.
+                verified_version="1.0.105",
                 remediation=(
-                    "Upgrade GitHub Copilot CLI to 1.0.83 or newer. Copilot exposes no "
+                    "Upgrade GitHub Copilot CLI to 1.0.105 or newer. Copilot exposes no "
                     "final-response JSON Schema flag, so schema-constrained sessions must use "
                     "Claude Code, Codex CLI, or Antigravity CLI."
                 ),
@@ -231,7 +230,7 @@ class CopilotAdapter(AbstractAITool):
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
-        """Return Copilot's complete command, including its argument-delivered prompt."""
+        """Return Copilot's complete command; the prompt itself is piped on stdin."""
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             from crossby.ai_tools.copilot_sdk import command
 
@@ -350,16 +349,16 @@ class CopilotAdapter(AbstractAITool):
     def _headless_command(
         self, request: HeadlessSessionRequest, *, session_id: str | None = None
     ) -> list[str]:
-        """Build the exact unattended ``copilot --prompt`` invocation.
+        """Build the exact unattended ``copilot`` prompt-mode invocation.
 
+        The prompt is not an argument: piped on stdin, it runs in prompt mode
+        just as ``--prompt <text>`` does, with no command-line size limit.
         ``--session-id`` resumes ``request.resume_id``, or else pins the new
         session to ``session_id``: text output carries no session ID, so the
         only ID crossby can resume is one it chose.
         """
         command = [
             "copilot",
-            "--prompt",
-            request.prompt,
             # -s keeps stdout to the agent response alone, and --no-ask-user
             # removes the ask_user tool so the agent cannot stop on a question
             # nobody can answer.
@@ -411,6 +410,7 @@ class CopilotAdapter(AbstractAITool):
             argv=self._headless_command(request, session_id=session_id),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
         )
         warnings = capture_failure_warnings(output)
         # --allow-all-tools is deliberately never emitted, so any tool call

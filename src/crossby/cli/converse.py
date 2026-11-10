@@ -105,11 +105,6 @@ def converse(
     responder_model: str | None = typer.Option(
         None, "--responder-model", help="Model for the responder."
     ),
-    history_chars: int = typer.Option(
-        80_000,
-        "--history-chars",
-        help="Character budget for replayed history (tools without session resume).",
-    ),
     summary: bool = typer.Option(
         False, "--summary", help="Also write a neutral summary.md of the whole consultation."
     ),
@@ -140,10 +135,11 @@ def converse(
     asks follow-up questions, and ends with its final answer. The RESPONDER
     is never sent the goal; it gets the asker's messages as written and only
     answers, from its own folder (--responder-path), read-only: it can read and
-    search but not change files. Each side keeps its own session (resumed where
-    the installed build's resume was verified). The asker's final answer goes to
-    stdout; messages and progress go to stderr; transcript.md is saved after
-    every message.
+    search but not change files. Each side keeps its own session, resumed every
+    turn and sent only the newest message, whole; a CLI build whose resume was
+    not verified is refused before anything starts. The asker's final answer
+    goes to stdout; messages and progress go to stderr; transcript.md is saved
+    after every message.
 
     Exit codes: 0 answered, 2 stopped by the round or time limit, 1 failed,
     130 interrupted.
@@ -214,7 +210,6 @@ def converse(
             max_rounds=max_rounds,
             timeout_seconds=timeout,
             turn_timeout_seconds=turn_timeout,
-            history_chars=history_chars,
             on_turn_start=on_turn_start,
             on_turn=on_turn,
         )
@@ -343,9 +338,8 @@ def _side_json(result: ConversationResult, participant: Participant) -> dict[str
     return {
         "tool": participant.tool.value,
         "model": participant.model,
-        "session": result.modes[participant.role].value,
-        # The most earlier messages a replayed turn left out (0 when resumed).
-        "replay_omitted": max((turn.omitted for turn in own), default=0),
+        # The native session every turn after the first resumed.
+        "session_id": result.sessions.get(participant.role),
         "denials": [denial for turn in own for denial in turn.denials],
     }
 
@@ -367,9 +361,6 @@ def _summarize(
     """Return ``(summary, error, interrupted)``; the transcript is already written."""
     from crossby.services.converse import ConverseSummaryError, summarize_conversation
 
-    def warn_truncation(total: int, kept: int) -> None:
-        console.warn(f"Summary input truncated: kept the last {kept} of {total} turns.")
-
     if not quiet:
         _stderr(f"  [step]▸[/] Summarizing with {tool.value}…")
     try:
@@ -378,7 +369,6 @@ def _summarize(
             transcript_path=transcript_path,
             tool=tool,
             working_dir=project_root,
-            on_truncate=warn_truncation,
         )
     except ConverseSummaryError as exc:
         console.warn(f"Summary failed: {exc}")
