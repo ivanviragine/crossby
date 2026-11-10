@@ -239,6 +239,15 @@ When agy denies an action it still ends that turn with an empty `response`
 (the same with the old argv form and `--output-format json`); crossby reports
 the denial with the failure.
 
+Skills still load on the stdin path. One Claude skill (`secret-fruit`) was
+copied with `crossby sync skills --from claude --strategy copy` into
+`.cursor/skills/`, `.agents/skills/` (Codex and Antigravity CLI) and
+`.github/skills/`. A read-only fresh turn on each of the six tools answered
+from the skill, and the resumed turn named the copy in that tool's own
+directory: `.claude/skills/` for Claude Code, `.cursor/skills/` for Cursor,
+`.github/skills/` for Copilot, and `.agents/skills/` for Codex, Antigravity CLI
+and OpenCode (which reads the shared copy). Every folder stayed clean.
+
 End to end, two-round `crossby converse` runs (resume only, nothing replayed)
 put each changed tool on both sides: Claude Code asking Copilot, Cursor and
 Antigravity CLI, each also writing the `--summary`; Cursor asking Codex;
