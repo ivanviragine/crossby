@@ -49,6 +49,73 @@ if TYPE_CHECKING:
 
 _OPENCODE_STREAM_EVENT_KINDS = frozenset({"step_start", "text", "step_finish"})
 
+# A read-only session runs as this agent, defined for the child process only
+# through OpenCode's inline-config variable, never written to any config file.
+# Verified on 1.19.5: with edit and bash denied OpenCode does not offer its
+# write, edit, patch or bash tools at all, while the folder's AGENTS.md and
+# skills still load. The built-in ``plan`` agent is not enough: it allows bash
+# (``* allow``) and edits under ``.opencode/plans/`` inside the project. Task is
+# denied because a subagent has its own permissions; question is denied because
+# nobody can answer one.
+_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+_READ_ONLY_AGENT = "crossby-read-only"
+_READ_ONLY_AGENT_CONFIG: dict[str, Any] = {
+    "mode": "primary",
+    "description": "crossby read-only session: reads and searches, never edits or runs commands.",
+    "permission": {"edit": "deny", "bash": "deny", "task": "deny", "question": "deny"},
+}
+
+
+def _split_plugin_chatter(stdout: str) -> tuple[str, int]:
+    """Separate ``--format json`` event lines from plain text that plugins print.
+
+    OpenCode plugins share the process's stdout: a plugin's auto-update checker
+    printed ``[auto-update-checker] Package not found, …`` before the first event
+    on 1.19.5, which failed every run as malformed output. Only lines that are
+    not JSON objects at all are set aside (and counted); a line that starts like
+    an event but does not parse is still malformed output.
+    """
+    events: list[str] = []
+    chatter = 0
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("{"):
+            events.append(stripped)
+        else:
+            chatter += 1
+    return "\n".join(events), chatter
+
+
+def _read_only_config_content(adapter: AbstractAITool, request: HeadlessSessionRequest) -> str:
+    """Return inline config that adds the read-only agent to any existing value."""
+    import os
+
+    from crossby.ai_tools.headless import HeadlessRequestError
+
+    existing = os.environ.get(_CONFIG_CONTENT_ENV, "").strip()
+    config: dict[str, Any] = {}
+    if existing:
+        try:
+            parsed = json.loads(existing)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            raise HeadlessRequestError(
+                f"{_CONFIG_CONTENT_ENV} is set but is not a JSON object, so crossby cannot "
+                "add its read-only OpenCode agent to it.",
+                tool_id=adapter.TOOL_ID,
+                capability=adapter.capabilities().headless,
+            )
+        config = parsed
+    agents = config.get("agent")
+    config["agent"] = {
+        **(agents if isinstance(agents, dict) else {}),
+        _READ_ONLY_AGENT: _READ_ONLY_AGENT_CONFIG,
+    }
+    return json.dumps(config, separators=(",", ":"))
+
 
 class OpenCodeAdapter(AbstractAITool):
     """Adapter for OpenCode CLI.
@@ -62,6 +129,10 @@ class OpenCodeAdapter(AbstractAITool):
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.OPENCODE
+    # Unattended ``--session <id>`` and the read-only agent were verified live
+    # on 1.19.5, after the unattended floor (1.18.31).
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -114,6 +185,10 @@ class OpenCodeAdapter(AbstractAITool):
                     ),
                 ),
                 supports_response_schema=False,
+                # ``opencode run --session <id>`` continues the exact session.
+                supports_resume=True,
+                # A session-only agent whose edit, bash and task tools are denied.
+                supports_read_only=True,
                 successful_native_statuses=("stop",),
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
@@ -209,6 +284,9 @@ class OpenCodeAdapter(AbstractAITool):
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         if request.interaction_mode is not HeadlessInteractionMode.BROKERED:
+            if request.read_only:
+                # Fail before spawning when the read-only agent cannot be added.
+                _read_only_config_content(self, request)
             return
         from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
 
@@ -250,11 +328,24 @@ class OpenCodeAdapter(AbstractAITool):
         refused natively instead of being auto-approved.
         """
         command = ["opencode", "run", "--format", "json", "--log-level", "ERROR"]
+        if request.read_only:
+            # The agent is defined for this process only, through
+            # OPENCODE_CONFIG_CONTENT (see _read_only_environment).
+            command.extend(("--agent", _READ_ONLY_AGENT))
+        if request.resume_id is not None:
+            command.extend(("--session", request.resume_id))
         if request.model:
             command.extend(("--model", request.model))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
         return command
+
+    def _headless_environment(self, request: HeadlessSessionRequest) -> dict[str, str]:
+        """The child environment additions for one unattended run."""
+        extra = {"NO_COLOR": "1"}
+        if request.read_only:
+            extra[_CONFIG_CONTENT_ENV] = _read_only_config_content(self, request)
+        return extra
 
     def _run_headless_session(
         self,
@@ -308,7 +399,7 @@ class OpenCodeAdapter(AbstractAITool):
             context,
             argv=self._headless_command(request),
             cwd=request.working_dir,
-            env=child_environment({"NO_COLOR": "1"}),
+            env=child_environment(self._headless_environment(request)),
             stdin_text=request.prompt,
             on_stdout_lines=frame_streamer(
                 context,
@@ -325,12 +416,19 @@ class OpenCodeAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
-        frames = parse_json_lines(output.stdout)
+        event_lines, chatter = _split_plugin_chatter(output.stdout)
+        frames = parse_json_lines(event_lines)
         if frames is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
                 exit_code=output.returncode,
                 warnings=(*warnings, "OpenCode emitted malformed raw JSON events."),
+            )
+        if chatter:
+            warnings = (
+                *warnings,
+                f"OpenCode printed {chatter} non-JSON line(s) to stdout, typically from a "
+                "plugin; they were ignored.",
             )
 
         # Progress and provenance were already emitted live by the streamer.
@@ -375,6 +473,16 @@ class OpenCodeAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 session_id=session_id,
                 warnings=(*warnings, "OpenCode ended without a terminal stop event."),
+            )
+        if request.resume_id is not None and session_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(
+                    *warnings,
+                    "OpenCode reported a different session than the one crossby resumed.",
+                ),
             )
         texts = [text for part in text_parts if (text := non_blank_text(part.get("text")))]
         if len(text_parts) > 1 and request.native_output is HeadlessNativeOutput.JSONL:

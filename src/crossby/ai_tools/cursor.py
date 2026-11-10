@@ -94,6 +94,9 @@ _CURSOR_STREAM_EVENT_KINDS = frozenset({"system", "user", "thinking", "assistant
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
 _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
+# The read-only session's closed tool set, in Cursor's proto ToolCall names:
+# reading, searching and listing, with no edit, delete, shell or MCP tool.
+_READ_ONLY_TOOLS = "read_tool_call,grep_tool_call,glob_tool_call,ls_tool_call,sem_search_tool_call"
 
 
 def _cursor_acp_initialize_params(client_version: str) -> dict[str, Any]:
@@ -110,6 +113,21 @@ def _cursor_acp_session_params(working_dir: Path) -> dict[str, Any]:
 
 def _cursor_acp_prompt_params(session_id: str, prompt: str) -> dict[str, Any]:
     return {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}
+
+
+def _assistant_texts(frame: dict[str, Any]) -> list[str]:
+    """Text blocks of one stream-json ``assistant`` frame."""
+    message = frame.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ]
 
 
 def _effort_template(model: str) -> tuple[str, EffortLevel | None, bool]:
@@ -306,11 +324,15 @@ class CursorAdapter(AbstractAITool):
             supports_yolo=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
-                # Cursor's print mode has no verified stdin contract, and its
-                # plain-text output carries no terminal status, so only the two
-                # execution-output formats are offered.
-                native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
+                # Print mode reads a piped prompt when no prompt argument is given.
+                prompt_transport=HeadlessPromptTransport.STDIN,
+                # Plain-text output carries no terminal status, so TEXT is served
+                # from the stream-json result envelope, never ``--output-format text``.
+                native_outputs=(
+                    HeadlessNativeOutput.TEXT,
+                    HeadlessNativeOutput.JSON,
+                    HeadlessNativeOutput.JSONL,
+                ),
                 interaction_modes=(
                     HeadlessInteractionMode.UNATTENDED,
                     HeadlessInteractionMode.BROKERED,
@@ -336,17 +358,23 @@ class CursorAdapter(AbstractAITool):
                     ),
                 ),
                 supports_response_schema=False,
+                # ``--resume <chatId>`` continues the exact chat.
+                supports_resume=True,
+                # A closed tool set of read and search tools.
+                supports_read_only=True,
                 successful_native_statuses=("success",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
                 command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
                 version_requirement=(
-                    "Cursor Agent exposing --print with --output-format json|stream-json "
-                    "and --trust."
+                    "Cursor Agent reading a piped prompt in --print with --output-format "
+                    "json|stream-json, --trust, --resume, and --allowed-tools."
                 ),
-                verified_version="2026.09.10-fd3934a",
+                # A piped prompt, --resume, and the read-only tool set were all
+                # verified live on this build.
+                verified_version="2026.11.05-86047df",
                 remediation=(
-                    "Upgrade Cursor Agent to the 2026.09.10 build or newer. Cursor exposes no "
+                    "Upgrade Cursor Agent to the 2026.11.05 build or newer. Cursor exposes no "
                     "final-response JSON Schema flag, so schema-constrained sessions must use "
                     "Claude Code, Codex CLI, or Antigravity CLI."
                 ),
@@ -558,13 +586,17 @@ class CursorAdapter(AbstractAITool):
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
-        """Return Cursor's complete command, including its argument-delivered prompt."""
+        """Return Cursor's complete command; the prompt itself is piped on stdin."""
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             return ["agent", "--sandbox", "enabled" if request.sandbox else "disabled", "acp"]
         return self._headless_command(request)
 
     def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
-        """Build the exact unattended ``agent --print`` invocation."""
+        """Build the exact unattended ``agent --print`` invocation.
+
+        There is no prompt argument: print mode reads the piped prompt, so its
+        size is not bounded by the command line.
+        """
         command = [
             "agent",
             "--print",
@@ -578,10 +610,18 @@ class CursorAdapter(AbstractAITool):
             "--sandbox",
             "enabled" if request.sandbox else "disabled",
         ]
+        if request.read_only:
+            # Verified on 2026.11.05-86047df: neither --mode ask nor --mode plan
+            # stops print mode's edit tool (a forced edit wrote the file), but
+            # this closed tool set leaves only read and search tools. The flag
+            # is hidden; Cursor validates the names, so a build that renames
+            # them fails the session instead of widening it.
+            command.extend(("--allowed-tools", _READ_ONLY_TOOLS))
+        if request.resume_id is not None:
+            command.extend(("--resume", request.resume_id))
         model = self.resolve_effort_model(request.model, request.effort)
         if model:
             command.extend(("--model", model))
-        command.append(request.prompt)
         return command
 
     def _run_headless_session(
@@ -606,12 +646,14 @@ class CursorAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import child_environment
 
-        streaming = request.native_output is HeadlessNativeOutput.JSONL
+        # TEXT shares the stream-json wire with JSONL (see _headless_command).
+        streaming = request.native_output is not HeadlessNativeOutput.JSON
         output = run_managed_command(
             context,
             argv=self._headless_command(request),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
             on_stdout_lines=(
                 frame_streamer(
                     context,
@@ -644,6 +686,9 @@ class CursorAdapter(AbstractAITool):
 
         session_id: str | None = None
         envelope: dict[str, Any] | None = None
+        # Assistant text after the last tool call (stream-json only): the
+        # answer, without the "I'll read X" commentary ``result`` prepends.
+        answer_parts: list[str] = []
         if request.native_output is HeadlessNativeOutput.JSON:
             envelope = parse_json_object(output.stdout)
             if envelope is not None and envelope.get("type") != "result":
@@ -675,9 +720,14 @@ class CursorAdapter(AbstractAITool):
                         session_id=session_id,
                         warnings=(*warnings, warning),
                     )
-                if non_blank_text(frame.get("type")) == "result":
+                frame_type = non_blank_text(frame.get("type"))
+                if frame_type == "result":
                     envelope = frame
                     saw_result = True
+                elif frame_type == "tool_call":
+                    answer_parts = []
+                elif frame_type == "assistant":
+                    answer_parts.extend(_assistant_texts(frame))
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
@@ -687,7 +737,21 @@ class CursorAdapter(AbstractAITool):
             )
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
+        if request.resume_id is not None and session_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(
+                    *warnings,
+                    "Cursor reported a different chat than the one crossby resumed.",
+                ),
+            )
         response_text = non_blank_text(envelope.get("result"))
+        answer = non_blank_text("".join(answer_parts))
+        # Trim only a prefix of Cursor's own result; otherwise keep it whole.
+        if response_text is not None and answer is not None and response_text.endswith(answer):
+            response_text = answer.strip()
         native_error = envelope.get("is_error")
         if not isinstance(native_error, bool):
             return context.complete(

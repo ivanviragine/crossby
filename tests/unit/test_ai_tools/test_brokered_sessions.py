@@ -1110,33 +1110,37 @@ def test_opencode_ordinary_session_does_not_select_plan_agent(
     assert FakeServer.instances[0].active_session_id == "ses-exact"
 
 
+def _agy_result(envelope: dict[str, Any]) -> str:
+    """agy's stream-json wire carrying only its final result envelope."""
+    return json.dumps({"event": "result", "result": envelope}) + "\n"
+
+
+_AGY_SCOPE_QUESTION: dict[str, Any] = {
+    "status": "WAITING_FOR_INPUT",
+    "conversation_id": "conv-exact",
+    "question": {
+        "id": "scope",
+        "prompt": "Choose scope",
+        "options": [{"id": "api", "label": "API"}],
+    },
+}
+
+
 def test_antigravity_continuation_reuses_exact_conversation_without_plan_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from crossby.ai_tools.antigravity_cli import _stream_input
+
     class FakeOwner:
         def __init__(self, _context: Any) -> None:
             return None
 
     outputs = iter(
         [
+            HeadlessCommandOutput(0, _agy_result(_AGY_SCOPE_QUESTION), ""),
             HeadlessCommandOutput(
                 0,
-                json.dumps(
-                    {
-                        "status": "WAITING_FOR_INPUT",
-                        "conversation_id": "conv-exact",
-                        "question": {
-                            "id": "scope",
-                            "prompt": "Choose scope",
-                            "options": [{"id": "api", "label": "API"}],
-                        },
-                    }
-                ),
-                "",
-            ),
-            HeadlessCommandOutput(
-                0,
-                json.dumps(
+                _agy_result(
                     {"status": "SUCCESS", "conversation_id": "conv-exact", "response": "Done."}
                 ),
                 "",
@@ -1144,15 +1148,20 @@ def test_antigravity_continuation_reuses_exact_conversation_without_plan_mode(
         ]
     )
     commands: list[list[str]] = []
+    stdins: list[str | None] = []
 
-    def run(_context: Any, *, argv: list[str], **_kwargs: Any) -> HeadlessCommandOutput:
+    def run(
+        _context: Any, *, argv: list[str], stdin_text: str | None = None, **_kwargs: Any
+    ) -> HeadlessCommandOutput:
         commands.append(argv)
+        stdins.append(stdin_text)
         return next(outputs)
 
     monkeypatch.setattr("crossby.ai_tools.headless_cli.ResumableManagedCLIController", FakeOwner)
     monkeypatch.setattr("crossby.ai_tools.headless_cli.run_managed_command", run)
+    request = _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
     result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
-        _request(tmp_path, native_output=HeadlessNativeOutput.JSON),
+        request,
         lambda interaction: SessionInteractionResponse(
             outcome=PlanInteractionOutcome.ANSWERED, option_id="api"
         ),
@@ -1160,93 +1169,66 @@ def test_antigravity_continuation_reuses_exact_conversation_without_plan_mode(
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.conversation_id == "conv-exact"
     assert len(commands) == 2
-    assert commands[1][1:5] == ["--conversation", "conv-exact", "--print", "API"]
+    assert commands[1][1:3] == ["--conversation", "conv-exact"]
+    # The prompt, then the chosen label, each as one stream-json message on stdin.
+    assert stdins == [_stream_input(request.prompt), _stream_input("API")]
+    assert all("API" not in argv for argv in commands)
     assert all("--mode" not in argv for argv in commands)
 
 
 @pytest.mark.parametrize("answer_source", ["free-form", "option-label"])
-@pytest.mark.parametrize("limit", ["posix-argument", "posix-total", "windows"])
-def test_antigravity_oversized_continuation_fails_before_launch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    answer_source: str,
-    limit: str,
+def test_antigravity_continuation_of_any_size_travels_on_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer_source: str
 ) -> None:
-    from crossby.ai_tools import base, headless_cli
+    """An answer far past every argv limit continues the conversation unchanged."""
+    from crossby.ai_tools import headless_cli
+    from crossby.ai_tools.antigravity_cli import _stream_input
 
     class FakeOwner:
         def __init__(self, _context: Any) -> None:
             pass
 
-    adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
-    request = _request(tmp_path, native_output=HeadlessNativeOutput.JSON)
-    if limit == "windows":
-        monkeypatch.setattr(base.sys, "platform", "win32")
-        # Non-BMP characters occupy two UTF-16 units in CreateProcess argv.
-        answer = "\U0001f680" * 17_000
-    else:
-        monkeypatch.setattr(base.sys, "platform", "linux")
-        monkeypatch.setattr(base, "_MAX_HEADLESS_ARGUMENT_PROMPT", 120_000)
-        answer = "x" * (120_001 if limit == "posix-argument" else 80_000)
-        if limit == "posix-total":
-            request = request.model_copy(
-                update={"response_schema": {"type": "object", "description": "s" * 80_000}}
-            )
-            initial_argv = adapter._headless_argv_for_validation(request)
-            assert initial_argv is not None
-            monkeypatch.setattr(
-                base,
-                "_headless_posix_exec_limit",
-                lambda: (
-                    base._headless_posix_exec_size(initial_argv)
-                    + base._HEADLESS_POSIX_EXEC_SAFETY_MARGIN
-                    + 1_000
+    answer = "\U0001f680" * 200_000
+    question = json.loads(json.dumps(_AGY_SCOPE_QUESTION))
+    question["question"]["options"] = (
+        [{"id": "api", "label": answer}] if answer_source == "option-label" else []
+    )
+    outputs = iter(
+        [
+            HeadlessCommandOutput(0, _agy_result(question), ""),
+            HeadlessCommandOutput(
+                0,
+                _agy_result(
+                    {"status": "SUCCESS", "conversation_id": "conv-exact", "response": "Done."}
                 ),
-            )
-
-    commands: list[list[str]] = []
-
-    def run(_context: Any, *, argv: list[str], **_kwargs: Any) -> HeadlessCommandOutput:
-        commands.append(argv)
-        assert len(commands) == 1, "oversized continuation must not be launched"
-        return HeadlessCommandOutput(
-            0,
-            json.dumps(
-                {
-                    "status": "WAITING_FOR_INPUT",
-                    "conversation_id": "conv-exact",
-                    "question": {
-                        "id": "scope",
-                        "prompt": "Choose scope",
-                        "options": (
-                            [{"id": "api", "label": answer}]
-                            if answer_source == "option-label"
-                            else []
-                        ),
-                    },
-                }
+                "",
             ),
-            "",
-        )
+        ]
+    )
+    commands: list[list[str]] = []
+    stdins: list[str | None] = []
+
+    def run(
+        _context: Any, *, argv: list[str], stdin_text: str | None = None, **_kwargs: Any
+    ) -> HeadlessCommandOutput:
+        commands.append(argv)
+        stdins.append(stdin_text)
+        return next(outputs)
 
     monkeypatch.setattr(headless_cli, "ResumableManagedCLIController", FakeOwner)
     monkeypatch.setattr(headless_cli, "run_managed_command", run)
-    result = adapter.run_headless_session(
-        request,
+    result = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI).run_headless_session(
+        _request(tmp_path, native_output=HeadlessNativeOutput.JSON),
         lambda _interaction: SessionInteractionResponse(
             outcome=PlanInteractionOutcome.ANSWERED,
             **({"answer": answer} if answer_source == "free-form" else {"option_id": "api"}),
         ),
     )
 
-    assert len(commands) == 1
-    assert result.status is HeadlessTerminalStatus.FAILED
-    assert result.conversation_id == "conv-exact"
-    assert result.events[-1].terminal_status is HeadlessTerminalStatus.FAILED
-    assert any(
-        "continuation exceeds native command limits" in warning for warning in result.warnings
-    )
-    assert answer not in str(result.model_dump())
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    assert len(commands) == 2
+    assert stdins[1] == _stream_input(answer)
+    assert all(answer not in argument for argv in commands for argument in argv)
 
 
 def test_codex_builtin_permission_grants_exact_profile_only_after_explicit_approval(
@@ -2283,7 +2265,7 @@ def test_antigravity_brokered_continuation_stops_after_nine_invocations(
         calls.append(argv)
         return HeadlessCommandOutput(
             0,
-            json.dumps(
+            _agy_result(
                 {
                     "status": "WAITING_FOR_INPUT",
                     "conversation_id": "conv-exact",
@@ -2373,7 +2355,7 @@ def test_antigravity_nonzero_exit_emits_failed_terminal(
         "run_managed_command",
         lambda *_args, **_kwargs: HeadlessCommandOutput(
             1,
-            json.dumps({"status": "FAILED", "conversation_id": "conv-exact"}),
+            _agy_result({"status": "FAILED", "conversation_id": "conv-exact"}),
             "",
         ),
     )
@@ -2400,7 +2382,7 @@ def test_antigravity_invalid_native_answer_emits_failed_terminal(
         "run_managed_command",
         lambda *_args, **_kwargs: HeadlessCommandOutput(
             0,
-            json.dumps(
+            _agy_result(
                 {
                     "status": "WAITING_FOR_INPUT",
                     "conversation_id": "conv-exact",

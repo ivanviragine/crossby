@@ -109,10 +109,37 @@ def _open_or_create_posix_directories(parent_fd: int, components: tuple[str, ...
     return current_fd
 
 
+_PLACEHOLDER_SESSION_ID = "00000000-0000-4000-8000-000000000000"
+# A read-only session gets only these built-in tools: reading, searching and
+# the project's skills. ``--tools`` is a closed set, so the write and shell
+# tools are absent rather than denied, whatever the ambient allow rules say.
+# ``--restricted`` was rejected: on 2.1.317 it also stops the folder's
+# CLAUDE.md from loading, and a responder must keep its folder's instructions.
+_READ_ONLY_TOOLS = "Read,Grep,Glob,Skill"
+# Hooks run commands outside the tool set, so a read-only session disables them.
+_READ_ONLY_SETTINGS = '{"disableAllHooks":true}'
+
+
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
+
 class ClaudeAdapter(AbstractAITool):
     """Adapter for Claude Code CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CLAUDE
+    # Unattended ``--print --resume`` and ``--session-id`` were verified on
+    # 2.1.316, and the read-only profile on 2.1.317; the unattended floor
+    # (2.1.263) predates both.
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "2.1.316"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "2.1.317"
 
     def capabilities(self) -> AIToolCapabilities:
         from crossby.ai_tools.claude_sdk import brokered_profile
@@ -150,6 +177,12 @@ class ClaudeAdapter(AbstractAITool):
                 ),
                 brokered=brokered,
                 supports_response_schema=True,
+                # ``--print --resume <id>`` continues the exact session; every new
+                # unattended session gets an explicit ``--session-id`` (verified on
+                # 2.1.316), so the returned ID is always one crossby chose.
+                supports_resume=True,
+                # A closed built-in tool set without write or shell tools.
+                supports_read_only=True,
                 # Claude owns approvals itself; ``--print`` has no writable-root
                 # selector, so a sandbox=False request cannot be preserved.
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
@@ -296,7 +329,24 @@ class ClaudeAdapter(AbstractAITool):
 
     def _validate_headless_requirements(self, request: HeadlessSessionRequest) -> None:
         """Reject schema requests Claude cannot answer with structured output."""
-        from crossby.ai_tools.headless import HeadlessUnsupportedError
+        from crossby.ai_tools.headless import HeadlessRequestError, HeadlessUnsupportedError
+
+        if request.read_only and request.command_policy is not None:
+            raise HeadlessRequestError(
+                "A read-only Claude Code session has no shell, so it cannot take a command policy.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
+        if (
+            request.resume_id is not None
+            and request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+            and not _is_uuid(request.resume_id)
+        ):
+            raise HeadlessRequestError(
+                "Claude Code session IDs are UUIDs; the requested resume ID is not one.",
+                tool_id=self.TOOL_ID,
+                capability=self.capabilities().headless,
+            )
 
         if (
             request.response_schema is not None
@@ -318,12 +368,23 @@ class ClaudeAdapter(AbstractAITool):
             from crossby.ai_tools.claude_sdk import sdk_command
 
             return sdk_command(request)
-        return self._headless_command(request)
+        # The real run adds ``--session-id <uuid>``; size the argv the same way.
+        return self._headless_command(request, session_id=_PLACEHOLDER_SESSION_ID)
 
-    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
-        """Build the exact unattended ``claude --print`` invocation."""
+    def _headless_command(
+        self, request: HeadlessSessionRequest, *, session_id: str | None = None
+    ) -> list[str]:
+        """Build the exact unattended ``claude --print`` invocation.
+
+        ``request.resume_id`` continues that session with ``--resume``.
+        Otherwise ``session_id`` pins the new session's ID with ``--session-id``:
+        a ``claude`` started inside another Claude Code session would otherwise
+        inherit the parent's session ID, so two agents could share one session.
+        """
         native_formats = {
-            HeadlessNativeOutput.TEXT: "text",
+            # TEXT is read from the JSON result envelope: plain text carries no
+            # session ID, is_error or permission_denials to check.
+            HeadlessNativeOutput.TEXT: "json",
             HeadlessNativeOutput.JSON: "json",
             HeadlessNativeOutput.JSONL: "stream-json",
         }
@@ -344,12 +405,22 @@ class ClaudeAdapter(AbstractAITool):
             command.extend(
                 ("--json-schema", json.dumps(request.response_schema, separators=(",", ":")))
             )
+        if request.resume_id is not None:
+            command.extend(("--resume", request.resume_id))
+        elif session_id is not None:
+            command.extend(("--session-id", session_id))
         if request.model:
             command.extend(("--model", self.normalize_model_format(request.model)))
         if request.effort is not None:
             command.extend(self.effort_args(request.effort))
         for path in request.trusted_dirs:
             command.extend(("--add-dir", str(path)))
+        if request.read_only:
+            # Verified on 2.1.317: a closed --tools set leaves no write or shell
+            # tool to call (forced write attempts had nothing to call), while the
+            # folder's CLAUDE.md and skills still load. Unlike --setting-sources
+            # or --restricted, it keeps the folder's own setup.
+            command.extend(("--tools", _READ_ONLY_TOOLS, "--settings", _READ_ONLY_SETTINGS))
         if request.command_policy is not None:
             command.extend(
                 self.allowed_commands_args(list(request.command_policy.allowed_commands))
@@ -391,9 +462,10 @@ class ClaudeAdapter(AbstractAITool):
         from crossby.ai_tools.plan_process import child_environment
 
         streaming = request.native_output is HeadlessNativeOutput.JSONL
+        expected_session = request.resume_id or _new_session_id()
         output = run_managed_command(
             context,
-            argv=self._headless_command(request),
+            argv=self._headless_command(request, session_id=expected_session),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
             stdin_text=request.prompt,
@@ -418,23 +490,9 @@ class ClaudeAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
-        if request.native_output is HeadlessNativeOutput.TEXT:
-            return complete_session(
-                context,
-                request,
-                status=(
-                    HeadlessTerminalStatus.SUCCEEDED
-                    if output.returncode == 0
-                    else HeadlessTerminalStatus.FAILED
-                ),
-                exit_code=output.returncode,
-                response_text=output.stdout.strip() or None,
-                warnings=warnings,
-            )
-
         session_id: str | None = None
         envelope: dict[str, Any] | None = None
-        if request.native_output is HeadlessNativeOutput.JSON:
+        if not streaming:  # TEXT and JSON both run --output-format json
             envelope = parse_json_object(output.stdout)
             if envelope is not None and envelope.get("type") != "result":
                 envelope = None
@@ -485,6 +543,15 @@ class ClaudeAdapter(AbstractAITool):
             )
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
+        if session_id is not None and session_id != expected_session:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(
+                    *warnings,
+                    "Claude Code reported a different session than the one crossby requested.",
+                ),
+            )
         denials = envelope.get("permission_denials")
         denials = denials if isinstance(denials, list) else []
         # Native denial entries include untrusted tool names and proposed input;
@@ -494,7 +561,8 @@ class ClaudeAdapter(AbstractAITool):
                 f"Claude Code reported {len(denials)} permission denials under "
                 "--permission-prompts none"
             )
-        response_text = non_blank_text(envelope.get("result"))
+        # Stripped as the plain-text wire was.
+        response_text = (non_blank_text(envelope.get("result")) or "").strip() or None
         # ``subtype`` stays "success" on a failed turn (verified on 2.1.263), so
         # ``is_error`` is the only authoritative native failure signal.
         native_error = envelope.get("is_error")

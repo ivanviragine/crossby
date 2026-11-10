@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -35,6 +36,15 @@ if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
+_PLACEHOLDER_SESSION_ID = "00000000-0000-4000-8000-000000000000"
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
 
 class CopilotAdapter(AbstractAITool):
     """Adapter for GitHub Copilot CLI."""
@@ -60,7 +70,8 @@ class CopilotAdapter(AbstractAITool):
             supports_trusted_dirs=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # Prompt mode reads a piped prompt when --prompt is omitted.
+                prompt_transport=HeadlessPromptTransport.STDIN,
                 # 1.0.83 advertises --output-format json (JSONL), but its event
                 # schema is not verified, so the managed transport stays on the
                 # documented text response rather than guessing a shape.
@@ -72,17 +83,25 @@ class CopilotAdapter(AbstractAITool):
                 ),
                 brokered=brokered,
                 supports_response_schema=False,
+                # Every new session gets an explicit ``--session-id``, and the
+                # same flag resumes it, so the ID is always one crossby chose.
+                supports_resume=True,
+                # ``--deny-tool write`` and ``--deny-tool shell``.
+                supports_read_only=True,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
                 # Per-invocation --allow-tool shell(...) entries; no other tool
                 # is auto-approved because --allow-all-tools is never emitted.
                 command_policy_support=PlanCommandPolicySupport.NATIVE,
                 version_requirement=(
-                    "GitHub Copilot CLI exposing --prompt, --silent, and --no-ask-user."
+                    "GitHub Copilot CLI reading a piped prompt with --silent, --no-ask-user, "
+                    "--session-id, and --deny-tool."
                 ),
-                verified_version="1.0.83",
+                # A piped prompt, --session-id resume, and the read-only deny
+                # rules were all verified live on this build.
+                verified_version="1.0.105",
                 remediation=(
-                    "Upgrade GitHub Copilot CLI to 1.0.83 or newer. Copilot exposes no "
+                    "Upgrade GitHub Copilot CLI to 1.0.105 or newer. Copilot exposes no "
                     "final-response JSON Schema flag, so schema-constrained sessions must use "
                     "Claude Code, Codex CLI, or Antigravity CLI."
                 ),
@@ -211,19 +230,38 @@ class CopilotAdapter(AbstractAITool):
     def _headless_argv_for_validation(
         self, request: HeadlessSessionRequest, **_kwargs: object
     ) -> list[str]:
-        """Return Copilot's complete command, including its argument-delivered prompt."""
+        """Return Copilot's complete command; the prompt itself is piped on stdin."""
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             from crossby.ai_tools.copilot_sdk import command
 
             return command()
-        return self._headless_command(request)
+        # The real run adds ``--session-id <uuid>``; size the argv the same way.
+        return self._headless_command(request, session_id=_PLACEHOLDER_SESSION_ID)
 
     def _validate_headless_request(
         self, request: HeadlessSessionRequest, **kwargs: Any
     ) -> HeadlessSessionRequest:
         from crossby.ai_tools.copilot_sdk import SDK_REMEDIATION, load_sdk
-        from crossby.ai_tools.headless import HeadlessUnsupportedError, _is_safe_provenance_id
+        from crossby.ai_tools.headless import (
+            HeadlessRequestError,
+            HeadlessUnsupportedError,
+            _is_safe_provenance_id,
+        )
 
+        if request.interaction_mode is HeadlessInteractionMode.UNATTENDED:
+            if request.resume_id is not None and not _is_uuid(request.resume_id):
+                raise HeadlessRequestError(
+                    "Copilot session IDs are UUIDs; the requested resume ID is not one.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            if request.read_only and request.command_policy is not None:
+                raise HeadlessRequestError(
+                    "A read-only Copilot session denies the shell, so it cannot take a "
+                    "command policy.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             if request.resume_id is not None and not _is_safe_provenance_id(request.resume_id):
                 raise HeadlessUnsupportedError(
@@ -308,12 +346,19 @@ class CopilotAdapter(AbstractAITool):
             capability=self.capabilities().headless,
         )
 
-    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
-        """Build the exact unattended ``copilot --prompt`` invocation."""
+    def _headless_command(
+        self, request: HeadlessSessionRequest, *, session_id: str | None = None
+    ) -> list[str]:
+        """Build the exact unattended ``copilot`` prompt-mode invocation.
+
+        The prompt is not an argument: piped on stdin, it runs in prompt mode
+        just as ``--prompt <text>`` does, with no command-line size limit.
+        ``--session-id`` resumes ``request.resume_id``, or else pins the new
+        session to ``session_id``: text output carries no session ID, so the
+        only ID crossby can resume is one it chose.
+        """
         command = [
             "copilot",
-            "--prompt",
-            request.prompt,
             # -s keeps stdout to the agent response alone, and --no-ask-user
             # removes the ask_user tool so the agent cannot stop on a question
             # nobody can answer.
@@ -323,10 +368,18 @@ class CopilotAdapter(AbstractAITool):
             "--log-level",
             "none",
         ]
+        pinned = request.resume_id or session_id
+        if pinned is not None:
+            command.extend(("--session-id", pinned))
         if request.model:
             command.extend(("--model", self.normalize_model_format(request.model)))
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
+        if request.read_only:
+            # Verified on 1.0.105: forced shell and apply_patch writes were both
+            # refused ("Permission to run this tool was denied"). Deny rules win
+            # over every allow rule, including ambient ones.
+            command.extend(("--deny-tool", "write", "--deny-tool", "shell"))
         if request.command_policy is not None:
             command.extend(
                 self.allowed_commands_args(list(request.command_policy.allowed_commands))
@@ -351,11 +404,13 @@ class CopilotAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import child_environment
 
+        session_id = request.resume_id or str(uuid.uuid4())
         output = run_managed_command(
             context,
-            argv=self._headless_command(request),
+            argv=self._headless_command(request, session_id=session_id),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
+            stdin_text=request.prompt,
         )
         warnings = capture_failure_warnings(output)
         # --allow-all-tools is deliberately never emitted, so any tool call
@@ -382,6 +437,7 @@ class CopilotAdapter(AbstractAITool):
             ),
             exit_code=output.returncode,
             response_text=output.stdout.strip() or None,
+            session_id=session_id,
             warnings=warnings,
         )
 

@@ -49,6 +49,7 @@ def main(
 
 # Register subcommands
 from crossby.cli.agents import agents_app  # noqa: E402
+from crossby.cli.converse import ask, converse  # noqa: E402
 from crossby.cli.convert import convert  # noqa: E402
 from crossby.cli.handoff import handoff  # noqa: E402
 from crossby.cli.init import init  # noqa: E402
@@ -64,6 +65,8 @@ app.command()(sync)
 app.command()(convert)
 app.command()(stats)
 app.command()(handoff)
+app.command()(ask)
+app.command()(converse)
 app.command()(init)
 app.command()(ui)
 app.add_typer(agents_app, name="agents")

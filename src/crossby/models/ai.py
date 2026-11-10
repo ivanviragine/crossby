@@ -223,12 +223,16 @@ class HeadlessNativeOutput(StrEnum):
 
 
 class HeadlessPromptTransport(StrEnum):
-    """How a prompt is delivered without transferring process ownership."""
+    """How a prompt is delivered without transferring process ownership.
+
+    There is deliberately no command-line argument transport: argv is bounded
+    by the OS and visible in the process list, so every managed session gets
+    its prompt on a channel with no size limit.
+    """
 
     STDIN = "stdin"
     PROTOCOL = "protocol"
     API = "api"
-    ARGUMENT = "argument"
 
 
 class HeadlessEventKind(StrEnum):
@@ -656,6 +660,11 @@ class HeadlessSessionRequest(BaseModel):
         default=None,
         validation_alias=AliasChoices("resume_id", "resume_session_id"),
     )
+    # The session must not change files. Each adapter applies the native
+    # profile verified to block its file-writing and shell tools (an OS sandbox,
+    # a closed tool set, or native deny rules), or rejects the request: it is
+    # never approximated with prompt text.
+    read_only: bool = False
     timeout_seconds: float = 600.0
     idle_timeout_seconds: float | None = None
     interaction_timeout_seconds: float = 60.0
@@ -986,6 +995,7 @@ class HeadlessModeCapability(BaseModel):
     native_outputs: tuple[HeadlessNativeOutput, ...]
     supports_response_schema: bool = False
     supports_resume: bool = False
+    supports_read_only: bool = False
     supports_native_abort: bool = False
     terminal_event_required: bool = False
     terminal_event_authoritative: bool = False
@@ -1049,6 +1059,9 @@ class HeadlessCapability(BaseModel):
     )
     supports_response_schema: bool = False
     supports_resume: bool = False
+    # A verified native profile that blocks file writes (see
+    # ``HeadlessSessionRequest.read_only``).
+    supports_read_only: bool = False
     supports_native_abort: bool = False
     terminal_event_required: bool = False
     terminal_event_authoritative: bool = False
@@ -1088,6 +1101,7 @@ class HeadlessCapability(BaseModel):
                 or self.native_outputs
                 or self.supports_response_schema
                 or self.supports_resume
+                or self.supports_read_only
                 or self.supports_native_abort
                 or self.terminal_event_required
                 or self.terminal_event_authoritative
@@ -1139,6 +1153,7 @@ class HeadlessCapability(BaseModel):
             native_outputs=self.native_outputs,
             supports_response_schema=self.supports_response_schema,
             supports_resume=self.supports_resume,
+            supports_read_only=self.supports_read_only,
             supports_native_abort=self.supports_native_abort,
             terminal_event_required=self.terminal_event_required,
             terminal_event_authoritative=self.terminal_event_authoritative,

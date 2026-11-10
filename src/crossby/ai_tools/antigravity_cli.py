@@ -91,6 +91,18 @@ _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
     "-max": EffortLevel.MAX,
 }
 _AGY_STREAM_EVENT_KINDS = frozenset({"init", "step_update", "result"})
+# Session-only settings (never saved) for a read-only turn: an empty allow list.
+_READ_ONLY_SETTINGS = '{"permissions":{"allow":[]}}'
+
+
+def _stream_input(prompt: str) -> str:
+    """The prompt as agy's one-turn ``--input-format stream-json`` message.
+
+    ASCII-escaped, so the line is valid JSON whatever the prompt holds,
+    including a lone surrogate from a filename decoded with ``os.fsdecode``.
+    """
+    message = {"event": "user", "message": {"role": "user", "content": prompt}}
+    return json.dumps(message) + "\n"
 
 
 def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
@@ -151,7 +163,9 @@ class AntigravityCLIAdapter(AbstractAITool):
             supports_trusted_dirs=True,
             headless=HeadlessCapability(
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
-                prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                # One ``--input-format stream-json`` message on stdin, which
+                # requires (and every output is served from) stream-json output.
+                prompt_transport=HeadlessPromptTransport.STDIN,
                 native_outputs=(
                     HeadlessNativeOutput.TEXT,
                     HeadlessNativeOutput.JSON,
@@ -163,7 +177,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                 ),
                 brokered=HeadlessModeCapability(
                     transport=HeadlessNativeTransport.HEADLESS_CLI,
-                    prompt_transport=HeadlessPromptTransport.ARGUMENT,
+                    prompt_transport=HeadlessPromptTransport.STDIN,
                     native_outputs=(HeadlessNativeOutput.JSON, HeadlessNativeOutput.JSONL),
                     supports_response_schema=True,
                     supports_resume=True,
@@ -173,25 +187,35 @@ class AntigravityCLIAdapter(AbstractAITool):
                     sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                     approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
                     supported_interaction_kinds=(PlanInteractionKind.QUESTION,),
-                    version_requirement="Antigravity CLI with verified JSON continuation output.",
-                    verified_version="1.2.6",
+                    version_requirement=(
+                        "Antigravity CLI with stream-json input and verified continuation output."
+                    ),
+                    verified_version="1.5.4",
                     limitation=(
                         "Questions can be brokered through conversation continuation; "
                         "permissions and native abort are unsupported."
                     ),
                 ),
                 supports_response_schema=True,
+                # ``--conversation <id>`` continues the exact conversation.
+                supports_resume=True,
+                # Session-only settings with an empty allow list, in plan mode.
+                supports_read_only=True,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
                 version_requirement=(
-                    "Antigravity CLI exposing --print with --output-format "
-                    "text|json|stream-json, --json-schema, and --print-timeout."
+                    "Antigravity CLI exposing --print with --input-format stream-json, "
+                    "--output-format stream-json, --json-schema, --print-timeout, "
+                    "--conversation, and session-only --settings."
                 ),
-                verified_version="1.2.6",
+                # stream-json input, --conversation resume, and the read-only
+                # profile were all verified live on this build (resume and
+                # read-only first on 1.5.1).
+                verified_version="1.5.4",
                 remediation=(
-                    "Upgrade Antigravity CLI to 1.2.6 or newer so --print accepts a native "
-                    "whole-run --print-timeout and echoes the requested --json-schema."
+                    "Upgrade Antigravity CLI to 1.5.4 or newer so --print reads its prompt as "
+                    "stream-json input and resumes conversations by ID."
                 ),
             ),
             plan_mode=PlanModeCapability(
@@ -326,11 +350,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         return self._headless_command(
             request,
             print_timeout_seconds=max(1, math.ceil(request.timeout_seconds)),
-            conversation_id=(
-                request.resume_id
-                if request.interaction_mode is HeadlessInteractionMode.BROKERED
-                else None
-            ),
+            conversation_id=request.resume_id,
         )
 
     def _headless_command(
@@ -338,22 +358,26 @@ class AntigravityCLIAdapter(AbstractAITool):
         request: HeadlessSessionRequest,
         *,
         print_timeout_seconds: int,
-        prompt_override: str | None = None,
         conversation_id: str | None = None,
     ) -> list[str]:
-        """Build the exact unattended ``agy --print`` invocation."""
-        native_formats = {
-            HeadlessNativeOutput.TEXT: "text",
-            HeadlessNativeOutput.JSON: "json",
-            HeadlessNativeOutput.JSONL: "stream-json",
-        }
+        """Build the exact unattended ``agy --print`` invocation.
+
+        There is no prompt argument: the prompt is one stream-json message on
+        stdin (see :func:`_stream_input`), so its size is not bounded by the
+        command line. ``--print=`` takes an empty value so it cannot swallow the
+        next flag. Stream-json input requires stream-json output, which also
+        serves TEXT and JSON: every result is read from its final envelope,
+        because plain text carries no conversation ID, native status or waiting
+        state to check.
+        """
         command = [
             "agy",
             *(["--conversation", conversation_id] if conversation_id is not None else []),
-            "--print",
-            prompt_override if prompt_override is not None else request.prompt,
+            "--print=",
+            "--input-format",
+            "stream-json",
             "--output-format",
-            native_formats[request.native_output],
+            "stream-json",
             # agy's own whole-run bound. Crossby's outer deadline still owns
             # cleanup; this simply lets agy end its turn first when it can.
             "--print-timeout",
@@ -368,6 +392,14 @@ class AntigravityCLIAdapter(AbstractAITool):
             command.extend(("--model", model))
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
+        if request.read_only:
+            # Verified on 1.5.1 and 1.5.4: session-only --settings replace the ambient
+            # permissions.allow list, so every command and file write needs a
+            # permission that headless agy auto-denies. Ambient rules such as
+            # command(uv) otherwise let a "read-only" turn write through a
+            # command. Plan mode keeps the agent from attempting edits, because
+            # agy ends a turn with no answer when it denies an action.
+            command.extend(("--mode", "plan", "--settings", _READ_ONLY_SETTINGS))
         return command
 
     def _run_headless_session(
@@ -386,14 +418,12 @@ class AntigravityCLIAdapter(AbstractAITool):
             frame_streamer,
             non_blank_text,
             parse_json_lines,
-            parse_json_object,
             recognized_frame_kind,
             run_managed_command,
             usage_from,
         )
         from crossby.ai_tools.plan_process import child_environment
 
-        streaming = request.native_output is HeadlessNativeOutput.JSONL
         output = run_managed_command(
             context,
             argv=self._headless_command(
@@ -404,19 +434,17 @@ class AntigravityCLIAdapter(AbstractAITool):
                 print_timeout_seconds=_whole_run_timeout_seconds(
                     context.deadline, time.monotonic()
                 ),
+                conversation_id=request.resume_id,
             ),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
-            on_stdout_lines=(
-                frame_streamer(
-                    context,
-                    kind_of=lambda frame: recognized_frame_kind(
-                        frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
-                    ),
-                    provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
-                )
-                if streaming
-                else None
+            stdin_text=_stream_input(request.prompt),
+            on_stdout_lines=frame_streamer(
+                context,
+                kind_of=lambda frame: recognized_frame_kind(
+                    frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
+                ),
+                provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
             ),
         )
         warnings = capture_failure_warnings(output)
@@ -426,57 +454,39 @@ class AntigravityCLIAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
-        if request.native_output is HeadlessNativeOutput.TEXT:
-            # agy's text wire carries no conversation ID, status, or usage.
-            return complete_session(
-                context,
-                request,
-                status=(
-                    HeadlessTerminalStatus.SUCCEEDED
-                    if output.returncode == 0
-                    else HeadlessTerminalStatus.FAILED
-                ),
-                exit_code=output.returncode,
-                response_text=output.stdout.strip() or None,
-                warnings=warnings,
-            )
-
         conversation_id: str | None = None
         envelope: dict[str, Any] | None = None
-        if request.native_output is HeadlessNativeOutput.JSON:
-            envelope = parse_json_object(output.stdout)
-        else:
-            frames = parse_json_lines(output.stdout)
-            if frames is None:
+        frames = parse_json_lines(output.stdout)
+        if frames is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "Antigravity CLI emitted malformed streaming JSON."),
+            )
+        # Progress and provenance were already emitted live by the streamer,
+        # which never copies agy's streamed response text deltas.
+        saw_result = False
+        for frame in frames:
+            observed_conversation_id = _agy_conversation_id(frame)
+            context.validate_provenance(conversation_id=observed_conversation_id)
+            conversation_id = conversation_id or observed_conversation_id
+            if saw_result:
+                warning = (
+                    "Antigravity CLI emitted multiple final result envelopes."
+                    if non_blank_text(frame.get("event")) == "result"
+                    else "Antigravity CLI emitted a frame after its final result envelope."
+                )
                 return context.complete(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
                     exit_code=output.returncode,
-                    warnings=(*warnings, "Antigravity CLI emitted malformed streaming JSON."),
+                    conversation_id=conversation_id,
+                    warnings=(*warnings, warning),
                 )
-            # Progress and provenance were already emitted live by the streamer,
-            # which never copies agy's streamed response text deltas.
-            saw_result = False
-            for frame in frames:
-                observed_conversation_id = _agy_conversation_id(frame)
-                context.validate_provenance(conversation_id=observed_conversation_id)
-                conversation_id = conversation_id or observed_conversation_id
-                if saw_result:
-                    warning = (
-                        "Antigravity CLI emitted multiple final result envelopes."
-                        if non_blank_text(frame.get("event")) == "result"
-                        else "Antigravity CLI emitted a frame after its final result envelope."
-                    )
-                    return context.complete(
-                        HeadlessTerminalStatus.INVALID_OUTPUT,
-                        exit_code=output.returncode,
-                        conversation_id=conversation_id,
-                        warnings=(*warnings, warning),
-                    )
-                if non_blank_text(frame.get("event")) == "result" and isinstance(
-                    frame.get("result"), dict
-                ):
-                    envelope = frame["result"]
-                    saw_result = True
+            if non_blank_text(frame.get("event")) == "result" and isinstance(
+                frame.get("result"), dict
+            ):
+                envelope = frame["result"]
+                saw_result = True
         if envelope is None:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,
@@ -492,7 +502,25 @@ class AntigravityCLIAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=(*warnings, "Antigravity CLI output omitted conversation_id."),
             )
+        if request.resume_id is not None and conversation_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                conversation_id=conversation_id,
+                warnings=(
+                    *warnings,
+                    "Antigravity CLI reported a different conversation than the one crossby "
+                    "resumed.",
+                ),
+            )
         context.set_provenance(conversation_id=conversation_id)
+        denied = envelope.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            # Native entries name untrusted actions; keep only the count.
+            context.add_denial(
+                f"Antigravity CLI denied {len(denied)} action(s) that needed a permission "
+                "headless mode cannot grant"
+            )
         if _agy_waiting(envelope):
             # Nobody can answer: route the native question through the runtime's
             # unattended policy, which fails the session rather than waiting.
@@ -535,7 +563,8 @@ class AntigravityCLIAdapter(AbstractAITool):
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,
-            response_text=non_blank_text(envelope.get("response")),
+            # Stripped as the plain-text wire was; agy ends ``response`` with a newline.
+            response_text=(non_blank_text(envelope.get("response")) or "").strip() or None,
             native_object=envelope,
             structured_output=envelope.get("structured_output", MISSING),
             native_status=native_status,
@@ -557,7 +586,6 @@ class AntigravityCLIAdapter(AbstractAITool):
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
         """Continue exact native questions under one runtime and nine invocations."""
-        from crossby.ai_tools.headless import HeadlessRequestError
         from crossby.ai_tools.headless_cli import (
             MISSING,
             BoundedProgress,
@@ -566,7 +594,6 @@ class AntigravityCLIAdapter(AbstractAITool):
             complete_session,
             frame_streamer,
             parse_json_lines,
-            parse_json_object,
             recognized_frame_kind,
             run_managed_command,
             usage_from,
@@ -577,30 +604,8 @@ class AntigravityCLIAdapter(AbstractAITool):
         conversation_id = request.resume_id
         answer: str | None = None
         warnings_seen: list[str] = []
-        streaming = request.native_output is HeadlessNativeOutput.JSONL
         progress = BoundedProgress(context)
         for _invocation in range(9):
-            if answer is not None:
-                # Callback answers and native labels replace the original prompt
-                # in argv; recheck the full continuation, including its binding.
-                try:
-                    self._validate_headless_argv(
-                        request.model_copy(update={"prompt": answer, "resume_id": conversation_id})
-                    )
-                except HeadlessRequestError:
-                    context.emit(
-                        HeadlessEventKind.TERMINAL,
-                        terminal_status=HeadlessTerminalStatus.FAILED,
-                    )
-                    return context.complete(
-                        HeadlessTerminalStatus.FAILED,
-                        conversation_id=conversation_id,
-                        warnings=(
-                            *warnings_seen,
-                            "Antigravity continuation exceeds native command limits. "
-                            "Shorten the answer or native option label.",
-                        ),
-                    )
             output = run_managed_command(
                 context,
                 argv=self._headless_command(
@@ -608,24 +613,20 @@ class AntigravityCLIAdapter(AbstractAITool):
                     print_timeout_seconds=_whole_run_timeout_seconds(
                         context.deadline, time.monotonic()
                     ),
-                    prompt_override=answer,
                     conversation_id=conversation_id,
                 ),
                 cwd=request.working_dir,
                 env=child_environment({"NO_COLOR": "1"}),
-                on_stdout_lines=(
-                    frame_streamer(
-                        context,
-                        kind_of=lambda frame: recognized_frame_kind(
-                            frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
-                        ),
-                        provenance_of=lambda frame: {
-                            "conversation_id": _agy_conversation_id(frame)
-                        },
-                        progress=progress,
-                    )
-                    if streaming
-                    else None
+                # A callback answer continues the conversation in place of the
+                # original prompt, on the same unbounded stdin channel.
+                stdin_text=_stream_input(answer if answer is not None else request.prompt),
+                on_stdout_lines=frame_streamer(
+                    context,
+                    kind_of=lambda frame: recognized_frame_kind(
+                        frame, field="event", recognized=_AGY_STREAM_EVENT_KINDS
+                    ),
+                    provenance_of=lambda frame: {"conversation_id": _agy_conversation_id(frame)},
+                    progress=progress,
                 ),
                 controller=owner,
             )
@@ -637,24 +638,16 @@ class AntigravityCLIAdapter(AbstractAITool):
                     conversation_id=conversation_id,
                     warnings=tuple(warnings_seen),
                 )
-            envelope: dict[str, Any] | None
-            if streaming:
-                frames = parse_json_lines(output.stdout)
-                if frames is None:
-                    envelope = None
-                else:
-                    results = [
-                        frame.get("result")
-                        for frame in frames
-                        if frame.get("event") == "result" and isinstance(frame.get("result"), dict)
-                    ]
-                    envelope = (
-                        results[0]
-                        if len(results) == 1 and frames[-1].get("event") == "result"
-                        else None
-                    )
-            else:
-                envelope = parse_json_object(output.stdout)
+            envelope: dict[str, Any] | None = None
+            frames = parse_json_lines(output.stdout)
+            if frames is not None:
+                results = [
+                    frame.get("result")
+                    for frame in frames
+                    if frame.get("event") == "result" and isinstance(frame.get("result"), dict)
+                ]
+                if len(results) == 1 and frames[-1].get("event") == "result":
+                    envelope = results[0]
             if envelope is None:
                 return context.complete(
                     HeadlessTerminalStatus.INVALID_OUTPUT,
