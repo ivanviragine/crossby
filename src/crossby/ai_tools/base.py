@@ -101,6 +101,17 @@ def _argument_prompt_length(prompt: str) -> int:
     return len(os.fsencode(prompt))
 
 
+def _build_at_least(version: str | None, floor: str | None) -> bool:
+    """Whether CLI ``version`` is at least ``floor`` (no floor: always)."""
+    if floor is None:
+        return True
+    from crossby.utils.versioning import parse_semver
+
+    detected = parse_semver(version or "")
+    minimum = parse_semver(floor)
+    return detected is not None and minimum is not None and detected >= minimum
+
+
 def _headless_posix_exec_size(argv: list[str]) -> int:
     """Return a conservative byte count for the child argv and environment."""
     # Every managed native adapter inherits the current environment and pins
@@ -136,6 +147,11 @@ class AbstractAITool(ABC):
 
     TOOL_ID: ClassVar[AIToolID]
     _registry: ClassVar[dict[AIToolID, type[AbstractAITool]]] = {}
+    # Oldest CLI builds on which unattended session resume and the unattended
+    # read-only profile were verified live, when that verification came after
+    # the unattended mode's own floor. ``None`` means the mode floor applies.
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = None
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -617,13 +633,40 @@ class AbstractAITool(ABC):
     ) -> bool:
         """Whether a session run by CLI ``version`` can be resumed in this mode.
 
-        The default is the mode's declared ``supports_resume``; an adapter whose
-        resume was verified later than its mode floor narrows it by version.
+        The mode must declare ``supports_resume``; in unattended mode the build
+        must also be at least ``HEADLESS_RESUME_VERIFIED_VERSION`` when the
+        adapter sets one, because resume was verified later than the mode floor.
         """
         try:
-            return self.capabilities().headless.profile_for(interaction_mode).supports_resume
+            profile = self.capabilities().headless.profile_for(interaction_mode)
         except ValueError:
             return False
+        if not profile.supports_resume:
+            return False
+        if interaction_mode is not HeadlessInteractionMode.UNATTENDED:
+            return True
+        return _build_at_least(version, self.HEADLESS_RESUME_VERIFIED_VERSION)
+
+    def headless_read_only_supported(
+        self,
+        version: str | None,
+        interaction_mode: HeadlessInteractionMode = HeadlessInteractionMode.UNATTENDED,
+    ) -> bool:
+        """Whether CLI ``version`` can run a ``read_only`` session in this mode.
+
+        The mode must declare ``supports_read_only``; in unattended mode the
+        build must also be at least ``HEADLESS_READ_ONLY_VERIFIED_VERSION``
+        when the adapter sets one.
+        """
+        try:
+            profile = self.capabilities().headless.profile_for(interaction_mode)
+        except ValueError:
+            return False
+        if not profile.supports_read_only:
+            return False
+        if interaction_mode is not HeadlessInteractionMode.UNATTENDED:
+            return True
+        return _build_at_least(version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION)
 
     def headless_prompt_fits(
         self,
@@ -792,6 +835,13 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        if request.read_only and not mode.supports_read_only:
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} has no verified way to run a read-only "
+                f"{request.interaction_mode.value} session, so crossby will not start one.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
         working_dir = request.working_dir.resolve()
         if require_existing_working_dir and not working_dir.is_dir():
             raise HeadlessRequestError(
@@ -877,6 +927,32 @@ class AbstractAITool(ABC):
             raise HeadlessUnsupportedError(
                 f"{self.capabilities().display_name} requires {profile.version_requirement} "
                 f"The oldest verified release is {profile.verified_version}.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        name = self.capabilities().display_name
+        unattended = request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+        if request.resume_id is not None and not self.headless_resume_supported(
+            detected.text, request.interaction_mode
+        ):
+            verified = (unattended and self.HEADLESS_RESUME_VERIFIED_VERSION) or (
+                profile.verified_version
+            )
+            raise HeadlessUnsupportedError(
+                f"Resuming an unattended {name} session was verified on {verified}; "
+                f"the installed build is {detected.text}. Upgrade {name} to resume sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.read_only and not self.headless_read_only_supported(
+            detected.text, request.interaction_mode
+        ):
+            verified = (unattended and self.HEADLESS_READ_ONLY_VERIFIED_VERSION) or (
+                profile.verified_version
+            )
+            raise HeadlessUnsupportedError(
+                f"Read-only {name} sessions were verified on {verified}; the installed "
+                f"build is {detected.text}. Upgrade {name} to run it read-only.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

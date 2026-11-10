@@ -38,17 +38,17 @@ def ask(
 ) -> None:
     """Ask another AI coding agent one question, headless, and print its answer.
 
-    The question is sent as is. The agent runs unattended in the project:
-    unexpected questions fail the session and unapproved permissions are
-    denied. Each call is a fresh session, so include the context the agent
-    needs in the question.
+    The question is sent as is. The agent runs unattended and read-only in the
+    project: it can read and search but not change files, unexpected questions
+    fail the session and unapproved permissions are denied. Each call is a
+    fresh session, so include the context the agent needs in the question.
 
     Examples::
 
         crossby ask codex "Is there a race in src/cache.py invalidate()?"
         git diff | crossby ask claude -
     """
-    from crossby.services.converse import ConverseError, ask_agent, check_depth
+    from crossby.services.converse import ConverseError, ask_agent
 
     project_root = _project_root(path)
     tool_id = _headless_tool(tool, "TOOL")
@@ -56,7 +56,6 @@ def ask(
         question, question_file, what="question", hint="an argument, '-' for stdin, or --file"
     )
     try:
-        check_depth()
         result = ask_agent(
             tool_id, prompt, working_dir=project_root, model=model, timeout_seconds=timeout
         )
@@ -140,8 +139,9 @@ def converse(
     The ASKER holds the goal. It decides what to ask, judges each answer,
     asks follow-up questions, and ends with its final answer. The RESPONDER
     is never sent the goal; it gets the asker's messages as written and only
-    answers, from its own folder (--responder-path). Each side keeps its own
-    session (resumed where the tool supports it). The asker's final answer goes to
+    answers, from its own folder (--responder-path), read-only: it can read and
+    search but not change files. Each side keeps its own session (resumed where
+    the installed build's resume was verified). The asker's final answer goes to
     stdout; messages and progress go to stderr; transcript.md is saved after
     every message.
 
@@ -206,7 +206,6 @@ def converse(
             _show_turn(turn)
 
     try:
-        engine.check_depth()
         result = engine.run_conversation(
             goal_text,
             (asker, responder),
@@ -330,13 +329,25 @@ def _write(path: Path, text: str) -> None:
 
 
 def _show_turn(turn: ConverseTurn) -> None:
+    from crossby.services.converse import turn_footer
+
     sys.stderr.write(f"\n{turn.text or '(empty message)'}\n\n")
-    marker = f"NEXT: {turn.next.value} · " if turn.next is not None else ""
     title = "final answer" if turn.is_final_answer else f"{turn.role.value} ({turn.tool.value})"
-    _stderr(
-        f"[dim]      {title} · {marker}{turn.duration_seconds:.0f}s · session {turn.mode.value}[/]"
-    )
+    _stderr(f"[dim]      {_escape(f'{title} · {turn_footer(turn)}')}[/]")
     sys.stderr.flush()
+
+
+def _side_json(result: ConversationResult, participant: Participant) -> dict[str, Any]:
+    """One side's tool, model and session facts for ``--json``."""
+    own = [turn for turn in result.turns if turn.role is participant.role]
+    return {
+        "tool": participant.tool.value,
+        "model": participant.model,
+        "session": result.modes[participant.role].value,
+        # The most earlier messages a replayed turn left out (0 when resumed).
+        "replay_omitted": max((turn.omitted for turn in own), default=0),
+        "denials": [denial for turn in own for denial in turn.denials],
+    }
 
 
 def _interrupted(result: ConversationResult) -> bool:
@@ -400,16 +411,8 @@ def _report(
                 "rounds": result.rounds,
                 "max_rounds": result.max_rounds,
                 "turns": len(result.turns),
-                "asker": {
-                    "tool": result.asker.tool.value,
-                    "model": result.asker.model,
-                    "session": result.modes[result.asker.role].value,
-                },
-                "responder": {
-                    "tool": result.responder.tool.value,
-                    "model": result.responder.model,
-                    "session": result.modes[result.responder.role].value,
-                },
+                "asker": _side_json(result, result.asker),
+                "responder": _side_json(result, result.responder),
                 "transcript_path": str(transcript_path),
                 "summary_path": str(summary_path) if summary_path else None,
                 "summary": summary_body,

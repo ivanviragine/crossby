@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -35,11 +36,25 @@ if TYPE_CHECKING:
     from crossby.ai_tools.headless import HeadlessRuntimeContext
     from crossby.scenes.launch import SceneLaunchArgs, SceneLaunchContext
 
+_PLACEHOLDER_SESSION_ID = "00000000-0000-4000-8000-000000000000"
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
 
 class CopilotAdapter(AbstractAITool):
     """Adapter for GitHub Copilot CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.COPILOT
+    # Unattended ``--session-id`` (pin a new session, or resume one) and the
+    # read-only deny rules were verified live on 1.0.105, after the unattended
+    # floor (1.0.83).
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.0.105"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.0.105"
 
     def capabilities(self) -> AIToolCapabilities:
         from crossby.ai_tools.copilot_sdk import brokered_profile
@@ -72,6 +87,11 @@ class CopilotAdapter(AbstractAITool):
                 ),
                 brokered=brokered,
                 supports_response_schema=False,
+                # Every new session gets an explicit ``--session-id``, and the
+                # same flag resumes it, so the ID is always one crossby chose.
+                supports_resume=True,
+                # ``--deny-tool write`` and ``--deny-tool shell``.
+                supports_read_only=True,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
                 # Per-invocation --allow-tool shell(...) entries; no other tool
@@ -216,14 +236,33 @@ class CopilotAdapter(AbstractAITool):
             from crossby.ai_tools.copilot_sdk import command
 
             return command()
-        return self._headless_command(request)
+        # The real run adds ``--session-id <uuid>``; size the argv the same way.
+        return self._headless_command(request, session_id=_PLACEHOLDER_SESSION_ID)
 
     def _validate_headless_request(
         self, request: HeadlessSessionRequest, **kwargs: Any
     ) -> HeadlessSessionRequest:
         from crossby.ai_tools.copilot_sdk import SDK_REMEDIATION, load_sdk
-        from crossby.ai_tools.headless import HeadlessUnsupportedError, _is_safe_provenance_id
+        from crossby.ai_tools.headless import (
+            HeadlessRequestError,
+            HeadlessUnsupportedError,
+            _is_safe_provenance_id,
+        )
 
+        if request.interaction_mode is HeadlessInteractionMode.UNATTENDED:
+            if request.resume_id is not None and not _is_uuid(request.resume_id):
+                raise HeadlessRequestError(
+                    "Copilot session IDs are UUIDs; the requested resume ID is not one.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
+            if request.read_only and request.command_policy is not None:
+                raise HeadlessRequestError(
+                    "A read-only Copilot session denies the shell, so it cannot take a "
+                    "command policy.",
+                    tool_id=self.TOOL_ID,
+                    capability=self.capabilities().headless,
+                )
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             if request.resume_id is not None and not _is_safe_provenance_id(request.resume_id):
                 raise HeadlessUnsupportedError(
@@ -308,8 +347,15 @@ class CopilotAdapter(AbstractAITool):
             capability=self.capabilities().headless,
         )
 
-    def _headless_command(self, request: HeadlessSessionRequest) -> list[str]:
-        """Build the exact unattended ``copilot --prompt`` invocation."""
+    def _headless_command(
+        self, request: HeadlessSessionRequest, *, session_id: str | None = None
+    ) -> list[str]:
+        """Build the exact unattended ``copilot --prompt`` invocation.
+
+        ``--session-id`` resumes ``request.resume_id``, or else pins the new
+        session to ``session_id``: text output carries no session ID, so the
+        only ID crossby can resume is one it chose.
+        """
         command = [
             "copilot",
             "--prompt",
@@ -323,10 +369,18 @@ class CopilotAdapter(AbstractAITool):
             "--log-level",
             "none",
         ]
+        pinned = request.resume_id or session_id
+        if pinned is not None:
+            command.extend(("--session-id", pinned))
         if request.model:
             command.extend(("--model", self.normalize_model_format(request.model)))
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
+        if request.read_only:
+            # Verified on 1.0.105: forced shell and apply_patch writes were both
+            # refused ("Permission to run this tool was denied"). Deny rules win
+            # over every allow rule, including ambient ones.
+            command.extend(("--deny-tool", "write", "--deny-tool", "shell"))
         if request.command_policy is not None:
             command.extend(
                 self.allowed_commands_args(list(request.command_policy.allowed_commands))
@@ -351,9 +405,10 @@ class CopilotAdapter(AbstractAITool):
         )
         from crossby.ai_tools.plan_process import child_environment
 
+        session_id = request.resume_id or str(uuid.uuid4())
         output = run_managed_command(
             context,
-            argv=self._headless_command(request),
+            argv=self._headless_command(request, session_id=session_id),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
         )
@@ -382,6 +437,7 @@ class CopilotAdapter(AbstractAITool):
             ),
             exit_code=output.returncode,
             response_text=output.stdout.strip() or None,
+            session_id=session_id,
             warnings=warnings,
         )
 

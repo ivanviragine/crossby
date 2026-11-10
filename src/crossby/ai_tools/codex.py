@@ -178,6 +178,10 @@ class CodexAdapter(AbstractAITool):
     """Adapter for OpenAI Codex CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CODEX
+    # Unattended ``codex exec resume`` and the read-only profile were verified
+    # live on 0.166.0, after the unattended floor (0.154.0).
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "0.166.0"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "0.166.0"
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -234,6 +238,11 @@ class CodexAdapter(AbstractAITool):
                     ),
                 ),
                 supports_response_schema=True,
+                # ``codex exec resume <thread>`` continues the exact thread
+                # (verified on 0.166.0; see HEADLESS_RESUME_VERIFIED_VERSION).
+                supports_resume=True,
+                # The OS ``read-only`` sandbox with approvals pinned to never.
+                supports_read_only=True,
                 successful_native_statuses=("turn.completed",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
@@ -480,25 +489,49 @@ class CodexAdapter(AbstractAITool):
         ``codex exec`` has no interactive approval channel, so the requested
         sandbox posture is the whole policy: a command the sandbox refuses fails
         the turn natively instead of waiting for an approval nobody can give.
+
+        ``request.resume_id`` continues that thread with ``codex exec resume``,
+        which takes no ``--sandbox``, ``--color`` or ``--add-dir``: the same
+        policy is pinned through ``-c`` instead, on every turn.
         """
-        command = [
-            "codex",
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "--sandbox",
-            "workspace-write" if request.sandbox else "danger-full-access",
-        ]
-        for path in request.trusted_dirs:
-            command.extend(self.plan_dir_args(str(path)))
-        for meta_dir in outside_root_git_metadata_dirs(
-            request.working_dir,
-            deadline=git_deadline,
-            cancel_event=cancel_event,
-        ):
-            command.extend(self.plan_dir_args(str(meta_dir)))
-        if request.sandbox:
+        if request.read_only:
+            sandbox_mode = "read-only"
+        elif request.sandbox:
+            sandbox_mode = "workspace-write"
+        else:
+            sandbox_mode = "danger-full-access"
+        resuming = request.resume_id is not None
+        command = ["codex", "exec", *(["resume"] if resuming else []), "--json"]
+        if not resuming:
+            command.extend(("--color", "never", "--sandbox", sandbox_mode))
+        command.extend(("-c", f'sandbox_mode="{sandbox_mode}"'))
+        if request.read_only:
+            # Verified on 0.166.0: ambient approval settings (for example
+            # ``approvals_reviewer = "auto_review"``) approved an escalated
+            # apply_patch outside the read-only sandbox until the approval
+            # policy was pinned to never. Hooks run commands outside the
+            # sandbox, so a read-only session disables them too.
+            command.extend(("-c", 'approval_policy="never"', "--disable", "hooks"))
+        else:
+            writable = [
+                *(str(path) for path in request.trusted_dirs),
+                *(
+                    str(meta_dir)
+                    for meta_dir in outside_root_git_metadata_dirs(
+                        request.working_dir,
+                        deadline=git_deadline,
+                        cancel_event=cancel_event,
+                    )
+                ),
+            ]
+            if resuming and writable and request.sandbox:
+                command.extend(
+                    ("-c", f"sandbox_workspace_write.writable_roots={json.dumps(writable)}")
+                )
+            elif not resuming:
+                for path in writable:
+                    command.extend(self.plan_dir_args(path))
+        if request.sandbox and not request.read_only:
             # Pin the flag both ways so an ambient config value can never
             # silently widen networking inside a crossby-managed sandbox.
             enabled = "true" if request.network_access else "false"
@@ -509,6 +542,8 @@ class CodexAdapter(AbstractAITool):
             command.extend(self.effort_args(request.effort))
         if schema_path is not None:
             command.extend(("--output-schema", str(schema_path)))
+        if request.resume_id is not None:
+            command.append(request.resume_id)
         # A bare ``-`` keeps the prompt on stdin instead of in argv.
         command.append("-")
         return command
@@ -663,6 +698,16 @@ class CodexAdapter(AbstractAITool):
         terminal = terminal_events[0]
         if terminal == "turn.failed":
             warnings = (*warnings, "Codex CLI turn failed.")
+        if request.resume_id is not None and thread_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                thread_id=thread_id,
+                warnings=(
+                    *warnings,
+                    "Codex CLI reported a different thread than the one crossby resumed.",
+                ),
+            )
 
         def _item_texts(items: list[dict[str, Any]]) -> list[str]:
             return [

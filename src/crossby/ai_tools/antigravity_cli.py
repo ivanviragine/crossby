@@ -91,6 +91,8 @@ _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
     "-max": EffortLevel.MAX,
 }
 _AGY_STREAM_EVENT_KINDS = frozenset({"init", "step_update", "result"})
+# Session-only settings (never saved) for a read-only turn: an empty allow list.
+_READ_ONLY_SETTINGS = '{"permissions":{"allow":[]}}'
 
 
 def _split_effort_suffix(model: str) -> tuple[str, EffortLevel | None]:
@@ -130,6 +132,10 @@ class AntigravityCLIAdapter(AbstractAITool):
     launches the Antigravity IDE."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.ANTIGRAVITY_CLI
+    # Unattended ``--conversation <id>`` and the read-only profile were verified
+    # live on 1.5.1, after the unattended floor (1.2.6).
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.5.1"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.5.1"
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -181,6 +187,10 @@ class AntigravityCLIAdapter(AbstractAITool):
                     ),
                 ),
                 supports_response_schema=True,
+                # ``--conversation <id>`` continues the exact conversation.
+                supports_resume=True,
+                # Session-only settings with an empty allow list, in plan mode.
+                supports_read_only=True,
                 sandbox_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 approval_behavior=PlanRequestBehavior.TOOL_MANAGED,
                 command_policy_support=PlanCommandPolicySupport.UNSUPPORTED,
@@ -326,11 +336,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         return self._headless_command(
             request,
             print_timeout_seconds=max(1, math.ceil(request.timeout_seconds)),
-            conversation_id=(
-                request.resume_id
-                if request.interaction_mode is HeadlessInteractionMode.BROKERED
-                else None
-            ),
+            conversation_id=request.resume_id,
         )
 
     def _headless_command(
@@ -370,6 +376,14 @@ class AntigravityCLIAdapter(AbstractAITool):
             command.extend(("--model", model))
         for path in request.trusted_dirs:
             command.extend(self.plan_dir_args(str(path)))
+        if request.read_only:
+            # Verified on 1.5.1: session-only --settings replace the ambient
+            # permissions.allow list, so every command and file write needs a
+            # permission that headless agy auto-denies. Ambient rules such as
+            # command(uv) otherwise let a "read-only" turn write through a
+            # command. Plan mode keeps the agent from attempting edits, because
+            # agy ends a turn with no answer when it denies an action.
+            command.extend(("--mode", "plan", "--settings", _READ_ONLY_SETTINGS))
         return command
 
     def _run_headless_session(
@@ -406,6 +420,7 @@ class AntigravityCLIAdapter(AbstractAITool):
                 print_timeout_seconds=_whole_run_timeout_seconds(
                     context.deadline, time.monotonic()
                 ),
+                conversation_id=request.resume_id,
             ),
             cwd=request.working_dir,
             env=child_environment({"NO_COLOR": "1"}),
@@ -479,7 +494,25 @@ class AntigravityCLIAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=(*warnings, "Antigravity CLI output omitted conversation_id."),
             )
+        if request.resume_id is not None and conversation_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                conversation_id=conversation_id,
+                warnings=(
+                    *warnings,
+                    "Antigravity CLI reported a different conversation than the one crossby "
+                    "resumed.",
+                ),
+            )
         context.set_provenance(conversation_id=conversation_id)
+        denied = envelope.get("denied_actions")
+        if isinstance(denied, list) and denied:
+            # Native entries name untrusted actions; keep only the count.
+            context.add_denial(
+                f"Antigravity CLI denied {len(denied)} action(s) that needed a permission "
+                "headless mode cannot grant"
+            )
         if _agy_waiting(envelope):
             # Nobody can answer: route the native question through the runtime's
             # unattended policy, which fails the session rather than waiting.

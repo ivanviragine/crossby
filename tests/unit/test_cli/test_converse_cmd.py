@@ -158,8 +158,20 @@ def test_converse_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert payload["final_answer"] == "Verdict: it knows the anatomy."
     assert payload["rounds"] == 1
     assert payload["turns"] == 3
-    assert payload["asker"] == {"tool": "claude", "model": None, "session": "resumed"}
-    assert payload["responder"] == {"tool": "codex", "model": "gpt-x", "session": "resumed"}
+    assert payload["asker"] == {
+        "tool": "claude",
+        "model": None,
+        "session": "resumed",
+        "replay_omitted": 0,
+        "denials": [],
+    }
+    assert payload["responder"] == {
+        "tool": "codex",
+        "model": "gpt-x",
+        "session": "resumed",
+        "replay_omitted": 0,
+        "denials": [],
+    }
     assert payload["transcript_path"] == str(out_dir.resolve() / "transcript.md")
     assert payload["summary_path"] is None
     assert "is writing" not in result.stderr

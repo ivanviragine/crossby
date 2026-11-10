@@ -44,6 +44,7 @@ def _result(
     status: HeadlessTerminalStatus,
     text: str | None,
     session_id: str | None = None,
+    denials: tuple[str, ...] = (),
 ) -> HeadlessSessionResult:
     return HeadlessSessionResult(
         tool=tool,
@@ -55,6 +56,7 @@ def _result(
         final_text=text,
         session_id=session_id,
         duration_seconds=1.0,
+        denials=denials,
     )
 
 
@@ -84,6 +86,7 @@ class FakeRunner:
         seconds_per_preflight: float = 0.0,
         preflight_error: BaseException | None = None,
         issue_session_ids: bool = True,
+        denials: dict[int, tuple[str, ...]] | None = None,
     ) -> None:
         self.replies = list(replies)
         self.clock = clock
@@ -91,7 +94,10 @@ class FakeRunner:
         self.seconds_per_preflight = seconds_per_preflight
         self.preflight_error = preflight_error
         self.issue_session_ids = issue_session_ids
+        # Denials the tool reports, by 1-based call number.
+        self.denials = denials or {}
         self.preflights: list[AIToolID] = []
+        self.preflight_requests: list[HeadlessSessionRequest] = []
         self.preflight_timeouts: list[float] = []
         self.calls: list[tuple[AIToolID, HeadlessSessionRequest]] = []
         self.depths: list[str | None] = []
@@ -99,6 +105,7 @@ class FakeRunner:
 
     def preflight(self, tool: AIToolID, request: HeadlessSessionRequest) -> None:
         self.preflights.append(tool)
+        self.preflight_requests.append(request)
         self.preflight_timeouts.append(request.timeout_seconds)
         if self.clock is not None:
             self.clock.now += self.seconds_per_preflight
@@ -122,9 +129,10 @@ class FakeRunner:
         if session is None and self.issue_session_ids:
             self.sessions_created += 1
             session = f"session-{self.sessions_created}"
+        denials = self.denials.get(len(self.calls), ())
         if isinstance(item, HeadlessTerminalStatus):
-            return _result(tool, item, None)
-        return _result(tool, HeadlessTerminalStatus.SUCCEEDED, item, session)
+            return _result(tool, item, None, denials=denials)
+        return _result(tool, HeadlessTerminalStatus.SUCCEEDED, item, session, denials=denials)
 
 
 PARTICIPANTS = converse.make_participants(AIToolID.CLAUDE, AIToolID.CODEX)
@@ -306,6 +314,42 @@ def test_every_request_is_unattended_in_the_project(tmp_path: Path) -> None:
         assert request.working_dir == tmp_path
 
 
+def test_the_responder_runs_read_only_and_the_asker_does_not(tmp_path: Path) -> None:
+    runner = FakeRunner(ANSWERING)
+    _run(runner, tmp_path)
+    assert [request.read_only for _tool, request in runner.calls] == [
+        False,
+        True,
+        False,
+        True,
+        False,
+    ]
+    # Preflight checks the same posture, so a tool without a verified read-only
+    # profile is refused before any agent starts.
+    assert [request.read_only for request in runner.preflight_requests] == [False, True]
+
+
+def test_denials_are_recorded_on_their_turn_and_shown(tmp_path: Path) -> None:
+    denial = "Claude Code reported 1 permission denials under --permission-prompts none"
+    runner = FakeRunner(ANSWERING, denials={2: (denial,)})
+    result = _run(runner, tmp_path)
+    assert [turn.denials for turn in result.turns] == [(), (denial,), (), (), ()]
+    transcript = converse.render_transcript(result)
+    assert f"session resumed · denied: {denial}*" in transcript
+
+
+def test_an_empty_reply_after_denials_names_them(tmp_path: Path) -> None:
+    denial = "Antigravity CLI denied 1 action(s) that needed a permission"
+    # agy ends a turn with no answer when it denies an action; the runtime
+    # reports a successful exit without final output as invalid output.
+    runner = FakeRunner(
+        ["q\nNEXT: ASK", HeadlessTerminalStatus.INVALID_OUTPUT], denials={2: (denial,)}
+    )
+    result = _run(runner, tmp_path)
+    assert result.stop_reason is StopReason.FAILED
+    assert result.error == (f"responder (codex) turn 2 ended with status invalid_output ({denial})")
+
+
 def test_answering_on_the_first_turn_is_allowed(tmp_path: Path) -> None:
     result = _run(FakeRunner(["I already know: sound.\nNEXT: DONE"]), tmp_path)
     assert result.answered
@@ -448,11 +492,15 @@ def test_replay_keeps_the_newest_exchanges_within_budget(tmp_path: Path) -> None
             "done\nNEXT: DONE",
         ]
     )
-    _run(runner, tmp_path, supports_resume=_replays, history_chars=1500)
+    result = _run(runner, tmp_path, supports_resume=_replays, history_chars=1500)
     asker_turn_3 = runner.calls[4][1].prompt
     assert "A" * 900 not in asker_turn_3
     assert "earlier message(s) omitted" in asker_turn_3
     assert "C" * 900 in asker_turn_3
+    # The loss is recorded on the turn and shown in the transcript, not hidden.
+    assert result.turns[4].omitted > 0
+    assert result.turns[0].omitted == 0
+    assert "left out of the replay" in converse.render_transcript(result)
 
 
 # ---------------------------------------------------------------------------
@@ -773,8 +821,17 @@ def test_headless_prompt_fits_measures_encoded_argument_bytes() -> None:
 
 
 def test_native_supports_resume_matches_the_adapters() -> None:
-    assert converse.native_supports_resume(AIToolID.CLAUDE)
-    assert not converse.native_supports_resume(AIToolID.CURSOR)
+    # Every managed-headless tool resumes its unattended sessions on the build
+    # where that was verified; an older build falls back to replay per run.
+    for tool in (
+        AIToolID.CLAUDE,
+        AIToolID.CODEX,
+        AIToolID.CURSOR,
+        AIToolID.COPILOT,
+        AIToolID.OPENCODE,
+        AIToolID.ANTIGRAVITY_CLI,
+    ):
+        assert converse.native_supports_resume(tool), tool
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +868,23 @@ def test_ask_sends_the_question_as_written(tmp_path: Path) -> None:
     ((_tool, request),) = runner.calls
     assert request.prompt == "Question?"
     assert request.model == "m"
+    # The asked agent is a responder: it never changes the project.
+    assert request.read_only
     assert runner.depths == ["1"]
+
+
+def test_library_calls_enforce_the_recursion_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The guard lives in the engine, not only in the CLI, so a product that
+    # imports the library is covered too.
+    monkeypatch.setenv(DEPTH_ENV, "1")
+    runner = FakeRunner(["unused"])
+    with pytest.raises(ConverseDepthError):
+        converse.ask_agent(AIToolID.CODEX, "q", working_dir=tmp_path, runner=runner)
+    with pytest.raises(ConverseDepthError):
+        _run(runner, tmp_path)
+    assert runner.calls == []
 
 
 def test_ask_reports_failures(tmp_path: Path) -> None:
@@ -928,6 +1001,7 @@ def test_summary_runs_as_a_managed_unattended_session(
     assert body == "## Outcome\nSound."
     ((_tool, request),) = runner.calls
     assert request.interaction_mode is HeadlessInteractionMode.UNATTENDED
+    assert request.read_only
     assert request.timeout_seconds == 42
     assert runner.depths == ["1"]
 

@@ -6,13 +6,18 @@ follow-up questions, and decides when it has enough. The responder never sees
 the goal; it only answers the asker's messages. ``crossby ask`` is the
 single-question primitive underneath.
 
-Each side keeps its own native session. Where the adapter supports unattended
-resume (verified for Claude Code), every turn after the first resumes that
-side's session and carries only the other agent's latest message. A tool
-without verified resume falls back to replay: each turn is a fresh session
-whose prompt replays that side's earlier exchanges, bounded by a character
-budget and the transport's size limit. The transcript records which mode each
-side used.
+Each side keeps its own native session. On a CLI build where the adapter's
+unattended resume was verified (every managed-headless tool declares one),
+every turn after the first resumes that side's session and carries only the
+other agent's latest message. An older build falls back to replay: each turn
+is a fresh session whose prompt replays that side's earlier exchanges, bounded
+by a character budget and the transport's size limit. The transcript records
+which mode each side used and how much a replay left out.
+
+The responder never changes files: its turns (and ``ask`` and the summary) run
+with the adapter's verified read-only profile, and a tool without one is
+refused at preflight. The asker is the user's own agent and keeps its folder's
+normal unattended policy.
 """
 
 from __future__ import annotations
@@ -151,6 +156,12 @@ class ConverseTurn:
     next: Next | None
     duration_seconds: float
     mode: SessionMode
+    # What the tool reported denying during this turn (bounded, count-only
+    # diagnostics from the adapter, never the denied input).
+    denials: tuple[str, ...] = ()
+    # Earlier messages left out of this turn's replayed history to fit the
+    # budget or the transport; always 0 for a resumed session.
+    omitted: int = 0
 
     @property
     def is_final_answer(self) -> bool:
@@ -448,9 +459,29 @@ def replay_prompt(
     The prompt is the earlier exchanges from that side's point of view, then
     the message it is answering now (after the asker's goal, for the asker).
     """
+    return _replay(
+        role,
+        opening=opening,
+        turns=turns,
+        latest=latest,
+        responder=responder,
+        budget_chars=budget_chars,
+    )[0]
+
+
+def _replay(
+    role: Role,
+    *,
+    opening: str,
+    turns: Sequence[ConverseTurn],
+    latest: str,
+    responder: Participant,
+    budget_chars: int,
+) -> tuple[str, int]:
+    """:func:`replay_prompt`, plus how many earlier messages were left out."""
     asker_side = role is Role.ASKER
     if not turns:
-        return f"{opening}\n\n{latest}" if asker_side else latest
+        return (f"{opening}\n\n{latest}" if asker_side else latest), 0
     blocks: list[str] = []
     for turn in turns:
         if turn.role is Role.ASKER:
@@ -465,10 +496,10 @@ def replay_prompt(
     # with its goal, and the note there leaked into final answers ("the
     # previous sessions already got both answers").
     heading = ASKER_REPLAY_HEADING if asker_side else RESPONDER_REPLAY_HEADING
-    history, _omitted = _render_exchanges(blocks, budget_chars=budget_chars, heading=heading)
+    history, omitted = _render_exchanges(blocks, budget_chars=budget_chars, heading=heading)
     if asker_side:
-        return f"{opening}\n\n{history}\n\n### {responder.tool.value}\n{latest}"
-    return f"{history}\n\n### Question\n{latest}"
+        return f"{opening}\n\n{history}\n\n### {responder.tool.value}\n{latest}", omitted
+    return f"{history}\n\n### Question\n{latest}", omitted
 
 
 def _request(
@@ -479,6 +510,7 @@ def _request(
     timeout_seconds: float,
     model: str | None = None,
     resume_id: str | None = None,
+    read_only: bool = False,
 ) -> HeadlessSessionRequest:
     return HeadlessSessionRequest(
         prompt=prompt,
@@ -487,7 +519,17 @@ def _request(
         interaction_mode=HeadlessInteractionMode.UNATTENDED,
         timeout_seconds=timeout_seconds,
         resume_id=resume_id,
+        read_only=read_only,
     )
+
+
+def _read_only(participant: Participant) -> bool:
+    """A responder never changes files: its sessions run read-only.
+
+    The asker is the user's own agent in the user's project, so it keeps the
+    folder's normal unattended policy.
+    """
+    return participant.role is Role.RESPONDER
 
 
 def _session_handle(result: HeadlessSessionResult) -> str | None:
@@ -509,9 +551,14 @@ def ask_agent(
     runner: TurnRunner | None = None,
     clock: Callable[[], float] = monotonic,
 ) -> AskResult:
-    """Ask one agent one question in an unattended headless session."""
+    """Ask one agent one question in a read-only unattended headless session.
+
+    The asked agent is a responder: it answers from its folder and never
+    changes it. A tool without a verified read-only profile is refused.
+    """
     from crossby.ai_tools.headless import HeadlessSessionError
 
+    check_depth()
     if not prompt.strip():
         raise ConverseError("The question is empty.")
     runner = runner or HeadlessTurnRunner()
@@ -521,6 +568,7 @@ def ask_agent(
         working_dir=working_dir,
         timeout_seconds=timeout_seconds,
         model=model,
+        read_only=True,
     )
     started = clock()
     try:
@@ -557,6 +605,16 @@ class _Side:
     opening: str = ""
 
 
+@dataclass(frozen=True)
+class _Reply:
+    """What one turn produced, before the asker's marker is parsed."""
+
+    text: str
+    duration: float
+    denials: tuple[str, ...]
+    omitted: int
+
+
 def run_conversation(
     goal: str,
     participants: tuple[Participant, Participant],
@@ -587,6 +645,7 @@ def run_conversation(
     """
     from crossby.ai_tools.headless import HeadlessSessionError
 
+    check_depth()
     if not goal.strip():
         raise ConverseError("The goal is empty.")
     if max_rounds < 1:
@@ -641,20 +700,20 @@ def run_conversation(
             StopReason.TIMEOUT, f"conversation time limit of {timeout_seconds:g}s reached {when}"
         )
 
-    def build_prompt(side: _Side, message: str, budget: int) -> str:
-        """The prompt for this side's next turn, given the message it answers.
+    def build_prompt(side: _Side, message: str, budget: int) -> tuple[str, int]:
+        """The prompt for this side's next turn, and the replayed messages it omits.
 
         The message itself is never shortened; ``budget`` bounds only the
         replayed history of a side whose tool cannot resume.
         """
         if side.session_id is not None:  # resumed: only the new message
-            return message
+            return message, 0
         if not turns:  # the very first turn: the asker's opening
-            return side.opening
+            return side.opening, 0
         if side.mode is SessionMode.RESUMED:  # first turn of a resumable responder
-            return message
+            return message, 0
         # Replay: the latest turn is the message being answered, sent separately.
-        return replay_prompt(
+        return _replay(
             side.participant.role,
             opening=side.opening,
             turns=turns[:-1],
@@ -663,8 +722,8 @@ def run_conversation(
             budget_chars=budget,
         )
 
-    def take_turn(role: Role, message: str) -> tuple[str, float]:
-        """Run one turn for ``role``; return its reply text and duration."""
+    def take_turn(role: Role, message: str) -> _Reply:
+        """Run one turn for ``role`` and return its reply."""
         nonlocal in_progress
         side = sides[role]
         number = len(turns) + 1
@@ -676,7 +735,7 @@ def run_conversation(
         # still does not fit stops the consultation instead of being cut.
         budget = history_chars
         while True:
-            prompt = build_prompt(side, message, budget)
+            prompt, omitted = build_prompt(side, message, budget)
             if fits(side.participant.tool, prompt):
                 break
             if budget == 0:  # even with no replayed history, it does not fit
@@ -694,6 +753,7 @@ def run_conversation(
             working_dir=folders[role],
             timeout_seconds=min(turn_timeout_seconds, remaining),
             resume_id=side.session_id,
+            read_only=_read_only(side.participant),
         )
         in_progress = number
         if on_turn_start is not None:
@@ -715,13 +775,17 @@ def run_conversation(
                 StopReason.FAILED,
                 f"{label} turn {number} timed out after {turn_timeout_seconds:g}s",
             )
+        # A tool that denied an action may end its turn without an answer
+        # (Antigravity CLI does); name the denials so the failure explains itself.
+        denied = f" ({'; '.join(result.denials)})" if result.denials else ""
         if result.status is not HeadlessTerminalStatus.SUCCEEDED:
             raise _StopError(
-                StopReason.FAILED, f"{label} turn {number} ended with status {result.status.value}"
+                StopReason.FAILED,
+                f"{label} turn {number} ended with status {result.status.value}{denied}",
             )
         text = (result.final_text or "").strip()
         if not text:
-            raise _StopError(StopReason.FAILED, f"{label} turn {number} returned no text")
+            raise _StopError(StopReason.FAILED, f"{label} turn {number} returned no text{denied}")
         if side.mode is SessionMode.RESUMED and side.session_id is None:
             handle = _session_handle(result)
             if handle is None or not resumes_on(side.participant.tool, result.version):
@@ -730,18 +794,20 @@ def run_conversation(
                 side.mode = SessionMode.REPLAYED
             else:
                 side.session_id = handle
-        return text, clock() - turn_started
+        return _Reply(text, clock() - turn_started, tuple(result.denials), omitted)
 
-    def record(role: Role, text: str, next_: Next | None, duration: float) -> ConverseTurn:
+    def record(role: Role, reply: _Reply, body: str, next_: Next | None) -> ConverseTurn:
         nonlocal in_progress
         turn = ConverseTurn(
             number=len(turns) + 1,
             role=role,
             tool=sides[role].participant.tool,
-            text=text,
+            text=body,
             next=next_,
-            duration_seconds=duration,
+            duration_seconds=reply.duration,
             mode=sides[role].mode,
+            denials=reply.denials,
+            omitted=reply.omitted,
         )
         turns.append(turn)
         in_progress = None
@@ -759,6 +825,7 @@ def run_conversation(
                 prompt="preflight",
                 working_dir=folders[participant.role],
                 timeout_seconds=min(turn_timeout_seconds, remaining),
+                read_only=_read_only(participant),
             )
             try:
                 active_runner.preflight(participant.tool, probe)
@@ -775,8 +842,8 @@ def run_conversation(
         message_for_asker = ""  # the asker's first turn uses its opening
         for round_number in range(1, max_rounds + 2):
             final = round_number > max_rounds
-            raw, duration = take_turn(Role.ASKER, message_for_asker)
-            body, next_ = parse_next(raw)
+            asked = take_turn(Role.ASKER, message_for_asker)
+            body, next_ = parse_next(asked.text)
             if not body:
                 # A bare marker is neither an answer nor a message to send.
                 what = "final answer" if next_ is Next.DONE else "message"
@@ -785,16 +852,16 @@ def run_conversation(
                     f"{asker.label} turn {len(turns) + 1} sent only the NEXT marker, "
                     f"with no {what}",
                 )
-            record(Role.ASKER, body, next_, duration)
+            record(Role.ASKER, asked, body, next_)
             if next_ is Next.DONE:
                 answered_at_limit = final
                 return finish(StopReason.ANSWERED)
             if final:
                 return finish(StopReason.ROUND_LIMIT)
-            answer, duration = take_turn(Role.RESPONDER, body)
-            record(Role.RESPONDER, answer, None, duration)
+            answer = take_turn(Role.RESPONDER, body)
+            record(Role.RESPONDER, answer, answer.text, None)
             message_for_asker = reply_for_asker(
-                answer, final=round_number == max_rounds, max_rounds=max_rounds
+                answer.text, final=round_number == max_rounds, max_rounds=max_rounds
             )
         return finish(StopReason.ROUND_LIMIT)  # pragma: no cover - loop always returns
 
@@ -907,16 +974,21 @@ def _render_transcript(
             heading = f"## {turn.number}. asker ({turn.tool.value}) → responder"
         else:
             heading = f"## {turn.number}. responder ({turn.tool.value}) → asker"
-        marker = f"NEXT: {turn.next.value} · " if turn.next is not None else ""
-        lines += [
-            heading,
-            "",
-            turn.text or "(empty message)",
-            "",
-            f"*{marker}{turn.duration_seconds:.0f}s · session {turn.mode.value}*",
-            "",
-        ]
+        lines += [heading, "", turn.text or "(empty message)", "", f"*{turn_footer(turn)}*", ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def turn_footer(turn: ConverseTurn) -> str:
+    """The one-line run facts shown under a turn: marker, time, session, losses."""
+    parts = [f"NEXT: {turn.next.value}"] if turn.next is not None else []
+    parts += [f"{turn.duration_seconds:.0f}s", f"session {turn.mode.value}"]
+    if turn.omitted:
+        parts.append(
+            f"{turn.omitted} earlier message{'s' if turn.omitted != 1 else ''} "
+            "left out of the replay"
+        )
+    parts += [f"denied: {denial}" for denial in turn.denials]
+    return " · ".join(parts)
 
 
 def to_handoff_transcript(result: ConversationResult, path: Path) -> ConversationTranscript:
@@ -1024,11 +1096,11 @@ def summarize_conversation(
     on_truncate: Callable[[int, int], None] | None = None,
     prompt_fits: PromptFits = native_prompt_fits,
 ) -> str:
-    """Summarize a finished consultation in one managed unattended session.
+    """Summarize a finished consultation in one managed read-only session.
 
     The summary runs through the same boundary as the turns, so it gets the
     runtime's deadline, cancellation, process-group cleanup and each tool's
-    unattended permission policy, plus the recursion guard. Failures raise
+    read-only profile, plus the recursion guard. Failures raise
     :class:`ConverseSummaryError`; the transcript is already on disk.
     """
     from crossby.ai_tools.headless import HeadlessSessionError
@@ -1040,7 +1112,12 @@ def summarize_conversation(
         on_truncate=on_truncate,
     )
     request = _request(
-        None, prompt=prompt, working_dir=working_dir, timeout_seconds=timeout_seconds, model=model
+        None,
+        prompt=prompt,
+        working_dir=working_dir,
+        timeout_seconds=timeout_seconds,
+        model=model,
+        read_only=True,
     )
     runner = runner or HeadlessTurnRunner()
     try:

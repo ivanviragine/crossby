@@ -94,6 +94,9 @@ _CURSOR_STREAM_EVENT_KINDS = frozenset({"system", "user", "thinking", "assistant
 _NO_THINKING_MODELS: frozenset[str] = frozenset({"auto"})
 
 _THINKING_EFFORTS = frozenset({EffortLevel.HIGH, EffortLevel.XHIGH, EffortLevel.MAX})
+# The read-only session's closed tool set, in Cursor's proto ToolCall names:
+# reading, searching and listing, with no edit, delete, shell or MCP tool.
+_READ_ONLY_TOOLS = "read_tool_call,grep_tool_call,glob_tool_call,ls_tool_call,sem_search_tool_call"
 
 
 def _cursor_acp_initialize_params(client_version: str) -> dict[str, Any]:
@@ -302,6 +305,10 @@ class CursorAdapter(AbstractAITool):
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
+    # Unattended ``--resume <chatId>`` and the read-only tool set were verified
+    # live on this build, after the unattended floor (2026.09.10).
+    HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "2026.11.05-86047df"
+    HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "2026.11.05-86047df"
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -355,6 +362,10 @@ class CursorAdapter(AbstractAITool):
                     ),
                 ),
                 supports_response_schema=False,
+                # ``--resume <chatId>`` continues the exact chat.
+                supports_resume=True,
+                # A closed tool set of read and search tools.
+                supports_read_only=True,
                 successful_native_statuses=("success",),
                 sandbox_behavior=PlanRequestBehavior.PRESERVED,
                 approval_behavior=PlanRequestBehavior.PRESERVED,
@@ -597,6 +608,15 @@ class CursorAdapter(AbstractAITool):
             "--sandbox",
             "enabled" if request.sandbox else "disabled",
         ]
+        if request.read_only:
+            # Verified on 2026.11.05-86047df: neither --mode ask nor --mode plan
+            # stops print mode's edit tool (a forced edit wrote the file), but
+            # this closed tool set leaves only read and search tools. The flag
+            # is hidden; Cursor validates the names, so a build that renames
+            # them fails the session instead of widening it.
+            command.extend(("--allowed-tools", _READ_ONLY_TOOLS))
+        if request.resume_id is not None:
+            command.extend(("--resume", request.resume_id))
         model = self.resolve_effort_model(request.model, request.effort)
         if model:
             command.extend(("--model", model))
@@ -715,6 +735,16 @@ class CursorAdapter(AbstractAITool):
             )
 
         session_id = session_id or non_blank_text(envelope.get("session_id"))
+        if request.resume_id is not None and session_id != request.resume_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(
+                    *warnings,
+                    "Cursor reported a different chat than the one crossby resumed.",
+                ),
+            )
         response_text = non_blank_text(envelope.get("result"))
         answer = non_blank_text("".join(answer_parts))
         # Trim only a prefix of Cursor's own result; otherwise keep it whole.

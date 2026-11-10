@@ -206,13 +206,17 @@ def run_managed_command(
     proc: subprocess.Popen[bytes] | None = None
     workers: list[threading.Thread] = []
     input_stream: IO[bytes] | None = None
+    # A CLI may take its working directory from an inherited PWD rather than
+    # from the process cwd (OpenCode does, verified on 1.19.5), and would then
+    # act on the caller's folder instead of ``cwd``. Keep PWD truthful.
+    child_env = {**(env if env is not None else os.environ), "PWD": os.path.abspath(cwd)}
     # Register before Popen. A continuation reuses this same hook chain.
     owner = controller or ResumableManagedCLIController(context)
     try:
         child = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=env,
+            env=child_env,
             stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
