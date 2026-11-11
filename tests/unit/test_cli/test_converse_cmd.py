@@ -798,13 +798,13 @@ def test_continue_refuses_a_missing_or_answered_journal(
 ) -> None:
     missing = _invoke(tmp_path, "converse", "--continue", str(tmp_path))
     assert missing.exit_code == 1
-    assert "has no events.jsonl" in missing.stderr
+    assert "has no events.jsonl" in " ".join(missing.stderr.split())
     out = tmp_path / "out"
     _use_runner(monkeypatch, FakeRunner(CONSULTING))
     _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out))
     answered = _invoke(tmp_path, "converse", "--continue", str(out))
     assert answered.exit_code == 1
-    assert "already has its final answer" in answered.stderr
+    assert "already has its final answer" in " ".join(answered.stderr.split())
 
 
 def test_converse_needs_its_tools_without_continue(
@@ -828,5 +828,58 @@ def test_a_fresh_consultation_never_appends_to_an_existing_journal(
     second = _invoke(tmp_path, "converse", "claude", "codex", "-g", "y", "--output-dir", str(out))
     assert second.exit_code == 1
     assert "already holds a consultation" in " ".join(second.stderr.split())
+    assert fake.calls == []
+    assert (out / "events.jsonl").read_text() == before
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--max-rounds", "0"], ["--summary", "--summarizer-tool", "vscode"], ["--timeout", "0"]],
+)
+def test_a_refused_start_leaves_no_journal_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: list[str]
+) -> None:
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner([]))
+    refused = _invoke(
+        tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out), *args
+    )
+    assert refused.exit_code == 1
+    assert not (out / "events.jsonl").exists()
+    # The same folder can be used once the call is fixed.
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    fixed = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out))
+    assert fixed.exit_code == 0, fixed.output
+
+
+def test_continue_refuses_a_consultation_still_being_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.services.journal import Journal
+
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK"]))
+    first = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--max-rounds",
+        "1",
+        "--output-dir",
+        str(out),
+    )
+    assert first.exit_code == 2
+    before = (out / "events.jsonl").read_text()
+    held, _ = Journal.reopen(out / "events.jsonl")  # another run is continuing it
+    try:
+        fake = _use_runner(monkeypatch, FakeRunner(["a2", "verdict\nNEXT: DONE"]))
+        second = _invoke(tmp_path, "converse", "--continue", str(out))
+    finally:
+        held.close()
+    assert second.exit_code == 1
+    assert "Another process is writing" in " ".join(second.stderr.split())
     assert fake.calls == []
     assert (out / "events.jsonl").read_text() == before

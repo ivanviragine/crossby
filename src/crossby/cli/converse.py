@@ -241,10 +241,23 @@ def converse(
         crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json
     """
     from crossby.services import converse as engine
-    from crossby.services.journal import JOURNAL_FILE, Journal
+    from crossby.services.journal import (
+        JOURNAL_FILE,
+        Journal,
+        JournalError,
+        JournalExistsError,
+    )
 
+    # Everything that can refuse the call is checked before a journal exists,
+    # so a refused fresh run leaves no journal behind to block a retry.
+    chosen_summarizer = (
+        _headless_tool(summarizer_tool, "--summarizer-tool")
+        if summary and summarizer_tool is not None
+        else None
+    )
     prior: ConversationResult | None = None
     responder_root: Path | None
+    journal: Journal | None = None
     if continue_dir is not None:
         prior, out_dir, journal = _load_continuation(
             continue_dir,
@@ -262,10 +275,14 @@ def converse(
         asker, responder = prior.asker, prior.responder
         asker_id = asker.tool
         goal_text = prior.goal
-        project_root = _project_root(prior.folders[engine.Role.ASKER], "the asker's folder")
-        responder_root = _project_root(
-            prior.folders[engine.Role.RESPONDER], "the responder's folder"
-        )
+        try:
+            project_root = _project_root(prior.folders[engine.Role.ASKER], "the asker's folder")
+            responder_root = _project_root(
+                prior.folders[engine.Role.RESPONDER], "the responder's folder"
+            )
+        except BaseException:
+            journal.close()
+            raise
         started_at = prior.started_at
     else:
         if asker_tool is None or responder_tool is None:
@@ -289,21 +306,20 @@ def converse(
             if output_dir is not None
             else engine.conversation_dir(project_root, started_at)
         )
-        if (out_dir / JOURNAL_FILE).exists():
-            # Appending a fresh run would mix two consultations in one journal.
+    summarizer_id = (chosen_summarizer or asker_id) if summary else None
+    if journal is None:
+        try:
+            # Created exclusively: a fresh run never appends to another journal.
+            journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE)
+        except JournalExistsError:
             console.error(
                 f"{out_dir} already holds a consultation; --continue it or choose another "
                 "--output-dir."
             )
-            raise typer.Exit(1)
-        journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE)
-    summarizer_id: AIToolID | None = None
-    if summary:
-        summarizer_id = (
-            _headless_tool(summarizer_tool, "--summarizer-tool")
-            if summarizer_tool is not None
-            else asker_id
-        )
+            raise typer.Exit(1) from None
+        except JournalError as exc:
+            console.error(str(exc))
+            raise typer.Exit(1) from None
 
     transcript_path = out_dir / "transcript.md"
     folders = {
@@ -313,16 +329,6 @@ def converse(
     completed: list[ConverseTurn] = list(prior.turns) if prior is not None else []
     allowed = (prior.rounds if prior is not None else 0) + max_rounds
     waiting = _TurnWait()
-
-    if not quiet:
-        _show_start(asker, responder, folders[engine.Role.RESPONDER], project_root)
-        if prior is not None:
-            _stderr(
-                f"[dim]      continuing after {len(prior.turns)} messages "
-                f"({prior.stop_reason.value})[/]"
-            )
-        _stderr(f"[dim]      limits: up to {max_rounds} messages, {_duration(timeout)} in all[/]")
-        _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
 
     def on_turn_start(number: int, speaker: Participant) -> None:
         if quiet:
@@ -356,6 +362,17 @@ def converse(
             _show_turn(turn, heading=console.err.is_terminal)
 
     try:
+        if not quiet:
+            _show_start(asker, responder, folders[engine.Role.RESPONDER], project_root)
+            if prior is not None:
+                _stderr(
+                    f"[dim]      continuing after {len(prior.turns)} messages "
+                    f"({prior.stop_reason.value})[/]"
+                )
+            _stderr(
+                f"[dim]      limits: up to {max_rounds} messages, {_duration(timeout)} in all[/]"
+            )
+            _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
         result = engine.run_conversation(
             goal_text,
             (asker, responder),
@@ -642,7 +659,7 @@ def _load_continuation(
 ) -> tuple[ConversationResult, Path, Journal]:
     """The saved consultation in ``directory``, ready to continue."""
     from crossby.services.converse import ConverseError, result_from_journal
-    from crossby.services.journal import JOURNAL_FILE, Journal, JournalError, read_journal
+    from crossby.services.journal import JOURNAL_FILE, Journal, JournalError
 
     given = [name for name, value in conflicting.items() if value is not None]
     if given:
@@ -656,15 +673,22 @@ def _load_continuation(
         console.error(f"{folder} has no {JOURNAL_FILE} to continue from.")
         raise typer.Exit(1)
     try:
-        events = read_journal(path)
+        # Locked before it is read, and held until the run ends: a second
+        # process continuing the same consultation is refused.
+        journal, events = Journal.reopen(path)
+    except JournalError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
+    try:
         prior = result_from_journal(events)
-    except (JournalError, ConverseError) as exc:
+    except ConverseError as exc:
+        journal.close()
         console.error(str(exc))
         raise typer.Exit(1) from None
     if prior.answered:
+        journal.close()
         console.error("That consultation already has its final answer.")
         raise typer.Exit(1)
-    journal = Journal(events[-1].run_id, path=path, start_seq=events[-1].seq + 1)
     return prior, folder, journal
 
 

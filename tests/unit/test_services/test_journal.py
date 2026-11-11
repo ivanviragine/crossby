@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,7 +28,9 @@ from crossby.services.journal import (
     ConversationEvent,
     EventType,
     Journal,
+    JournalBusyError,
     JournalError,
+    JournalExistsError,
     finished,
     read_journal,
 )
@@ -182,13 +187,12 @@ def test_continuing_after_the_round_limit_resumes_both_sessions(tmp_path: Path) 
     journal.close()
     assert stopped.stop_reason is StopReason.ROUND_LIMIT
 
-    events = read_journal(tmp_path / "out" / JOURNAL_FILE)
+    resumed, events = Journal.reopen(tmp_path / "out" / JOURNAL_FILE)
     prior = result_from_journal(events)
     assert prior.stop_reason is StopReason.ROUND_LIMIT
     assert prior.sessions == {Role.ASKER: "session-1", Role.RESPONDER: "session-2"}
 
     second = FakeRunner(["a2", "verdict\nNEXT: DONE"])
-    resumed = Journal("run-1", path=tmp_path / "out" / JOURNAL_FILE, start_seq=events[-1].seq + 1)
     result = _run(second, tmp_path, resumed, max_rounds=2, resume=prior)
     resumed.close()
 
@@ -218,9 +222,11 @@ def test_continuing_after_an_interrupted_answer_resends_the_owed_message(tmp_pat
     journal.close()
     assert stopped.stop_reason is StopReason.INTERRUPTED
 
-    prior = result_from_journal(read_journal(tmp_path / "out" / JOURNAL_FILE))
+    resumed, events = Journal.reopen(tmp_path / "out" / JOURNAL_FILE)
+    prior = result_from_journal(events)
     second = FakeRunner(["a1", "ok\nNEXT: DONE"])
-    result = _run(second, tmp_path, _journal(tmp_path), resume=prior)
+    result = _run(second, tmp_path, resumed, resume=prior)
+    resumed.close()
 
     assert result.answered
     assert second.calls[0][1].prompt == "q1"
@@ -234,7 +240,7 @@ def test_an_answered_consultation_cannot_be_continued(tmp_path: Path) -> None:
     journal.close()
     prior = result_from_journal(journal.events)
     with pytest.raises(ConverseError, match="already has its final answer"):
-        _run(FakeRunner([]), tmp_path, _journal(tmp_path), resume=prior)
+        _run(FakeRunner([]), tmp_path, Journal("again"), resume=prior)
 
 
 def test_a_run_that_never_recorded_its_end_reads_as_interrupted(tmp_path: Path) -> None:
@@ -263,7 +269,8 @@ def test_appending_repairs_an_unfinished_last_line(tmp_path: Path, complete: boo
     else:
         path.write_text("\n".join(lines[:-1]) + '\n{"schema_version": 1, "run_id": "run-1", "se')
         kept = len(lines) - 1
-    resumed = Journal("run-1", path=path, start_seq=kept + 1)
+    resumed, events = Journal.reopen(path)
+    assert len(events) == kept
     resumed.emit(T.CONVERSATION_CONTINUED, max_rounds=9)
     resumed.close()
     events = read_journal(path)
@@ -281,9 +288,102 @@ def test_a_committed_final_answer_is_answered_even_without_its_end(tmp_path: Pat
     assert prior.answered
     assert prior.final_answer == "done"
     with pytest.raises(ConverseError, match="already has its final answer"):
-        _run(FakeRunner([]), tmp_path, _journal(tmp_path), resume=prior)
+        _run(FakeRunner([]), tmp_path, Journal("again"), resume=prior)
     # Even a result that claims otherwise is never continued.
     claimed = prior
     claimed.stop_reason = StopReason.INTERRUPTED
     with pytest.raises(ConverseError, match="already has its final answer"):
-        _run(FakeRunner([]), tmp_path, _journal(tmp_path), resume=claimed)
+        _run(FakeRunner([]), tmp_path, Journal("again"), resume=claimed)
+
+
+# ---------------------------------------------------------------------------
+# One writer per journal
+# ---------------------------------------------------------------------------
+
+
+def _answered(tmp_path: Path) -> Path:
+    journal = _journal(tmp_path)
+    _run(FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"]), tmp_path, journal)
+    journal.close()
+    return tmp_path / "out" / JOURNAL_FILE
+
+
+def test_a_journal_being_written_cannot_be_reopened(tmp_path: Path) -> None:
+    path = _answered(tmp_path)
+    held, _ = Journal.reopen(path)
+    with pytest.raises(JournalBusyError, match="Another process is writing"):
+        Journal.reopen(path)
+    held.close()
+    again, events = Journal.reopen(path)
+    again.close()
+    assert events[-1].type is T.CONVERSATION_FINISHED
+
+
+def test_another_process_cannot_write_a_journal_in_use(tmp_path: Path) -> None:
+    path = _answered(tmp_path)
+    probe = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from crossby.services.journal import Journal, JournalBusyError\n"
+        "try:\n"
+        "    Journal.reopen(Path(sys.argv[1]))[0].close()\n"
+        "except JournalBusyError:\n"
+        "    sys.exit(3)\n"
+    )
+
+    def other_process() -> int:
+        return subprocess.run([sys.executable, "-c", probe, str(path)], check=False).returncode
+
+    held, _ = Journal.reopen(path)
+    try:
+        assert other_process() == 3
+    finally:
+        held.close()
+    assert other_process() == 0
+
+
+def test_reading_never_waits_for_the_writer(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    journal.emit(T.CONVERSATION_STARTED, goal="g")
+    assert [event.seq for event in read_journal(journal.path)] == [1]  # type: ignore[arg-type]
+    journal.close()
+
+
+def test_a_new_journal_never_takes_over_one_with_events(tmp_path: Path) -> None:
+    path = _answered(tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(JournalExistsError):
+        _journal(tmp_path)
+    assert path.read_bytes() == before
+
+
+def test_a_journal_that_recorded_nothing_leaves_no_file(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    assert journal.path is not None and journal.path.is_file()
+    journal.close()
+    assert not journal.path.exists()
+    # An empty file that was already there is taken over, and kept.
+    journal.path.touch()
+    taken = _journal(tmp_path)
+    taken.close()
+    assert journal.path.is_file()
+
+
+@pytest.mark.parametrize("content", ["", "\n"])
+def test_a_journal_without_events_cannot_be_reopened(tmp_path: Path, content: str) -> None:
+    path = tmp_path / JOURNAL_FILE
+    path.write_text(content)
+    with pytest.raises(JournalError, match="holds no events"):
+        Journal.reopen(path)
+    # The refusal released the lock.
+    with pytest.raises(JournalError, match="holds no events"):
+        Journal.reopen(path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs are POSIX")
+def test_a_journal_path_must_be_a_regular_file(tmp_path: Path) -> None:
+    path = tmp_path / "out" / JOURNAL_FILE
+    path.parent.mkdir()
+    os.mkfifo(path)
+    with pytest.raises(JournalError, match="not a regular file"):
+        Journal("run-1", path=path)
