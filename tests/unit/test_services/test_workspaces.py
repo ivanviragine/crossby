@@ -602,3 +602,43 @@ def test_a_file_changed_before_its_removal_is_kept(
         cleanup(workspace)
     assert (workspace.path / "AGENTS.md").read_text() == "edited after verification"
     assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]
+
+
+@pytest.mark.skipif(os.rename not in os.supports_dir_fd, reason="needs dir_fd support")
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_a_directory_put_in_a_files_place_is_never_moved_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    agents = workspace.path / "AGENTS.md"
+
+    def replace_with_directory() -> None:
+        agents.unlink()
+        agents.mkdir()
+        (agents / "theirs.md").write_text("unrelated")
+
+    if when == "before":
+        real_verify = workspaces.verify
+
+        def verify_then_replace(target: Any) -> None:
+            real_verify(target)
+            replace_with_directory()
+
+        monkeypatch.setattr(workspaces, "verify", verify_then_replace)
+    else:
+        real_rename = os.rename
+
+        def rename_then_swap(src: Any, dst: Any, **kwargs: Any) -> None:
+            if src == "AGENTS.md":
+                # The check passed on the file; a directory lands in its place
+                # just before the move.
+                replace_with_directory()
+            real_rename(src, dst, **kwargs)
+
+        monkeypatch.setattr(workspaces.os, "rename", rename_then_swap)
+    with pytest.raises(WorkspaceDriftError):
+        cleanup(workspace)
+    assert (agents / "theirs.md").read_text() == "unrelated"
+    assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]

@@ -519,6 +519,14 @@ def _unlink_if_unchanged(parent: int, name: str, digest: str) -> bool:
     substituted at ``name`` meanwhile is never deleted unchecked. On a
     mismatch the entry is linked back under ``name`` (never over a newer one).
     """
+    try:
+        entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except OSError:
+        return False
+    if not stat.S_ISREG(entry.st_mode):
+        # Only a regular file is ever moved: a directory or link put in its
+        # place is left where it is.
+        return False
     private = f".crossby-removing-{secrets.token_hex(8)}"
     try:
         os.rename(name, private, src_dir_fd=parent, dst_dir_fd=parent)
@@ -539,10 +547,27 @@ def _unlink_if_unchanged(parent: int, name: str, digest: str) -> bool:
     if matches:
         os.unlink(private, dir_fd=parent)
         return True
-    with contextlib.suppress(OSError):
-        os.link(private, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-        os.unlink(private, dir_fd=parent)
+    _restore(parent, private, name)
     return False
+
+
+def _restore(parent: int, private: str, name: str) -> None:
+    """Put a rejected entry back under ``name``, never over a newer entry."""
+    try:
+        os.link(private, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+    except FileExistsError:
+        return  # something newer took the name; the entry keeps its private name
+    except OSError:
+        # Not hard-linkable (a directory swapped in after the check): rename it
+        # back, only while nothing holds the name.
+        with contextlib.suppress(OSError):
+            try:
+                os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                os.rename(private, name, src_dir_fd=parent, dst_dir_fd=parent)
+        return
+    with contextlib.suppress(OSError):
+        os.unlink(private, dir_fd=parent)
 
 
 def _cleanup_anchored(workspace: OwnedWorkspace) -> None:
