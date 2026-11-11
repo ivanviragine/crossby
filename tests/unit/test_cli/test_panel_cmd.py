@@ -131,3 +131,24 @@ def test_a_bad_recipe_or_call_starts_nothing(
     assert result.exit_code == 1
     assert message in " ".join(result.stderr.split())
     assert all(not calls for calls in fake.requests.values())
+
+
+def test_a_panel_never_reuses_a_folder_with_a_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _project(tmp_path, RECIPE)
+    _use(
+        monkeypatch,
+        PanelRunner(
+            {root.name: ["Q?\nNEXT: ASK @cto", "ok\nNEXT: DONE"], "cto": ["a"], "founder": []}
+        ),
+    )
+    out = root / "out"
+    assert _invoke(root, "pricing", "-g", "g", "--output-dir", str(out), "--quiet").exit_code == 0
+    before = (out / "events.jsonl").read_text()
+    fake = _use(monkeypatch, PanelRunner({root.name: [], "cto": [], "founder": []}))
+    again = _invoke(root, "pricing", "-g", "g", "--output-dir", str(out))
+    assert again.exit_code == 1
+    assert "already holds a panel" in " ".join(again.stderr.split())
+    assert (out / "events.jsonl").read_text() == before
+    assert all(not calls for calls in fake.requests.values())

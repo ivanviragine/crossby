@@ -95,6 +95,10 @@ def panel(
         if output_dir is not None
         else root / ".crossby" / "panels" / started.strftime("%Y%m%dT%H%M%S%f")
     )
+    if (out_dir / JOURNAL_FILE).exists():
+        # Appending a second run would mix two panels in one journal.
+        console.error(f"{out_dir} already holds a panel; choose another --output-dir.")
+        raise typer.Exit(1)
     journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE, sinks=[] if quiet else [_show])
     if not quiet:
         roster = ", ".join(f"@{m.id} ({m.backend.tool.value})" for m in spec.members)

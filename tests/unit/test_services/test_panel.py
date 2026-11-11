@@ -391,7 +391,6 @@ def test_member_ids_are_addressable(tmp_path: Path) -> None:
         _spec(tmp_path, members=(duplicate, duplicate))
 
 
-
 def test_turn_numbers_match_their_events_when_a_member_fails(tmp_path: Path) -> None:
     runner = PanelRunner(
         {
