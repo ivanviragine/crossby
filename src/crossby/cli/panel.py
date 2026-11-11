@@ -228,9 +228,43 @@ _TERMINAL = threading.Lock()
 
 
 def _terminal_reply(request: Any) -> Any:
-    """One human seat's prompt and reply on the terminal, one seat at a time."""
-    with _TERMINAL:
+    """One human seat's prompt and reply on the terminal, one seat at a time.
+
+    A request that expires while waiting for the terminal is never prompted,
+    and one that expires mid-reply stops reading and frees the terminal.
+    """
+    while not _TERMINAL.acquire(timeout=0.2):
+        if request.expired.is_set():
+            return None
+    try:
+        if request.expired.is_set():
+            return None
         return _read_terminal_reply(request)
+    finally:
+        _TERMINAL.release()
+
+
+def _readline(request: Any) -> str | None:
+    """One line of stdin, or ``None`` at end of input or once the request expired.
+
+    A real terminal or pipe is polled, so an expired request stops waiting;
+    a stream without a descriptor (such as a test's) is read directly.
+    """
+    import select
+
+    try:
+        descriptor = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        descriptor = None
+    if descriptor is not None:
+        while True:
+            if request.expired.is_set():
+                return None
+            ready, _, _ = select.select([descriptor], [], [], 0.2)
+            if ready:
+                break
+    line = sys.stdin.readline()
+    return line if line else None
 
 
 def _read_terminal_reply(request: Any) -> Any:
@@ -249,17 +283,19 @@ def _read_terminal_reply(request: Any) -> Any:
         _stderr(f"[step]▸[/] [bold]{who}[/], your turn.")
     _stderr("[dim]      Write your reply; end it with a line holding only a period.[/]")
     lines: list[str] = []
-    for line in sys.stdin:
+    while (line := _readline(request)) is not None:
         if line.rstrip("\n") == ".":
             break
         lines.append(line.rstrip("\n"))
+    if request.expired.is_set():
+        return None
     text = "\n".join(lines).strip()
     if not text:
         return None
     if request.kind != "lead":
         return HumanReply(text)
     _stderr("[dim]      Send to whom? @ids, @all, or done for your final answer:[/]")
-    target = (sys.stdin.readline() or "").strip()
+    target = (_readline(request) or "").strip()
     if target.lower() == "done":
         return HumanReply(text, done=True)
     return HumanReply(text, recipients=tuple(target.replace(",", " ").split()))

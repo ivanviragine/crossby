@@ -236,10 +236,47 @@ def test_terminal_seats_take_turns_reading(tmp_path: Path, monkeypatch: pytest.M
             active["now"] -= 1
         return None
 
+    from crossby.services.panel import InputRequest
+
     monkeypatch.setattr(panel_cli, "_read_terminal_reply", reading)
-    workers = [threads.Thread(target=panel_cli._terminal_reply, args=(object(),)) for _ in range(3)]
+    requests = [InputRequest(f"r{index}", f"m{index}", "member", index, "Q?") for index in range(3)]
+    workers = [threads.Thread(target=panel_cli._terminal_reply, args=(r,)) for r in requests]
     for worker in workers:
         worker.start()
     for worker in workers:
         worker.join(5)
     assert active["most"] == 1
+
+
+def test_an_expired_seat_is_never_prompted_and_frees_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading as threads
+
+    from crossby.cli import panel as panel_cli
+    from crossby.services.panel import InputRequest
+
+    holder = InputRequest("r1", "dana", "member", 2, "Q?")
+    waiting = InputRequest("r2", "lee", "member", 3, "Q?")
+    reached: list[str] = []
+
+    def reading(request: Any) -> Any:
+        reached.append(request.request_id)
+        request.expired.wait(5)  # blocked until its turn expires
+        return None
+
+    monkeypatch.setattr(panel_cli, "_read_terminal_reply", reading)
+    first = threads.Thread(target=panel_cli._terminal_reply, args=(holder,))
+    first.start()
+    threads.Event().wait(0.1)
+    second = threads.Thread(target=panel_cli._terminal_reply, args=(waiting,))
+    second.start()
+    waiting.expired.set()  # expires while waiting for the terminal
+    second.join(2)
+    assert not second.is_alive()
+    holder.expired.set()  # expires mid-reply: the reader stops
+    first.join(2)
+    assert not first.is_alive()
+    assert reached == ["r1"]
+    assert panel_cli._TERMINAL.acquire(timeout=1)
+    panel_cli._TERMINAL.release()
