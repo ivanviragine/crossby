@@ -247,3 +247,25 @@ def test_a_run_that_never_recorded_its_end_reads_as_interrupted(tmp_path: Path) 
     assert prior.stop_reason is StopReason.INTERRUPTED
     assert not finished(events)
     assert json.loads(events[0].model_dump_json())["type"] == "conversation.started"
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_appending_repairs_an_unfinished_last_line(tmp_path: Path, complete: bool) -> None:
+    journal = _journal(tmp_path)
+    _run(FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"]), tmp_path, journal)
+    journal.close()
+    path = tmp_path / "out" / JOURNAL_FILE
+    lines = path.read_text().splitlines()
+    if complete:
+        # The last event is whole; only its newline is missing.
+        path.write_text("\n".join(lines))
+        kept = len(lines)
+    else:
+        path.write_text("\n".join(lines[:-1]) + '\n{"schema_version": 1, "run_id": "run-1", "se')
+        kept = len(lines) - 1
+    resumed = Journal("run-1", path=path, start_seq=kept + 1)
+    resumed.emit(T.CONVERSATION_CONTINUED, max_rounds=9)
+    resumed.close()
+    events = read_journal(path)
+    assert len(events) == kept + 1
+    assert events[-1].type is T.CONVERSATION_CONTINUED

@@ -814,3 +814,19 @@ def test_converse_needs_its_tools_without_continue(
     result = _invoke(tmp_path, "converse", "-g", "x")
     assert result.exit_code == 1
     assert "Name the ASKER and RESPONDER tools" in result.stderr
+
+
+def test_a_fresh_consultation_never_appends_to_an_existing_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    first = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out))
+    assert first.exit_code == 0, first.output
+    before = (out / "events.jsonl").read_text()
+    fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    second = _invoke(tmp_path, "converse", "claude", "codex", "-g", "y", "--output-dir", str(out))
+    assert second.exit_code == 1
+    assert "already holds a consultation" in " ".join(second.stderr.split())
+    assert fake.calls == []
+    assert (out / "events.jsonl").read_text() == before

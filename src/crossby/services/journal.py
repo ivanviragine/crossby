@@ -94,6 +94,7 @@ class Journal:
         if path is not None:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
+                _repair_tail(path)
                 self._file = path.open("a", encoding="utf-8", errors="surrogateescape")
             except OSError as exc:
                 self.store_error = f"could not open {path}: {exc}"
@@ -147,6 +148,30 @@ class Journal:
             if self._file is not None:
                 self._file.close()
                 self._file = None
+
+
+def _repair_tail(path: Path) -> None:
+    """Make an existing journal safe to append to.
+
+    A last line without its newline is either an append that did not finish
+    (dropped, as :func:`read_journal` ignores it) or a complete event that
+    only lacks its newline (kept, and terminated).
+    """
+    if not path.exists():
+        return
+    raw = path.read_bytes()
+    if not raw or raw.endswith(b"\n"):
+        return
+    cut = raw.rfind(b"\n") + 1
+    last = raw[cut:]
+    try:
+        ConversationEvent.model_validate(json.loads(last))
+    except (ValueError, ValidationError):
+        with path.open("r+b") as handle:
+            handle.truncate(cut)
+        return
+    with path.open("ab") as handle:
+        handle.write(b"\n")
 
 
 def read_journal(path: Path) -> list[ConversationEvent]:

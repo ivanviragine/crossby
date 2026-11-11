@@ -289,6 +289,13 @@ def converse(
             if output_dir is not None
             else engine.conversation_dir(project_root, started_at)
         )
+        if (out_dir / JOURNAL_FILE).exists():
+            # Appending a fresh run would mix two consultations in one journal.
+            console.error(
+                f"{out_dir} already holds a consultation; --continue it or choose another "
+                "--output-dir."
+            )
+            raise typer.Exit(1)
         journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE)
     summarizer_id: AIToolID | None = None
     if summary:
