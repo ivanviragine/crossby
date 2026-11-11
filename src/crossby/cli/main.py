@@ -54,6 +54,7 @@ from crossby.cli.convert import convert  # noqa: E402
 from crossby.cli.handoff import handoff  # noqa: E402
 from crossby.cli.init import init  # noqa: E402
 from crossby.cli.launch import launch  # noqa: E402
+from crossby.cli.panel import panel  # noqa: E402
 from crossby.cli.scene import scene_app  # noqa: E402
 from crossby.cli.stats import stats  # noqa: E402
 from crossby.cli.sync import sync  # noqa: E402
@@ -67,6 +68,7 @@ app.command()(stats)
 app.command()(handoff)
 app.command()(ask)
 app.command()(converse)
+app.command()(panel)
 app.command()(init)
 app.command()(ui)
 app.add_typer(agents_app, name="agents")

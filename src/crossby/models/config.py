@@ -326,6 +326,59 @@ class HandoffDefaults(BaseModel):
     token_budget: int | None = Field(default=None, gt=0)
 
 
+class PanelLeadConfig(BaseModel):
+    """``panels.<name>.lead``: the agent that holds the goal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    model: str | None = None
+    effort: str | None = None
+    # The lead's folder, relative to the project root.
+    folder: str = "."
+
+
+class PanelMemberConfig(BaseModel):
+    """``panels.<name>.members[]``: one read-only member.
+
+    With ``persona_folder`` crossby provisions that folder in the tool's own
+    layout (``instructions`` becomes its instruction file, ``skills`` its
+    skills, ``files`` maps material paths to source files). Otherwise the
+    member answers from ``folder`` and ``instructions`` travels in the
+    envelope.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str | None = None
+    tool: str
+    model: str | None = None
+    effort: str | None = None
+    folder: str = "."
+    persona_folder: str | None = None
+    instructions: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class PanelConfig(BaseModel):
+    """``panels.<name>``: a recipe for ``crossby panel``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lead: PanelLeadConfig
+    members: list[PanelMemberConfig]
+    visibility: Literal["private", "shared"] = "private"
+    max_rounds: int = Field(default=5, ge=1)
+    concurrency: int = Field(default=4, ge=1)
+    timeout: float = Field(default=1800.0, gt=0)
+    turn_timeout: float = Field(default=600.0, gt=0)
+    # A file whose text replaces the lead's opening notice wording.
+    notice: str | None = None
+    require_blocked: list[str] = Field(default_factory=list)
+
+
 class CrossbyConfig(BaseModel):
     """Full configuration from .crossby.yml.
 
@@ -342,6 +395,7 @@ class CrossbyConfig(BaseModel):
     models: dict[str, ComplexityModelMapping] = {}
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
     scenes: dict[str, SceneConfig] = Field(default_factory=dict)
+    panels: dict[str, PanelConfig] = Field(default_factory=dict)
     sync_defaults: SyncDefaults = Field(default_factory=SyncDefaults)
     handoff_defaults: HandoffDefaults = Field(default_factory=HandoffDefaults)
 

@@ -43,6 +43,7 @@ gets its own process, environment and cancellation.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from crossby.models.ai import (
     AIToolID,
@@ -79,6 +80,16 @@ from crossby.services.ask import (
     run_ask,
     run_preflight,
 )
+from crossby.services.journal import ConversationEvent, EventSink, EventType
+from crossby.services.panel import (
+    Lead,
+    Member,
+    PanelResult,
+    PanelSpec,
+    PanelTurn,
+    ProtocolError,
+    render_panel_transcript,
+)
 from crossby.services.workspaces import (
     OwnedWorkspace,
     OwnedWorkspaceSpec,
@@ -102,16 +113,25 @@ __all__ = [
     "AskUnsupportedError",
     "CliBackend",
     "CliProvenance",
+    "ConversationEvent",
     "EffortLevel",
+    "EventSink",
+    "EventType",
     "FailureReason",
     "JsonOutput",
+    "Lead",
+    "Member",
     "NestedAskError",
     "Output",
     "OwnedWorkspace",
     "OwnedWorkspaceSpec",
+    "PanelResult",
+    "PanelSpec",
+    "PanelTurn",
     "PreflightReport",
     "ProjectHooksError",
     "ProjectWorkspace",
+    "ProtocolError",
     "RequirementNotMetError",
     "Restriction",
     "RestrictionChannel",
@@ -124,9 +144,11 @@ __all__ = [
     "WorkspaceError",
     "ask",
     "cleanup",
+    "panel",
     "preflight",
     "provision",
     "render_envelope",
+    "render_panel_transcript",
     "verify_workspace",
 ]
 
@@ -156,3 +178,47 @@ def preflight(request: AskRequest) -> PreflightReport:
     only a real run can make, such as authentication, are listed as deferred.
     """
     return run_preflight(request)
+
+
+def panel(
+    spec: PanelSpec,
+    *,
+    on_event: EventSink | None = None,
+    events_path: Path | None = None,
+) -> PanelResult:
+    """Run a panel: a lead consults read-only members by id until it answers.
+
+    ``on_event`` receives every journal event, in order, on a dispatcher
+    thread (it can never slow a turn, and an exception drops it). With
+    ``events_path`` the events are also appended to that JSONL file as they
+    happen. Members are always read-only; see :class:`PanelSpec`.
+
+    A journal problem never stops the panel: the result's ``journal_error``
+    says why the events file is missing or incomplete, and ``sink_errors``
+    lists each ``on_event`` failure that dropped the sink.
+    """
+    import dataclasses
+    import uuid
+
+    from crossby.services.journal import Journal, JournalError, JournalExistsError
+    from crossby.services.panel import PanelError, run_panel
+
+    try:
+        # Created exclusively and locked: a panel never appends to another
+        # run's journal, and a run refused before it starts leaves none behind.
+        journal = Journal(
+            uuid.uuid4().hex, path=events_path, sinks=[on_event] if on_event is not None else []
+        )
+    except JournalExistsError:
+        raise PanelError(
+            f"{events_path} already holds a journal; choose another events_path."
+        ) from None
+    except JournalError as exc:
+        raise PanelError(str(exc)) from None
+    try:
+        result = run_panel(spec, journal=journal)
+    finally:
+        journal.close()
+    return dataclasses.replace(
+        result, journal_error=journal.store_error, sink_errors=tuple(journal.sink_errors)
+    )

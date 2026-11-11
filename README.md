@@ -548,6 +548,34 @@ Output is split for scripting: live messages and progress go to stderr; stdout g
 
 Both commands accept the managed-headless tools: **Claude, Codex, Cursor, Copilot, OpenCode, Antigravity CLI**.
 
+## Panels
+
+`crossby panel NAME --goal "…"` lets a **lead** agent consult several **members** at once. The recipe lives in `.crossby.yml`:
+
+```yaml
+panels:
+  pricing:
+    lead: {tool: claude}
+    members:
+      - {id: cto, name: Rui, tool: codex, persona_folder: .crossby/personas/cto, instructions: personas/cto.md}
+      - {id: founder, tool: cursor, persona_folder: .crossby/personas/founder, instructions: personas/founder.md,
+         skills: [skills/voice], files: {notes/interviews.md: research/founder.md}}
+      - {id: buyer, tool: claude, folder: ., instructions: personas/buyer.md}
+    visibility: private   # or shared
+    max_rounds: 5         # the lead's messages, plus one final turn
+    concurrency: 3        # members answering at once
+    require_blocked: [file_edits, shell_writes]
+```
+
+- **The lead addresses members on its last line:** `NEXT: ASK @cto @founder`, `NEXT: ASK @all`, or `NEXT: DONE` for its final answer. Only that line is read. Unknown ids, a repeated id, `@all` mixed with ids, or `DONE` with ids are a protocol error: nothing is sent and the panel stops. A one-member panel also accepts a bare `NEXT: ASK`, or no marker, like a consultation.
+- **Addressed members answer in parallel**, read-only, each resuming its own session, and their replies reach the lead in roster order, each under its label (`@cto:` followed by the reply). A member that fails becomes a note (`@founder (no answer: …)`); if every addressed member fails, the panel stops.
+- **`private`**: a member receives only what the lead addresses to it. **`shared`**: on its next turn a member also receives the other members' replies it has not seen, under their labels (`@founder:` …, then `@lead:` and the lead's message); no extra turns run.
+- **Members' folders.** A member with `persona_folder` gets it [provisioned](#python-api) in its tool's own layout from `instructions`, `skills` and `files`. Otherwise it answers from `folder`, with `instructions` sent in the instructions envelope on its first message.
+- **The lead's opening** is protocol text only, notice version 1: `Goal: {goal}`, the roster (`@cto (Rui), @founder, …`), the markers and the limit. A recipe's `notice: FILE` replaces its wording, formatted with `{goal}`, `{roster}`, `{count}` and `{max_rounds}`; the grammar never changes. After the last allowed message the lead is told to answer now.
+- Everything is journaled in `.crossby/panels/<time>/events.jsonl` (`--output-dir` to choose), with each event's `participant` (`lead` or a member id) and each lead message's `recipients`, and `transcript.md` is written at the end. Exit codes are those of `converse`.
+
+From Python, `crossby.api.panel(PanelSpec(goal=…, lead=Lead(…), members=(Member(id=…, backend=CliBackend(…), workspace=…), …)), on_event=…, events_path=…)` runs the same engine; `on_event` gets every event on a dispatcher thread. A journal problem never stops a panel: the result's `journal_error` says why the events file is missing or incomplete, and `sink_errors` lists each `on_event` failure that dropped the sink.
+
 ## Python API
 
 `crossby.api` is the supported interface for programs that use crossby as a library. Everything it exports is the contract; every other module is internal. Before 1.0, patch releases keep it compatible and a minor release may change it only with a migration note, so pin a minor series (for example `crossby>=0.46,<0.47`). Serialized results carry a `schema_version` of their own.

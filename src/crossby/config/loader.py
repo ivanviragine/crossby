@@ -15,6 +15,7 @@ from crossby.models.config import (
     ComplexityModelMapping,
     CrossbyConfig,
     HandoffDefaults,
+    PanelConfig,
     ProfileConfig,
     SceneConfig,
     SyncDefaults,
@@ -343,6 +344,8 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
     # Parse scenes section (after profiles — validates scene.profile against them)
     scenes = _parse_scenes(raw.get("scenes"), profiles)
 
+    panels = _parse_panels(raw.get("panels"))
+
     # Parse sync_defaults / handoff_defaults sections
     sync_defaults = _parse_sync_defaults(raw.get("sync_defaults"))
     handoff_defaults = _parse_handoff_defaults(raw.get("handoff_defaults"))
@@ -353,11 +356,31 @@ def _build_config(raw: dict[str, Any], config_path: Path) -> CrossbyConfig:
         models=models,
         profiles=profiles,
         scenes=scenes,
+        panels=panels,
         sync_defaults=sync_defaults,
         handoff_defaults=handoff_defaults,
         config_path=str(config_path),
         project_root=str(config_path.parent),
     )
+
+
+def _parse_panels(raw: Any) -> dict[str, PanelConfig]:
+    """Parse ``panels:`` recipes; any invalid field is a ConfigError naming it."""
+    from pydantic import ValidationError
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("'panels' must be a mapping")
+    panels: dict[str, PanelConfig] = {}
+    for name, value in raw.items():
+        try:
+            panels[str(name)] = PanelConfig.model_validate(value)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(part) for part in first.get("loc", ()))
+            raise ConfigError(f"'panels.{name}.{where}': {first.get('msg')}") from None
+    return panels
 
 
 def _parse_scenes(raw: Any, profiles: dict[str, ProfileConfig]) -> dict[str, SceneConfig]:
