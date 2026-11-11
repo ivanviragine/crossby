@@ -54,8 +54,11 @@ def version_number(text: str | None) -> str | None:
 
 
 def backend_label(backend: CliBackend) -> str:
-    """``codex``, or ``codex gpt-5.5`` when a model is set."""
-    return backend.tool.value + (f" {backend.model}" if backend.model else "")
+    """``codex``, or ``codex (gpt-5.5, high effort)`` when a model or effort is set."""
+    settings = [backend.model] if backend.model else []
+    if backend.effort is not None:
+        settings.append(f"{backend.effort.value} effort")
+    return backend.tool.value + (f" ({', '.join(settings)})" if settings else "")
 
 
 def member_label(member: Member) -> str:

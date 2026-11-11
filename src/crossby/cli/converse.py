@@ -188,6 +188,14 @@ def converse(
     responder_model: str | None = typer.Option(
         None, "--responder-model", help="Model for the responder."
     ),
+    asker_effort: str | None = typer.Option(
+        None, "--asker-effort", help="Reasoning effort for the asker, where its tool supports it."
+    ),
+    responder_effort: str | None = typer.Option(
+        None,
+        "--responder-effort",
+        help="Reasoning effort for the responder, where its tool supports it.",
+    ),
     summary: bool = typer.Option(
         False, "--summary", help="Also write a neutral summary.md of the whole consultation."
     ),
@@ -195,6 +203,16 @@ def converse(
         None,
         "--summarizer-tool",
         help="Tool that writes the --summary (defaults to the asker's tool).",
+    ),
+    summarizer_model: str | None = typer.Option(
+        None,
+        "--summarizer-model",
+        help="Model for the --summary (defaults to the asker's, when on the asker's tool).",
+    ),
+    summarizer_effort: str | None = typer.Option(
+        None,
+        "--summarizer-effort",
+        help="Reasoning effort for the --summary (defaults to the asker's, on the asker's tool).",
     ),
     output_dir: Path | None = typer.Option(
         None,
@@ -255,6 +273,11 @@ def converse(
         if summary and summarizer_tool is not None
         else None
     )
+    efforts = {
+        "asker": _effort(asker_effort, "--asker-effort"),
+        "responder": _effort(responder_effort, "--responder-effort"),
+        "summarizer": _effort(summarizer_effort, "--summarizer-effort"),
+    }
     prior: ConversationResult | None = None
     responder_root: Path | None
     journal: Journal | None = None
@@ -268,6 +291,8 @@ def converse(
                 "--goal-file": goal_file,
                 "--asker-model": asker_model,
                 "--responder-model": responder_model,
+                "--asker-effort": asker_effort,
+                "--responder-effort": responder_effort,
                 "--responder-path": responder_path,
                 "--output-dir": output_dir,
             },
@@ -298,7 +323,12 @@ def converse(
         responder_id = _headless_tool(responder_tool, "RESPONDER")
         goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
         asker, responder = engine.make_participants(
-            asker_id, responder_id, asker_model=asker_model, responder_model=responder_model
+            asker_id,
+            responder_id,
+            asker_model=asker_model,
+            responder_model=responder_model,
+            asker_effort=efforts["asker"],
+            responder_effort=efforts["responder"],
         )
         started_at = datetime.now(tz=UTC)
         out_dir = (
@@ -307,6 +337,10 @@ def converse(
             else engine.conversation_dir(project_root, started_at)
         )
     summarizer_id = (chosen_summarizer or asker_id) if summary else None
+    # On the asker's own tool the summary keeps the asker's model and effort.
+    same_tool = summarizer_id == asker.tool
+    summary_model = summarizer_model or (asker.model if same_tool else None)
+    summary_effort = efforts["summarizer"] or (asker.effort if same_tool else None)
     if journal is None:
         try:
             # Created exclusively: a fresh run never appends to another journal.
@@ -417,6 +451,8 @@ def converse(
             transcript_path,
             summarizer_id,
             project_root,
+            model=summary_model,
+            effort=summary_effort,
             quiet=quiet,
             allow_project_hooks=allow_project_hooks,
         )
@@ -533,7 +569,7 @@ def _read_instructions(file: Path | None) -> str | None:
     return text
 
 
-def _effort(value: str | None) -> EffortLevel | None:
+def _effort(value: str | None, flag: str = "--effort") -> EffortLevel | None:
     from crossby.models.ai import EffortLevel
 
     if value is None:
@@ -542,7 +578,7 @@ def _effort(value: str | None) -> EffortLevel | None:
         return EffortLevel(value)
     except ValueError:
         choices = ", ".join(level.value for level in EffortLevel)
-        console.error(f"Unknown effort {value!r}. Choose one of: {choices}.")
+        console.error(f"Unknown {flag} {value!r}. Choose one of: {choices}.")
         raise typer.Exit(1) from None
 
 
@@ -584,8 +620,8 @@ def _show_start(asker: Participant, responder: Participant, folder: Path, root: 
     """One line on who consults whom, and where the read-only responder runs."""
 
     def name(participant: Participant) -> str:
-        model = f" ({participant.model})" if participant.model else ""
-        return f"{participant.tool.value}{model}"
+        settings = participant.settings
+        return participant.tool.value + (f" ({settings})" if settings else "")
 
     where = "the asker's folder" if folder == root else str(folder)
     _stderr(
@@ -746,6 +782,7 @@ def _side_json(result: ConversationResult, participant: Participant) -> dict[str
     return {
         "tool": participant.tool.value,
         "model": participant.model,
+        "effort": participant.effort.value if participant.effort is not None else None,
         # The native session every turn after the first resumed.
         "session_id": result.sessions.get(participant.role),
         "denials": [denial for turn in own for denial in turn.denials],
@@ -765,6 +802,8 @@ def _summarize(
     project_root: Path,
     *,
     quiet: bool,
+    model: str | None = None,
+    effort: EffortLevel | None = None,
     allow_project_hooks: bool = False,
 ) -> tuple[str | None, str | None, bool]:
     """Return ``(summary, error, interrupted)``; the transcript is already written."""
@@ -780,6 +819,8 @@ def _summarize(
                 transcript_path=transcript_path,
                 tool=tool,
                 working_dir=project_root,
+                model=model,
+                effort=effort,
                 allow_project_hooks=allow_project_hooks,
             )
     except ConverseSummaryError as exc:

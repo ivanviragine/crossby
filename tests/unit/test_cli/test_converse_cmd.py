@@ -236,12 +236,14 @@ def test_converse_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     assert payload["asker"] == {
         "tool": "claude",
         "model": None,
+        "effort": None,
         "session_id": "session-1",
         "denials": [],
     }
     assert payload["responder"] == {
         "tool": "codex",
         "model": "gpt-x",
+        "effort": None,
         "session_id": "session-2",
         "denials": [],
     }
@@ -643,7 +645,7 @@ def test_ask_refuses_an_unmet_requirement_before_starting(
     ("args", "message"),
     [
         (["--require-blocked", "telepathy"], "Unknown channel 'telepathy' for --require-blocked"),
-        (["--effort", "extreme"], "Unknown effort 'extreme'"),
+        (["--effort", "extreme"], "Unknown --effort 'extreme'"),
         (["--instructions-file", "missing.md"], "Cannot read instructions file"),
         (["--timeout", "0"], "timeout_seconds must be positive and finite"),
     ],
@@ -980,3 +982,128 @@ def test_a_final_answer_committed_before_ctrl_c_is_not_offered_to_continue(
     # --continue agrees: the journal holds the answer.
     again = _invoke(tmp_path, "converse", "--continue", str(run_dir))
     assert "already has its final answer" in " ".join(again.stderr.split())
+
+
+# ---------------------------------------------------------------------------
+# Effort
+# ---------------------------------------------------------------------------
+
+
+def test_each_side_runs_with_its_own_effort(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.models.ai import EffortLevel
+    from crossby.services.journal import read_journal
+
+    fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    out = tmp_path / "out"
+    result = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--asker-model",
+        "claude-opus-5-5",
+        "--asker-effort",
+        "high",
+        "--responder-effort",
+        "low",
+        "--output-dir",
+        str(out),
+        "--json",
+    )
+    assert result.exit_code == 0, result.output
+    by_tool = {tool: request.effort for tool, request in fake.calls}
+    assert by_tool == {AIToolID.CLAUDE: EffortLevel.HIGH, AIToolID.CODEX: EffortLevel.LOW}
+    # Preflight checks the same effort, so a tool that cannot honour it is refused first.
+    assert {r.effort for r in fake.preflight_requests} == {EffortLevel.HIGH, EffortLevel.LOW}
+    payload = json.loads(result.stdout)
+    assert payload["asker"]["effort"] == "high"
+    assert payload["responder"]["effort"] == "low"
+    started = read_journal(out / "events.jsonl")[0]
+    assert [side["effort"] for side in started.data["participants"]] == ["high", "low"]
+    assert "claude (claude-opus-5-5, high effort)" in " ".join(result.stderr.split())
+    transcript = (out / "transcript.md").read_text()
+    assert "- Asker: claude (claude-opus-5-5, high effort)" in transcript
+
+
+def test_continue_keeps_each_sides_effort(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from crossby.models.ai import EffortLevel
+
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK"]))
+    first = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--max-rounds",
+        "1",
+        "--asker-effort",
+        "high",
+        "--output-dir",
+        str(out),
+    )
+    assert first.exit_code == 2
+    refused = _invoke(tmp_path, "converse", "--continue", str(out), "--asker-effort", "low")
+    assert refused.exit_code == 1
+    assert "drop --asker-effort" in " ".join(refused.stderr.split())
+    fake = _use_runner(monkeypatch, FakeRunner(["a2", "verdict\nNEXT: DONE"]))
+    again = _invoke(tmp_path, "converse", "--continue", str(out))
+    assert again.exit_code == 0, again.output
+    by_tool = {tool: request.effort for tool, request in fake.calls}
+    assert by_tool == {AIToolID.CLAUDE: EffortLevel.HIGH, AIToolID.CODEX: None}
+
+
+@pytest.mark.parametrize(
+    ("extra", "model", "effort"),
+    [
+        ([], "claude-opus-5-5", "high"),  # the asker's own tool: its settings carry over
+        (["--summarizer-effort", "low"], "claude-opus-5-5", "low"),
+        (["--summarizer-tool", "codex"], None, None),  # another tool: its own defaults
+        (["--summarizer-tool", "codex", "--summarizer-model", "gpt-x"], "gpt-x", None),
+    ],
+)
+def test_the_summary_uses_the_askers_settings_on_its_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra: list[str],
+    model: str | None,
+    effort: str | None,
+) -> None:
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    calls = _fake_summary(monkeypatch)
+    result = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--asker-model",
+        "claude-opus-5-5",
+        "--asker-effort",
+        "high",
+        "--summary",
+        *extra,
+    )
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["model"] == model
+    assert (call["effort"].value if call["effort"] else None) == effort
+
+
+def test_an_unknown_effort_names_its_flag_and_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(
+        tmp_path, "converse", "claude", "codex", "-g", "x", "--responder-effort", "extreme"
+    )
+    assert result.exit_code == 1
+    assert "Unknown --responder-effort 'extreme'" in " ".join(result.stderr.split())
+    assert fake.calls == [] and fake.preflights == []

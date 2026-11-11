@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from crossby.models.ai import (
     AIToolID,
+    EffortLevel,
     HeadlessEvent,
     HeadlessEventKind,
     HeadlessInteractionMode,
@@ -127,10 +128,19 @@ class Participant:
     tool: AIToolID
     role: Role
     model: str | None = None
+    effort: EffortLevel | None = None
 
     @property
     def label(self) -> str:
         return f"{self.role.value} ({self.tool.value})"
+
+    @property
+    def settings(self) -> str:
+        """``claude-opus-5-5, high effort``: the model and effort asked for, if any."""
+        parts = [self.model] if self.model else []
+        if self.effort is not None:
+            parts.append(f"{self.effort.value} effort")
+        return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -275,10 +285,14 @@ def make_participants(
     *,
     asker_model: str | None = None,
     responder_model: str | None = None,
+    asker_effort: EffortLevel | None = None,
+    responder_effort: EffortLevel | None = None,
 ) -> tuple[Participant, Participant]:
     return (
-        Participant(tool=asker, role=Role.ASKER, model=asker_model),
-        Participant(tool=responder, role=Role.RESPONDER, model=responder_model),
+        Participant(tool=asker, role=Role.ASKER, model=asker_model, effort=asker_effort),
+        Participant(
+            tool=responder, role=Role.RESPONDER, model=responder_model, effort=responder_effort
+        ),
     )
 
 
@@ -337,6 +351,7 @@ def _request(
     working_dir: Path,
     timeout_seconds: float,
     model: str | None = None,
+    effort: EffortLevel | None = None,
     resume_id: str | None = None,
     read_only: bool = False,
     allow_project_hooks: bool = False,
@@ -345,6 +360,7 @@ def _request(
         prompt=prompt,
         working_dir=working_dir,
         model=participant.model if participant is not None else model,
+        effort=participant.effort if participant is not None else effort,
         interaction_mode=HeadlessInteractionMode.UNATTENDED,
         timeout_seconds=timeout_seconds,
         resume_id=resume_id,
@@ -512,6 +528,7 @@ def run_conversation(
             "role": participant.role.value,
             "tool": participant.tool.value,
             "model": participant.model,
+            "effort": participant.effort.value if participant.effort is not None else None,
             "folder": str(folders[participant.role]),
             "read_only": _read_only(participant),
         }
@@ -843,7 +860,13 @@ def result_from_journal(events: Sequence[ConversationEvent]) -> ConversationResu
     folders: dict[Role, Path] = {}
     for item in data.get("participants", []):
         role = Role(item["role"])
-        sides[role] = Participant(tool=AIToolID(item["tool"]), role=role, model=item.get("model"))
+        effort = item.get("effort")
+        sides[role] = Participant(
+            tool=AIToolID(item["tool"]),
+            role=role,
+            model=item.get("model"),
+            effort=EffortLevel(effort) if effort else None,
+        )
         folders[role] = Path(item["folder"])
     if set(sides) != {Role.ASKER, Role.RESPONDER}:
         raise ConverseError("The journal does not name both sides of the consultation.")
@@ -1010,7 +1033,8 @@ def _fenced(text: str) -> str:
 def _side_line(
     label: str, participant: Participant, folder: Path | None, *, read_only: bool
 ) -> str:
-    facts = [participant.tool.value + (f" ({participant.model})" if participant.model else "")]
+    settings = participant.settings
+    facts = [participant.tool.value + (f" ({settings})" if settings else "")]
     if read_only:
         facts.append("read-only")
     if folder is not None:
@@ -1132,6 +1156,7 @@ def summarize_conversation(
     tool: AIToolID,
     working_dir: Path,
     model: str | None = None,
+    effort: EffortLevel | None = None,
     timeout_seconds: float = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
     runner: TurnRunner | None = None,
     allow_project_hooks: bool = False,
@@ -1152,6 +1177,7 @@ def summarize_conversation(
         working_dir=working_dir,
         timeout_seconds=timeout_seconds,
         model=model,
+        effort=effort,
         read_only=True,
         allow_project_hooks=allow_project_hooks,
     )
