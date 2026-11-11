@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
     from crossby.models.ai import AIToolID, EffortLevel, RestrictionChannel
     from crossby.services.converse import ConversationResult, ConverseTurn, Participant
+    from crossby.services.journal import Journal
 
 
 def ask(
@@ -153,11 +155,19 @@ def ask(
 
 
 def converse(
-    asker_tool: str = typer.Argument(
-        ..., metavar="ASKER", help="Agent that holds the goal and asks (e.g. claude)."
+    asker_tool: str | None = typer.Argument(
+        None, metavar="ASKER", help="Agent that holds the goal and asks (e.g. claude)."
     ),
-    responder_tool: str = typer.Argument(
-        ..., metavar="RESPONDER", help="Agent that answers (e.g. codex)."
+    responder_tool: str | None = typer.Argument(
+        None, metavar="RESPONDER", help="Agent that answers (e.g. codex)."
+    ),
+    continue_dir: Path | None = typer.Option(
+        None,
+        "--continue",
+        help=(
+            "Continue the consultation saved in this directory (its events.jsonl): both "
+            "sides resume their sessions and --max-rounds more answers are allowed."
+        ),
     ),
     goal: str | None = typer.Option(
         None, "--goal", "-g", help="What the asker should find out. Only the asker sees it."
@@ -166,7 +176,9 @@ def converse(
         None, "--goal-file", help="Read the goal from this file instead."
     ),
     max_rounds: int = typer.Option(
-        5, "--max-rounds", help="Most questions the asker may send before it must answer."
+        5,
+        "--max-rounds",
+        help="Most questions the asker may send before it must answer (with --continue: more).",
     ),
     timeout: float = typer.Option(
         1800.0, "--timeout", help="Seconds for the whole consultation (summary excluded)."
@@ -229,14 +241,55 @@ def converse(
         crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json
     """
     from crossby.services import converse as engine
+    from crossby.services.journal import JOURNAL_FILE, Journal
 
-    project_root = _project_root(path)
-    responder_root = (
-        _project_root(responder_path, "--responder-path") if responder_path is not None else None
-    )
-    asker_id = _headless_tool(asker_tool, "ASKER")
-    responder_id = _headless_tool(responder_tool, "RESPONDER")
-    goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
+    prior: ConversationResult | None = None
+    responder_root: Path | None
+    if continue_dir is not None:
+        prior, out_dir, journal = _load_continuation(
+            continue_dir,
+            conflicting={
+                "ASKER": asker_tool,
+                "RESPONDER": responder_tool,
+                "--goal": goal,
+                "--goal-file": goal_file,
+                "--asker-model": asker_model,
+                "--responder-model": responder_model,
+                "--responder-path": responder_path,
+                "--output-dir": output_dir,
+            },
+        )
+        asker, responder = prior.asker, prior.responder
+        asker_id = asker.tool
+        goal_text = prior.goal
+        project_root = _project_root(prior.folders[engine.Role.ASKER], "the asker's folder")
+        responder_root = _project_root(
+            prior.folders[engine.Role.RESPONDER], "the responder's folder"
+        )
+        started_at = prior.started_at
+    else:
+        if asker_tool is None or responder_tool is None:
+            console.error("Name the ASKER and RESPONDER tools, or --continue a consultation.")
+            raise typer.Exit(1)
+        project_root = _project_root(path)
+        responder_root = (
+            _project_root(responder_path, "--responder-path")
+            if responder_path is not None
+            else None
+        )
+        asker_id = _headless_tool(asker_tool, "ASKER")
+        responder_id = _headless_tool(responder_tool, "RESPONDER")
+        goal_text = _read_text_input(goal, goal_file, what="goal", hint="--goal or --goal-file")
+        asker, responder = engine.make_participants(
+            asker_id, responder_id, asker_model=asker_model, responder_model=responder_model
+        )
+        started_at = datetime.now(tz=UTC)
+        out_dir = (
+            output_dir.resolve()
+            if output_dir is not None
+            else engine.conversation_dir(project_root, started_at)
+        )
+        journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE)
     summarizer_id: AIToolID | None = None
     if summary:
         summarizer_id = (
@@ -244,25 +297,23 @@ def converse(
             if summarizer_tool is not None
             else asker_id
         )
-    asker, responder = engine.make_participants(
-        asker_id, responder_id, asker_model=asker_model, responder_model=responder_model
-    )
 
-    started_at = datetime.now(tz=UTC)
-    if output_dir is not None:
-        out_dir = output_dir.resolve()
-    else:
-        out_dir = engine.conversation_dir(project_root, started_at)
     transcript_path = out_dir / "transcript.md"
     folders = {
         engine.Role.ASKER: project_root,
         engine.Role.RESPONDER: responder_root or project_root,
     }
-    completed: list[ConverseTurn] = []
+    completed: list[ConverseTurn] = list(prior.turns) if prior is not None else []
+    allowed = (prior.rounds if prior is not None else 0) + max_rounds
     waiting = _TurnWait()
 
     if not quiet:
         _show_start(asker, responder, folders[engine.Role.RESPONDER], project_root)
+        if prior is not None:
+            _stderr(
+                f"[dim]      continuing after {len(prior.turns)} messages "
+                f"({prior.stop_reason.value})[/]"
+            )
         _stderr(f"[dim]      limits: up to {max_rounds} messages, {_duration(timeout)} in all[/]")
         _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
 
@@ -283,7 +334,7 @@ def converse(
             goal=goal_text,
             asker=asker,
             responder=responder,
-            max_rounds=max_rounds,
+            max_rounds=allowed,
             started_at=started_at,
             turns=completed,
             folders=folders,
@@ -309,12 +360,17 @@ def converse(
             on_turn_start=on_turn_start,
             on_turn=on_turn,
             allow_project_hooks=allow_project_hooks,
+            journal=journal,
+            resume=prior,
         )
     except engine.ConverseError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
     finally:
         waiting.stop()  # a failed or interrupted turn never reaches on_turn
+        journal.close()
+    if journal.store_error is not None:
+        console.warn(f"The event journal is incomplete: {journal.store_error}")
 
     _write(transcript_path, engine.render_transcript(result))
 
@@ -340,6 +396,8 @@ def converse(
     _report(
         result,
         transcript_path=transcript_path,
+        events_path=journal.path,
+        run_id=journal.run_id,
         summary_path=summary_path,
         summary_body=summary_body,
         summary_error=summary_error,
@@ -572,6 +630,37 @@ def _waiting(label: str) -> Iterator[None]:
         wait.stop()
 
 
+def _load_continuation(
+    directory: Path, *, conflicting: dict[str, object]
+) -> tuple[ConversationResult, Path, Journal]:
+    """The saved consultation in ``directory``, ready to continue."""
+    from crossby.services.converse import ConverseError, result_from_journal
+    from crossby.services.journal import JOURNAL_FILE, Journal, JournalError, read_journal
+
+    given = [name for name, value in conflicting.items() if value is not None]
+    if given:
+        console.error(
+            f"--continue takes its tools, goal and folders from the journal; drop {given[0]}."
+        )
+        raise typer.Exit(1)
+    folder = directory.resolve()
+    path = folder / JOURNAL_FILE
+    if not path.is_file():
+        console.error(f"{folder} has no {JOURNAL_FILE} to continue from.")
+        raise typer.Exit(1)
+    try:
+        events = read_journal(path)
+        prior = result_from_journal(events)
+    except (JournalError, ConverseError) as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
+    if prior.answered:
+        console.error("That consultation already has its final answer.")
+        raise typer.Exit(1)
+    journal = Journal(events[-1].run_id, path=path, start_seq=events[-1].seq + 1)
+    return prior, folder, journal
+
+
 def _side_json(result: ConversationResult, participant: Participant) -> dict[str, Any]:
     """One side's tool, model and session facts for ``--json``."""
     own = [turn for turn in result.turns if turn.role is participant.role]
@@ -632,6 +721,8 @@ def _report(
     result: ConversationResult,
     *,
     transcript_path: Path,
+    events_path: Path | None = None,
+    run_id: str | None = None,
     summary_path: Path | None,
     summary_body: str | None,
     summary_error: str | None,
@@ -654,6 +745,8 @@ def _report(
                 "asker": _side_json(result, result.asker),
                 "responder": _side_json(result, result.responder),
                 "transcript_path": str(transcript_path),
+                "events_path": str(events_path) if events_path is not None else None,
+                "run_id": run_id,
                 "summary_path": str(summary_path) if summary_path else None,
                 "summary": summary_body,
                 "summary_error": summary_error,

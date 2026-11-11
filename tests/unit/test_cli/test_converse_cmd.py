@@ -286,7 +286,7 @@ def test_converse_persists_each_turn_before_the_next_starts(
     seen: list[str] = []
 
     class Peeking(FakeRunner):
-        def run(self, tool, request, cancel_event):  # type: ignore[no-untyped-def]
+        def run(self, tool, request, cancel_event, on_event=None):  # type: ignore[no-untyped-def]
             transcript = out_dir / "transcript.md"
             seen.append(transcript.read_text(encoding="utf-8") if transcript.exists() else "")
             return super().run(tool, request, cancel_event)
@@ -702,3 +702,115 @@ def test_ask_failure_shows_what_to_do(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "codex login" in result.stderr
     # stdout carries only an answer, so it can be piped.
     assert result.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# Journal and --continue
+# ---------------------------------------------------------------------------
+
+
+def test_converse_writes_its_event_journal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from crossby.services.journal import read_journal
+
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    out = tmp_path / "out"
+    result = _invoke(
+        tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out), "--json"
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["events_path"] == str(out / "events.jsonl")
+    events = read_journal(out / "events.jsonl")
+    assert {event.run_id for event in events} == {payload["run_id"]}
+    assert events[-1].data["stop_reason"] == "answered"
+
+
+def test_converse_continue_picks_up_where_it_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.services.journal import read_journal
+
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK"]))
+    first = _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--max-rounds",
+        "1",
+        "--output-dir",
+        str(out),
+    )
+    assert first.exit_code == 2  # round limit
+
+    fake = _use_runner(monkeypatch, FakeRunner(["a2", "verdict\nNEXT: DONE"]))
+    second = _invoke(tmp_path, "converse", "--continue", str(out), "--max-rounds", "2", "--json")
+    assert second.exit_code == 0, second.output
+    payload = json.loads(second.stdout)
+    assert payload["final_answer"] == "verdict"
+    assert [call[1].prompt for call in fake.calls] == ["q2", "a2"]
+    events = read_journal(out / "events.jsonl")
+    assert [event.seq for event in events] == list(range(1, len(events) + 1))
+    transcript = (out / "transcript.md").read_text()
+    assert "q1" in transcript and "verdict" in transcript
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["claude"], "drop ASKER"),
+        (["--goal", "y"], "drop --goal"),
+        (["--responder-model", "m"], "drop --responder-model"),
+    ],
+)
+def test_continue_takes_its_setup_from_the_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: list[str], message: str
+) -> None:
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK"]))
+    _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--max-rounds",
+        "1",
+        "--output-dir",
+        str(out),
+    )
+    fake = _use_runner(monkeypatch, FakeRunner([]))
+    if args[0] == "claude":
+        result = _invoke(tmp_path, "converse", "claude", "--continue", str(out))
+    else:
+        result = _invoke(tmp_path, "converse", "--continue", str(out), *args)
+    assert result.exit_code == 1
+    assert message in " ".join(result.stderr.split())
+    assert fake.calls == []
+
+
+def test_continue_refuses_a_missing_or_answered_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = _invoke(tmp_path, "converse", "--continue", str(tmp_path))
+    assert missing.exit_code == 1
+    assert "has no events.jsonl" in missing.stderr
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out))
+    answered = _invoke(tmp_path, "converse", "--continue", str(out))
+    assert answered.exit_code == 1
+    assert "already has its final answer" in answered.stderr
+
+
+def test_converse_needs_its_tools_without_continue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_runner(monkeypatch, FakeRunner([]))
+    result = _invoke(tmp_path, "converse", "-g", "x")
+    assert result.exit_code == 1
+    assert "Name the ASKER and RESPONDER tools" in result.stderr

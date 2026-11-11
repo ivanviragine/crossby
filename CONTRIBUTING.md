@@ -575,6 +575,19 @@ source only with a sentinel probe recorded in
 `docs/unattended-headless-verification.md#project-hooks`; an unparseable file
 is reported, never treated as clear, and user-level files are not inspected.
 
+#### The conversation journal
+
+`services/journal.py` sequences `ConversationEvent`s under one lock, appends
+each to `events.jsonl` with a flush before returning, and hands it to sinks on
+a single dispatcher thread; a sink that raises is dropped and recorded in
+`sink_errors`, never propagated. `run_conversation` emits from its own thread
+and from the runtime event handler (content-free `turn.progress` only), so
+`emit` must stay bounded. The transcript and `--continue` are built by
+`result_from_journal`; a change to an event's fields needs that reader, the
+README table and `SCHEMA_VERSION` updated together. Continuing resumes the
+recorded sessions and never replays: the next side gets only the message it
+was owed.
+
 #### The public API (`crossby.api`)
 
 `src/crossby/api.py` is the only supported library surface besides the

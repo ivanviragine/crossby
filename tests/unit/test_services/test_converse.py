@@ -7,6 +7,7 @@ import subprocess
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -99,6 +100,8 @@ class FakeRunner:
         self.preflight_timeouts: list[float] = []
         self.calls: list[tuple[AIToolID, HeadlessSessionRequest]] = []
         self.depths: list[str | None] = []
+        # Runtime event kinds every run reports to its event handler.
+        self.progress: list[HeadlessEventKind] = []
         self.parent_depths: list[str | None] = []
         self.sessions_created = 0
 
@@ -116,8 +119,14 @@ class FakeRunner:
         tool: AIToolID,
         request: HeadlessSessionRequest,
         cancel_event: threading.Event,
+        on_event: Any = None,
     ) -> HeadlessSessionResult:
         self.calls.append((tool, request))
+        if on_event is not None:
+            for sequence, kind in enumerate(self.progress, start=1):
+                on_event(
+                    HeadlessEvent(sequence=sequence, kind=kind, elapsed_seconds=0.5 * sequence)
+                )
         self.depths.append(request.environment.get(DEPTH_ENV))
         self.parent_depths.append(os.environ.get(DEPTH_ENV))
         if self.clock is not None:
@@ -475,7 +484,11 @@ def test_messages_of_any_size_are_sent_whole(tmp_path: Path) -> None:
 def test_a_failed_turn_names_the_tools_own_status(tmp_path: Path) -> None:
     class NativeFailure(FakeRunner):
         def run(
-            self, tool: AIToolID, request: HeadlessSessionRequest, cancel_event: threading.Event
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
         ) -> HeadlessSessionResult:
             result = super().run(tool, request, cancel_event)
             if tool is AIToolID.CODEX:

@@ -469,6 +469,9 @@ crossby converse claude codex --goal "Check whether this diagnosis is sound: …
 # Script it: JSON on stdout, no live messages on stderr
 crossby converse claude cursor --goal-file goal.md --max-rounds 3 --json --quiet
 
+# Continue one that stopped on a limit, with up to 3 more answers
+crossby converse --continue .crossby/conversations/20261110T201500123456 --max-rounds 3
+
 # One question to another agent; '-' reads it from stdin
 crossby ask codex "Is there a race in src/cache.py invalidate()?"
 git diff | crossby ask claude -
@@ -519,6 +522,21 @@ How a consultation runs:
 - **A responder never runs the project's own hooks.** Only Claude Code and Codex CLI disable hooks in their read-only profile, and a hook can change any file, so a responder, `ask` or summary on Cursor, Copilot, OpenCode or Antigravity CLI refuses to start in a folder that has its own hooks (`.cursor/hooks.json`, `.github/hooks/*.json`, `.agents/hooks.json`, OpenCode plugins), naming them. Remove them, use a persona folder, ask another tool, or pass `--allow-project-hooks` to accept them. User-level hooks are not inspected ([evidence](docs/unattended-headless-verification.md#project-hooks)).
 - **Nothing is cut or budgeted.** Each question and answer reaches the other side whole, and every tool reads its prompt from stdin, never from the command line, so no OS argument limit applies. The only limit is each model's own context, which its tool manages.
 - The asker's final answer is its own judgment, not independent verification: check what it says it verified. Permissions a tool denied during a turn are shown under that turn in the transcript and listed in `--json`.
+
+**Every consultation is an event journal.** crossby appends each event to `events.jsonl` in the conversation's folder as it happens, and the transcript, `--json` and `--continue` are built from it, so a UI can follow a consultation live by reading that file. Every line is one JSON object with `schema_version`, `run_id`, `seq` (1, 2, 3, …, never skipping), `ts`, `type` and `data`:
+
+| `type` | `data` |
+| --- | --- |
+| `conversation.started` | `goal`, `participants` (each side's `role`, `tool`, `model`, `folder`, `read_only`), `max_rounds`, `timeout_seconds`, `turn_timeout_seconds`, `started_at` |
+| `participant.ready` | the side's facts plus the detected `version` and each channel's `restrictions` state |
+| `turn.started` | `turn`, `role`, `tool`, `resumed`, `session_id` |
+| `turn.progress` | `turn`, `kind` (`tool_started`, `tool_completed`, `assistant_message`, or `progress` at most once a second), `elapsed_seconds`; never content |
+| `turn.finished` | `turn`, `role`, `tool`, `status`, `duration_seconds`, `session_id`, `usage`, `denials`, `failure_reason`, `error` (failed turns too) |
+| `message.committed` | `turn`, `role`, `tool`, `text` as relayed, `next` (`ASK`, `DONE`, `MISSING` or none), `duration_seconds`, `denials`, `usage` |
+| `conversation.continued` | `previous_stop_reason`, `max_rounds` (the new total), `added_rounds`, timeouts |
+| `conversation.finished` | `stop_reason`, `error`, `answered_at_limit`, `rounds`, `sessions`, `finished_at` |
+
+A last line without its newline is an append the process did not finish and is ignored when reading. **`crossby converse --continue DIR`** picks up a consultation that stopped without an answer (round or time limit, a failed turn, Ctrl-C): it reads the tools, goal and folders from `DIR/events.jsonl`, both sides resume their own sessions, the side whose turn it was gets the message it was owed, and `--max-rounds` more answers are allowed; events are appended to the same journal and the transcript is rewritten. A message interrupted mid-turn is sent again to a resumed session, so that session may hold it twice. An answered consultation cannot be continued.
 
 crossby writes `.crossby/conversations/<timestamp>/transcript.md` (or `--output-dir`) after every message: each side's tool, model and folder, both session IDs, the goal in a code fence, and every message as written under a numbered turn heading. It writes it atomically (a temp file replaced into place), so a crash, Ctrl-C or failed write never loses finished turns. Pass `--summary` to also write `summary.md`: a neutral summary covering the outcome, key findings, points of disagreement, open questions and next steps. It runs as one more managed read-only session, by default on the asker's tool (`--summarizer-tool` picks another), reads the whole transcript, uncut, and reuses the [handoff](#session-handoff) transcript formatting.
 
