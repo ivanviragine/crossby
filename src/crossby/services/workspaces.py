@@ -158,6 +158,24 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _read_regular(path: Path) -> bytes | None:
+    """A regular file's bytes, or ``None`` for anything else.
+
+    Opened non-blocking and without following links, with the type checked
+    on the open descriptor, so a FIFO or link swapped in can neither hang the
+    read nor redirect it.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            return handle.read()
+    finally:
+        os.close(descriptor)
+
+
 def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
     """A skill directory's name and its files, read without following links."""
     if source.is_symlink() or not source.is_dir():
@@ -170,19 +188,28 @@ def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
     if not (source / "SKILL.md").is_file() or (source / "SKILL.md").is_symlink():
         raise WorkspaceError(f"Skill {source} has no SKILL.md.")
     files: dict[str, bytes] = {}
-    for root, dirs, names in os.walk(source, followlinks=False):
+
+    def unreadable(error: OSError) -> None:
+        # A part of the skill that cannot be listed must never be dropped silently.
+        raise WorkspaceError(f"Skill {source} cannot be read completely: {error}")
+
+    for root, dirs, names in os.walk(source, followlinks=False, onerror=unreadable):
         for entry in (*dirs, *names):
             if Path(root, entry).is_symlink():
                 raise WorkspaceError(f"Skill {source} contains a symbolic link: {entry}")
         for entry in names:
             full = Path(root, entry)
-            if not stat.S_ISREG(full.lstat().st_mode):
-                raise WorkspaceError(f"Skill {source} contains a special file: {entry}")
             if entry.lower() in _RESERVED_NAMES:
                 raise WorkspaceError(
                     f"Skill {source} contains {entry}, an instruction or configuration file name."
                 )
-            files[full.relative_to(source).as_posix()] = full.read_bytes()
+            try:
+                data = _read_regular(full)
+            except OSError as exc:
+                raise WorkspaceError(f"Skill {source} cannot be read completely: {exc}") from None
+            if data is None:
+                raise WorkspaceError(f"Skill {source} contains a special file: {entry}")
+            files[full.relative_to(source).as_posix()] = data
             if len(files) > _MAX_SKILL_FILES:
                 raise WorkspaceError(f"Skill {source} has more than {_MAX_SKILL_FILES} files.")
     return name, files
@@ -255,13 +282,14 @@ def _inventory(
             full = Path(current, entry)
             relative = full.relative_to(root).as_posix()
             try:
-                if full.is_symlink() or not stat.S_ISREG(full.lstat().st_mode):
-                    other.append(relative)
-                    continue
-                found[relative] = _sha256(full.read_bytes())
+                data = _read_regular(full)
             except OSError:
-                # Unreadable or gone mid-scan: never the provisioned file.
+                # Unreadable, a link, or gone mid-scan: never the provisioned file.
+                data = None
+            if data is None:
                 other.append(relative)
+            else:
+                found[relative] = _sha256(data)
     for error in unlisted:
         # A folder that cannot be listed cannot be shown to match.
         name = error.filename if isinstance(error.filename, str) else str(root)

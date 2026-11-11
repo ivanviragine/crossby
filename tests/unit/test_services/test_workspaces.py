@@ -425,6 +425,8 @@ def test_a_failed_write_leaves_nothing_behind(
     calls = {"count": 0}
 
     def flaky(fd: int, mode: str) -> Any:
+        if "w" not in mode:
+            return real_fdopen(fd, mode)
         calls["count"] += 1
         if calls["count"] == 3:
             os.close(fd)
@@ -514,7 +516,11 @@ def test_a_write_that_fails_part_way_removes_the_file_it_created(
             self.handle.write(data[:10])
             raise OSError("file too large")
 
-    monkeypatch.setattr(workspaces.os, "fdopen", lambda fd, mode: Failing(real_fdopen(fd, mode)))
+    monkeypatch.setattr(
+        workspaces.os,
+        "fdopen",
+        lambda fd, mode: Failing(real_fdopen(fd, mode)) if "w" in mode else real_fdopen(fd, mode),
+    )
     folder = tmp_path / "p"
     with pytest.raises(OSError, match="file too large"):
         provision(_spec(tmp_path, path=folder))
@@ -687,7 +693,22 @@ def test_a_read_error_puts_the_entry_back(tmp_path: Path, monkeypatch: pytest.Mo
         def read(self) -> bytes:
             raise OSError("I/O error")
 
-    monkeypatch.setattr(workspaces.os, "fdopen", lambda fd, mode: Broken(real_fdopen(fd, mode)))
+    verified = {"done": False}
+    real_verify = workspaces.verify
+
+    def verify_then_arm(target: Any) -> None:
+        real_verify(target)
+        verified["done"] = True
+
+    monkeypatch.setattr(workspaces, "verify", verify_then_arm)
+    # Reads fail only after verification, i.e. while removing renamed entries.
+    monkeypatch.setattr(
+        workspaces.os,
+        "fdopen",
+        lambda fd, mode: (
+            Broken(real_fdopen(fd, mode)) if verified["done"] else real_fdopen(fd, mode)
+        ),
+    )
     with pytest.raises(WorkspaceDriftError):
         cleanup(workspace)
     assert (workspace.path / "AGENTS.md").read_text() == PERSONA
@@ -718,3 +739,25 @@ def test_an_unreadable_file_is_drift_and_never_loses_the_answer(
             verify_workspace(workspace)
     finally:
         (workspace.path / "AGENTS.md").chmod(0o644)
+
+
+def test_a_fifo_in_the_folder_never_hangs_verification(tmp_path: Path) -> None:
+    workspace = provision(_spec(tmp_path))
+    agents = workspace.path / "AGENTS.md"
+    agents.unlink()
+    os.mkfifo(agents)
+    with pytest.raises(WorkspaceDriftError, match=r"AGENTS\.md"):
+        verify_workspace(workspace)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+def test_a_skill_that_cannot_be_read_completely_is_refused(tmp_path: Path) -> None:
+    skill = _skill(tmp_path, "locked")
+    references = skill / "references"
+    references.chmod(0)
+    try:
+        with pytest.raises(WorkspaceError, match="cannot be read completely"):
+            provision(_spec(tmp_path, skills=(skill,)))
+        assert not (tmp_path / "personas").exists()
+    finally:
+        references.chmod(0o755)
