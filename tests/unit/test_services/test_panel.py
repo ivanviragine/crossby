@@ -776,3 +776,21 @@ def test_a_synchronous_responder_is_bound_by_the_timeout(tmp_path: Path) -> None
     assert result.answered
     assert time.monotonic() - started < 4
     assert "@dana (no answer: no reply within 0.3s)" in runner.requests["lead"][1].prompt
+
+
+def test_ctrl_c_during_a_human_leads_turn_stops_its_responder(tmp_path: Path) -> None:
+    import _thread
+
+    stopped = threading.Event()
+
+    def waits_for_its_turn_to_end(request: InputRequest) -> HumanReply | None:
+        _thread.interrupt_main()  # the person presses Ctrl-C while being asked
+        if request.expired.wait(5):
+            stopped.set()
+        return None
+
+    spec = _spec(tmp_path).model_copy(update={"lead": Lead(backend=HumanBackend())})
+    runner = PanelRunner({"cto": [], "founder": [], "buyer": []})
+    result = run_panel(spec, runner=runner, inputs=HumanInput(waits_for_its_turn_to_end))
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert stopped.wait(2), "the responder never learned its request ended"

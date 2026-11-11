@@ -364,8 +364,22 @@ class HumanInput:
         """The reply to an open request and how it resolved: answered, timed_out or cancelled.
 
         A synchronous responder runs in a worker bound by the same deadline and
-        cancellation; a reply it gives too late is discarded.
+        cancellation; a reply it gives too late is discarded. However the wait
+        ends without an answer, even by an exception such as Ctrl-C, the
+        request is expired, so a responder still working on it stops.
         """
+        answered = False
+        try:
+            reply, how = self._wait(request, timeout, cancel)
+            answered = how == "answered"
+            return reply, how
+        finally:
+            if not answered:
+                request.expired.set()
+
+    def _wait(
+        self, request: InputRequest, timeout: float, cancel: threading.Event
+    ) -> tuple[HumanReply | None, str]:
         deadline = monotonic() + timeout
         if self._responder is not None:
             responder = self._responder
@@ -384,10 +398,8 @@ class HumanInput:
             try:
                 while not finished.wait(0.1):
                     if cancel.is_set():
-                        request.expired.set()
                         return None, "cancelled"
                     if monotonic() >= deadline:
-                        request.expired.set()
                         return None, "timed_out"
                 reply = box[0] if box else None
                 return (reply, "answered") if reply is not None else (None, "cancelled")
@@ -399,11 +411,9 @@ class HumanInput:
             try:
                 while request.request_id not in self._replies:
                     if cancel.is_set():
-                        request.expired.set()
                         return None, "cancelled"
                     left = deadline - monotonic()
                     if left <= 0:
-                        request.expired.set()
                         return None, "timed_out"
                     self._ready.wait(min(left, 0.1))
                 return self._replies.pop(request.request_id), "answered"
