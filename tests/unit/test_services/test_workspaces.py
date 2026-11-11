@@ -542,3 +542,63 @@ def test_rollback_never_touches_a_folder_put_in_place_of_this_one(
     # through the descriptor it was written through.
     assert (folder / "AGENTS.md").read_text() == "someone else's instructions"
     assert not any(path.is_file() for path in moved.rglob("*"))
+
+
+def test_untagged_project_workspaces_still_deserialize(tmp_path: Path) -> None:
+    from crossby.api import OwnedWorkspace, ProjectWorkspace
+
+    request = AskRequest.model_validate(
+        {"backend": {"tool": "codex"}, "prompt": "q", "workspace": {"path": str(tmp_path)}}
+    )
+    assert isinstance(request.workspace, ProjectWorkspace)
+    owned = provision(_spec(tmp_path))
+    again = AskRequest.model_validate_json(
+        AskRequest(backend=CliBackend(tool="codex"), prompt="q", workspace=owned).model_dump_json()
+    )
+    assert isinstance(again.workspace, OwnedWorkspace)
+    assert again.workspace == owned
+
+
+@pytest.mark.skipif(os.rename not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_cleanup_deletes_only_the_entry_it_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    real_rename = os.rename
+    swapped = {"done": False}
+
+    def rename_then_substitute(src: Any, dst: Any, **kwargs: Any) -> None:
+        real_rename(src, dst, **kwargs)
+        if src == "AGENTS.md" and not swapped["done"]:
+            swapped["done"] = True
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open("AGENTS.md", flags, dir_fd=kwargs["dst_dir_fd"])
+            os.write(fd, b"someone else's file")
+            os.close(fd)
+
+    monkeypatch.setattr(workspaces.os, "rename", rename_then_substitute)
+    with pytest.raises(WorkspaceDriftError):
+        cleanup(workspace)
+    # The substitute is never removed: only the checked entry was.
+    assert (workspace.path / "AGENTS.md").read_text() == "someone else's file"
+
+
+def test_a_file_changed_before_its_removal_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    real_verify = workspaces.verify
+
+    def verify_then_edit(target: Any) -> None:
+        real_verify(target)
+        (workspace.path / "AGENTS.md").write_text("edited after verification")
+
+    monkeypatch.setattr(workspaces, "verify", verify_then_edit)
+    with pytest.raises(WorkspaceDriftError, match=r"AGENTS\.md"):
+        cleanup(workspace)
+    assert (workspace.path / "AGENTS.md").read_text() == "edited after verification"
+    assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]

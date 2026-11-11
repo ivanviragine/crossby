@@ -21,7 +21,15 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
 from crossby.models.ai import (
     AIToolID,
@@ -101,7 +109,19 @@ class ProjectWorkspace(_Frozen):
         return value
 
 
-Workspace = Annotated[ProjectWorkspace | OwnedWorkspace, Field(discriminator="kind")]
+def _workspace_kind(value: Any) -> str:
+    """The workspace variant; a mapping without ``kind`` is a project folder."""
+    if isinstance(value, dict):
+        return str(value.get("kind", "project"))
+    return str(getattr(value, "kind", "project"))
+
+
+# Untagged mappings ({"path": ...}) stay project folders, as before persona
+# folders existed.
+Workspace = Annotated[
+    Annotated[ProjectWorkspace, Tag("project")] | Annotated[OwnedWorkspace, Tag("owned")],
+    Discriminator(_workspace_kind),
+]
 
 
 class AskRequest(_Frozen):

@@ -25,6 +25,7 @@ import errno
 import hashlib
 import os
 import re
+import secrets
 import stat
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -37,7 +38,7 @@ from crossby.models.ai import AIToolID, OwnedWorkspaceLayout
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # Whether writes and removals can be anchored to directory descriptors (every
 # POSIX platform; not Windows). Fixed at import, so it cannot change mid-run.
-_ANCHORED = {os.open, os.mkdir, os.unlink, os.rmdir} <= os.supports_dir_fd
+_ANCHORED = {os.open, os.mkdir, os.unlink, os.rmdir, os.rename, os.link} <= os.supports_dir_fd
 _MAX_SKILL_FILES = 1000
 _MAX_BYTES = 20 * 1024 * 1024
 # File names a supported tool reads as instructions or configuration, at the
@@ -431,15 +432,8 @@ def _remove_entry(root: Path, root_fd: int | None, relative: str, *, digest: str
         with contextlib.suppress(OSError):
             if digest is None:
                 os.rmdir(name, dir_fd=parent)
-                return
-            descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
-            try:
-                with os.fdopen(os.dup(descriptor), "rb") as handle:
-                    content = handle.read()
-            finally:
-                os.close(descriptor)
-            if _sha256(content) == digest:
-                os.unlink(name, dir_fd=parent)
+            else:
+                _unlink_if_unchanged(parent, name, digest)
     finally:
         for item in reversed(opened):
             os.close(item)
@@ -517,6 +511,40 @@ def _drifted(workspace: OwnedWorkspace, relative: str) -> WorkspaceDriftError:
     )
 
 
+def _unlink_if_unchanged(parent: int, name: str, digest: str) -> bool:
+    """Remove ``name`` from ``parent`` only if it still holds ``digest``.
+
+    The entry is first renamed to a private name in the same directory, which
+    is atomic, so the content checked is exactly the content removed: a file
+    substituted at ``name`` meanwhile is never deleted unchecked. On a
+    mismatch the entry is linked back under ``name`` (never over a newer one).
+    """
+    private = f".crossby-removing-{secrets.token_hex(8)}"
+    try:
+        os.rename(name, private, src_dir_fd=parent, dst_dir_fd=parent)
+    except OSError:
+        return False
+    matches = False
+    try:
+        descriptor = os.open(private, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+    except OSError:
+        descriptor = None
+    if descriptor is not None:
+        try:
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                with os.fdopen(os.dup(descriptor), "rb") as handle:
+                    matches = _sha256(handle.read()) == digest
+        finally:
+            os.close(descriptor)
+    if matches:
+        os.unlink(private, dir_fd=parent)
+        return True
+    with contextlib.suppress(OSError):
+        os.link(private, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        os.unlink(private, dir_fd=parent)
+    return False
+
+
 def _cleanup_anchored(workspace: OwnedWorkspace) -> None:
     root_fd = os.open(workspace.path, _DIRECTORY_FLAGS)
     try:
@@ -526,22 +554,8 @@ def _cleanup_anchored(workspace: OwnedWorkspace) -> None:
             except OSError:
                 raise _drifted(workspace, relative) from None
             try:
-                try:
-                    descriptor = os.open(
-                        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent
-                    )
-                except OSError:
-                    raise _drifted(workspace, relative) from None
-                try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                        raise _drifted(workspace, relative)
-                    with os.fdopen(os.dup(descriptor), "rb") as handle:
-                        content = handle.read()
-                finally:
-                    os.close(descriptor)
-                if _sha256(content) != digest:
+                if not _unlink_if_unchanged(parent, name, digest):
                     raise _drifted(workspace, relative)
-                os.unlink(name, dir_fd=parent)
             finally:
                 for descriptor in reversed(opened):
                     os.close(descriptor)
