@@ -919,25 +919,44 @@ def _turns(count: int) -> str:
     return f"{count} turn" if count == 1 else f"{count} turns"
 
 
-def _rounds(count: int) -> str:
-    return f"{count} round" if count == 1 else f"{count} rounds"
+def _questions(count: int) -> str:
+    return f"{count} question" if count == 1 else f"{count} questions"
+
+
+def _asked(result: ConversationResult) -> int:
+    """Questions the asker sent; its final answer is not one."""
+    return sum(1 for turn in result.turns if turn.role is Role.ASKER and not turn.is_final_answer)
+
+
+def _where(result: ConversationResult) -> str:
+    """Where a consultation that did not answer stood when it stopped."""
+    asked = _asked(result)
+    if asked > result.rounds:
+        return f"while the responder was answering question {asked}"
+    if asked == 0:
+        return "before the asker's first question"
+    return f"after {_questions(asked)}, while the asker was writing"
 
 
 def describe_stop(result: ConversationResult) -> str:
-    rounds = _rounds(result.rounds)
+    """How the consultation ended, in one sentence, for people and ``--json``'s ``outcome``."""
     if result.stop_reason is StopReason.ANSWERED:
-        when = " at the round limit" if result.answered_at_limit else ""
-        return f"answered: the asker gave its final answer after {rounds}{when}"
+        asked = _asked(result)
+        after = f"after {_questions(asked)}" if asked else "without asking a question"
+        when = " at the question limit" if result.answered_at_limit else ""
+        return f"answered: the asker gave its final answer {after}{when}"
     if result.stop_reason is StopReason.ROUND_LIMIT:
         return (
-            f"round limit reached ({_rounds(result.max_rounds)}) and the asker gave no final answer"
+            f"question limit reached ({_questions(result.max_rounds)}) "
+            "and the asker gave no final answer"
         )
+    if result.stop_reason is StopReason.INTERRUPTED:
+        # The error only restates where it stopped.
+        return f"interrupted by the user {_where(result)}"
     detail = f": {result.error}" if result.error else ""
     if result.stop_reason is StopReason.TIMEOUT:
-        return f"stopped on the time limit after {rounds}{detail}"
-    if result.stop_reason is StopReason.INTERRUPTED:
-        return f"interrupted by the user after {rounds}{detail}"
-    return f"a session failed after {rounds}{detail}"
+        return f"stopped on the time limit {_where(result)}{detail}"
+    return f"a session failed {_where(result)}{detail}"
 
 
 def render_transcript(result: ConversationResult) -> str:

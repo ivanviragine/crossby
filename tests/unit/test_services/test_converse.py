@@ -755,7 +755,7 @@ def test_render_transcript() -> None:
     assert f"## Goal (sent only to the asker)\n\n```text\n{GOAL}\n```" in text
     assert "- Asker: claude" in text
     assert "- Responder: codex" in text
-    assert "- Outcome: answered: the asker gave its final answer after 1 round" in text
+    assert "- Outcome: answered: the asker gave its final answer after 1 question" in text
     assert "## Turn 1 · asker (claude) → responder\n\nWhat is a PFO?" in text
     assert "## Turn 2 · responder (codex) → asker\n\nAn opening between the atria." in text
     assert "## Turn 3 · final answer (claude)\n\nIt knows the anatomy." in text
@@ -799,11 +799,21 @@ def test_partial_transcript_has_no_sessions_yet() -> None:
     [
         (
             StopReason.ROUND_LIMIT,
-            "round limit reached (5 rounds) and the asker gave no final answer",
+            "question limit reached (5 questions) and the asker gave no final answer",
         ),
-        (StopReason.TIMEOUT, "stopped on the time limit after 1 round: late"),
-        (StopReason.FAILED, "a session failed after 1 round: late"),
-        (StopReason.INTERRUPTED, "interrupted by the user after 1 round: late"),
+        (
+            StopReason.TIMEOUT,
+            "stopped on the time limit after 1 question, while the asker was writing: late",
+        ),
+        (
+            StopReason.FAILED,
+            "a session failed after 1 question, while the asker was writing: late",
+        ),
+        # An interruption's error only restates where it stopped.
+        (
+            StopReason.INTERRUPTED,
+            "interrupted by the user after 1 question, while the asker was writing",
+        ),
     ],
 )
 def test_describe_stop(reason: StopReason, expected: str) -> None:
@@ -813,7 +823,19 @@ def test_describe_stop(reason: StopReason, expected: str) -> None:
 def test_answered_at_the_limit_is_described() -> None:
     result = _finished(StopReason.ANSWERED)
     result.answered_at_limit = True
-    assert converse.describe_stop(result).endswith("after 1 round at the round limit")
+    assert converse.describe_stop(result).endswith("after 1 question at the question limit")
+
+
+def test_a_stop_says_where_the_consultation_stood() -> None:
+    waiting = _finished(StopReason.TIMEOUT, error="late")
+    waiting.turns = waiting.turns[:1]  # the asker's question, still unanswered
+    assert converse.describe_stop(waiting) == (
+        "stopped on the time limit while the responder was answering question 1: late"
+    )
+    waiting.turns = []
+    assert converse.describe_stop(waiting) == (
+        "stopped on the time limit before the asker's first question: late"
+    )
 
 
 def test_partial_transcript_marks_the_consultation_in_progress() -> None:

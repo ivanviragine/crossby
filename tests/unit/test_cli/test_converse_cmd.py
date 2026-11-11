@@ -84,7 +84,7 @@ def test_converse_prints_the_final_answer_and_writes_the_transcript(
     assert "responder (codex) is writing" in result.stderr
     assert "A flap-like opening between the atria." in result.stderr
     assert "NEXT: ASK" in result.stderr
-    assert "answered: the asker gave its final answer after 1 round" in result.stderr
+    assert "answered: the asker gave its final answer after 1 question" in result.stderr
     assert summaries == []  # the summary is opt-in
 
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
@@ -108,7 +108,7 @@ def test_converse_opens_with_who_consults_whom_and_where_the_transcript_goes(
     assert result.exit_code == 0, result.output
     head = result.stderr.splitlines()[:3]
     assert "claude asks codex (read-only, in the asker's folder)" in head[0]
-    assert "limits: up to 3 messages, 30m in all" in head[1]
+    assert "limits: up to 3 questions, 30m in all, 10m per turn" in head[1]
     assert "transcript: " in head[2] and head[2].endswith("transcript.md")
 
 
@@ -194,7 +194,7 @@ def test_converse_round_limit_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path:
     result = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--max-rounds", "1")
     assert result.exit_code == 2
     assert result.stdout.strip() == ""
-    assert "round limit reached (1 round) and the asker gave no final answer" in result.stderr
+    assert "question limit reached (1 question) and the asker gave no final answer" in result.stderr
 
 
 def test_converse_marker_only_answer_is_not_reported_as_answered(
@@ -413,7 +413,7 @@ def test_converse_ctrl_c_while_printing_keeps_the_transcript(
     (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
     transcript = (run_dir / "transcript.md").read_text(encoding="utf-8")
     assert "## Turn 2 · responder (codex) → asker\n\nA flap-like opening" in transcript
-    assert "- Outcome: interrupted by the user after 1 round" in transcript
+    assert "- Outcome: interrupted by the user after 1 question" in transcript
 
 
 def test_converse_ctrl_c_during_summary_exits_130_with_transcript(
@@ -883,3 +883,79 @@ def test_continue_refuses_a_consultation_still_being_written(
     assert "Another process is writing" in " ".join(second.stderr.split())
     assert fake.calls == []
     assert (out / "events.jsonl").read_text() == before
+
+
+# ---------------------------------------------------------------------------
+# What a stopped consultation says, and what the opening shows
+# ---------------------------------------------------------------------------
+
+
+def _round_limited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *extra: str, name: str = "out dir"
+) -> Any:
+    _use_runner(monkeypatch, FakeRunner(["q1\nNEXT: ASK", "a1", "q2\nNEXT: ASK"]))
+    out = tmp_path / name
+    return out, _invoke(
+        tmp_path,
+        "converse",
+        "claude",
+        "codex",
+        "-g",
+        "x",
+        "--max-rounds",
+        "1",
+        "--output-dir",
+        str(out),
+        *extra,
+    )
+
+
+def test_a_stopped_consultation_says_how_to_continue_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import shlex
+
+    out, result = _round_limited(monkeypatch, tmp_path)
+    assert result.exit_code == 2
+    command = f"crossby converse --continue {shlex.quote(str(out))}"
+    # On one line, whatever the width, so it can be copied.
+    assert any(line.rstrip().endswith(command) for line in result.stderr.splitlines())
+    _out, as_json = _round_limited(monkeypatch, tmp_path, "--json", name="as json")
+    assert json.loads(as_json.stdout)["continuable"] is True
+
+
+def test_an_answered_consultation_offers_no_continuation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x")
+    assert result.exit_code == 0
+    assert "--continue" not in result.stderr
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    as_json = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--json")
+    assert json.loads(as_json.stdout)["continuable"] is False
+
+
+def test_the_opening_names_the_events_file_and_the_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+    result = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--output-dir", str(out))
+    lines = [" ".join(line.split()) for line in result.stderr.splitlines()]
+    assert f"events: {out / 'events.jsonl'}" in lines
+    tools = lines.index("tools: claude · codex")
+    assert tools < next(i for i, line in enumerate(lines) if "is writing" in line)
+
+
+def test_a_continuation_says_where_it_picks_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out, first = _round_limited(monkeypatch, tmp_path)
+    assert first.exit_code == 2
+    _use_runner(monkeypatch, FakeRunner(["a2", "verdict\nNEXT: DONE"]))
+    again = _invoke(tmp_path, "converse", "--continue", str(out), "--max-rounds", "2")
+    assert again.exit_code == 0, again.output
+    shown = " ".join(again.stderr.split())
+    assert "continuing after 3 messages; it had reached its question limit" in shown
+    assert "limits: up to 2 more questions" in shown
