@@ -538,14 +538,19 @@ def run_panel(
         message = member_message(seat, body, shared=shared)
         if seat.session_id is None and isinstance(member.workspace, ProjectWorkspace):
             message = render_envelope(message, member.workspace.instructions)
-        built = request(
-            message,
-            member.backend,
-            folder,
-            resume_id=seat.session_id,
-            read_only=True,
-            minimum_version=minimum,
-        )
+        try:
+            built = request(
+                message,
+                member.backend,
+                folder,
+                resume_id=seat.session_id,
+                read_only=True,
+                minimum_version=minimum,
+            )
+        except _StopError as stop:
+            # Queued past the deadline: this attempt fails, and the members
+            # who already answered keep their replies.
+            return member.id, None, stop.error, 0.0, None
         result, failure, seconds = run_one(member.id, number, built, member.backend.tool)
         text = (result.final_text or "").strip() if result is not None else None
         if failure is None and result is not None and seat.session_id is None:
@@ -619,13 +624,20 @@ def run_panel(
                 for member_id in recipients
             }
             pending_futures = set(futures)
+            unexpected: BaseException | None = None
             try:
                 while pending_futures:
                     done, pending_futures = wait(
                         pending_futures, timeout=0.1, return_when=FIRST_COMPLETED
                     )
                     for future in done:
-                        member_id, text, failure, seconds, result = future.result()
+                        try:
+                            member_id, text, failure, seconds, result = future.result()
+                        except Exception as exc:
+                            member_id = futures[future]
+                            unexpected = unexpected or exc
+                            outcomes[member_id] = (None, f"the turn failed: {exc}", 0.0, None)
+                            continue
                         outcomes[member_id] = (text, failure, seconds, result)
             except KeyboardInterrupt:
                 cancel.set()
@@ -653,6 +665,9 @@ def run_panel(
             else:
                 failures.append((dispatch, member_id, failure or "no answer"))
             replies.append((member_id, text, failure))
+        if unexpected is not None:
+            # Every completed reply is committed above before this propagates.
+            raise unexpected
         if all(text is None for _member, text, _failure in replies):
             raise _StopError(
                 StopReason.FAILED,

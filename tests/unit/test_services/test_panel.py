@@ -438,3 +438,43 @@ def test_a_drifted_persona_folder_stops_the_panel_before_anyone_starts(tmp_path:
     )
     assert runner.preflights == []
     assert all(not calls for calls in runner.requests.values())
+
+
+def test_replies_survive_a_member_queued_past_the_deadline(tmp_path: Path) -> None:
+    from crossby.services import panel as panel_service
+
+    clock = [0.0]
+    runner = PanelRunner(
+        {
+            "lead": ["Q\nNEXT: ASK @cto @founder", "x\nNEXT: DONE"],
+            "cto": ["first"],
+            "founder": ["never"],
+            "buyer": [],
+        }
+    )
+    real_run = runner.run
+
+    def run_and_age(tool: Any, request: Any, cancel: Any, on_event: Any = None) -> Any:
+        result = real_run(tool, request, cancel, on_event)
+        if request.working_dir.name == "cto":
+            clock[0] += 10_000  # the queued founder now starts past the deadline
+        return result
+
+    runner.run = run_and_age  # type: ignore[method-assign]
+    spec = _spec(tmp_path, concurrency=1, timeout_seconds=100)
+    result = panel_service.run_panel(spec, runner=runner, clock=lambda: clock[0])
+    assert [turn.sender for turn in result.turns][:2] == ["lead", "cto"]
+    assert result.turns[1].text == "first"
+    assert runner.requests["founder"] == []
+    assert result.stop_reason is StopReason.TIMEOUT
+
+
+def test_the_api_never_appends_a_second_panel_to_a_journal(tmp_path: Path) -> None:
+    from crossby.api import panel as run_api_panel
+    from crossby.services.panel import PanelError
+
+    events = tmp_path / "events.jsonl"
+    events.write_text('{"seq": 1}\n')
+    with pytest.raises(PanelError, match="already holds a journal"):
+        run_api_panel(_spec(tmp_path), events_path=events)
+    assert events.read_text() == '{"seq": 1}\n'

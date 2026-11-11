@@ -196,7 +196,11 @@ def panel(
     import uuid
 
     from crossby.services.journal import Journal
-    from crossby.services.panel import run_panel
+    from crossby.services.panel import PanelError, run_panel
+
+    if events_path is not None and events_path.exists() and events_path.stat().st_size > 0:
+        # Appending a second run would mix two panels in one journal.
+        raise PanelError(f"{events_path} already holds a journal; choose another events_path.")
 
     journal = Journal(
         uuid.uuid4().hex, path=events_path, sinks=[on_event] if on_event is not None else []
