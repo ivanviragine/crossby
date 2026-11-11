@@ -17,6 +17,8 @@ user-level configuration is not inspected.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ _PROJECT_HOOK_FILES: dict[AIToolID, tuple[str, ...]] = {
 }
 _OPENCODE_PLUGIN_DIRS = (".opencode/plugin", ".opencode/plugins")
 _OPENCODE_CONFIGS = ("opencode.json", "opencode.jsonc")
+_MAX_SOURCE_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,23 @@ def _has_entries(value: Any) -> bool:
 
 
 def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Parse a hook source; anything but a readable regular file raises ``OSError``.
+
+    The source is opened non-blocking with its type checked on the open
+    descriptor, so a FIFO (or a link to one) can never hang the inspection,
+    which runs before the session's own deadline is watched.
+    """
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            data = handle.read(_MAX_SOURCE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > _MAX_SOURCE_BYTES:
+        raise OSError(f"{path} is larger than {_MAX_SOURCE_BYTES} bytes")
+    return json.loads(data.decode("utf-8"))
 
 
 def _check(folder: Path, relative: str, found: list[str], unreadable: list[str]) -> None:

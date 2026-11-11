@@ -221,3 +221,19 @@ def test_the_cli_flag_reaches_the_request(tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert result.exit_code == 0, result.output
     assert fake.calls[0][1].allow_project_hooks
+
+
+@pytest.mark.parametrize(
+    ("tool", "relative"),
+    [(AIToolID.CURSOR, ".cursor/hooks.json"), (AIToolID.OPENCODE, "opencode.json")],
+)
+def test_a_special_file_is_unreadable_and_never_blocks(
+    tool: AIToolID, relative: str, tmp_path: Path
+) -> None:
+    import os
+
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    sources = project_hook_sources(tool, tmp_path)
+    assert sources.unreadable == (relative,)
