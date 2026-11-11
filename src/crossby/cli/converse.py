@@ -438,10 +438,14 @@ def converse(
         # In a terminal stdout and stderr share the screen, where the final
         # answer was just shown as the last message: print it only once.
         answer_shown=not quiet and sys.stdout.isatty() and console.err.is_terminal,
-        # A saved journal of a consultation without its answer can go on.
+        # A saved journal of a consultation without its answer can go on. A
+        # final answer committed before Ctrl-C reads as answered to --continue.
         continue_dir=(
             out_dir
-            if not result.answered and journal.store_error is None and journal.path is not None
+            if not result.answered
+            and not any(turn.is_final_answer for turn in result.turns)
+            and journal.store_error is None
+            and journal.path is not None
             else None
         ),
     )

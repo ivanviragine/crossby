@@ -959,3 +959,24 @@ def test_a_continuation_says_where_it_picks_up(
     shown = " ".join(again.stderr.split())
     assert "continuing after 3 messages; it had reached its question limit" in shown
     assert "limits: up to 2 more questions" in shown
+
+
+def test_a_final_answer_committed_before_ctrl_c_is_not_offered_to_continue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from crossby.cli import converse as cli
+
+    _use_runner(monkeypatch, FakeRunner(CONSULTING))
+
+    def interrupted_print(turn: Any, **_kwargs: Any) -> None:
+        if turn.is_final_answer:
+            raise KeyboardInterrupt  # while the final answer is being shown
+
+    monkeypatch.setattr(cli, "_show_turn", interrupted_print)
+    result = _invoke(tmp_path, "converse", "claude", "codex", "-g", "x", "--json")
+    assert result.exit_code == 130
+    assert json.loads(result.stdout)["continuable"] is False
+    (run_dir,) = (tmp_path / ".crossby" / "conversations").iterdir()
+    # --continue agrees: the journal holds the answer.
+    again = _invoke(tmp_path, "converse", "--continue", str(run_dir))
+    assert "already has its final answer" in " ".join(again.stderr.split())
