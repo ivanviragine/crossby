@@ -435,10 +435,12 @@ one listed what it had loaded:
 | GitHub Copilot CLI | `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` | `.github/skills/`, `.agents/skills/`, `.claude/skills/` |
 
 So a folder that served several tools would give Cursor or Copilot the
-instructions twice; a persona folder serves exactly one tool. Material files
-may not be hidden or use a top-level instruction or configuration name
-(`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `opencode.json`, …), so they can never
-add instructions, hooks, permissions or MCP servers.
+instructions twice; a persona folder serves exactly one tool. Material and
+skill files may not be hidden or use an instruction or configuration name at
+any depth (`AGENTS.md`, `AGENTS.override.md`, which Codex prefers over
+`AGENTS.md`, `CLAUDE.md`, which Claude Code also loads from subfolders,
+`GEMINI.md`, `opencode.json`, …), so they can never add or replace
+instructions, hooks, permissions or MCP servers.
 
 End to end, `provision`, `ask` and `cleanup` ran on all six tools in parallel
 threads, each with a persona (a codeword), one skill (a city) and a material

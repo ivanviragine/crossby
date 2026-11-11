@@ -37,12 +37,15 @@ from crossby.models.ai import AIToolID, OwnedWorkspaceLayout
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _MAX_SKILL_FILES = 1000
 _MAX_BYTES = 20 * 1024 * 1024
-# File names any supported tool reads as instructions or configuration from a
-# folder's top level. Material files may not use them, so they can never add
+# File names a supported tool reads as instructions or configuration, at the
+# top level or in subfolders (Claude Code loads a subfolder's CLAUDE.md, and
+# Codex prefers AGENTS.override.md over AGENTS.md). Material files and skill
+# files may not use them at any depth, so they can never add or replace
 # instructions, MCP servers, hooks or permissions.
 _RESERVED_NAMES = frozenset(
     {
         "agents.md",
+        "agents.override.md",
         "claude.md",
         "claude.local.md",
         "gemini.md",
@@ -139,7 +142,7 @@ def _material_path(name: str) -> PurePosixPath:
         raise ValueError(f"{name!r} is not a relative file path")
     if any(part.startswith(".") for part in path.parts):
         raise ValueError(f"{name!r} is hidden; tools read hidden folders as configuration")
-    if len(path.parts) == 1 and path.name.lower() in _RESERVED_NAMES:
+    if path.name.lower() in _RESERVED_NAMES:
         raise ValueError(f"{name!r} is an instruction or configuration file name")
     return path
 
@@ -168,6 +171,10 @@ def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
             full = Path(root, entry)
             if not stat.S_ISREG(full.lstat().st_mode):
                 raise WorkspaceError(f"Skill {source} contains a special file: {entry}")
+            if entry.lower() in _RESERVED_NAMES:
+                raise WorkspaceError(
+                    f"Skill {source} contains {entry}, an instruction or configuration file name."
+                )
             files[full.relative_to(source).as_posix()] = full.read_bytes()
             if len(files) > _MAX_SKILL_FILES:
                 raise WorkspaceError(f"Skill {source} has more than {_MAX_SKILL_FILES} files.")
@@ -195,10 +202,22 @@ def planned_files(spec: OwnedWorkspaceSpec) -> dict[str, bytes]:
         planned[key] = text.encode("utf-8")
     if sum(len(data) for data in planned.values()) > _MAX_BYTES:
         raise WorkspaceError("A persona folder may hold at most 20 MiB.")
+    # Refuse a layout the filesystem cannot hold before anything is written:
+    # a path that is both a file and a folder, or two that differ only in
+    # case (one file on case-insensitive filesystems).
+    folders = _expected_directories(planned)
+    both = sorted(name for name in planned if name in folders)
+    if both:
+        raise WorkspaceError(f"{both[0]!r} would be both a file and a folder.")
+    folded: dict[str, str] = {}
+    for name in sorted({*planned, *folders}):
+        other = folded.setdefault(name.casefold(), name)
+        if other != name:
+            raise WorkspaceError(f"{other!r} and {name!r} differ only in case.")
     return planned
 
 
-def _expected_directories(manifest: Mapping[str, str]) -> set[str]:
+def _expected_directories(manifest: Mapping[str, object]) -> set[str]:
     return {
         parent.as_posix()
         for relative in manifest
@@ -275,13 +294,45 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
                 f"{root} is not empty and does not hold this persona; provision into a new "
                 "or empty folder."
             )
+        created_root = False
     else:
         root.mkdir(parents=True)
-    for relative, data in planned.items():
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _write_new(target, data)
+        created_root = True
+    written: list[str] = []
+    try:
+        for relative, data in planned.items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_new(target, data)
+            written.append(relative)
+    except BaseException:
+        # Leave nothing behind that the caller has no manifest for.
+        _remove_written(root, written, planned, created_root=created_root)
+        raise
     return workspace
+
+
+def _remove_written(
+    root: Path, written: list[str], planned: Mapping[str, object], *, created_root: bool
+) -> None:
+    """Undo a provisioning that failed part-way: only the files it wrote.
+
+    Every planned directory is removed if it ended up empty, including the one
+    created for the file whose write failed; the folder was new or empty.
+    """
+    for relative in reversed(written):
+        with contextlib.suppress(OSError):
+            (root / relative).unlink()
+    for directory in sorted(
+        _expected_directories(planned),
+        key=lambda item: item.count("/"),
+        reverse=True,
+    ):
+        with contextlib.suppress(OSError):
+            (root / directory).rmdir()
+    if created_root:
+        with contextlib.suppress(OSError):
+            root.rmdir()
 
 
 def verify(workspace: OwnedWorkspace) -> None:
@@ -311,29 +362,115 @@ def cleanup(workspace: OwnedWorkspace) -> None:
 
     A drifted folder raises :class:`WorkspaceDriftError` and is left alone:
     only files crossby wrote, and the directories they leave empty, are ever
-    removed.
+    removed. Each file is re-checked against its manifest hash and removed
+    through directory descriptors opened without following links, so a
+    directory replaced by a link after the check can never redirect a removal
+    outside the folder.
     """
     verify(workspace)
     root = workspace.path
-    for relative in workspace.manifest:
-        (root / relative).unlink()
-    directories = sorted(
-        {parent for relative in workspace.manifest for parent in PurePosixPath(relative).parents},
-        key=lambda item: len(item.parts),
-        reverse=True,
-    )
-    for relative_dir in directories:
-        if relative_dir == PurePosixPath("."):
-            continue
-        # A directory that still holds something not written here stays.
-        with contextlib.suppress(OSError):
-            (root / relative_dir).rmdir()
+    if os.unlink in os.supports_dir_fd and os.open in os.supports_dir_fd:
+        _cleanup_anchored(workspace)
+    else:  # pragma: no cover - platforms without dir_fd support (Windows)
+        _cleanup_by_path(workspace)
     try:
         root.rmdir()
     except OSError as exc:
         raise WorkspaceDriftError(
             f"The persona folder {root} gained content during cleanup.", changed=(".",)
         ) from exc
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_parent(root_fd: int, relative: str) -> tuple[int, str, list[int]]:
+    """The descriptor of ``relative``'s parent, walked from ``root_fd`` without links."""
+    parts = relative.split("/")
+    opened: list[int] = []
+    current = root_fd
+    try:
+        for part in parts[:-1]:
+            current = os.open(part, _DIRECTORY_FLAGS, dir_fd=current)
+            opened.append(current)
+    except OSError:
+        for descriptor in opened:
+            os.close(descriptor)
+        raise
+    return current, parts[-1], opened
+
+
+def _drifted(workspace: OwnedWorkspace, relative: str) -> WorkspaceDriftError:
+    return WorkspaceDriftError(
+        f"The persona folder {workspace.path} changed during cleanup: {relative}.",
+        changed=(relative,),
+    )
+
+
+def _cleanup_anchored(workspace: OwnedWorkspace) -> None:
+    root_fd = os.open(workspace.path, _DIRECTORY_FLAGS)
+    try:
+        for relative, digest in workspace.manifest.items():
+            try:
+                parent, name, opened = _open_parent(root_fd, relative)
+            except OSError:
+                raise _drifted(workspace, relative) from None
+            try:
+                try:
+                    descriptor = os.open(
+                        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent
+                    )
+                except OSError:
+                    raise _drifted(workspace, relative) from None
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        raise _drifted(workspace, relative)
+                    with os.fdopen(os.dup(descriptor), "rb") as handle:
+                        content = handle.read()
+                finally:
+                    os.close(descriptor)
+                if _sha256(content) != digest:
+                    raise _drifted(workspace, relative)
+                os.unlink(name, dir_fd=parent)
+            finally:
+                for descriptor in reversed(opened):
+                    os.close(descriptor)
+        for directory in sorted(
+            _expected_directories(workspace.manifest),
+            key=lambda item: item.count("/"),
+            reverse=True,
+        ):
+            try:
+                parent, name, opened = _open_parent(root_fd, directory)
+            except OSError:
+                continue
+            try:
+                # A directory that still holds something not written here stays.
+                with contextlib.suppress(OSError):
+                    os.rmdir(name, dir_fd=parent)
+            finally:
+                for descriptor in reversed(opened):
+                    os.close(descriptor)
+    finally:
+        os.close(root_fd)
+
+
+def _cleanup_by_path(workspace: OwnedWorkspace) -> None:  # pragma: no cover - Windows
+    root = workspace.path
+    for relative, digest in workspace.manifest.items():
+        target = root / relative
+        if any(parent.is_symlink() for parent in target.parents if root in parent.parents):
+            raise _drifted(workspace, relative)
+        if target.is_symlink() or _sha256(target.read_bytes()) != digest:
+            raise _drifted(workspace, relative)
+        target.unlink()
+    for directory in sorted(
+        _expected_directories(workspace.manifest),
+        key=lambda item: item.count("/"),
+        reverse=True,
+    ):
+        with contextlib.suppress(OSError):
+            (root / directory).rmdir()
 
 
 def workspace_unchanged(workspace: OwnedWorkspace) -> bool:

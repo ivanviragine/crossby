@@ -372,3 +372,94 @@ def test_minimum_version_is_checked_against_the_detected_build(
     request = HeadlessSessionRequest(prompt="p", working_dir=tmp_path, minimum_version="0.170.0")
     with pytest.raises(HeadlessUnsupportedError, match=r"needs Codex CLI 0\.170\.0 or newer"):
         adapter.preflight_headless_session(request)
+
+
+# ---------------------------------------------------------------------------
+# Review hardening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["AGENTS.override.md", "notes/CLAUDE.md", "deep/a/Agents.md", "x/gemini.md"]
+)
+def test_instruction_names_are_reserved_at_every_depth(name: str, tmp_path: Path) -> None:
+    # Codex prefers AGENTS.override.md over AGENTS.md, and Claude Code loads a
+    # subfolder's CLAUDE.md, so either would replace or add instructions.
+    with pytest.raises(ValidationError, match="instruction or configuration"):
+        _spec(tmp_path, files={name: "different instructions"})
+
+
+def test_a_skill_cannot_carry_instruction_files(tmp_path: Path) -> None:
+    skill = _skill(tmp_path, "sneaky")
+    (skill / "references" / "AGENTS.md").write_text("different instructions")
+    with pytest.raises(WorkspaceError, match="instruction or configuration file name"):
+        provision(_spec(tmp_path, skills=(skill,)))
+    assert not (tmp_path / "personas").exists()
+
+
+@pytest.mark.parametrize(
+    ("files", "message"),
+    [
+        ({"notes": "one", "notes/interview.md": "two"}, "both a file and a folder"),
+        ({"Notes/a.md": "one", "notes/b.md": "two"}, "differ only in case"),
+    ],
+)
+def test_layouts_the_filesystem_cannot_hold_are_refused_before_writing(
+    tmp_path: Path, files: dict[str, str], message: str
+) -> None:
+    with pytest.raises(WorkspaceError, match=message):
+        provision(_spec(tmp_path, files=files))
+    assert not (tmp_path / "personas").exists()
+
+
+def test_a_failed_write_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    original = workspaces._write_new
+    calls = {"count": 0}
+
+    def flaky(path: Path, data: bytes) -> None:
+        calls["count"] += 1
+        if calls["count"] == 3:
+            raise OSError("disk full")
+        original(path, data)
+
+    monkeypatch.setattr(workspaces, "_write_new", flaky)
+    with pytest.raises(OSError, match="disk full"):
+        provision(_spec(tmp_path))
+    assert not (tmp_path / "personas" / "dana").exists()
+    # A pre-existing empty folder is kept, emptied again.
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    calls["count"] = 0
+    with pytest.raises(OSError):
+        provision(_spec(tmp_path, path=folder))
+    assert folder.is_dir() and not any(folder.iterdir())
+
+
+@pytest.mark.skipif(os.unlink not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_cleanup_never_follows_a_folder_replaced_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # Same name and content as the manifest entry, so only the link check can stop it.
+    (outside / "interview-1.md").write_text("Budget is fixed for the year.\n")
+    real_verify = workspaces.verify
+
+    def verify_then_swap(target: Any) -> None:
+        real_verify(target)
+        notes = workspace.path / "notes"
+        (notes / "interview-1.md").unlink()
+        notes.rmdir()
+        notes.symlink_to(outside)
+
+    monkeypatch.setattr(workspaces, "verify", verify_then_swap)
+    with pytest.raises(WorkspaceDriftError, match="changed during cleanup"):
+        cleanup(workspace)
+    assert (outside / "interview-1.md").read_text() == "Budget is fixed for the year.\n"
