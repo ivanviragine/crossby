@@ -227,7 +227,7 @@ def test_terminal_seats_take_turns_reading(tmp_path: Path, monkeypatch: pytest.M
     active = {"now": 0, "most": 0}
     lock = threads.Lock()
 
-    def reading(_request: Any) -> Any:
+    def reading(_request: Any, **_shown: Any) -> Any:
         with lock:
             active["now"] += 1
             active["most"] = max(active["most"], active["now"])
@@ -260,7 +260,7 @@ def test_an_expired_seat_is_never_prompted_and_frees_the_terminal(
     waiting = InputRequest("r2", "lee", "member", 3, "Q?")
     reached: list[str] = []
 
-    def reading(request: Any) -> Any:
+    def reading(request: Any, **_shown: Any) -> Any:
         reached.append(request.request_id)
         request.expired.wait(5)  # blocked until its turn expires
         return None

@@ -6,6 +6,7 @@ and reserves stdout for the lead's final answer (or ``--json``).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import queue
 import sys
@@ -29,6 +30,7 @@ from crossby.cli.converse import (
 from crossby.ui.console import console
 
 if TYPE_CHECKING:
+    from crossby.cli.panel_view import PanelView
     from crossby.models.config import PanelConfig
     from crossby.services.panel import PanelResult, PanelSpec
 
@@ -103,10 +105,17 @@ def panel(
         if output_dir is not None
         else root / ".crossby" / "panels" / started.strftime("%Y%m%dT%H%M%S%f")
     )
+    from crossby.cli.panel_view import PanelView, show_opening
+
+    view = (
+        None
+        if quiet
+        else PanelView(spec, live=console.err.is_terminal, typed_here=_isatty(sys.stdin))
+    )
     try:
         # Created exclusively: a second run never mixes into this journal.
         journal = Journal(
-            uuid.uuid4().hex, path=out_dir / JOURNAL_FILE, sinks=[] if quiet else [_show]
+            uuid.uuid4().hex, path=out_dir / JOURNAL_FILE, sinks=[] if view is None else [view]
         )
     except JournalExistsError:
         console.error(f"{out_dir} already holds a panel; choose another --output-dir.")
@@ -115,22 +124,36 @@ def panel(
         console.error(str(exc))
         raise typer.Exit(1) from None
     human = spec.lead.human or any(member.human for member in spec.members)
+    member_ids = tuple(member.id for member in spec.members)
+    transcript = out_dir / "transcript.md"
+
+    def reply(request: Any) -> Any:
+        return _terminal_reply(request, view, member_ids)
+
     try:
-        if not quiet:
-            roster = ", ".join(f"@{m.id} ({m.tool_name})" for m in spec.members)
-            _stderr(f"[step]▸[/] {spec.lead.tool_name} leads a {spec.visibility} panel: {roster}")
-            _stderr(f"[dim]      events: {_escape(str(journal.path))}[/]")
-        result = run_panel(
-            spec, journal=journal, inputs=HumanInput(_terminal_reply) if human else None
-        )
+        if view is not None:
+            events = str(journal.path) if journal.path is not None else None
+            show_opening(spec, transcript=str(transcript), events=events)
+            view.start()
+        result = run_panel(spec, journal=journal, inputs=HumanInput(reply) if human else None)
     finally:
-        journal.close()
+        journal.close()  # delivers every queued event to the view first
+        if view is not None:
+            view.close()
     if journal.store_error is not None:
         console.warn(f"The event journal is incomplete: {journal.store_error}")
         result = dataclasses.replace(result, journal_error=journal.store_error)
-    transcript = out_dir / "transcript.md"
     _write(transcript, render_panel_transcript(result))
-    _report(result, transcript, journal.path, journal.run_id, as_json=as_json, quiet=quiet)
+    _report(
+        result,
+        transcript,
+        journal.path,
+        journal.run_id,
+        as_json=as_json,
+        # In a terminal stdout and stderr share the screen, where the final
+        # answer was just shown as the last message: print it only once.
+        answer_shown=not quiet and sys.stdout.isatty() and console.err.is_terminal,
+    )
     if result.exit_code:
         raise typer.Exit(result.exit_code)
 
@@ -228,11 +251,14 @@ def _spec(
 _TERMINAL = threading.Lock()
 
 
-def _terminal_reply(request: Any) -> Any:
+def _terminal_reply(
+    request: Any, view: PanelView | None = None, members: tuple[str, ...] = ()
+) -> Any:
     """One human seat's prompt and reply on the terminal, one seat at a time.
 
     A request that expires while waiting for the terminal is never prompted,
     and one that expires mid-reply stops reading and frees the terminal.
+    While the person types, the panel's live line and other output wait.
     """
     while not _TERMINAL.acquire(timeout=0.2):
         if request.expired.is_set():
@@ -240,7 +266,11 @@ def _terminal_reply(request: Any) -> Any:
     try:
         if request.expired.is_set():
             return None
-        return _read_terminal_reply(request)
+        # The messages this seat answers are printed above the prompt, unless
+        # the view is slow to catch up; then the prompt shows them itself.
+        shown = view is not None and view.wait_announced(request.request_id, timeout=2.0)
+        with view.hold() if view is not None else contextlib.nullcontext():
+            return _read_terminal_reply(request, message_shown=shown, members=members)
     finally:
         _TERMINAL.release()
 
@@ -326,22 +356,33 @@ def _readline(request: Any) -> str | None:
     return _stdin_lines().next(request.expired)
 
 
-def _read_terminal_reply(request: Any) -> Any:
+def _read_terminal_reply(
+    request: Any, *, message_shown: bool = False, members: tuple[str, ...] = ()
+) -> Any:
     """A human seat's reply, read from stdin: lines up to a lone "." or end of input.
 
     A human lead then names the members (`@cto @founder`, `@all`) or types
-    `done` for a final answer.
+    `done` for a final answer. ``message_shown`` means the messages this seat
+    answers are already on screen, so the prompt points at them instead.
     """
     from crossby.services.panel import HumanReply
 
     who = "lead" if request.kind == "lead" else f"@{request.participant}"
     _stdin_lines().drop_typed_ahead()
-    if request.message:
-        _stderr(f"[step]▸[/] [bold]{who}[/], your turn. You received:")
-        _stderr(_escape(request.message))
+    if request.kind == "lead" and request.message is None:
+        head = "your turn: write your first message to the panel"
+    elif request.kind == "lead":
+        head = "your turn: the replies are above" if message_shown else "your turn. The replies:"
     else:
-        _stderr(f"[step]▸[/] [bold]{who}[/], your turn.")
-    _stderr("[dim]      Write your reply; end it with a line holding only a period.[/]")
+        head = (
+            "your turn: reply to the lead's message above"
+            if message_shown
+            else "your turn. The lead's message:"
+        )
+    _stderr(f"  [step]▸[/] [bold]{_escape(who)}[/], {head}")
+    if request.message and not message_shown:
+        sys.stderr.write(f"\n{request.message}\n\n")
+    _stderr("[dim]      End your reply with a line holding only a period (or Ctrl-D).[/]")
     lines: list[str] = []
     while (line := _readline(request)) is not None:
         if line.rstrip("\n") == ".":
@@ -354,34 +395,14 @@ def _read_terminal_reply(request: Any) -> Any:
         return None
     if request.kind != "lead":
         return HumanReply(text)
-    _stderr("[dim]      Send to whom? @ids, @all, or done for your final answer:[/]")
+    names = " ".join(f"@{member}" for member in members) or "@ids"
+    _stderr(
+        f"[dim]      Send it to whom? {_escape(names)}, @all, or done for your final answer:[/]"
+    )
     target = (_readline(request) or "").strip()
     if target.lower() == "done":
         return HumanReply(text, done=True)
     return HumanReply(text, recipients=tuple(target.replace(",", " ").split()))
-
-
-def _show(event: Any) -> None:
-    """Print each committed message and member failure to stderr as it happens."""
-    from crossby.services.journal import EventType
-
-    data = event.data
-    if event.type is EventType.MESSAGE_COMMITTED:
-        sender = data["participant"]
-        if sender == "lead":
-            target = (
-                "final answer"
-                if data.get("done")
-                else " ".join(f"@{item}" for item in data.get("recipients", []))
-            )
-            title = f"lead → {target}"
-        else:
-            title = f"@{sender} → lead"
-        _stderr(f"[step.count]\\[{data['turn']}][/] {_escape(title)}")
-        _stderr(_escape(str(data["text"])))
-        _stderr("")
-    elif event.type is EventType.TURN_FINISHED and data.get("error"):
-        _stderr(f"[warning]![/] @{data['participant']}: {_escape(str(data['error']))}")
 
 
 def _report(
@@ -391,14 +412,18 @@ def _report(
     run_id: str,
     *,
     as_json: bool,
-    quiet: bool,
+    answer_shown: bool,
 ) -> None:
+    from crossby.services.panel import describe_panel_stop
+
+    outcome = describe_panel_stop(result)
     if as_json:
         _print_json(
             {
                 "status": result.stop_reason.value,
                 "answered": result.answered,
                 "final_answer": result.final_answer,
+                "outcome": outcome,
                 "error": result.error,
                 "dispatches": result.dispatches,
                 "members": [
@@ -421,11 +446,15 @@ def _report(
             }
         )
         return
-    if result.final_answer is not None and not (sys.stdout.isatty() and not quiet):
+    # stdout carries only the lead's final answer, so it can be piped.
+    if result.final_answer is not None and not answer_shown:
         print(result.final_answer)
-    outcome = result.stop_reason.value + (f": {result.error}" if result.error else "")
     if result.answered:
-        console.success(f"answered after {result.dispatches} messages")
+        _stderr(f"  [success]✓[/] {_escape(outcome)}")
+    elif result.exit_code == 1:
+        _stderr(f"  [error]✗ Error:[/] {_escape(outcome)}")
     else:
-        console.warn(outcome)
+        _stderr(f"  [warning]![/] {_escape(outcome)}")
+    for dispatch, member, reason in result.member_failures:
+        _stderr(f"[dim]      no answer from @{member} to message {dispatch}: {_escape(reason)}[/]")
     _stderr(f"[dim]      transcript: {_escape(str(transcript))}[/]")
