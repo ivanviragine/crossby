@@ -35,6 +35,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from crossby.models.ai import AIToolID, OwnedWorkspaceLayout
 
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+# Whether writes and removals can be anchored to directory descriptors (every
+# POSIX platform; not Windows). Fixed at import, so it cannot change mid-run.
+_ANCHORED = {os.open, os.mkdir, os.unlink, os.rmdir} <= os.supports_dir_fd
 _MAX_SKILL_FILES = 1000
 _MAX_BYTES = 20 * 1024 * 1024
 # File names a supported tool reads as instructions or configuration, at the
@@ -310,11 +313,16 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
         created_root = True
     written: list[str] = []
     try:
-        for relative, data in planned.items():
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _write_new(target, data)
-            written.append(relative)
+        if _ANCHORED:
+            _write_anchored(root, planned, written)
+        else:  # pragma: no cover - platforms without dir_fd support (Windows)
+            for relative, data in planned.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_new(target, data)
+                written.append(relative)
+        # The folder must hold exactly what was written, nothing redirected.
+        verify(workspace)
     except BaseException:
         # Leave nothing behind that the caller has no manifest for.
         _remove_written(root, written, planned, created_root=created_root)
@@ -322,27 +330,97 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
     return workspace
 
 
+def _write_anchored(root: Path, planned: Mapping[str, bytes], written: list[str]) -> None:
+    """Write every planned file relative to directory descriptors, never following links.
+
+    Each directory is created and opened from its verified parent with
+    ``O_NOFOLLOW``, so a directory replaced by a link mid-way fails the write
+    instead of redirecting it outside the folder.
+    """
+    root_fd = os.open(root, _DIRECTORY_FLAGS)
+    try:
+        for relative, data in planned.items():
+            parts = relative.split("/")
+            opened: list[int] = []
+            current = root_fd
+            try:
+                for part in parts[:-1]:
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, 0o755, dir_fd=current)
+                    current = os.open(part, _DIRECTORY_FLAGS, dir_fd=current)
+                    opened.append(current)
+                name = parts[-1]
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    descriptor = os.open(name, flags, 0o644, dir_fd=current)
+                except FileExistsError:
+                    raise WorkspaceConflictError(
+                        f"{root / relative} appeared while provisioning."
+                    ) from None
+                try:
+                    with os.fdopen(descriptor, "wb") as handle:
+                        handle.write(data)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=current)
+                    raise
+                written.append(relative)
+            finally:
+                for item in reversed(opened):
+                    os.close(item)
+    finally:
+        os.close(root_fd)
+
+
 def _remove_written(
     root: Path, written: list[str], planned: Mapping[str, object], *, created_root: bool
 ) -> None:
     """Undo a provisioning that failed part-way: only the files it wrote.
 
-    Every planned directory is removed if it ended up empty, including the one
-    created for the file whose write failed; the folder was new or empty.
+    Removal goes through the same no-follow directory walk as writing, so it
+    can never reach outside the folder. Every planned directory is removed if
+    it ended up empty, including the one created for the file whose write
+    failed; the folder was new or empty.
     """
-    for relative in reversed(written):
-        with contextlib.suppress(OSError):
-            (root / relative).unlink()
-    for directory in sorted(
-        _expected_directories(planned),
-        key=lambda item: item.count("/"),
-        reverse=True,
-    ):
-        with contextlib.suppress(OSError):
-            (root / directory).rmdir()
+    try:
+        root_fd = os.open(root, _DIRECTORY_FLAGS) if _ANCHORED else None
+    except OSError:
+        return
+    try:
+        for relative in reversed(written):
+            _remove_entry(root, root_fd, relative, directory=False)
+        for directory in sorted(
+            _expected_directories(planned),
+            key=lambda item: item.count("/"),
+            reverse=True,
+        ):
+            _remove_entry(root, root_fd, directory, directory=True)
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
     if created_root:
         with contextlib.suppress(OSError):
             root.rmdir()
+
+
+def _remove_entry(root: Path, root_fd: int | None, relative: str, *, directory: bool) -> None:
+    if root_fd is None:  # pragma: no cover - platforms without dir_fd support (Windows)
+        with contextlib.suppress(OSError):
+            (root / relative).rmdir() if directory else (root / relative).unlink()
+        return
+    try:
+        parent, name, opened = _open_parent(root_fd, relative)
+    except OSError:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            if directory:
+                os.rmdir(name, dir_fd=parent)
+            else:
+                os.unlink(name, dir_fd=parent)
+    finally:
+        for item in reversed(opened):
+            os.close(item)
 
 
 def verify(workspace: OwnedWorkspace) -> None:
@@ -379,7 +457,7 @@ def cleanup(workspace: OwnedWorkspace) -> None:
     """
     verify(workspace)
     root = workspace.path
-    if os.unlink in os.supports_dir_fd and os.open in os.supports_dir_fd:
+    if _ANCHORED:
         _cleanup_anchored(workspace)
     else:  # pragma: no cover - platforms without dir_fd support (Windows)
         _cleanup_by_path(workspace)

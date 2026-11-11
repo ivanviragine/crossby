@@ -420,16 +420,17 @@ def test_a_failed_write_leaves_nothing_behind(
 ) -> None:
     from crossby.services import workspaces
 
-    original = workspaces._write_new
+    real_fdopen = os.fdopen
     calls = {"count": 0}
 
-    def flaky(path: Path, data: bytes) -> None:
+    def flaky(fd: int, mode: str) -> Any:
         calls["count"] += 1
         if calls["count"] == 3:
+            os.close(fd)
             raise OSError("disk full")
-        original(path, data)
+        return real_fdopen(fd, mode)
 
-    monkeypatch.setattr(workspaces, "_write_new", flaky)
+    monkeypatch.setattr(workspaces.os, "fdopen", flaky)
     with pytest.raises(OSError, match="disk full"):
         provision(_spec(tmp_path))
     assert not (tmp_path / "personas" / "dana").exists()
@@ -440,6 +441,29 @@ def test_a_failed_write_leaves_nothing_behind(
     with pytest.raises(OSError):
         provision(_spec(tmp_path, path=folder))
     assert folder.is_dir() and not any(folder.iterdir())
+
+
+@pytest.mark.skipif(os.mkdir not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_provisioning_never_follows_a_folder_replaced_mid_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    folder = tmp_path / "p"
+    real_mkdir = os.mkdir
+
+    def mkdir_then_swap(name: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        real_mkdir(name, mode, dir_fd=dir_fd)
+        if name == "notes":
+            os.rmdir(name, dir_fd=dir_fd)
+            os.symlink(outside, name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(workspaces.os, "mkdir", mkdir_then_swap)
+    with pytest.raises(OSError):
+        provision(_spec(tmp_path, path=folder))
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.skipif(os.unlink not in os.supports_dir_fd, reason="needs dir_fd support")
