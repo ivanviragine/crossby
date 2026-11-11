@@ -756,6 +756,11 @@ def run_panel(
     def human_lead_turn(message: str | None, number: int) -> tuple[str, Dispatch, float]:
         reply, failure, seconds = ask_human("lead", "lead", number, message)
         if reply is None:
+            if remaining() <= 0:
+                # The panel's time ran out, not the person's own reply window.
+                raise _StopError(
+                    StopReason.TIMEOUT, f"panel time limit reached during turn {number}"
+                )
             raise _StopError(StopReason.FAILED, f"lead turn {number}: {failure}")
         if reply.done:
             if reply.recipients:

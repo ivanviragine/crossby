@@ -794,3 +794,26 @@ def test_ctrl_c_during_a_human_leads_turn_stops_its_responder(tmp_path: Path) ->
     result = run_panel(spec, runner=runner, inputs=HumanInput(waits_for_its_turn_to_end))
     assert result.stop_reason is StopReason.INTERRUPTED
     assert stopped.wait(2), "the responder never learned its request ended"
+
+
+@pytest.mark.parametrize(
+    ("used_up", "reason", "exit_code"),
+    [(True, StopReason.TIMEOUT, 2), (False, StopReason.FAILED, 1)],
+)
+def test_a_silent_human_lead_ends_the_panel_by_whichever_limit_ran_out(
+    tmp_path: Path, used_up: bool, reason: StopReason, exit_code: int
+) -> None:
+    clock = [0.0]
+
+    def silent(_request: InputRequest) -> HumanReply | None:
+        if used_up:
+            clock[0] += 10_000  # the wait outlasted the panel's own time
+        return None
+
+    spec = _spec(tmp_path).model_copy(
+        update={"lead": Lead(backend=HumanBackend()), "timeout_seconds": 100}
+    )
+    runner = PanelRunner({"cto": [], "founder": [], "buyer": []})
+    result = run_panel(spec, runner=runner, inputs=HumanInput(silent), clock=lambda: clock[0])
+    assert result.stop_reason is reason
+    assert result.exit_code == exit_code
