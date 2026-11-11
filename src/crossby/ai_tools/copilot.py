@@ -647,10 +647,13 @@ def _copilot_denied(frame: dict[str, Any]) -> bool:
 def _copilot_answer(frames: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
     """The final answer's text, and the models that wrote any assistant message.
 
-    Copilot marks the answer ``phase: "final_answer"``; messages that only
-    request tools have empty content. Without the marker, the last message
-    with content and no tool requests is the answer.
+    Copilot marks the answer ``phase: "final_answer"``, and a marked answer is
+    authoritative even when empty: an earlier message is never put in its
+    place. Messages that only request tools have empty content. Only when no
+    message is marked is the last one with content and no tool requests the
+    answer.
     """
+    marked = False
     answer: str | None = None
     fallback: str | None = None
     models: list[str] = []
@@ -664,13 +667,13 @@ def _copilot_answer(frames: list[dict[str, Any]]) -> tuple[str | None, list[str]
         if isinstance(model, str) and model.strip() and model not in models:
             models.append(model)
         content = data.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
+        text = content.strip() if isinstance(content, str) and content.strip() else None
         if data.get("phase") == "final_answer":
-            answer = content.strip()
-        elif not data.get("toolRequests"):
-            fallback = content.strip()
-    return answer or fallback, models
+            marked = True
+            answer = text
+        elif text is not None and not data.get("toolRequests"):
+            fallback = text
+    return (answer if marked else fallback), models
 
 
 def _copilot_usage(result: dict[str, Any], models: list[str], session_id: str) -> TokenUsage | None:

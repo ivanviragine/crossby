@@ -1002,18 +1002,9 @@ class HeadlessRuntimeContext:
                     self.add_warning("The native transport reported failure.")
 
             final_json_present = final_json is not _MISSING_FINAL_JSON
-            self._failure_reason = None
-            if status in _CLASSIFIED_STATUSES:
-                self._failure_reason = self._classify_failure()
-                if (
-                    self._failure_reason is not None
-                    and status is HeadlessTerminalStatus.INVALID_OUTPUT
-                    and final_text is None
-                    and not final_json_present
-                ):
-                    # The tool reported a recognized refusal (a missing login,
-                    # an unknown model) rather than emitting malformed output.
-                    status = HeadlessTerminalStatus.FAILED
+            # Whether the adapter produced any answer at all, before output
+            # normalization: an answer that fails validation is not a refusal.
+            output_absent = final_text is None and not final_json_present
             if status is HeadlessTerminalStatus.SUCCEEDED:
                 try:
                     final_text, final_json, final_json_present = self._normalize_output(
@@ -1040,6 +1031,21 @@ class HeadlessRuntimeContext:
                 final_text = None
                 final_json = _MISSING_FINAL_JSON
                 final_json_present = False
+
+            # Classify once the final status is known. A recognized refusal (a
+            # missing login, an unknown model) that left no answer is a failure,
+            # not malformed output; an answer that failed validation keeps
+            # INVALID_OUTPUT and gets no reason.
+            self._failure_reason = None
+            if status in {HeadlessTerminalStatus.FAILED, HeadlessTerminalStatus.TIMED_OUT} or (
+                status is HeadlessTerminalStatus.INVALID_OUTPUT and output_absent
+            ):
+                self._failure_reason = self._classify_failure()
+                if (
+                    self._failure_reason is not None
+                    and status is HeadlessTerminalStatus.INVALID_OUTPUT
+                ):
+                    status = HeadlessTerminalStatus.FAILED
 
             # Replace any malformed/conflicting native terminal evidence with one
             # normalized terminal event.  Raw frames are never retained.

@@ -1368,6 +1368,26 @@ def test_copilot_counts_the_tool_calls_it_denied(
     _assert_prompt_is_private(result)
 
 
+def test_an_empty_marked_final_answer_is_never_replaced_by_commentary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commentary = json.dumps(
+        {
+            "type": "assistant.message",
+            "data": {"model": "gpt-6-luna", "content": "I will inspect the repository."},
+        }
+    )
+    events = _copilot_events(answer="   ")
+    turn = '{"type": "assistant.turn_start"'
+    events = events.replace(turn, f"{commentary}\n{turn}", 1)
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None
+
+
 def test_copilot_answer_without_the_final_answer_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

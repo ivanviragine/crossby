@@ -21,6 +21,7 @@ from crossby.ai_tools.failure_reasons import classify_failure
 from crossby.models.ai import (
     AIToolID,
     HeadlessFailureReason,
+    HeadlessNativeOutput,
     HeadlessSessionResult,
     HeadlessTerminalStatus,
 )
@@ -390,3 +391,35 @@ def test_claude_passes_through_its_reported_cost_and_models(
     assert result.usage.reported_cost_usd == 0.0123
     assert [item.model for item in result.usage.model_breakdown] == ["claude-opus-5-5"]
     assert (result.usage.input_tokens, result.usage.output_tokens) == (2, 63)
+
+
+def test_a_run_that_looked_successful_but_left_no_answer_keeps_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Not an error envelope, but no answer either, and the login refusal is on
+    # stderr: the missing output is a recognized refusal, not malformed output.
+    envelope = {**CLAUDE_RESULT, "result": "", "structured_output": None}
+    cli = _fake_cli(stdout=json.dumps(envelope), stderr="Not logged in · Please run /login\n")
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, cli)
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.failure_reason is R.NOT_SIGNED_IN
+
+
+def test_an_answer_that_fails_validation_gets_no_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_ai_tools.test_headless_adapters import SCHEMA
+
+    envelope = {**CLAUDE_RESULT, "structured_output": {"unexpected": 1}}
+    cli = _fake_cli(stdout=json.dumps(envelope), stderr="Not logged in · Please run /login\n")
+    adapter = _adapter(monkeypatch, AIToolID.CLAUDE, cli)
+
+    result = adapter.run_headless_session(
+        _request(tmp_path, response_schema=SCHEMA, native_output=HeadlessNativeOutput.JSON)
+    )
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.failure_reason is None
