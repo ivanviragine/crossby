@@ -618,33 +618,49 @@ def run_panel(
         # is committed; a failed attempt's number is never reused.
         numbers = {member_id: claim() for member_id in recipients}
         outcomes: dict[str, tuple[str | None, str | None, float, HeadlessSessionResult | None]] = {}
+        unexpected: BaseException | None = None
+        interrupted = False
+
+        def collect(future: Future[Any], member_id: str) -> None:
+            nonlocal unexpected
+            try:
+                _member, text, failure, seconds, result = future.result()
+            except Exception as exc:
+                unexpected = unexpected or exc
+                outcomes[member_id] = (None, f"the turn failed: {exc}", 0.0, None)
+                return
+            outcomes[member_id] = (text, failure, seconds, result)
+
         with ThreadPoolExecutor(max_workers=min(spec.concurrency, len(recipients))) as pool:
             futures: dict[Future[Any], str] = {
                 pool.submit(member_turn, seats[member_id], body, numbers[member_id]): member_id
                 for member_id in recipients
             }
             pending_futures = set(futures)
-            unexpected: BaseException | None = None
             try:
                 while pending_futures:
                     done, pending_futures = wait(
                         pending_futures, timeout=0.1, return_when=FIRST_COMPLETED
                     )
                     for future in done:
-                        try:
-                            member_id, text, failure, seconds, result = future.result()
-                        except Exception as exc:
-                            member_id = futures[future]
-                            unexpected = unexpected or exc
-                            outcomes[member_id] = (None, f"the turn failed: {exc}", 0.0, None)
-                            continue
-                        outcomes[member_id] = (text, failure, seconds, result)
+                        collect(future, futures[future])
             except KeyboardInterrupt:
+                # Stop the turns still running and start no queued one; the
+                # replies that already came in are committed below.
+                interrupted = True
                 cancel.set()
-                raise
+                for future in pending_futures:
+                    future.cancel()
+        if interrupted:
+            # The pool has waited for the stopped turns; keep what finished.
+            for future, member_id in futures.items():
+                if member_id not in outcomes and not future.cancelled():
+                    collect(future, member_id)
         replies: list[tuple[str, str | None, str | None]] = []
         for member_id in recipients:  # roster order
-            text, failure, seconds, result = outcomes[member_id]
+            text, failure, seconds, result = outcomes.get(
+                member_id, (None, "interrupted before it started", 0.0, None)
+            )
             if text is not None:
                 commit(
                     PanelTurn(
@@ -665,8 +681,10 @@ def run_panel(
             else:
                 failures.append((dispatch, member_id, failure or "no answer"))
             replies.append((member_id, text, failure))
+        # Every completed reply is committed above before either propagates.
+        if interrupted:
+            raise KeyboardInterrupt
         if unexpected is not None:
-            # Every completed reply is committed above before this propagates.
             raise unexpected
         if all(text is None for _member, text, _failure in replies):
             raise _StopError(

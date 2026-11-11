@@ -478,3 +478,61 @@ def test_the_api_never_appends_a_second_panel_to_a_journal(tmp_path: Path) -> No
     with pytest.raises(PanelError, match="already holds a journal"):
         run_api_panel(_spec(tmp_path), events_path=events)
     assert events.read_text() == '{"seq": 1}\n'
+
+
+class _SlowFounder(PanelRunner):
+    """The founder's turn runs until it is cancelled."""
+
+    def run(
+        self,
+        tool: AIToolID,
+        request: HeadlessSessionRequest,
+        cancel_event: threading.Event,
+        on_event: Any = None,
+    ) -> HeadlessSessionResult:
+        if request.working_dir.name == "founder":
+            with self.lock:
+                self.requests["founder"].append(request)
+            cancel_event.wait(5)
+            return _failed(tool)
+        return super().run(tool, request, cancel_event, on_event)
+
+
+@pytest.mark.parametrize("concurrency", [3, 1])
+def test_ctrl_c_mid_dispatch_keeps_the_replies_that_came_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrency: int
+) -> None:
+    from concurrent.futures import wait as real_wait
+
+    from crossby.services import panel as panel_service
+
+    def interrupt_once_one_answered(fs: Any, timeout: Any = None, return_when: Any = None) -> Any:
+        done, pending = real_wait(fs, timeout=timeout, return_when=return_when)
+        if done and pending:
+            raise KeyboardInterrupt  # the cto's reply is done but not yet collected
+        return done, pending
+
+    monkeypatch.setattr(panel_service, "wait", interrupt_once_one_answered)
+    runner = _SlowFounder(
+        {"lead": ["Q?\nNEXT: ASK @all"], "cto": ["first"], "founder": [], "buyer": ["third"]}
+    )
+    journal = Journal("p")
+    result = panel_service.run_panel(
+        _spec(tmp_path, concurrency=concurrency), runner=runner, journal=journal
+    )
+    journal.close()
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    committed = {
+        event.data["participant"]: event.data["text"]
+        for event in journal.events
+        if event.type is EventType.MESSAGE_COMMITTED
+    }
+    assert committed["cto"] == "first"
+    assert [turn.sender for turn in result.turns][:2] == ["lead", "cto"]
+    failed = {member: reason for _dispatch, member, reason in result.member_failures}
+    assert "founder" in failed
+    if concurrency == 1:
+        # The buyer was still queued behind the founder: it never started.
+        assert runner.requests["buyer"] == []
+        assert failed["buyer"] == "interrupted before it started"

@@ -152,3 +152,25 @@ def test_a_panel_never_reuses_a_folder_with_a_journal(
     assert "already holds a panel" in " ".join(again.stderr.split())
     assert (out / "events.jsonl").read_text() == before
     assert all(not calls for calls in fake.requests.values())
+
+
+def test_a_journal_that_could_not_be_saved_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import journal as journal_module
+
+    root = _project(tmp_path, RECIPE)
+    _use(
+        monkeypatch,
+        PanelRunner(
+            {root.name: ["Q?\nNEXT: ASK @cto", "ok\nNEXT: DONE"], "cto": ["a"], "founder": []}
+        ),
+    )
+
+    def unwritable(fd: int, data: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(journal_module, "_write_all", unwritable)
+    result = _invoke(root, "pricing", "-g", "g", "--output-dir", str(root / "out"), "--quiet")
+    assert result.exit_code == 0, result.output
+    assert "The event journal is incomplete" in " ".join(result.stderr.split())
