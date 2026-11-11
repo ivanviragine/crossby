@@ -15,6 +15,7 @@ from typing import Any, cast
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from crossby.ai_tools.failure_reasons import classify_failure
 from crossby.models.ai import (
     AIToolID,
     HeadlessCapability,
@@ -841,15 +842,14 @@ class HeadlessRuntimeContext:
                 self._failure_reasons.append(reason)
 
     def _classify_failure(self) -> HeadlessFailureReason | None:
-        from crossby.ai_tools.failure_reasons import classify_failure
-
         with self._evidence_lock:
-            return classify_failure(
-                self.tool_id,
-                texts=tuple(self._failure_texts),
-                http_statuses=tuple(self._failure_http_statuses),
-                reasons=tuple(self._failure_reasons),
-            )
+            if not (self._failure_texts or self._failure_http_statuses or self._failure_reasons):
+                # No evidence (every SDK and protocol transport): nothing to do.
+                return None
+            texts = tuple(self._failure_texts)
+            statuses = tuple(self._failure_http_statuses)
+            reasons = tuple(self._failure_reasons)
+        return classify_failure(self.tool_id, texts=texts, http_statuses=statuses, reasons=reasons)
 
     def add_denial(self, denial: str) -> None:
         self._denials.append(_bounded_diagnostic(_redact_prompt(denial, self.request.prompt)))
