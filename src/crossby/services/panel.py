@@ -687,6 +687,11 @@ def run_panel(
         if unexpected is not None:
             raise unexpected
         if all(text is None for _member, text, _failure in replies):
+            if remaining() < MIN_TURN_SECONDS:
+                # The panel's time ran out, not its members: nothing more can start.
+                raise _StopError(
+                    StopReason.TIMEOUT, f"panel time limit reached during message {dispatch}"
+                )
             raise _StopError(
                 StopReason.FAILED,
                 f"every member addressed in message {dispatch} failed: "

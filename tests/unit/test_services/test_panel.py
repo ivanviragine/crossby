@@ -536,3 +536,38 @@ def test_ctrl_c_mid_dispatch_keeps_the_replies_that_came_in(
         # The buyer was still queued behind the founder: it never started.
         assert runner.requests["buyer"] == []
         assert failed["buyer"] == "interrupted before it started"
+
+
+def test_members_cut_off_by_the_panel_deadline_end_it_as_a_timeout(tmp_path: Path) -> None:
+    from crossby.services import panel as panel_service
+
+    clock = [0.0]
+    runner = PanelRunner(
+        {"lead": ["Q?\nNEXT: ASK @all"], "cto": [None], "founder": ["late"], "buyer": ["late"]}
+    )
+    real_run = runner.run
+
+    def run_and_age(tool: Any, request: Any, cancel: Any, on_event: Any = None) -> Any:
+        result = real_run(tool, request, cancel, on_event)
+        if request.working_dir.name == "cto":
+            clock[0] += 10_000  # the cto's turn used up the panel's time
+        return result
+
+    runner.run = run_and_age  # type: ignore[method-assign]
+    spec = _spec(tmp_path, concurrency=1, timeout_seconds=100)
+    result = panel_service.run_panel(spec, runner=runner, clock=lambda: clock[0])
+    assert result.stop_reason is StopReason.TIMEOUT
+    assert result.exit_code == 2
+    assert "time limit" in (result.error or "")
+    assert runner.requests["founder"] == runner.requests["buyer"] == []
+
+
+def test_members_that_all_fail_in_time_end_it_as_failed(tmp_path: Path) -> None:
+    from crossby.services import panel as panel_service
+
+    runner = PanelRunner(
+        {"lead": ["Q?\nNEXT: ASK @all"], "cto": [None], "founder": [None], "buyer": [None]}
+    )
+    result = panel_service.run_panel(_spec(tmp_path), runner=runner)
+    assert result.stop_reason is StopReason.FAILED
+    assert "every member addressed in message 1 failed" in (result.error or "")
