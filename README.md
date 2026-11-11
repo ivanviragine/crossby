@@ -533,6 +533,7 @@ How a consultation runs:
 | `turn.progress` | `turn`, `kind` (`tool_started`, `tool_completed`, `assistant_message`, or `progress` at most once a second), `elapsed_seconds`; never content |
 | `turn.finished` | `turn`, `role`, `tool`, `status`, `duration_seconds`, `session_id`, `usage`, `denials`, `failure_reason`, `error` (failed turns too) |
 | `message.committed` | `turn`, `role`, `tool`, `text` as relayed, `next` (`ASK`, `DONE`, `MISSING` or none), `duration_seconds`, `denials`, `usage` |
+| `input.requested` / `input.resolved` | panels only: a human seat's `request_id`, `participant`, `kind` (`lead` or `member`), `turn` and `message`; then its `status` |
 | `conversation.continued` | `previous_stop_reason`, `max_rounds` (the new total), `added_rounds`, timeouts |
 | `conversation.finished` | `stop_reason`, `error`, `answered_at_limit`, `rounds`, `sessions`, `finished_at` |
 
@@ -574,7 +575,9 @@ panels:
 - **The lead's opening** is protocol text only, notice version 1: `Goal: {goal}`, the roster (`@cto (Rui), @founder, …`), the markers and the limit. A recipe's `notice: FILE` replaces its wording, formatted with `{goal}`, `{roster}`, `{count}` and `{max_rounds}`; the grammar never changes. After the last allowed message the lead is told to answer now.
 - Everything is journaled in `.crossby/panels/<time>/events.jsonl` (`--output-dir` to choose), with each event's `participant` (`lead` or a member id) and each lead message's `recipients`, and `transcript.md` is written at the end. Exit codes are those of `converse`.
 
-From Python, `crossby.api.panel(PanelSpec(goal=…, lead=Lead(…), members=(Member(id=…, backend=CliBackend(…), workspace=…), …)), on_event=…, events_path=…)` runs the same engine; `on_event` gets every event on a dispatcher thread. A journal problem never stops a panel: the result's `journal_error` says why the events file is missing or incomplete, and `sink_errors` lists each `on_event` failure that dropped the sink.
+- **A person can take a seat.** A member or the lead with `human: true` (`HumanBackend()` in Python) gets each turn as an `input.requested` event, with `request_id` and the `message` they received, and the run waits up to `human_timeout` (default 1800 s) for their reply; `input.resolved` records `answered`, `timed_out`, `cancelled` or `empty`. A member who does not reply becomes a failure note. A human lead names members with a typed action (`recipients` or `done`), never a `NEXT:` line. `crossby panel` reads a human seat's reply from the terminal (end it with a line holding only `.`; a lead is then asked for `@ids`, `@all` or `done`).
+
+From Python, `crossby.api.panel(PanelSpec(goal=…, lead=Lead(…), members=(Member(id=…, backend=CliBackend(…), workspace=…), …)), on_event=…, events_path=…, inputs=HumanInput())` runs the same engine; `on_event` gets every event on a dispatcher thread, and a UI answers a human seat with `inputs.submit(request_id, text, recipients=…, done=…)` (or `HumanInput(responder)` answers synchronously). A journal problem never stops a panel: the result's `journal_error` says why the events file is missing or incomplete, and `sink_errors` lists each `on_event` failure that dropped the sink.
 
 ## Python API
 

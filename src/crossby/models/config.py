@@ -331,11 +331,19 @@ class PanelLeadConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tool: str
+    # A person leads instead of an agent (crossby panel reads the terminal).
+    human: bool = False
+    tool: str | None = None
     model: str | None = None
     effort: str | None = None
     # The lead's folder, relative to the project root.
     folder: str = "."
+
+    @model_validator(mode="after")
+    def _tool_or_human(self) -> PanelLeadConfig:
+        if self.human == (self.tool is not None):
+            raise ValueError("set either tool or human: true")
+        return self
 
 
 class PanelMemberConfig(BaseModel):
@@ -352,7 +360,9 @@ class PanelMemberConfig(BaseModel):
 
     id: str
     name: str | None = None
-    tool: str
+    # A person takes this seat instead of an agent.
+    human: bool = False
+    tool: str | None = None
     model: str | None = None
     effort: str | None = None
     folder: str = "."
@@ -360,6 +370,14 @@ class PanelMemberConfig(BaseModel):
     instructions: str | None = None
     skills: list[str] = Field(default_factory=list)
     files: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _tool_or_human(self) -> PanelMemberConfig:
+        if self.human == (self.tool is not None):
+            raise ValueError("set either tool or human: true")
+        if self.human and (self.persona_folder or self.instructions or self.skills or self.files):
+            raise ValueError("a human member takes no folder, instructions, skills or files")
+        return self
 
 
 class PanelConfig(BaseModel):
@@ -377,6 +395,8 @@ class PanelConfig(BaseModel):
     # A file whose text replaces the lead's opening notice wording.
     notice: str | None = None
     require_blocked: list[str] = Field(default_factory=list)
+    # Seconds a human seat may take to reply.
+    human_timeout: float = Field(default=1800.0, gt=0)
 
 
 class CrossbyConfig(BaseModel):

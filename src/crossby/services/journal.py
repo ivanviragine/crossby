@@ -47,6 +47,8 @@ class EventType(StrEnum):
     TURN_PROGRESS = "turn.progress"
     TURN_FINISHED = "turn.finished"
     MESSAGE_COMMITTED = "message.committed"
+    INPUT_REQUESTED = "input.requested"
+    INPUT_RESOLVED = "input.resolved"
     CONVERSATION_FINISHED = "conversation.finished"
 
 

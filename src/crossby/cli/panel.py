@@ -73,7 +73,7 @@ def panel(
         JournalError,
         JournalExistsError,
     )
-    from crossby.services.panel import render_panel_transcript, run_panel
+    from crossby.services.panel import HumanInput, render_panel_transcript, run_panel
 
     root = _project_root(path)
     try:
@@ -112,15 +112,15 @@ def panel(
     except JournalError as exc:
         console.error(str(exc))
         raise typer.Exit(1) from None
+    human = spec.lead.human or any(member.human for member in spec.members)
     try:
         if not quiet:
-            roster = ", ".join(f"@{m.id} ({m.backend.tool.value})" for m in spec.members)
-            _stderr(
-                f"[step]▸[/] {spec.lead.backend.tool.value} leads a {spec.visibility} "
-                f"panel: {roster}"
-            )
+            roster = ", ".join(f"@{m.id} ({m.tool_name})" for m in spec.members)
+            _stderr(f"[step]▸[/] {spec.lead.tool_name} leads a {spec.visibility} panel: {roster}")
             _stderr(f"[dim]      events: {_escape(str(journal.path))}[/]")
-        result = run_panel(spec, journal=journal)
+        result = run_panel(
+            spec, journal=journal, inputs=HumanInput(_terminal_reply) if human else None
+        )
     finally:
         journal.close()
     if journal.store_error is not None:
@@ -146,7 +146,7 @@ def _spec(
 
     from crossby.models.ai import EffortLevel, RestrictionChannel
     from crossby.services.ask import CliBackend, ProjectWorkspace
-    from crossby.services.panel import Lead, Member, PanelSpec
+    from crossby.services.panel import HumanBackend, Lead, Member, PanelSpec
     from crossby.services.workspaces import OwnedWorkspaceSpec, WorkspaceError, provision
 
     def backend(tool: str, model: str | None, effort: str | None, role: str) -> CliBackend:
@@ -167,6 +167,10 @@ def _spec(
     try:
         members = []
         for item in recipe.members:
+            if item.human:
+                members.append(Member(id=item.id, name=item.name, backend=HumanBackend()))
+                continue
+            assert item.tool is not None
             instructions = text(item.instructions, "instructions") if item.instructions else None
             member_backend = backend(item.tool, item.model, item.effort, f"member {item.id}")
             if item.persona_folder is not None:
@@ -190,14 +194,19 @@ def _spec(
             members.append(
                 Member(id=item.id, name=item.name, backend=member_backend, workspace=workspace)
             )
-        return PanelSpec(
-            goal=goal,
-            lead=Lead(
+        if recipe.lead.human:
+            lead = Lead(backend=HumanBackend())
+        else:
+            assert recipe.lead.tool is not None
+            lead = Lead(
                 backend=backend(
                     recipe.lead.tool, recipe.lead.model, recipe.lead.effort, "the lead"
                 ),
                 folder=_project_root(root / recipe.lead.folder, "the lead's folder"),
-            ),
+            )
+        return PanelSpec(
+            goal=goal,
+            lead=lead,
             members=tuple(members),
             visibility=recipe.visibility,
             max_rounds=max_rounds or recipe.max_rounds,
@@ -207,10 +216,43 @@ def _spec(
             require_blocked=frozenset(RestrictionChannel(c) for c in recipe.require_blocked),
             allow_project_hooks=allow_project_hooks,
             protocol_notice=text(recipe.notice, "notice") if recipe.notice else None,
+            human_timeout_seconds=recipe.human_timeout,
         )
     except (ValidationError, ValueError, WorkspaceError) as exc:
         console.error(f"The panel recipe is invalid: {exc}")
         raise typer.Exit(1) from None
+
+
+def _terminal_reply(request: Any) -> Any:
+    """A human seat's reply, read from stdin: lines up to a lone "." or end of input.
+
+    A human lead then names the members (`@cto @founder`, `@all`) or types
+    `done` for a final answer.
+    """
+    from crossby.services.panel import HumanReply
+
+    who = "lead" if request.kind == "lead" else f"@{request.participant}"
+    if request.message:
+        _stderr(f"[step]▸[/] [bold]{who}[/], your turn. You received:")
+        _stderr(_escape(request.message))
+    else:
+        _stderr(f"[step]▸[/] [bold]{who}[/], your turn.")
+    _stderr("[dim]      Write your reply; end it with a line holding only a period.[/]")
+    lines: list[str] = []
+    for line in sys.stdin:
+        if line.rstrip("\n") == ".":
+            break
+        lines.append(line.rstrip("\n"))
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if request.kind != "lead":
+        return HumanReply(text)
+    _stderr("[dim]      Send to whom? @ids, @all, or done for your final answer:[/]")
+    target = (sys.stdin.readline() or "").strip()
+    if target.lower() == "done":
+        return HumanReply(text, done=True)
+    return HumanReply(text, recipients=tuple(target.replace(",", " ").split()))
 
 
 def _show(event: Any) -> None:
@@ -256,7 +298,7 @@ def _report(
                 "members": [
                     {
                         "id": member.id,
-                        "tool": member.backend.tool.value,
+                        "tool": member.tool_name,
                         "session_id": result.sessions.get(member.id),
                         "replies": sum(1 for t in result.turns if t.sender == member.id),
                     }

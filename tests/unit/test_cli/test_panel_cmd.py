@@ -175,3 +175,45 @@ def test_a_journal_that_could_not_be_saved_is_reported(
     assert result.exit_code == 0, result.output
     assert "The event journal is incomplete" in " ".join(result.stderr.split())
     assert "No space left" in json.loads(result.stdout)["journal_error"]
+
+
+def test_a_person_takes_a_seat_from_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe = RECIPE.replace(
+        "{id: founder, tool: cursor, folder: founder}", "{id: dana, name: Dana, human: true}"
+    )
+    root = _project(tmp_path, recipe)
+    fake = _use(
+        monkeypatch,
+        PanelRunner({root.name: ["Q?\nNEXT: ASK @all", "ok\nNEXT: DONE"], "cto": ["Yes."]}),
+    )
+    result = runner.invoke(
+        app,
+        ["panel", "pricing", "-g", "g", "--path", str(root), "--json"],
+        input="I would pay 20.\nAnd no more.\n.\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert fake.requests[root.name][1].prompt == (
+        "@cto:\nYes.\n\n@dana:\nI would pay 20.\nAnd no more."
+    )
+    assert "@dana, your turn" in " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(
+    ("member", "message"),
+    [
+        ("{id: dana, human: true, tool: codex}", "set either tool or human"),
+        ("{id: dana}", "set either tool or human"),
+        ("{id: dana, human: true, instructions: personas/cto.md}", "human member takes no"),
+    ],
+)
+def test_a_human_seat_is_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str, message: str
+) -> None:
+    founder = "{id: founder, tool: cursor, folder: founder}"
+    root = _project(tmp_path, RECIPE.replace(founder, member))
+    _use(monkeypatch, PanelRunner({root.name: [], "cto": []}))
+    result = _invoke(root, "pricing", "-g", "g")
+    assert result.exit_code == 1
+    assert message in " ".join(result.stderr.split())

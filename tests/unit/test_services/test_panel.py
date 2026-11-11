@@ -613,3 +613,129 @@ def test_the_api_reports_no_journal_error_when_all_was_saved(
     result = run_api_panel(_spec(tmp_path), events_path=tmp_path / "events.jsonl")
     assert result.answered
     assert result.journal_error is None and result.sink_errors == ()
+
+
+# ---------------------------------------------------------------------------
+# Human seats
+# ---------------------------------------------------------------------------
+
+from crossby.services.panel import HumanBackend, HumanInput, HumanReply, InputRequest  # noqa: E402
+
+
+def _with_human_member(tmp_path: Path) -> PanelSpec:
+    spec = _spec(tmp_path)
+    return spec.model_copy(
+        update={
+            "members": (
+                spec.members[0],
+                Member(id="dana", name="Dana", backend=HumanBackend()),
+            )
+        }
+    )
+
+
+def test_a_person_answers_when_addressed(tmp_path: Path) -> None:
+    asked: list[InputRequest] = []
+
+    def respond(request: InputRequest) -> HumanReply:
+        asked.append(request)
+        return HumanReply("I'd pay 20 a month.")
+
+    runner = PanelRunner(
+        {
+            "lead": ["Price?\nNEXT: ASK @all", "x\nNEXT: DONE"],
+            "cto": ["Too high."],
+            "founder": [],
+            "buyer": [],
+        }
+    )
+    journal = Journal("p")
+    result = run_panel(
+        _with_human_member(tmp_path), runner=runner, journal=journal, inputs=HumanInput(respond)
+    )
+    assert result.answered
+    assert [(r.participant, r.kind, r.message) for r in asked] == [("dana", "member", "Price?")]
+    assert runner.requests["lead"][1].prompt == "@cto:\nToo high.\n\n@dana:\nI'd pay 20 a month."
+    # No preflight for a person, and no folder.
+    assert len(runner.preflights) == 2
+    types = [e.type for e in journal.events]
+    assert EventType.INPUT_REQUESTED in types and EventType.INPUT_RESOLVED in types
+    resolved = next(e for e in journal.events if e.type is EventType.INPUT_RESOLVED)
+    assert resolved.data["status"] == "answered"
+
+
+def test_a_person_who_does_not_reply_is_a_failure_note(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @all", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _with_human_member(tmp_path).model_copy(update={"human_timeout_seconds": 0.3})
+    result = run_panel(spec, runner=runner, inputs=HumanInput())
+    assert result.answered
+    assert "@dana (no answer: no reply within 0.3s)" in runner.requests["lead"][1].prompt
+
+
+def test_a_ui_submits_replies_to_open_requests(tmp_path: Path) -> None:
+    inputs = HumanInput()
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @dana", "x\nNEXT: DONE"], "cto": [], "founder": [], "buyer": []}
+    )
+    outcome: dict[str, Any] = {}
+    thread = threading.Thread(
+        target=lambda: outcome.setdefault(
+            "result", run_panel(_with_human_member(tmp_path), runner=runner, inputs=inputs)
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not inputs.pending() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    (request,) = inputs.pending()
+    with pytest.raises(KeyError):
+        inputs.submit("not-a-request", "x")
+    inputs.submit(request.request_id, "From the UI.")
+    thread.join(5)
+    assert outcome["result"].answered
+    assert runner.requests["lead"][1].prompt == "@dana:\nFrom the UI."
+
+
+def test_a_person_can_lead_with_typed_actions(tmp_path: Path) -> None:
+    replies = iter(
+        [
+            HumanReply("What would you pay?", recipients=("@founder", "cto")),
+            HumanReply("Thanks, that settles it.", done=True),
+        ]
+    )
+    seen: list[str | None] = []
+
+    def respond(request: InputRequest) -> HumanReply:
+        seen.append(request.message)
+        return next(replies)
+
+    runner = PanelRunner({"cto": ["30"], "founder": ["10"], "buyer": []})
+    spec = _spec(tmp_path).model_copy(update={"lead": Lead(backend=HumanBackend())})
+    result = run_panel(spec, runner=runner, inputs=HumanInput(respond))
+    assert result.answered
+    assert result.final_answer == "Thanks, that settles it."
+    # Members get the person's text exactly; the lead sees their replies next.
+    assert runner.requests["cto"][0].prompt == "What would you pay?"
+    assert seen == [None, "@cto:\n30\n\n@founder:\n10"]
+    assert len(runner.preflights) == 3  # members only
+
+
+def test_a_person_leading_must_name_real_members(tmp_path: Path) -> None:
+    spec = _spec(tmp_path).model_copy(update={"lead": Lead(backend=HumanBackend())})
+    runner = PanelRunner({"cto": [], "founder": [], "buyer": []})
+    result = run_panel(
+        spec, runner=runner, inputs=HumanInput(lambda _r: HumanReply("Q", recipients=("@ceo",)))
+    )
+    assert result.stop_reason is StopReason.FAILED
+    assert "no member is named @ceo; nothing was sent" in (result.error or "")
+
+
+def test_a_human_seat_needs_an_input(tmp_path: Path) -> None:
+    from crossby.services.panel import PanelError
+
+    with pytest.raises(PanelError, match="HumanInput"):
+        run_panel(_with_human_member(tmp_path), runner=PanelRunner({}))
+    with pytest.raises(ValueError, match="no folder"):
+        Member(id="x", backend=HumanBackend(), workspace=ProjectWorkspace(path=tmp_path))

@@ -33,9 +33,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
 from crossby.models.ai import (
     HeadlessEvent,
@@ -96,13 +104,34 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class HumanBackend(_Frozen):
+    """A seat a person takes: their turns come from a :class:`HumanInput`."""
+
+    kind: Literal["human"] = "human"
+
+
+def _backend_kind(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("kind", "cli"))
+    return "human" if isinstance(value, HumanBackend) else "cli"
+
+
+Backend = Annotated[
+    Annotated[CliBackend, Tag("cli")] | Annotated[HumanBackend, Tag("human")],
+    Discriminator(_backend_kind),
+]
+
+
 class Member(_Frozen):
-    """One read-only member: an id the lead addresses, an agent and its folder."""
+    """One member: an id the lead addresses, and an agent with its folder, or a person.
+
+    An agent member is always read-only; a human member has no folder.
+    """
 
     id: str
     name: str | None = None
-    backend: CliBackend
-    workspace: Workspace
+    backend: Backend
+    workspace: Workspace | None = None
 
     @field_validator("id")
     @classmethod
@@ -115,7 +144,13 @@ class Member(_Frozen):
         return value
 
     @model_validator(mode="after")
-    def _owned_folder_matches(self) -> Member:
+    def _seat_is_coherent(self) -> Member:
+        if isinstance(self.backend, HumanBackend):
+            if self.workspace is not None:
+                raise ValueError(f"human member {self.id} has no folder")
+            return self
+        if self.workspace is None:
+            raise ValueError(f"member {self.id} needs a folder")
         if isinstance(self.workspace, OwnedWorkspace) and self.workspace.tool is not (
             self.backend.tool
         ):
@@ -123,15 +158,37 @@ class Member(_Frozen):
         return self
 
     @property
+    def human(self) -> bool:
+        return isinstance(self.backend, HumanBackend)
+
+    @property
+    def tool_name(self) -> str:
+        return "human" if isinstance(self.backend, HumanBackend) else self.backend.tool.value
+
+    @property
     def label(self) -> str:
         return f"@{self.id}"
 
 
 class Lead(_Frozen):
-    """The agent that holds the goal; it runs in ``folder`` with its normal policy."""
+    """Who holds the goal: an agent running in ``folder`` with its normal policy, or a person."""
 
-    backend: CliBackend
-    folder: Path
+    backend: Backend
+    folder: Path | None = None
+
+    @model_validator(mode="after")
+    def _seat_is_coherent(self) -> Lead:
+        if not isinstance(self.backend, HumanBackend) and self.folder is None:
+            raise ValueError("an agent lead needs a folder")
+        return self
+
+    @property
+    def human(self) -> bool:
+        return isinstance(self.backend, HumanBackend)
+
+    @property
+    def tool_name(self) -> str:
+        return "human" if isinstance(self.backend, HumanBackend) else self.backend.tool.value
 
 
 class PanelSpec(_Frozen):
@@ -149,6 +206,8 @@ class PanelSpec(_Frozen):
     # Replaces the wording of the lead's opening notice; it is formatted with
     # {goal}, {roster}, {count} and {max_rounds}. The grammar never changes.
     protocol_notice: str | None = None
+    # How long a human seat may take to reply before its turn times out.
+    human_timeout_seconds: float = Field(default=1800.0, gt=0)
 
     @field_validator("goal")
     @classmethod
@@ -224,6 +283,94 @@ def parse_dispatch(text: str, member_ids: Sequence[str]) -> tuple[str, Dispatch]
         raise ProtocolError("a member is named twice")
     # Roster order, whatever order the lead named them in.
     return body, Dispatch(done=False, recipients=tuple(m for m in member_ids if m in ids))
+
+
+# ---------------------------------------------------------------------------
+# Human seats
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InputRequest:
+    """A human seat's turn: what they are asked to reply to."""
+
+    request_id: str
+    participant: str  # "lead" or a member id
+    kind: Literal["lead", "member"]
+    turn: int
+    # For a member: the lead's message (with missed replies, if shared). For
+    # the lead: the members' replies, or None for its first message.
+    message: str | None
+
+
+@dataclass(frozen=True)
+class HumanReply:
+    """A human's reply. A human lead names its ``recipients`` or sets ``done``."""
+
+    text: str
+    recipients: tuple[str, ...] = ()
+    done: bool = False
+
+
+HumanResponder = Callable[[InputRequest], "HumanReply | None"]
+
+
+class HumanInput:
+    """Where a panel gets its human seats' replies.
+
+    A UI watches for ``input.requested`` events (or calls :meth:`pending`) and
+    calls :meth:`submit` with the request's id. A ``responder`` instead
+    answers each request synchronously (the CLI reads the terminal). Safe from
+    any thread.
+    """
+
+    def __init__(self, responder: HumanResponder | None = None) -> None:
+        self._responder = responder
+        self._lock = threading.Lock()
+        self._open: dict[str, InputRequest] = {}
+        self._replies: dict[str, HumanReply] = {}
+        self._ready = threading.Condition(self._lock)
+
+    def pending(self) -> tuple[InputRequest, ...]:
+        with self._lock:
+            return tuple(self._open.values())
+
+    def submit(
+        self,
+        request_id: str,
+        text: str,
+        *,
+        recipients: Sequence[str] = (),
+        done: bool = False,
+    ) -> None:
+        """Reply to an open request; raises ``KeyError`` for an unknown or closed one."""
+        with self._ready:
+            if request_id not in self._open:
+                raise KeyError(f"no open input request {request_id!r}")
+            self._replies[request_id] = HumanReply(text, tuple(recipients), done)
+            self._ready.notify_all()
+
+    def _await(
+        self, request: InputRequest, timeout: float, cancel: threading.Event
+    ) -> tuple[HumanReply | None, str]:
+        """The reply and how it resolved: answered, timed_out or cancelled."""
+        if self._responder is not None:
+            reply = self._responder(request)
+            return (reply, "answered") if reply is not None else (None, "cancelled")
+        deadline = monotonic() + timeout
+        with self._ready:
+            self._open[request.request_id] = request
+            try:
+                while request.request_id not in self._replies:
+                    if cancel.is_set():
+                        return None, "cancelled"
+                    left = deadline - monotonic()
+                    if left <= 0:
+                        return None, "timed_out"
+                    self._ready.wait(min(left, 0.1))
+                return self._replies.pop(request.request_id), "answered"
+            finally:
+                self._open.pop(request.request_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +481,22 @@ def run_panel(
     *,
     runner: TurnRunner | None = None,
     journal: Journal | None = None,
+    inputs: HumanInput | None = None,
     clock: Callable[[], float] = monotonic,
 ) -> PanelResult:
-    """Run a panel until the lead gives its final answer, or a limit stops it."""
+    """Run a panel until the lead gives its final answer, or a limit stops it.
+
+    Human seats get their replies from ``inputs`` (required when the panel has
+    one): each turn emits ``input.requested`` and then ``input.resolved``.
+    """
     from crossby.ai_tools.headless import HeadlessSessionError
     from crossby.services.journal import EventType
 
     check_depth()
+    has_human = spec.lead.human or any(member.human for member in spec.members)
+    if has_human and inputs is None:
+        raise PanelError("A panel with a human seat needs a HumanInput.")
+    human_inputs = inputs or HumanInput()
     active: TurnRunner = runner or HeadlessTurnRunner()
     started_at = datetime.now(tz=UTC)
     deadline = clock() + spec.timeout_seconds
@@ -429,9 +585,47 @@ def run_panel(
 
     def member_folder(member: Member) -> tuple[Path, str | None]:
         workspace = member.workspace
+        assert workspace is not None  # agent members always have one
         if isinstance(workspace, OwnedWorkspace):
             return workspace.path, workspace.layout.verified_version
         return workspace.path, None
+
+    def ask_human(
+        participant: str, kind: Literal["lead", "member"], number: int, message: str | None
+    ) -> tuple[HumanReply | None, str | None, float]:
+        """One human turn: ``(reply, failure, seconds)``."""
+        request_id = f"{journal.run_id if journal is not None else 'panel'}-{number}-{participant}"
+        emit(
+            EventType.INPUT_REQUESTED,
+            request_id=request_id,
+            participant=participant,
+            kind=kind,
+            turn=number,
+            message=message,
+        )
+        begun = clock()
+        left = min(spec.human_timeout_seconds, max(remaining(), 0.0))
+        reply, status = human_inputs._await(
+            InputRequest(request_id, participant, kind, number, message), left, cancel
+        )
+        if reply is not None and not reply.text.strip():
+            reply, status = None, "empty"
+        emit(
+            EventType.INPUT_RESOLVED,
+            request_id=request_id,
+            participant=participant,
+            status=status,
+        )
+        failure = (
+            None
+            if reply is not None
+            else {
+                "timed_out": f"no reply within {left:g}s",
+                "cancelled": "the reply was cancelled",
+                "empty": "the reply was empty",
+            }.get(status, status)
+        )
+        return reply, failure, clock() - begun
 
     def progress(participant: str, number: int) -> Callable[[HeadlessEvent], None]:
         def handle(event: HeadlessEvent) -> None:
@@ -509,7 +703,35 @@ def run_panel(
             denials=list(turn.denials),
         )
 
+    def human_lead_turn(message: str | None, number: int) -> tuple[str, Dispatch, float]:
+        reply, failure, seconds = ask_human("lead", "lead", number, message)
+        if reply is None:
+            raise _StopError(StopReason.FAILED, f"lead turn {number}: {failure}")
+        if reply.done:
+            if reply.recipients:
+                raise _StopError(
+                    StopReason.FAILED, f"lead turn {number}: a final answer names no members"
+                )
+            return reply.text.strip(), Dispatch(done=True), seconds
+        recipients = [name.lstrip("@").lower() for name in reply.recipients]
+        if recipients == ["all"]:
+            chosen = tuple(member_ids)
+        elif not recipients and len(member_ids) == 1:
+            chosen = (member_ids[0],)
+        else:
+            unknown = [name for name in recipients if name not in member_ids]
+            if not recipients or unknown or len(set(recipients)) != len(recipients):
+                problem = (
+                    f"no member is named @{unknown[0]}" if unknown else "name members once each"
+                )
+                raise _StopError(
+                    StopReason.FAILED, f"lead turn {number}: {problem}; nothing was sent"
+                )
+            chosen = tuple(m for m in member_ids if m in recipients)
+        return reply.text.strip(), Dispatch(done=False, recipients=chosen), seconds
+
     def lead_turn(message: str, number: int) -> tuple[str, float, HeadlessSessionResult]:
+        assert isinstance(spec.lead.backend, CliBackend) and spec.lead.folder is not None
         built = request(
             message,
             spec.lead.backend,
@@ -538,8 +760,15 @@ def run_panel(
         seat: _Seat, body: str, number: int
     ) -> tuple[str, str | None, str | None, float, HeadlessSessionResult | None]:
         member = seat.member
-        folder, minimum = member_folder(member)
         message = member_message(seat, body, shared=shared)
+        if member.human:
+            reply, failure, seconds = ask_human(member.id, "member", number, message)
+            if reply is not None:
+                with lock:
+                    seat.pending.clear()
+            return member.id, (reply.text.strip() if reply else None), failure, seconds, None
+        assert isinstance(member.backend, CliBackend)
+        folder, minimum = member_folder(member)
         if seat.session_id is None and isinstance(member.workspace, ProjectWorkspace):
             message = render_envelope(message, member.workspace.instructions)
         try:
@@ -581,12 +810,13 @@ def run_panel(
                         f"@{member.id}'s persona folder changed since it was provisioned: "
                         f"{', '.join(exc.changed[:5])}; provision it again",
                     ) from None
-        checks: list[tuple[str, CliBackend, Path, bool, str | None]] = [
-            ("lead", spec.lead.backend, spec.lead.folder, False, None)
-        ]
+        checks: list[tuple[str, CliBackend, Path, bool, str | None]] = []
+        if isinstance(spec.lead.backend, CliBackend) and spec.lead.folder is not None:
+            checks.append(("lead", spec.lead.backend, spec.lead.folder, False, None))
         for member in spec.members:
-            folder, minimum = member_folder(member)
-            checks.append((member.id, member.backend, folder, True, minimum))
+            if isinstance(member.backend, CliBackend):
+                folder, minimum = member_folder(member)
+                checks.append((member.id, member.backend, folder, True, minimum))
         for participant, backend, folder, read_only, minimum in checks:
             probe = request(
                 "preflight",
@@ -710,13 +940,13 @@ def run_panel(
         visibility=spec.visibility,
         notice_version=PANEL_NOTICE_VERSION,
         participants=[
-            {"participant": "lead", "tool": spec.lead.backend.tool.value, "read_only": False},
+            {"participant": "lead", "tool": spec.lead.tool_name, "read_only": False},
             *[
                 {
                     "participant": member.id,
                     "name": member.name,
-                    "tool": member.backend.tool.value,
-                    "read_only": True,
+                    "tool": member.tool_name,
+                    "read_only": not member.human,
                 }
                 for member in spec.members
             ],
@@ -729,16 +959,22 @@ def run_panel(
         preflight()
         message = render_notice(spec)
         dispatches = 0
+        first = True
         while True:
             final = dispatches >= spec.max_rounds
             number = claim()
-            text, seconds, result = lead_turn(message, number)
-            try:
-                body, dispatch = parse_dispatch(text, member_ids)
-            except ProtocolError as exc:
-                raise _StopError(
-                    StopReason.FAILED, f"lead turn {number}: {exc}; nothing was sent"
-                ) from None
+            if spec.lead.human:
+                body, dispatch, seconds = human_lead_turn(None if first else message, number)
+                result = None
+            else:
+                text, seconds, result = lead_turn(message, number)
+                try:
+                    body, dispatch = parse_dispatch(text, member_ids)
+                except ProtocolError as exc:
+                    raise _StopError(
+                        StopReason.FAILED, f"lead turn {number}: {exc}; nothing was sent"
+                    ) from None
+            first = False
             if not body:
                 raise _StopError(StopReason.FAILED, f"lead turn {number} sent only the marker")
             commit(
@@ -749,8 +985,8 @@ def run_panel(
                     recipients=dispatch.recipients,
                     done=dispatch.done,
                     duration_seconds=seconds,
-                    denials=tuple(result.denials),
-                    usage=result.usage,
+                    denials=tuple(result.denials) if result is not None else (),
+                    usage=result.usage if result is not None else None,
                 )
             )
             if dispatch.done:
@@ -775,18 +1011,16 @@ def render_panel_transcript(result: PanelResult) -> str:
     from crossby.services.converse import _fenced
 
     spec = result.spec
-    lines = [
-        "# Panel",
-        "",
-        f"- Lead: {spec.lead.backend.tool.value}, in `{spec.lead.folder}`",
-    ]
+    lead = "a person" if spec.lead.human else f"{spec.lead.tool_name}, in `{spec.lead.folder}`"
+    lines = ["# Panel", "", f"- Lead: {lead}"]
     for member in spec.members:
+        name = f" ({member.name})" if member.name else ""
+        if member.workspace is None:
+            lines.append(f"- @{member.id}{name}: a person")
+            continue
         folder = member.workspace.path
         kind = "persona folder" if isinstance(member.workspace, OwnedWorkspace) else "folder"
-        name = f" ({member.name})" if member.name else ""
-        lines.append(
-            f"- @{member.id}{name}: {member.backend.tool.value}, read-only, {kind} `{folder}`"
-        )
+        lines.append(f"- @{member.id}{name}: {member.tool_name}, read-only, {kind} `{folder}`")
     lines += [
         f"- Visibility: {spec.visibility}",
         f"- Started: {result.started_at.isoformat(timespec='seconds')}",
@@ -802,7 +1036,7 @@ def render_panel_transcript(result: PanelResult) -> str:
     for turn in result.turns:
         if turn.sender == "lead":
             target = "final answer" if turn.done else " ".join(f"@{r}" for r in turn.recipients)
-            heading = f"## Turn {turn.number} · lead ({spec.lead.backend.tool.value}) → {target}"
+            heading = f"## Turn {turn.number} · lead ({spec.lead.tool_name}) → {target}"
         else:
             heading = f"## Turn {turn.number} · @{turn.sender} → lead"
         lines += ["---", "", heading, "", turn.text or "(empty message)", ""]
@@ -821,6 +1055,10 @@ __all__ = [
     "PANEL_NOTICE",
     "PANEL_NOTICE_VERSION",
     "Dispatch",
+    "HumanBackend",
+    "HumanInput",
+    "HumanReply",
+    "InputRequest",
     "Lead",
     "Member",
     "PanelError",

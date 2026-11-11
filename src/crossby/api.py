@@ -82,6 +82,10 @@ from crossby.services.ask import (
 )
 from crossby.services.journal import ConversationEvent, EventSink, EventType
 from crossby.services.panel import (
+    HumanBackend,
+    HumanInput,
+    HumanReply,
+    InputRequest,
     Lead,
     Member,
     PanelResult,
@@ -118,6 +122,10 @@ __all__ = [
     "EventSink",
     "EventType",
     "FailureReason",
+    "HumanBackend",
+    "HumanInput",
+    "HumanReply",
+    "InputRequest",
     "JsonOutput",
     "Lead",
     "Member",
@@ -185,13 +193,16 @@ def panel(
     *,
     on_event: EventSink | None = None,
     events_path: Path | None = None,
+    inputs: HumanInput | None = None,
 ) -> PanelResult:
     """Run a panel: a lead consults read-only members by id until it answers.
 
     ``on_event`` receives every journal event, in order, on a dispatcher
     thread (it can never slow a turn, and an exception drops it). With
     ``events_path`` the events are also appended to that JSONL file as they
-    happen. Members are always read-only; see :class:`PanelSpec`.
+    happen. Agent members are always read-only; see :class:`PanelSpec`.
+    Human seats (``HumanBackend``) get their replies from ``inputs``: call
+    ``inputs.submit(request_id, text)`` for each ``input.requested`` event.
 
     A journal problem never stops the panel: the result's ``journal_error``
     says why the events file is missing or incomplete, and ``sink_errors``
@@ -216,7 +227,7 @@ def panel(
     except JournalError as exc:
         raise PanelError(str(exc)) from None
     try:
-        result = run_panel(spec, journal=journal)
+        result = run_panel(spec, journal=journal, inputs=inputs)
     finally:
         journal.close()
     return dataclasses.replace(
