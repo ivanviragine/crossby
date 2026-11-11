@@ -29,6 +29,7 @@ from crossby.models.ai import (
     HeadlessSessionRequest,
     HeadlessSessionResult,
     HeadlessTerminalStatus,
+    OwnedWorkspaceLayout,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -139,6 +140,11 @@ class OpenCodeAdapter(AbstractAITool):
     # on 1.19.5, after the unattended floor (1.18.31).
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "1.19.5"
+    # A persona folder's instructions and skills; verified live in a plain
+    # folder (docs/unattended-headless-verification.md#persona-folders).
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
+        instructions="AGENTS.md", skills=".agents/skills", verified_version="1.19.5"
+    )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[

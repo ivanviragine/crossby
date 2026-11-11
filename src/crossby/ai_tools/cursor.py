@@ -38,6 +38,7 @@ from crossby.models.ai import (
     HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    OwnedWorkspaceLayout,
     PlanApprovalPolicy,
     PlanArtifactLocation,
     PlanArtifactSource,
@@ -308,6 +309,11 @@ class CursorAdapter(AbstractAITool):
     """
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.CURSOR
+    # A persona folder's instructions and skills; verified live in a plain
+    # folder (docs/unattended-headless-verification.md#persona-folders).
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
+        instructions="AGENTS.md", skills=".cursor/skills", verified_version="2026.11.05-86047df"
+    )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[

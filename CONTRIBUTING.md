@@ -552,6 +552,19 @@ and a recognized refusal with no output becomes `FAILED` rather than
 `docs/unattended-headless-verification.md#failure-reasons` (mark an inferred
 one as such), and match each tool's wording only against that tool.
 
+#### Persona folders
+
+`OWNED_WORKSPACE_LAYOUT` on each adapter names the instruction file and
+skills directory the tool reads from a plain folder, and the oldest build that
+was verified on; declare it only with a live probe in a folder without Git
+(see `docs/unattended-headless-verification.md#persona-folders`).
+`services/workspaces.py` writes exactly the planned files with `O_EXCL` and
+`O_NOFOLLOW`, never follows links in skill sources, and keeps ownership in the
+returned manifest only: no receipt file goes into the folder, because the
+agent would read it. Drift is any changed, missing or extra file, link or
+directory. `cleanup` verifies first and removes only manifest files and the
+directories they leave empty; never fall back to recursive deletion.
+
 #### The public API (`crossby.api`)
 
 `src/crossby/api.py` is the only supported library surface besides the

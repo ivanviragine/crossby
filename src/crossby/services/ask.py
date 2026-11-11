@@ -38,6 +38,7 @@ from crossby.models.ai import (
     RestrictionState,
     TokenUsage,
 )
+from crossby.services.workspaces import OwnedWorkspace
 
 if TYPE_CHECKING:
     from crossby.ai_tools.base import AbstractAITool
@@ -79,12 +80,16 @@ class CliBackend(_Frozen):
 class ProjectWorkspace(_Frozen):
     """An existing folder the agent answers from; crossby never writes to it.
 
+    See :class:`~crossby.services.workspaces.OwnedWorkspace` for a persona
+    folder crossby provisioned with one tool's own instruction and skill files.
+
     The agent sees the folder as it is, with its own instruction files,
     skills and configuration. ``instructions`` is literal text (never a path)
     delivered in the first message's envelope, so it reaches the agent the
     same way on every tool.
     """
 
+    kind: Literal["project"] = "project"
     path: Path
     instructions: str | None = None
 
@@ -94,6 +99,9 @@ class ProjectWorkspace(_Frozen):
         if value is not None and not value.strip():
             raise ValueError("instructions must be non-blank when given")
         return value
+
+
+Workspace = Annotated[ProjectWorkspace | OwnedWorkspace, Field(discriminator="kind")]
 
 
 class AskRequest(_Frozen):
@@ -108,7 +116,7 @@ class AskRequest(_Frozen):
 
     backend: CliBackend
     prompt: str
-    workspace: ProjectWorkspace
+    workspace: Workspace
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     require_blocked: frozenset[RestrictionChannel] = frozenset()
     response_schema: dict[str, Any] | None = None
@@ -126,6 +134,16 @@ class AskRequest(_Frozen):
         if not value > 0 or value == float("inf"):
             raise ValueError("timeout_seconds must be positive and finite")
         return value
+
+    @model_validator(mode="after")
+    def _owned_folder_matches_its_tool(self) -> AskRequest:
+        workspace = self.workspace
+        if isinstance(workspace, OwnedWorkspace) and workspace.tool is not self.backend.tool:
+            raise ValueError(
+                f"the persona folder was provisioned for {workspace.tool.value}, not "
+                f"{self.backend.tool.value}"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +233,14 @@ class AskResult(_Frozen):
     # a recognized way; ``None`` means unrecognized, not "no reason".
     failure_reason: HeadlessFailureReason | None = None
     # "prompt": the question was sent exactly as given; "prompt_envelope":
-    # it was sent inside the instructions envelope of ``envelope_version``.
-    delivery: Literal["prompt", "prompt_envelope"]
+    # it was sent inside the instructions envelope of ``envelope_version``;
+    # "native_files": as given, to a persona folder whose instructions and
+    # skills are the tool's own files.
+    delivery: Literal["prompt", "prompt_envelope", "native_files"]
     envelope_version: int | None = None
+    # For a persona folder, whether it still held exactly its manifest after
+    # the ask; ``None`` for a project folder, which crossby does not inventory.
+    workspace_unchanged: bool | None = None
 
     @model_validator(mode="after")
     def _delivery_matches_envelope(self) -> AskResult:
@@ -292,6 +315,14 @@ class RequirementNotMetError(AskUnsupportedError):
 
 class NestedAskError(AskError):
     """Called from inside an agent that crossby itself started."""
+
+
+class WorkspaceChangedError(AskRequestError):
+    """The persona folder no longer holds exactly what was provisioned into it."""
+
+    def __init__(self, message: str, *, changed: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.changed = changed
 
 
 # ---------------------------------------------------------------------------
@@ -404,16 +435,26 @@ def session_request(
     request: AskRequest, *, timeout_seconds: float, environment: Mapping[str, str]
 ) -> HeadlessSessionRequest:
     """The headless session an ask runs: fresh, unattended and read-only."""
+    workspace = request.workspace
+    if isinstance(workspace, OwnedWorkspace):
+        # The instructions are the tool's own files; the question goes as is.
+        prompt = request.prompt
+        # A persona folder's layout was verified on its own build.
+        minimum_version: str | None = workspace.layout.verified_version
+    else:
+        prompt = render_envelope(request.prompt, workspace.instructions)
+        minimum_version = None
     try:
         return HeadlessSessionRequest(
-            prompt=render_envelope(request.prompt, request.workspace.instructions),
-            working_dir=request.workspace.path,
+            prompt=prompt,
+            working_dir=workspace.path,
             model=request.backend.model,
             effort=request.backend.effort,
             interaction_mode=HeadlessInteractionMode.UNATTENDED,
             response_schema=request.response_schema,
             read_only=True,
             require_blocked=request.require_blocked,
+            minimum_version=minimum_version,
             environment=dict(environment),
             timeout_seconds=timeout_seconds,
         )
@@ -543,7 +584,10 @@ def _status_text(result: HeadlessSessionResult) -> str:
 
 
 def _delivery(request: AskRequest) -> dict[str, Any]:
-    if request.workspace.instructions is None:
+    workspace = request.workspace
+    if isinstance(workspace, OwnedWorkspace):
+        return {"delivery": "native_files", "envelope_version": None}
+    if workspace.instructions is None:
         return {"delivery": "prompt", "envelope_version": None}
     return {"delivery": "prompt_envelope", "envelope_version": ENVELOPE_VERSION}
 
@@ -563,11 +607,17 @@ def _result_from_session(
     if error is None and result.status is not HeadlessTerminalStatus.SUCCEEDED:
         denied = f" ({'; '.join(result.denials)})" if result.denials else ""
         error = f"{tool.value} session ended with status {_status_text(result)}{denied}"
+    unchanged: bool | None = None
+    if isinstance(request.workspace, OwnedWorkspace):
+        from crossby.services.workspaces import workspace_unchanged
+
+        unchanged = workspace_unchanged(request.workspace)
     return AskResult(
         status=status,
         output=output,
         error=error,
         duration_seconds=duration,
+        workspace_unchanged=unchanged,
         usage=_usage(tool, result.usage),
         restrictions=runner.restrictions(tool, session, result.version),
         provenance=_provenance(request, result),
@@ -615,6 +665,14 @@ def run_ask(
         raise NestedAskError(str(exc)) from None
     active: SessionRunner = runner or AdapterRunner()
     started = clock()
+    workspace = request.workspace
+    if isinstance(workspace, OwnedWorkspace):
+        from crossby.services.workspaces import WorkspaceDriftError, verify
+
+        try:
+            verify(workspace)
+        except WorkspaceDriftError as exc:
+            raise WorkspaceChangedError(str(exc), changed=exc.changed) from None
     session = session_request(
         request, timeout_seconds=request.timeout_seconds, environment=child_environment()
     )

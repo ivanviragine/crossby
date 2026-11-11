@@ -35,6 +35,7 @@ from crossby.models.ai import (
     HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    OwnedWorkspaceLayout,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -146,6 +147,11 @@ class AntigravityCLIAdapter(AbstractAITool):
     launches the Antigravity IDE."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.ANTIGRAVITY_CLI
+    # A persona folder's instructions and skills; verified live in a plain
+    # folder (docs/unattended-headless-verification.md#persona-folders).
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
+        instructions="AGENTS.md", skills=".agents/skills", verified_version="1.5.5"
+    )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[

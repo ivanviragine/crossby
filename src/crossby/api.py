@@ -27,7 +27,16 @@ Asking one agent one question::
 
 Each ask is a fresh, unattended session running under the tool's verified
 read-only profile; the agent answers from ``workspace.path`` and never changes
-it. Calls are independent and safe to run in parallel threads: each session
+it. A persona folder (:func:`provision`) holds one tool's own instruction and
+skill files instead of an instructions envelope::
+
+    folder = provision(
+        OwnedWorkspaceSpec(path=Path("personas/cto-claude"), tool="claude",
+                           instructions=persona_text, skills=(Path("skills/voice"),))
+    )
+    result = ask(AskRequest(backend=CliBackend(tool="claude"), prompt=q, workspace=folder))
+    cleanup(folder)
+ Calls are independent and safe to run in parallel threads: each session
 gets its own process, environment and cancellation.
 """
 
@@ -64,10 +73,21 @@ from crossby.services.ask import (
     RequirementNotMetError,
     TextOutput,
     UsageReport,
+    WorkspaceChangedError,
     render_envelope,
     run_ask,
     run_preflight,
 )
+from crossby.services.workspaces import (
+    OwnedWorkspace,
+    OwnedWorkspaceSpec,
+    WorkspaceConflictError,
+    WorkspaceDriftError,
+    WorkspaceError,
+    cleanup,
+    provision,
+)
+from crossby.services.workspaces import verify as verify_workspace
 
 __all__ = [
     "ENVELOPE_VERSION",
@@ -86,6 +106,8 @@ __all__ = [
     "JsonOutput",
     "NestedAskError",
     "Output",
+    "OwnedWorkspace",
+    "OwnedWorkspaceSpec",
     "PreflightReport",
     "ProjectWorkspace",
     "RequirementNotMetError",
@@ -94,9 +116,16 @@ __all__ = [
     "RestrictionState",
     "TextOutput",
     "UsageReport",
+    "WorkspaceChangedError",
+    "WorkspaceConflictError",
+    "WorkspaceDriftError",
+    "WorkspaceError",
     "ask",
+    "cleanup",
     "preflight",
+    "provision",
     "render_envelope",
+    "verify_workspace",
 ]
 
 
