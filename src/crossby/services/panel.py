@@ -259,6 +259,10 @@ class PanelResult:
     answered_at_limit: bool = False
     # Messages the lead actually sent to members.
     dispatches: int = 0
+    # Set by crossby.api.panel: why the events file is missing or incomplete,
+    # and each on_event sink that raised and was dropped.
+    journal_error: str | None = None
+    sink_errors: tuple[str, ...] = ()
 
     @property
     def answered(self) -> bool:

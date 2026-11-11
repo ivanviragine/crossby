@@ -6,6 +6,7 @@ and reserves stdout for the lead's final answer (or ``--json``).
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -124,6 +125,7 @@ def panel(
         journal.close()
     if journal.store_error is not None:
         console.warn(f"The event journal is incomplete: {journal.store_error}")
+        result = dataclasses.replace(result, journal_error=journal.store_error)
     transcript = out_dir / "transcript.md"
     _write(transcript, render_panel_transcript(result))
     _report(result, transcript, journal.path, journal.run_id, as_json=as_json, quiet=quiet)
@@ -266,6 +268,7 @@ def _report(
                 ],
                 "transcript_path": str(transcript),
                 "events_path": str(events) if events is not None else None,
+                "journal_error": result.journal_error,
                 "run_id": run_id,
             }
         )

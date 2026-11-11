@@ -192,7 +192,12 @@ def panel(
     thread (it can never slow a turn, and an exception drops it). With
     ``events_path`` the events are also appended to that JSONL file as they
     happen. Members are always read-only; see :class:`PanelSpec`.
+
+    A journal problem never stops the panel: the result's ``journal_error``
+    says why the events file is missing or incomplete, and ``sink_errors``
+    lists each ``on_event`` failure that dropped the sink.
     """
+    import dataclasses
     import uuid
 
     from crossby.services.journal import Journal, JournalError, JournalExistsError
@@ -211,6 +216,9 @@ def panel(
     except JournalError as exc:
         raise PanelError(str(exc)) from None
     try:
-        return run_panel(spec, journal=journal)
+        result = run_panel(spec, journal=journal)
     finally:
         journal.close()
+    return dataclasses.replace(
+        result, journal_error=journal.store_error, sink_errors=tuple(journal.sink_errors)
+    )

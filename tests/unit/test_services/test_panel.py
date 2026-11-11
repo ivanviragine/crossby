@@ -571,3 +571,45 @@ def test_members_that_all_fail_in_time_end_it_as_failed(tmp_path: Path) -> None:
     result = panel_service.run_panel(_spec(tmp_path), runner=runner)
     assert result.stop_reason is StopReason.FAILED
     assert "every member addressed in message 1 failed" in (result.error or "")
+
+
+def test_the_api_reports_a_journal_it_could_not_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.api import panel as run_api_panel
+    from crossby.services import journal as journal_module
+    from crossby.services import panel as panel_service
+
+    runner = PanelRunner(
+        {"lead": ["Q?\nNEXT: ASK @cto", "ok\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    monkeypatch.setattr(panel_service, "HeadlessTurnRunner", lambda: runner)
+
+    def disk_full(fd: int, data: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+    def broken_ui(_event: Any) -> None:
+        raise RuntimeError("the UI went away")
+
+    monkeypatch.setattr(journal_module, "_write_all", disk_full)
+    result = run_api_panel(
+        _spec(tmp_path), events_path=tmp_path / "events.jsonl", on_event=broken_ui
+    )
+    assert result.answered
+    assert result.journal_error is not None and "No space left" in result.journal_error
+    assert len(result.sink_errors) == 1 and "the UI went away" in result.sink_errors[0]
+
+
+def test_the_api_reports_no_journal_error_when_all_was_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.api import panel as run_api_panel
+    from crossby.services import panel as panel_service
+
+    runner = PanelRunner(
+        {"lead": ["Q?\nNEXT: ASK @cto", "ok\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    monkeypatch.setattr(panel_service, "HeadlessTurnRunner", lambda: runner)
+    result = run_api_panel(_spec(tmp_path), events_path=tmp_path / "events.jsonl")
+    assert result.answered
+    assert result.journal_error is None and result.sink_errors == ()

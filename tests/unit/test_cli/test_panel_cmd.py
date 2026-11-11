@@ -171,6 +171,7 @@ def test_a_journal_that_could_not_be_saved_is_reported(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(journal_module, "_write_all", unwritable)
-    result = _invoke(root, "pricing", "-g", "g", "--output-dir", str(root / "out"), "--quiet")
+    result = _invoke(root, "pricing", "-g", "g", "--output-dir", str(root / "out"), "--json")
     assert result.exit_code == 0, result.output
     assert "The event journal is incomplete" in " ".join(result.stderr.split())
+    assert "No space left" in json.loads(result.stdout)["journal_error"]
