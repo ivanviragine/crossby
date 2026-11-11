@@ -350,16 +350,47 @@ class HumanInput:
             self._replies[request_id] = HumanReply(text, tuple(recipients), done)
             self._ready.notify_all()
 
+    def _open_request(self, request: InputRequest) -> None:
+        """Register a request; it is open before anyone can learn of it."""
+        with self._ready:
+            self._open[request.request_id] = request
+
     def _await(
         self, request: InputRequest, timeout: float, cancel: threading.Event
     ) -> tuple[HumanReply | None, str]:
-        """The reply and how it resolved: answered, timed_out or cancelled."""
-        if self._responder is not None:
-            reply = self._responder(request)
-            return (reply, "answered") if reply is not None else (None, "cancelled")
+        """The reply to an open request and how it resolved: answered, timed_out or cancelled.
+
+        A synchronous responder runs in a worker bound by the same deadline and
+        cancellation; a reply it gives too late is discarded.
+        """
         deadline = monotonic() + timeout
+        if self._responder is not None:
+            responder = self._responder
+            box: list[HumanReply | None] = []
+            finished = threading.Event()
+
+            def answer() -> None:
+                try:
+                    box.append(responder(request))
+                except Exception:
+                    box.append(None)
+                finally:
+                    finished.set()
+
+            threading.Thread(target=answer, daemon=True, name="crossby-human-seat").start()
+            try:
+                while not finished.wait(0.1):
+                    if cancel.is_set():
+                        return None, "cancelled"
+                    if monotonic() >= deadline:
+                        return None, "timed_out"
+                reply = box[0] if box else None
+                return (reply, "answered") if reply is not None else (None, "cancelled")
+            finally:
+                with self._ready:
+                    self._open.pop(request.request_id, None)
         with self._ready:
-            self._open[request.request_id] = request
+            self._open.setdefault(request.request_id, request)
             try:
                 while request.request_id not in self._replies:
                     if cancel.is_set():
@@ -371,6 +402,7 @@ class HumanInput:
                 return self._replies.pop(request.request_id), "answered"
             finally:
                 self._open.pop(request.request_id, None)
+                self._replies.pop(request.request_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +627,9 @@ def run_panel(
     ) -> tuple[HumanReply | None, str | None, float]:
         """One human turn: ``(reply, failure, seconds)``."""
         request_id = f"{journal.run_id if journal is not None else 'panel'}-{number}-{participant}"
+        request = InputRequest(request_id, participant, kind, number, message)
+        # Open before announcing: a UI may submit as soon as it sees the event.
+        human_inputs._open_request(request)
         emit(
             EventType.INPUT_REQUESTED,
             request_id=request_id,
@@ -605,9 +640,7 @@ def run_panel(
         )
         begun = clock()
         left = min(spec.human_timeout_seconds, max(remaining(), 0.0))
-        reply, status = human_inputs._await(
-            InputRequest(request_id, participant, kind, number, message), left, cancel
-        )
+        reply, status = human_inputs._await(request, left, cancel)
         if reply is not None and not reply.text.strip():
             reply, status = None, "empty"
         emit(

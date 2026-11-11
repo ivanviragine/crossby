@@ -217,3 +217,29 @@ def test_a_human_seat_is_validated(
     result = _invoke(root, "pricing", "-g", "g")
     assert result.exit_code == 1
     assert message in " ".join(result.stderr.split())
+
+
+def test_terminal_seats_take_turns_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading as threads
+
+    from crossby.cli import panel as panel_cli
+
+    active = {"now": 0, "most": 0}
+    lock = threads.Lock()
+
+    def reading(_request: Any) -> Any:
+        with lock:
+            active["now"] += 1
+            active["most"] = max(active["most"], active["now"])
+        threads.Event().wait(0.1)
+        with lock:
+            active["now"] -= 1
+        return None
+
+    monkeypatch.setattr(panel_cli, "_read_terminal_reply", reading)
+    workers = [threads.Thread(target=panel_cli._terminal_reply, args=(object(),)) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(5)
+    assert active["most"] == 1

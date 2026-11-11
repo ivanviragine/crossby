@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import sys
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -223,7 +224,16 @@ def _spec(
         raise typer.Exit(1) from None
 
 
+_TERMINAL = threading.Lock()
+
+
 def _terminal_reply(request: Any) -> Any:
+    """One human seat's prompt and reply on the terminal, one seat at a time."""
+    with _TERMINAL:
+        return _read_terminal_reply(request)
+
+
+def _read_terminal_reply(request: Any) -> Any:
     """A human seat's reply, read from stdin: lines up to a lone "." or end of input.
 
     A human lead then names the members (`@cto @founder`, `@all`) or types

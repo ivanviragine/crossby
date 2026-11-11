@@ -739,3 +739,40 @@ def test_a_human_seat_needs_an_input(tmp_path: Path) -> None:
         run_panel(_with_human_member(tmp_path), runner=PanelRunner({}))
     with pytest.raises(ValueError, match="no folder"):
         Member(id="x", backend=HumanBackend(), workspace=ProjectWorkspace(path=tmp_path))
+
+
+def test_a_ui_answering_the_event_immediately_never_races(tmp_path: Path) -> None:
+    inputs = HumanInput()
+
+    def answer_at_once(event: Any) -> None:
+        if event.type is EventType.INPUT_REQUESTED:
+            inputs.submit(event.data["request_id"], "Instant.")
+
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @dana", "x\nNEXT: DONE"], "cto": [], "founder": [], "buyer": []}
+    )
+    journal = Journal("p", sinks=[answer_at_once])
+    result = run_panel(_with_human_member(tmp_path), runner=runner, journal=journal, inputs=inputs)
+    journal.close()
+    assert result.answered
+    assert journal.sink_errors == []
+    assert runner.requests["lead"][1].prompt == "@dana:\nInstant."
+
+
+def test_a_synchronous_responder_is_bound_by_the_timeout(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def slow(_request: InputRequest) -> HumanReply:
+        release.wait(5)
+        return HumanReply("too late")
+
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @all", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _with_human_member(tmp_path).model_copy(update={"human_timeout_seconds": 0.3})
+    started = time.monotonic()
+    result = run_panel(spec, runner=runner, inputs=HumanInput(slow))
+    release.set()
+    assert result.answered
+    assert time.monotonic() - started < 4
+    assert "@dana (no answer: no reply within 0.3s)" in runner.requests["lead"][1].prompt
