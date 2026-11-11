@@ -525,6 +525,16 @@ def combine_replies(
     return "\n\n".join(parts)
 
 
+def _settings(backend: CliBackend | HumanBackend) -> dict[str, str | None]:
+    """The model and effort a seat asked for, as journaled; none for a person."""
+    if not isinstance(backend, CliBackend):
+        return {"model": None, "effort": None}
+    return {
+        "model": backend.model,
+        "effort": backend.effort.value if backend.effort is not None else None,
+    }
+
+
 def render_member_notice(spec: PanelSpec, member: Member) -> str:
     """The notice an agent member's first message starts with."""
     ids = [f"@{item.id}" for item in spec.members]
@@ -1015,12 +1025,18 @@ def run_panel(
         notice_version=PANEL_NOTICE_VERSION,
         member_notice_version=MEMBER_NOTICE_VERSION,
         participants=[
-            {"participant": "lead", "tool": spec.lead.tool_name, "read_only": False},
+            {
+                "participant": "lead",
+                "tool": spec.lead.tool_name,
+                **_settings(spec.lead.backend),
+                "read_only": False,
+            },
             *[
                 {
                     "participant": member.id,
                     "name": member.name,
                     "tool": member.tool_name,
+                    **_settings(member.backend),
                     "read_only": not member.human,
                 }
                 for member in spec.members

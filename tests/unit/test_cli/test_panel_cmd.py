@@ -404,3 +404,35 @@ def test_at_a_terminal_ctrl_d_ends_one_reply_and_the_next_seat_still_reads(
     answer(_seat("r1"), "first\n", "")
     answer(_seat("r2", "lee"), "second\n", ".\n")
     assert replies == [HumanReply("first"), HumanReply("second")]
+
+
+def test_a_recipes_model_and_effort_reach_each_seat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.models.ai import EffortLevel
+    from crossby.services.journal import read_journal
+
+    recipe = RECIPE.replace(
+        "lead: {tool: claude}", "lead: {tool: claude, model: claude-opus-5-5, effort: high}"
+    ).replace("tool: cursor, folder: founder}", "tool: cursor, folder: founder, effort: low}")
+    root = _project(tmp_path, recipe)
+    fake = _use(
+        monkeypatch,
+        PanelRunner(
+            {root.name: ["Q?\nNEXT: ASK @all", "ok\nNEXT: DONE"], "cto": ["a"], "founder": ["b"]}
+        ),
+    )
+    out = root / "out"
+    result = _invoke(root, "pricing", "-g", "g", "--output-dir", str(out))
+    assert result.exit_code == 0, result.output
+    assert {r.effort for r in fake.requests[root.name]} == {EffortLevel.HIGH}
+    assert {r.model for r in fake.requests[root.name]} == {"claude-opus-5-5"}
+    assert [r.effort for r in fake.requests["founder"]] == [EffortLevel.LOW]
+    assert [r.effort for r in fake.requests["cto"]] == [None]
+    started = read_journal(out / "events.jsonl")[0]
+    seats = {seat["participant"]: seat for seat in started.data["participants"]}
+    assert (seats["lead"]["model"], seats["lead"]["effort"]) == ("claude-opus-5-5", "high")
+    assert seats["founder"]["effort"] == "low"
+    shown = " ".join(result.stderr.split())
+    assert "claude (claude-opus-5-5, high effort) leads" in shown
+    assert "@founder cursor (low effort)" in shown
