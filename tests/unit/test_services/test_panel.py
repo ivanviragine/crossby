@@ -379,7 +379,7 @@ def test_invalid_panels_are_refused(tmp_path: Path, updates: dict[str, Any]) -> 
 
 
 def test_member_ids_are_addressable(tmp_path: Path) -> None:
-    for bad in ("all", "CTO", "a b", "@x", ""):
+    for bad in ("all", "lead", "CTO", "a b", "@x", ""):
         with pytest.raises(ValueError):
             Member(
                 id=bad, backend=CliBackend(tool="codex"), workspace=ProjectWorkspace(path=tmp_path)
@@ -389,3 +389,53 @@ def test_member_ids_are_addressable(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="unique"):
         _spec(tmp_path, members=(duplicate, duplicate))
+
+
+
+def test_turn_numbers_match_their_events_when_a_member_fails(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {
+            "lead": ["Q\nNEXT: ASK @cto @founder", "x\nNEXT: DONE"],
+            "cto": [None],
+            "founder": ["F"],
+            "buyer": [],
+        }
+    )
+    journal = Journal("p")
+    result = run_panel(_spec(tmp_path), runner=runner, journal=journal)
+    assert [(turn.number, turn.sender) for turn in result.turns] == [
+        (1, "lead"),
+        (3, "founder"),
+        (4, "lead"),
+    ]
+    started = {
+        (e.data["turn"], e.data["participant"])
+        for e in journal.events
+        if e.type is EventType.TURN_STARTED
+    }
+    committed = {
+        (e.data["turn"], e.data["participant"])
+        for e in journal.events
+        if e.type is EventType.MESSAGE_COMMITTED
+    }
+    assert committed <= started
+    assert (2, "cto") in started and (2, "cto") not in committed
+
+
+def test_a_drifted_persona_folder_stops_the_panel_before_anyone_starts(tmp_path: Path) -> None:
+    from crossby.services.workspaces import OwnedWorkspaceSpec, provision
+
+    owned = provision(
+        OwnedWorkspaceSpec(path=tmp_path / "persona", tool="codex", instructions="You are a CTO.")
+    )
+    (owned.path / "AGENTS.md").write_text("Someone else.")
+    spec = _spec(tmp_path)
+    members = (spec.members[0].model_copy(update={"workspace": owned}), *spec.members[1:])
+    runner = PanelRunner({"lead": [], "cto": [], "founder": [], "buyer": [], "persona": []})
+    result = run_panel(spec.model_copy(update={"members": members}), runner=runner)
+    assert result.stop_reason is StopReason.FAILED
+    assert "@cto's persona folder changed since it was provisioned: AGENTS.md" in (
+        result.error or ""
+    )
+    assert runner.preflights == []
+    assert all(not calls for calls in runner.requests.values())

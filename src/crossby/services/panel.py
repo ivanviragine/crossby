@@ -66,6 +66,9 @@ if TYPE_CHECKING:
 PANEL_NOTICE_VERSION = 1
 MAX_MEMBERS = 16
 _MEMBER_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# "all" addresses every member and "lead" names the lead in labels, events
+# and sessions, so neither can be a member's id.
+_RESERVED_IDS = frozenset({"all", "lead"})
 _NEXT_LINE = re.compile(
     r"^[\s*_`>#-]*next\s*:\s*[*_`]*\s*(ask|done)\b(?P<args>[^\n]*?)[\s*_`.!]*$",
     re.IGNORECASE,
@@ -104,9 +107,10 @@ class Member(_Frozen):
     @field_validator("id")
     @classmethod
     def _id_is_addressable(cls, value: str) -> str:
-        if not _MEMBER_ID.fullmatch(value) or value == "all":
+        if not _MEMBER_ID.fullmatch(value) or value in _RESERVED_IDS:
             raise ValueError(
-                f"member id {value!r} must be lowercase letters, digits and hyphens (not 'all')"
+                f"member id {value!r} must be lowercase letters, digits and hyphens "
+                "(not 'all' or 'lead')"
             )
         return value
 
@@ -345,6 +349,15 @@ def run_panel(
     shared = spec.visibility == "shared"
     answered_at_limit = [False]
     sent = [0]
+    next_turn = [1]
+
+    def claim() -> int:
+        """The next turn number: every lead turn and member attempt gets one."""
+        with lock:
+            number = next_turn[0]
+            next_turn[0] += 1
+            return number
+
     lock = threading.Lock()
 
     def emit(type_: EventType, **data: Any) -> None:
@@ -492,8 +505,7 @@ def run_panel(
             denials=list(turn.denials),
         )
 
-    def lead_turn(message: str) -> tuple[str, float, HeadlessSessionResult]:
-        number = len(turns) + 1
+    def lead_turn(message: str, number: int) -> tuple[str, float, HeadlessSessionResult]:
         built = request(
             message,
             spec.lead.backend,
@@ -548,6 +560,18 @@ def run_panel(
         return member.id, (text if failure is None else None), failure, seconds, result
 
     def preflight() -> None:
+        from crossby.services.workspaces import WorkspaceDriftError, verify
+
+        for member in spec.members:
+            if isinstance(member.workspace, OwnedWorkspace):
+                try:
+                    verify(member.workspace)
+                except WorkspaceDriftError as exc:
+                    raise _StopError(
+                        StopReason.FAILED,
+                        f"@{member.id}'s persona folder changed since it was provisioned: "
+                        f"{', '.join(exc.changed[:5])}; provision it again",
+                    ) from None
         checks: list[tuple[str, CliBackend, Path, bool, str | None]] = [
             ("lead", spec.lead.backend, spec.lead.folder, False, None)
         ]
@@ -585,12 +609,14 @@ def run_panel(
             )
 
     def fan_out(body: str, recipients: tuple[str, ...], dispatch: int) -> str:
-        number = len(turns) + 1
+        # Each member's attempt gets its own turn number, kept when its reply
+        # is committed; a failed attempt's number is never reused.
+        numbers = {member_id: claim() for member_id in recipients}
         outcomes: dict[str, tuple[str | None, str | None, float, HeadlessSessionResult | None]] = {}
         with ThreadPoolExecutor(max_workers=min(spec.concurrency, len(recipients))) as pool:
             futures: dict[Future[Any], str] = {
-                pool.submit(member_turn, seats[member_id], body, number + index): member_id
-                for index, member_id in enumerate(recipients)
+                pool.submit(member_turn, seats[member_id], body, numbers[member_id]): member_id
+                for member_id in recipients
             }
             pending_futures = set(futures)
             try:
@@ -610,7 +636,7 @@ def run_panel(
             if text is not None:
                 commit(
                     PanelTurn(
-                        number=len(turns) + 1,
+                        number=numbers[member_id],
                         sender=member_id,
                         text=text,
                         recipients=("lead",),
@@ -663,20 +689,19 @@ def run_panel(
         dispatches = 0
         while True:
             final = dispatches >= spec.max_rounds
-            text, seconds, result = lead_turn(message)
+            number = claim()
+            text, seconds, result = lead_turn(message, number)
             try:
                 body, dispatch = parse_dispatch(text, member_ids)
             except ProtocolError as exc:
                 raise _StopError(
-                    StopReason.FAILED, f"lead turn {len(turns) + 1}: {exc}; nothing was sent"
+                    StopReason.FAILED, f"lead turn {number}: {exc}; nothing was sent"
                 ) from None
             if not body:
-                raise _StopError(
-                    StopReason.FAILED, f"lead turn {len(turns) + 1} sent only the marker"
-                )
+                raise _StopError(StopReason.FAILED, f"lead turn {number} sent only the marker")
             commit(
                 PanelTurn(
-                    number=len(turns) + 1,
+                    number=number,
                     sender="lead",
                     text=body,
                     recipients=dispatch.recipients,
