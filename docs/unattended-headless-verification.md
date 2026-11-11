@@ -397,6 +397,64 @@ Claude Code's result envelope also carries `total_cost_usd` and `modelUsage`.
 The cost is passed through as `reported_cost_usd`, exactly as reported (crossby
 keeps no prices), and the `modelUsage` keys are the observed models.
 
+## Persona folders
+
+Verified 2026-11-10 on macOS. A persona folder (`crossby.api.provision`) is a
+plain folder, with no Git repository, that holds only one tool's own
+instruction file and skills directory plus the caller's material files. Each
+tool ran a read-only turn in such a folder whose instruction file named a
+random codeword and whose one skill named a random city; every tool answered
+with both, and the folder was unchanged afterwards:
+
+| Tool | Instruction file | Skills directory | Verified on |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE.md` | `.claude/skills/` | 2.1.317 |
+| Codex CLI | `AGENTS.md` | `.agents/skills/` | 0.166.0 |
+| Cursor | `AGENTS.md` | `.cursor/skills/` | 2026.11.05-86047df (and 2026.11.10-731fb78) |
+| GitHub Copilot CLI | `.github/copilot-instructions.md` | `.github/skills/` | 1.0.105 (and 1.0.109) |
+| OpenCode | `AGENTS.md` | `.agents/skills/` | 1.19.5 |
+| Antigravity CLI | `AGENTS.md` | `.agents/skills/` | 1.5.5 |
+
+Cursor also loaded `.cursorrules`, and Copilot `AGENTS.md`, in place of the
+files above. The older Cursor and Copilot builds were run from the copies
+each tool keeps (`~/.local/share/cursor-agent/versions/`, `~/.copilot/pkg/`);
+agy keeps no older build, so its layout requires 1.5.5, after its read-only
+floor of 1.5.4. An ask in a persona folder passes that build as the session's
+`minimum_version`, checked after the version probe.
+
+Tools read each other's files. With every file below present at once, each
+one listed what it had loaded:
+
+| Tool | Instruction files loaded | Skills directories loaded |
+| --- | --- | --- |
+| Claude Code | `CLAUDE.md` | `.claude/skills/` |
+| Codex CLI | `AGENTS.md` | `.agents/skills/` |
+| Antigravity CLI | `AGENTS.md`, `GEMINI.md` | `.agents/skills/` |
+| OpenCode | `AGENTS.md` | `.agents/skills/`, `.opencode/skills/`, `.claude/skills/` |
+| Cursor | `.cursorrules`, `CLAUDE.md`, `AGENTS.md` | `.cursor/skills/`, `.claude/skills/`, `.agents/skills/` |
+| GitHub Copilot CLI | `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` | `.github/skills/`, `.agents/skills/`, `.claude/skills/` |
+
+So a folder that served several tools would give Cursor or Copilot the
+instructions twice; a persona folder serves exactly one tool. Material and
+skill files may not be hidden or use an instruction or configuration name at
+any depth (`AGENTS.md`, `AGENTS.override.md`, which Codex prefers over
+`AGENTS.md`, `CLAUDE.md`, which Claude Code also loads from subfolders,
+`GEMINI.md`, `opencode.json`, …), so they can never add or replace
+instructions, hooks, permissions or MCP servers.
+
+End to end, `provision`, `ask` and `cleanup` ran on all six tools in parallel
+threads, each with a persona (a codeword), one skill (a city) and a material
+file (a budget). Claude Code, Codex CLI, Cursor, Copilot and OpenCode
+answered with all three, `delivery` was `native_files`, `workspace_unchanged`
+was true, and cleanup left nothing behind. Antigravity CLI first tried a shell
+command to read the material file, which its read-only profile denied, and
+ended the turn without an answer (`action_denied`); asked again, it read the
+file with its own file tool and answered.
+
+The user's own global instructions, skills, MCP servers and connectors still
+load in every persona folder (for example `~/.claude/CLAUDE.md`); a persona
+folder isolates only what is in the folder.
+
 ## Not verified live
 
 - **Codex success-path event names.** The account hit its usage limit

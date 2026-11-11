@@ -25,6 +25,7 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
     ModelBreakdown,
+    OwnedWorkspaceLayout,
     PlanArtifactLocation,
     PlanCommandPolicySupport,
     PlanLaunchApprovalMode,
@@ -54,6 +55,13 @@ class CopilotAdapter(AbstractAITool):
     """Adapter for GitHub Copilot CLI."""
 
     TOOL_ID: ClassVar[AIToolID] = AIToolID.COPILOT
+    # A persona folder's instructions and skills; verified live in a plain
+    # folder (docs/unattended-headless-verification.md#persona-folders).
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
+        instructions=".github/copilot-instructions.md",
+        skills=".github/skills",
+        verified_version="1.0.105",
+    )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[

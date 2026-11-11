@@ -41,6 +41,7 @@ from crossby.models.ai import (
     HookOutputDialect,
     HookStopDialect,
     ModelBreakdown,
+    OwnedWorkspaceLayout,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -145,6 +146,11 @@ class ClaudeAdapter(AbstractAITool):
     # (2.1.263) predates both.
     HEADLESS_RESUME_VERIFIED_VERSION: ClassVar[str | None] = "2.1.316"
     HEADLESS_READ_ONLY_VERIFIED_VERSION: ClassVar[str | None] = "2.1.317"
+    # A persona folder's instructions and skills; verified live in a plain
+    # folder (docs/unattended-headless-verification.md#persona-folders).
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
+        instructions="CLAUDE.md", skills=".claude/skills", verified_version="2.1.317"
+    )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[

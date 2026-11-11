@@ -56,6 +56,7 @@ from crossby.models.ai import (
     HeadlessSessionResult,
     HeadlessTerminalStatus,
     ModelTier,
+    OwnedWorkspaceLayout,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -152,6 +153,9 @@ class AbstractAITool(ABC):
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
         Mapping[RestrictionChannel, tuple[RestrictionState, str]]
     ] = {}
+    # Where the tool reads a persona folder's own instructions and skills,
+    # verified live in a plain folder; ``None`` when not verified.
+    OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -975,6 +979,15 @@ class AbstractAITool(ABC):
             raise HeadlessUnsupportedError(
                 f"Read-only {name} sessions were verified on {verified}; the installed "
                 f"build is {detected.text}. Upgrade {name} to run it read-only.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.minimum_version is not None and not _build_at_least(
+            detected.text, request.minimum_version
+        ):
+            raise HeadlessUnsupportedError(
+                f"This session needs {name} {request.minimum_version} or newer; the installed "
+                f"build is {detected.text}. Upgrade {name} to run it.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

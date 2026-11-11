@@ -348,6 +348,22 @@ class RestrictionState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class OwnedWorkspaceLayout(BaseModel):
+    """Where a tool reads a folder's own instructions and skills.
+
+    Verified live for a plain folder, with no Git repository, holding only
+    these files: the tool loads the instruction file and every skill under
+    ``skills`` once, and no other file of the layout. ``verified_version`` is
+    the oldest build that was verified on.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instructions: str
+    skills: str
+    verified_version: str
+
+
 class Restriction(BaseModel):
     """One channel's state for one session, with the evidence behind it."""
 
@@ -751,6 +767,10 @@ class HeadlessSessionRequest(BaseModel):
     # runtime resolves them after its version probe and refuses to start the
     # session when any is not enforced; unknown counts as not enforced.
     require_blocked: frozenset[RestrictionChannel] = frozenset()
+    # The oldest CLI build this session may run on, checked after the version
+    # probe, when it depends on behavior verified later than the mode's floor
+    # (such as a persona folder's native file layout).
+    minimum_version: str | None = None
     # crossby's own ``CROSSBY_*`` markers for this session's native process
     # (such as the consultation depth), added to its environment only: the
     # parent process environment is never changed. Other names are rejected,
@@ -768,6 +788,15 @@ class HeadlessSessionRequest(BaseModel):
     def _prompt_is_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("a headless session requires a non-blank prompt")
+        return value
+
+    @field_validator("minimum_version")
+    @classmethod
+    def _minimum_version_is_a_build(cls, value: str | None) -> str | None:
+        from crossby.utils.versioning import parse_semver
+
+        if value is not None and parse_semver(value) is None:
+            raise ValueError(f"minimum_version {value!r} is not a version")
         return value
 
     @field_validator("environment")
