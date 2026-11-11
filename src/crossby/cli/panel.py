@@ -66,7 +66,12 @@ def panel(
     layout. Exit codes are those of `converse`.
     """
     from crossby.config.loader import ConfigError, load_config
-    from crossby.services.journal import JOURNAL_FILE, Journal
+    from crossby.services.journal import (
+        JOURNAL_FILE,
+        Journal,
+        JournalError,
+        JournalExistsError,
+    )
     from crossby.services.panel import render_panel_transcript, run_panel
 
     root = _project_root(path)
@@ -95,18 +100,25 @@ def panel(
         if output_dir is not None
         else root / ".crossby" / "panels" / started.strftime("%Y%m%dT%H%M%S%f")
     )
-    if (out_dir / JOURNAL_FILE).exists():
-        # Appending a second run would mix two panels in one journal.
-        console.error(f"{out_dir} already holds a panel; choose another --output-dir.")
-        raise typer.Exit(1)
-    journal = Journal(uuid.uuid4().hex, path=out_dir / JOURNAL_FILE, sinks=[] if quiet else [_show])
-    if not quiet:
-        roster = ", ".join(f"@{m.id} ({m.backend.tool.value})" for m in spec.members)
-        _stderr(
-            f"[step]▸[/] {spec.lead.backend.tool.value} leads a {spec.visibility} panel: {roster}"
-        )
-        _stderr(f"[dim]      events: {_escape(str(journal.path))}[/]")
     try:
+        # Created exclusively: a second run never mixes into this journal.
+        journal = Journal(
+            uuid.uuid4().hex, path=out_dir / JOURNAL_FILE, sinks=[] if quiet else [_show]
+        )
+    except JournalExistsError:
+        console.error(f"{out_dir} already holds a panel; choose another --output-dir.")
+        raise typer.Exit(1) from None
+    except JournalError as exc:
+        console.error(str(exc))
+        raise typer.Exit(1) from None
+    try:
+        if not quiet:
+            roster = ", ".join(f"@{m.id} ({m.backend.tool.value})" for m in spec.members)
+            _stderr(
+                f"[step]▸[/] {spec.lead.backend.tool.value} leads a {spec.visibility} "
+                f"panel: {roster}"
+            )
+            _stderr(f"[dim]      events: {_escape(str(journal.path))}[/]")
         result = run_panel(spec, journal=journal)
     finally:
         journal.close()
