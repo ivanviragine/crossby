@@ -55,6 +55,19 @@ _DEPRECATION_URLS: dict[str, str] = {
 # as a retirement; a far-off lifecycle date alone does not.
 _GEMINI_SHUTDOWN_HORIZON = datetime.timedelta(days=180)
 
+# Deliberate catalog policy from the earlier model refresh: Claude releases
+# older than 4.6 are excluded, except Haiku 4.5, even if Cursor still lists them.
+_CATALOG_EXCLUSIONS: dict[str, set[str]] = {
+    "cursor": {
+        "claude-4-sonnet",
+        "claude-4-sonnet-thinking",
+        "claude-4.5-opus-high",
+        "claude-4.5-opus-high-thinking",
+        "claude-4.5-sonnet",
+        "claude-4.5-sonnet-thinking",
+    },
+}
+
 _SCRAPE_PATTERNS: dict[str, str] = {
     # Family-anchored, word-boundary pattern. Matches single-number families
     # (claude-sonnet-5, claude-fable-5) as well as dotted ones (claude-opus-4.8)
@@ -62,7 +75,7 @@ _SCRAPE_PATTERNS: dict[str, str] = {
     # slug run-ons.
     "claude": r"claude-(?:opus|sonnet|haiku|fable)-\d(?:[.-]\d)?(?!\d|-\d|-v\d)\b",
     "copilot": (
-        r"(?:claude|gemini|gpt|codex|o[0-9])[a-zA-Z0-9._-]*|"
+        r"\b(?:claude|gemini|gpt|codex|grok|kimi|o[0-9])[a-zA-Z0-9._-]*|"
         r"mai-[a-zA-Z0-9._-]+"
     ),
     "codex": r"gpt-[0-9][.0-9]*[a-zA-Z0-9._-]*",
@@ -279,6 +292,9 @@ def parse_gemini_deprecations(text: str, today: datetime.date) -> set[str]:
     date> <shutdown date> <replacement>"; rows whose shutdown column says "No
     shutdown date announced" never match.
     """
+    # Google's docs also serve Markdoc tables: cells are bullet items and rows
+    # are separated by `---`. Strip that formatting before matching dates.
+    text = re.sub(r"(?m)^\s*(?:\* |---\s*$)", " ", text).replace("`", "")
     date = r"[A-Z][a-z]+ \d{1,2}, \d{4}"
     rows = re.findall(
         rf"\b((?:gemini|gemma|veo|lyria|imagen)-[a-z0-9.-]*[a-z0-9]) "
@@ -500,19 +516,19 @@ def probe_antigravity_cli() -> set[str]:
 def probe_codex() -> set[str]:
     """Read available models from codex's local cache file (~/.codex/models_cache.json).
 
-    Falls back to web scraping if the cache doesn't exist or yields no models.
+    Merge published guidance with the cache: a nonempty cache can predate a
+    new release, and the docs need not list every model still available locally.
     """
+    models = _scrape_models("codex")
     cache = Path.home() / ".codex" / "models_cache.json"
     if cache.exists():
         try:
             with open(cache, encoding="utf-8") as f:
                 data = json.load(f)
-            models = {m["slug"] for m in data.get("models", []) if m.get("visibility") == "list"}
-            if models:
-                return models
+            models |= {m["slug"] for m in data.get("models", []) if m.get("visibility") == "list"}
         except Exception:
             pass
-    return _scrape_models("codex")
+    return models
 
 
 def probe_opencode() -> set[str]:
@@ -721,12 +737,13 @@ def main() -> int:
             continue
 
         not_returned, new = model_catalog_diff(expected, actual_raw)
-        ignored = new & deprecated
-        new -= deprecated
+        excluded = deprecated | _CATALOG_EXCLUSIONS.get(tool, set())
+        ignored = new & excluded
+        new -= excluded
 
         console.header(f"Provider: {tool}")
         if ignored:
-            console.warn("IGNORED (in probe, but the provider marks these retired/deprecated):")
+            console.warn("IGNORED (retired/deprecated or excluded by catalog policy):")
             for m in sorted(ignored):
                 console.detail(f"  · {m}")
         if not not_returned and not new:

@@ -1269,6 +1269,8 @@ Sonnet shifts effort up one tier (low→medium, medium→high, high→xhigh) for
 
 The GPT-6 targets need a current Codex CLI: with ChatGPT sign-in, Codex 0.154 rejects `gpt-6-sol` as unsupported, while 0.156.1 accepts it. Run `npm i -g @openai/codex@latest` if a translated launch fails that way.
 
+`gpt-6.1-terra` is also available in the model catalog and requires Codex CLI 0.159.0 or later ([OpenAI Docs](https://learn.chatgpt.com/docs/models)). It is classified as balanced and translates to `claude-sonnet-5` when launching Claude.
+
 ### Codex interactive Plan startup and events
 
 Codex has no native `--plan` launch flag. Crossby opens the real Codex UI

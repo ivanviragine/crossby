@@ -49,6 +49,13 @@ uv sync --extra dev
 
 Run `./scripts/check-all.sh` before opening a PR.
 
+To refresh the model catalog, run `uv run python scripts/probe_models.py` with
+network access and signed-in CLIs. Codex discovery combines its local cache
+with published guidance, so an older cache cannot hide a new release. Google's
+retirement parser accepts HTML and Markdoc tables. Keep models that are merely
+not returned, apply provider-confirmed retirements, and preserve the existing
+exclusion of Claude models older than 4.6 (except Haiku 4.5).
+
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
 MCP discovery normalizes native Codex fields in `sync/mcp_codex.py` before model validation. Keep the reader matched to the Codex writer in `sync/mcp.py`: environment references must remain references, never resolved secrets. Codex `env` and `http_headers` values are literal, so a `${...}` literal cannot safely enter Crossby's interpolation-shaped canonical maps. Unrepresentable entries are excluded as a whole, with field-name-only diagnostics carried through `SyncData.mcp_warnings` to reports, including explicit `--to`, dry-run, and wizard paths; retain source precedence and ledger ownership rules.

@@ -411,6 +411,11 @@ class TestClassifyTierUniversal:
             ("openai/gpt-6-astra", ModelTier.POWERFUL),
             ("gpt-6.1-sol", ModelTier.POWERFUL),
             ("openai/gpt-6.1-sol-ultrafast", ModelTier.POWERFUL),
+            ("gpt-6.1-terra", ModelTier.BALANCED),
+            ("openai/gpt-6.1-terra-fast", ModelTier.BALANCED),
+            ("gemini-4-carbon", ModelTier.POWERFUL),
+            ("gemini-4-carbon-high", ModelTier.POWERFUL),
+            ("google/gemini-4-carbon", ModelTier.POWERFUL),
         ],
     )
     def test_codex_gpt_6_uses_documented_family_roles(

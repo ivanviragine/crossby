@@ -156,6 +156,59 @@ def test_copilot_pattern_captures_mai_id_without_matching_prose() -> None:
     }
 
 
+def test_copilot_pattern_captures_grok_kimi_and_terra() -> None:
+    text = "Choose grok-4.7, kimi-k3, or gpt-6.1-terra for programming."
+    assert {m.rstrip(".,;") for m in re.findall(COPILOT_PATTERN, text)} == {
+        "grok-4.7",
+        "kimi-k3",
+        "gpt-6.1-terra",
+    }
+
+
+def test_probe_codex_merges_cached_and_documented_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / ".codex" / "models_cache.json"
+    cache.parent.mkdir()
+    cache.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-6-sol", "visibility": "list"},
+                    {"slug": "gpt-reserve", "visibility": "hide"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(PROBE_MODULE.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(PROBE_MODULE, "_scrape_models", lambda _tool: {"gpt-6.1-terra"})
+    assert PROBE_MODULE.probe_codex() == {"gpt-6-sol", "gpt-6.1-terra"}
+
+
+@pytest.mark.parametrize("payload", [None, "not JSON", '{"models": []}'])
+def test_probe_codex_discovers_from_docs_without_a_usable_cache(
+    payload: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if payload is not None:
+        cache = tmp_path / ".codex" / "models_cache.json"
+        cache.parent.mkdir()
+        cache.write_text(payload)
+    monkeypatch.setattr(PROBE_MODULE.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(PROBE_MODULE, "_scrape_models", lambda _tool: {"gpt-6.1-terra"})
+    assert PROBE_MODULE.probe_codex() == {"gpt-6.1-terra"}
+
+
+def test_probe_codex_keeps_cache_when_docs_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / ".codex" / "models_cache.json"
+    cache.parent.mkdir()
+    cache.write_text('{"models": [{"slug": "gpt-6.1-terra", "visibility": "list"}]}')
+    monkeypatch.setattr(PROBE_MODULE.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(PROBE_MODULE, "_scrape_models", lambda _tool: set())
+    assert PROBE_MODULE.probe_codex() == {"gpt-6.1-terra"}
+
+
 def test_copilot_docs_parser_uses_model_table_not_table_of_contents() -> None:
     # Mirrors the real GitHub docs page: nav links and prose repeat the
     # "Supported models" / "Tool availability values" text before the real
@@ -194,6 +247,29 @@ def test_catalog_diff_preserves_exact_provider_spelling() -> None:
         registered,
         discovered,
     )
+
+
+@pytest.mark.parametrize(
+    ("discovered", "expected_status"),
+    [
+        ({"claude-4.5-opus-high", "claude-4-sonnet-thinking"}, 0),
+        ({"claude-4.5-opus-high", "claude-fable-5-2-high"}, 1),
+    ],
+)
+def test_probe_ignores_deliberate_exclusions_but_reports_new_models(
+    discovered: set[str],
+    expected_status: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "models.json"
+    registry.write_text('{"cursor": []}')
+    monkeypatch.setattr(PROBE_MODULE, "JSON_PATH", registry)
+    monkeypatch.setattr(PROBE_MODULE, "_MODEL_PROBES", {"cursor": lambda: discovered})
+    monkeypatch.setattr(PROBE_MODULE, "probe_deprecations", lambda _tool: set())
+    monkeypatch.setattr(PROBE_MODULE, "report_cli_args", lambda: False)
+    monkeypatch.setattr(PROBE_MODULE.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    assert PROBE_MODULE.main() == expected_status
 
 
 class TestAntigravityModelParsing:
@@ -412,6 +488,34 @@ class TestDeprecationParsing:
             json.dumps({}), set(), {"gemini-3-pro-preview"}
         )
         assert deprecated == {"google/gemini-3-pro-preview"}
+
+    def test_gemini_reads_markdoc_tables_without_retiring_replacements(self) -> None:
+        page = """
+        {% table %}
+          * Model
+          * Release date
+          * Shutdown date
+          * Recommended replacement
+          ---
+          * `gemini-3.1-flash-live-preview`
+          * March 11, 2026
+          * November 17, 2026
+          * `gemini-3.8-live`
+          ---
+          * `gemini-4-carbon`
+          * November 10, 2026
+          * No shutdown date announced
+          *
+          ---
+          * `gemini-embedding-001`
+          * July 14, 2025
+          * May 14, 2028
+          * `gemini-embedding-2`
+        {% /table %}
+        """
+        assert PROBE_MODULE.parse_gemini_deprecations(
+            page, PROBE_MODULE.datetime.date(2026, 11, 11)
+        ) == {"gemini-3.1-flash-live-preview"}
 
     def test_antigravity_uses_gemini_deprecations(self, monkeypatch: pytest.MonkeyPatch) -> None:
         urls: list[str] = []

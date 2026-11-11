@@ -177,7 +177,7 @@ class TestModelRegistry:
             "openai/gpt-5.4-mini-flex",
             "github-copilot/claude-haiku-5.5",
             "github-copilot/claude-sonnet-5.5",
-            "opencode/longcat-2.5-preview-free",
+            "opencode/longcat-2.5-free",
         ],
     )
     def test_opencode_registry_includes_live_cli_models(self, model: str) -> None:
@@ -194,11 +194,11 @@ class TestModelRegistry:
         codex_5_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-5.6")}
         assert codex_5_6 == {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
 
-    def test_codex_gpt_6_subset_is_exactly_astra_luna_sol(self) -> None:
+    def test_codex_gpt_6_catalog_includes_6_1_sol_and_terra(self) -> None:
         """GPT-6 ships as Astra, Sol, and Luna — there is no gpt-6-terra —
-        and GPT-6.1 so far only as Sol."""
+        and GPT-6.1 adds Sol and Terra."""
         codex_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-6")}
-        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"}
+        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"}
 
     @pytest.mark.parametrize(
         "model",
