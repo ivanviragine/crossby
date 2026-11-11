@@ -326,6 +326,7 @@ def _request(
     model: str | None = None,
     resume_id: str | None = None,
     read_only: bool = False,
+    allow_project_hooks: bool = False,
 ) -> HeadlessSessionRequest:
     return HeadlessSessionRequest(
         prompt=prompt,
@@ -335,6 +336,7 @@ def _request(
         timeout_seconds=timeout_seconds,
         resume_id=resume_id,
         read_only=read_only,
+        allow_project_hooks=allow_project_hooks,
         environment=child_environment(),
     )
 
@@ -403,6 +405,7 @@ def run_conversation(
     on_turn_start: Callable[[int, Participant], None] | None = None,
     on_turn: Callable[[ConverseTurn], None] | None = None,
     clock: Callable[[], float] = monotonic,
+    allow_project_hooks: bool = False,
 ) -> ConversationResult:
     """Let the asker consult the responder until it gives a final answer.
 
@@ -478,6 +481,7 @@ def run_conversation(
             timeout_seconds=min(turn_timeout_seconds, remaining),
             resume_id=side.session_id,
             read_only=_read_only(side.participant),
+            allow_project_hooks=allow_project_hooks,
         )
         in_progress = number
         if on_turn_start is not None:
@@ -551,6 +555,7 @@ def run_conversation(
                 timeout_seconds=min(turn_timeout_seconds, remaining),
                 resume_id=PREFLIGHT_RESUME_ID,
                 read_only=_read_only(participant),
+                allow_project_hooks=allow_project_hooks,
             )
             try:
                 active_runner.preflight(participant.tool, probe)
@@ -807,6 +812,7 @@ def summarize_conversation(
     model: str | None = None,
     timeout_seconds: float = DEFAULT_SUMMARY_TIMEOUT_SECONDS,
     runner: TurnRunner | None = None,
+    allow_project_hooks: bool = False,
 ) -> str:
     """Summarize a finished consultation in one managed read-only session.
 
@@ -825,6 +831,7 @@ def summarize_conversation(
         timeout_seconds=timeout_seconds,
         model=model,
         read_only=True,
+        allow_project_hooks=allow_project_hooks,
     )
     runner = runner or HeadlessTurnRunner()
     try:

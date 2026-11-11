@@ -767,6 +767,10 @@ class HeadlessSessionRequest(BaseModel):
     # runtime resolves them after its version probe and refuses to start the
     # session when any is not enforced; unknown counts as not enforced.
     require_blocked: frozenset[RestrictionChannel] = frozenset()
+    # A read-only session refuses to start in a folder whose own hooks the tool
+    # would run (see ai_tools/hook_inspection.py), because a hook can change
+    # files; set this to accept them anyway.
+    allow_project_hooks: bool = False
     # The oldest CLI build this session may run on, checked after the version
     # probe, when it depends on behavior verified later than the mode's floor
     # (such as a persona folder's native file layout).

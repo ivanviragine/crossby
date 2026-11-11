@@ -55,6 +55,14 @@ def ask(
     timeout: float = typer.Option(
         600.0, "--timeout", help="Seconds before the session is stopped."
     ),
+    allow_project_hooks: bool = typer.Option(
+        False,
+        "--allow-project-hooks",
+        help=(
+            "Run even if the folder has hooks the tool would run, which can change files "
+            "(refused by default on tools whose read-only profile keeps hooks)."
+        ),
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON result object."),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory."),
 ) -> None:
@@ -99,6 +107,7 @@ def ask(
             workspace=ProjectWorkspace(path=project_root, instructions=instructions),
             timeout_seconds=timeout,
             require_blocked=frozenset(_channel(value) for value in require_blocked),
+            allow_project_hooks=allow_project_hooks,
         )
     except ValueError as exc:
         console.error(_validation_message(exc))
@@ -188,6 +197,14 @@ def converse(
         None,
         "--responder-path",
         help="Folder the responder runs in, with its own files and setup (default: --path).",
+    ),
+    allow_project_hooks: bool = typer.Option(
+        False,
+        "--allow-project-hooks",
+        help=(
+            "Let a read-only responder or summarizer run the folder's own hooks, which can "
+            "change files (refused by default on tools whose read-only profile keeps hooks)."
+        ),
     ),
     path: Path = typer.Option(Path("."), "--path", help="Project root directory (the asker's)."),
 ) -> None:
@@ -291,6 +308,7 @@ def converse(
             turn_timeout_seconds=turn_timeout,
             on_turn_start=on_turn_start,
             on_turn=on_turn,
+            allow_project_hooks=allow_project_hooks,
         )
     except engine.ConverseError as exc:
         console.error(str(exc))
@@ -306,7 +324,12 @@ def converse(
     exit_code = result.exit_code
     if summarizer_id is not None and result.turns and not _interrupted(result):
         summary_body, summary_error, interrupted = _summarize(
-            result, transcript_path, summarizer_id, project_root, quiet=quiet
+            result,
+            transcript_path,
+            summarizer_id,
+            project_root,
+            quiet=quiet,
+            allow_project_hooks=allow_project_hooks,
         )
         if interrupted:
             exit_code = engine.EXIT_CODES[engine.StopReason.INTERRUPTED]
@@ -574,6 +597,7 @@ def _summarize(
     project_root: Path,
     *,
     quiet: bool,
+    allow_project_hooks: bool = False,
 ) -> tuple[str | None, str | None, bool]:
     """Return ``(summary, error, interrupted)``; the transcript is already written."""
     from crossby.services.converse import ConverseSummaryError, summarize_conversation
@@ -588,6 +612,7 @@ def _summarize(
                 transcript_path=transcript_path,
                 tool=tool,
                 working_dir=project_root,
+                allow_project_hooks=allow_project_hooks,
             )
     except ConverseSummaryError as exc:
         console.warn(f"Summary failed: {exc}")

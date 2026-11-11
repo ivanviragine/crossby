@@ -565,6 +565,16 @@ agent would read it. Drift is any changed, missing or extra file, link or
 directory. `cleanup` verifies first and removes only manifest files and the
 directories they leave empty; never fall back to recursive deletion.
 
+#### Project hooks
+
+`ai_tools/hook_inspection.py` lists the project hook sources a tool would
+load. `AbstractAITool._refuse_project_hooks` runs after the version probe for
+every read-only request whose resolved `hooks` restriction is not enforced, and
+raises `HeadlessProjectHooksError` unless `allow_project_hooks` is set. Add a
+source only with a sentinel probe recorded in
+`docs/unattended-headless-verification.md#project-hooks`; an unparseable file
+is reported, never treated as clear, and user-level files are not inspected.
+
 #### The public API (`crossby.api`)
 
 `src/crossby/api.py` is the only supported library surface besides the
