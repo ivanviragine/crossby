@@ -140,6 +140,9 @@ class AskRequest(_Frozen):
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     require_blocked: frozenset[RestrictionChannel] = frozenset()
     response_schema: dict[str, Any] | None = None
+    # Run even though the folder has hooks the tool would run (a hook can
+    # change files); otherwise such an ask is refused with ProjectHooksError.
+    allow_project_hooks: bool = False
 
     @field_validator("prompt")
     @classmethod
@@ -333,6 +336,19 @@ class RequirementNotMetError(AskUnsupportedError):
         self.restrictions = restrictions
 
 
+class ProjectHooksError(AskUnsupportedError):
+    """The folder has hooks the tool would run during the read-only session.
+
+    ``sources`` names them, relative to the folder. Remove them, ask in a
+    persona folder, use a tool whose read-only profile disables hooks, or set
+    ``allow_project_hooks``.
+    """
+
+    def __init__(self, message: str, *, sources: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.sources = sources
+
+
 class NestedAskError(AskError):
     """Called from inside an agent that crossby itself started."""
 
@@ -474,6 +490,7 @@ def session_request(
             response_schema=request.response_schema,
             read_only=True,
             require_blocked=request.require_blocked,
+            allow_project_hooks=request.allow_project_hooks,
             minimum_version=minimum_version,
             environment=dict(environment),
             timeout_seconds=timeout_seconds,
@@ -650,11 +667,14 @@ def _result_from_session(
 
 def _translate_preflight(exc: BaseException) -> AskError:
     from crossby.ai_tools.headless import (
+        HeadlessProjectHooksError,
         HeadlessRequestError,
         HeadlessRequirementError,
         HeadlessUnsupportedError,
     )
 
+    if isinstance(exc, HeadlessProjectHooksError):
+        return ProjectHooksError(str(exc), sources=exc.sources)
     if isinstance(exc, HeadlessRequirementError):
         return RequirementNotMetError(str(exc), unmet=exc.unmet, restrictions=exc.restrictions)
     if isinstance(exc, HeadlessRequestError):

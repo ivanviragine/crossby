@@ -455,6 +455,35 @@ The user's own global instructions, skills, MCP servers and connectors still
 load in every persona folder (for example `~/.claude/CLAUDE.md`); a persona
 folder isolates only what is in the folder.
 
+## Project hooks
+
+Verified 2026-11-10 on macOS. A read-only profile blocks a tool's own file,
+edit and shell tools, but only Claude Code (`disableAllHooks`) and Codex CLI
+(`--disable hooks`) also disable hooks, and a hook is a command that can change
+any file. A Claude Code `UserPromptSubmit` hook and a `PreToolUse` hook, each
+touching a sentinel file outside the project, were written for Cursor, Copilot
+and Antigravity CLI with `crossby sync hooks --from claude`, and each tool then
+ran a read-only turn that read a file:
+
+| Tool | Project hook source | Ran under read-only |
+| --- | --- | --- |
+| Claude Code | `.claude/settings.json` | no (`disableAllHooks`) |
+| Cursor | `.cursor/hooks.json` | yes: `preToolUse` (not `beforeSubmitPrompt`) |
+| Antigravity CLI | `.agents/hooks.json` | yes: `PreToolUse`, with the working directory set to `.agents/` |
+| GitHub Copilot CLI | `.github/hooks/hooks.json` | no sentinel in this run; not proven absent |
+
+So a read-only session on Cursor, Copilot, OpenCode or Antigravity CLI refuses
+to start in a folder with its own hooks (`HeadlessProjectHooksError`, raised
+after the version probe and before any spawn), naming the sources it found:
+`.cursor/hooks.json`, `.github/hooks/*.json`, `.agents/hooks.json`, and
+OpenCode's `.opencode/plugin(s)/` and the `plugin` key of `opencode.json`
+(plugins load code). A source that cannot be parsed, such as an
+`opencode.jsonc` with comments, counts as found. `allow_project_hooks` runs the
+session anyway: `crossby ask cursor … --allow-project-hooks` in the probe
+project answered, and its `preToolUse` hook wrote the sentinel. User-level
+hooks (for example `~/.cursor/hooks.json`) are not inspected and still run;
+only `require_blocked={hooks}` (Claude Code, Codex CLI) excludes them.
+
 ## Not verified live
 
 - **Codex success-path event names.** The account hit its usage limit

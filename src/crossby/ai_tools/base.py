@@ -991,6 +991,8 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        if request.read_only and not request.allow_project_hooks:
+            self._refuse_project_hooks(request, detected.text, name, capability)
         if request.require_blocked:
             restrictions = self.headless_restrictions(request, detected.text)
             unmet = tuple(
@@ -1008,6 +1010,41 @@ class AbstractAITool(ABC):
                     unmet=unmet,
                     restrictions=restrictions,
                 )
+
+    def _refuse_project_hooks(
+        self,
+        request: HeadlessSessionRequest,
+        version: str,
+        name: str,
+        capability: Any,
+    ) -> None:
+        """Refuse a read-only session whose folder has hooks the tool would run.
+
+        Only tools whose read-only profile does not disable hooks are checked;
+        see ``ai_tools/hook_inspection.py`` for the sources read.
+        """
+        from crossby.ai_tools.headless import HeadlessProjectHooksError
+        from crossby.ai_tools.hook_inspection import project_hook_sources
+
+        hooks = next(
+            item
+            for item in self.headless_restrictions(request, version)
+            if item.channel is RestrictionChannel.HOOKS
+        )
+        if hooks.enforced:
+            return
+        sources = project_hook_sources(self.TOOL_ID, request.working_dir)
+        if sources.clear:
+            return
+        raise HeadlessProjectHooksError(
+            f"{name} would run this folder's own hooks ({sources.describe()}) during a "
+            "read-only session, and a hook can change files. Remove them, use a persona "
+            "folder, ask a tool whose read-only profile disables hooks (Claude Code, Codex "
+            "CLI), or allow the project's hooks explicitly.",
+            tool_id=self.TOOL_ID,
+            capability=capability,
+            sources=(*sources.found, *sources.unreadable),
+        )
 
     def _validate_headless_launch_context(self, request: HeadlessSessionRequest) -> None:
         from crossby.ai_tools.headless import HeadlessUnsupportedError

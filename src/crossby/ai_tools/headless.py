@@ -162,6 +162,25 @@ class HeadlessRequirementError(HeadlessUnsupportedError):
         self.restrictions = restrictions
 
 
+class HeadlessProjectHooksError(HeadlessUnsupportedError):
+    """A read-only session's folder has hooks the tool would run.
+
+    ``sources`` names them, relative to the folder; a hook is a command that
+    can change files whatever the read-only profile blocks.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_id: AIToolID,
+        capability: HeadlessCapability,
+        sources: tuple[str, ...],
+    ) -> None:
+        super().__init__(message, tool_id=tool_id, capability=capability)
+        self.sources = sources
+
+
 class HeadlessAdapterContractError(HeadlessPreflightError):
     """An adapter's declaration and protected runtime hook disagree."""
 
