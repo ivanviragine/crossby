@@ -588,6 +588,16 @@ README table and `SCHEMA_VERSION` updated together. Continuing resumes the
 recorded sessions and never replays: the next side gets only the message it
 was owed.
 
+#### Panels
+
+`services/panel.py` is a separate engine from the two-party `converse`
+(unifying them is a follow-up). Members are always read-only and resume their
+own sessions; the lead keeps its folder's normal policy. `parse_dispatch` reads
+only the lead's last non-blank line and never routes on member text. Replies
+are committed and combined in roster order, whatever order they finished in.
+The notice wording (`PANEL_NOTICE`, version `PANEL_NOTICE_VERSION`) is
+documented in the README; change both together.
+
 #### The public API (`crossby.api`)
 
 `src/crossby/api.py` is the only supported library surface besides the
