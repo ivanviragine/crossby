@@ -312,101 +312,116 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
         root.mkdir(parents=True)
         created_root = True
     written: list[str] = []
+    # One descriptor for the folder through writing, verification and any
+    # rollback, so a folder renamed or replaced mid-way is never mistaken for
+    # this one.
+    root_fd = os.open(root, _DIRECTORY_FLAGS) if _ANCHORED else None
     try:
-        if _ANCHORED:
-            _write_anchored(root, planned, written)
-        else:  # pragma: no cover - platforms without dir_fd support (Windows)
-            for relative, data in planned.items():
-                target = root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                _write_new(target, data)
-                written.append(relative)
-        # The folder must hold exactly what was written, nothing redirected.
-        verify(workspace)
-    except BaseException:
-        # Leave nothing behind that the caller has no manifest for.
-        _remove_written(root, written, planned, created_root=created_root)
-        raise
+        try:
+            if root_fd is not None:
+                _write_anchored(root_fd, root, planned, written)
+            else:  # pragma: no cover - platforms without dir_fd support (Windows)
+                for relative, data in planned.items():
+                    target = root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    _write_new(target, data)
+                    written.append(relative)
+            # The folder must hold exactly what was written, nothing redirected.
+            verify(workspace)
+        except BaseException:
+            # Leave nothing behind that the caller has no manifest for.
+            _remove_written(root, root_fd, written, planned, manifest, created_root=created_root)
+            raise
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
     return workspace
 
 
-def _write_anchored(root: Path, planned: Mapping[str, bytes], written: list[str]) -> None:
+def _write_anchored(
+    root_fd: int, root: Path, planned: Mapping[str, bytes], written: list[str]
+) -> None:
     """Write every planned file relative to directory descriptors, never following links.
 
     Each directory is created and opened from its verified parent with
     ``O_NOFOLLOW``, so a directory replaced by a link mid-way fails the write
     instead of redirecting it outside the folder.
     """
-    root_fd = os.open(root, _DIRECTORY_FLAGS)
-    try:
-        for relative, data in planned.items():
-            parts = relative.split("/")
-            opened: list[int] = []
-            current = root_fd
+    for relative, data in planned.items():
+        parts = relative.split("/")
+        opened: list[int] = []
+        current = root_fd
+        try:
+            for part in parts[:-1]:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=current)
+                current = os.open(part, _DIRECTORY_FLAGS, dir_fd=current)
+                opened.append(current)
+            name = parts[-1]
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             try:
-                for part in parts[:-1]:
-                    with contextlib.suppress(FileExistsError):
-                        os.mkdir(part, 0o755, dir_fd=current)
-                    current = os.open(part, _DIRECTORY_FLAGS, dir_fd=current)
-                    opened.append(current)
-                name = parts[-1]
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-                try:
-                    descriptor = os.open(name, flags, 0o644, dir_fd=current)
-                except FileExistsError:
-                    raise WorkspaceConflictError(
-                        f"{root / relative} appeared while provisioning."
-                    ) from None
-                try:
-                    with os.fdopen(descriptor, "wb") as handle:
-                        handle.write(data)
-                except BaseException:
-                    with contextlib.suppress(OSError):
-                        os.unlink(name, dir_fd=current)
-                    raise
-                written.append(relative)
-            finally:
-                for item in reversed(opened):
-                    os.close(item)
-    finally:
-        os.close(root_fd)
+                descriptor = os.open(name, flags, 0o644, dir_fd=current)
+            except FileExistsError:
+                raise WorkspaceConflictError(
+                    f"{root / relative} appeared while provisioning."
+                ) from None
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=current)
+                raise
+            written.append(relative)
+        finally:
+            for item in reversed(opened):
+                os.close(item)
 
 
 def _remove_written(
-    root: Path, written: list[str], planned: Mapping[str, object], *, created_root: bool
+    root: Path,
+    root_fd: int | None,
+    written: list[str],
+    planned: Mapping[str, object],
+    manifest: Mapping[str, str],
+    *,
+    created_root: bool,
 ) -> None:
     """Undo a provisioning that failed part-way: only the files it wrote.
 
-    Removal goes through the same no-follow directory walk as writing, so it
-    can never reach outside the folder. Every planned directory is removed if
-    it ended up empty, including the one created for the file whose write
-    failed; the folder was new or empty.
+    Removal goes through the descriptor the files were written through, and a
+    file is removed only while it still holds what was written, so a folder
+    renamed or replaced mid-way never loses anything of its own. Every planned
+    directory is removed if it ended up empty; the folder itself only if its
+    path still names that same directory.
     """
-    try:
-        root_fd = os.open(root, _DIRECTORY_FLAGS) if _ANCHORED else None
-    except OSError:
-        return
-    try:
-        for relative in reversed(written):
-            _remove_entry(root, root_fd, relative, directory=False)
-        for directory in sorted(
-            _expected_directories(planned),
-            key=lambda item: item.count("/"),
-            reverse=True,
-        ):
-            _remove_entry(root, root_fd, directory, directory=True)
-    finally:
-        if root_fd is not None:
-            os.close(root_fd)
-    if created_root:
+    for relative in reversed(written):
+        _remove_entry(root, root_fd, relative, digest=manifest[relative])
+    for directory in sorted(
+        _expected_directories(planned),
+        key=lambda item: item.count("/"),
+        reverse=True,
+    ):
+        _remove_entry(root, root_fd, directory, digest=None)
+    if created_root and root_fd is not None:
+        with contextlib.suppress(OSError):
+            here, there = os.fstat(root_fd), os.lstat(root)
+            if (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino):
+                root.rmdir()
+    elif created_root:  # pragma: no cover - platforms without dir_fd support (Windows)
         with contextlib.suppress(OSError):
             root.rmdir()
 
 
-def _remove_entry(root: Path, root_fd: int | None, relative: str, *, directory: bool) -> None:
+def _remove_entry(root: Path, root_fd: int | None, relative: str, *, digest: str | None) -> None:
+    """Remove one written file (``digest`` given, if it still matches) or empty directory."""
     if root_fd is None:  # pragma: no cover - platforms without dir_fd support (Windows)
+        target = root / relative
         with contextlib.suppress(OSError):
-            (root / relative).rmdir() if directory else (root / relative).unlink()
+            if digest is None:
+                target.rmdir()
+            elif not target.is_symlink() and _sha256(target.read_bytes()) == digest:
+                target.unlink()
         return
     try:
         parent, name, opened = _open_parent(root_fd, relative)
@@ -414,9 +429,16 @@ def _remove_entry(root: Path, root_fd: int | None, relative: str, *, directory: 
         return
     try:
         with contextlib.suppress(OSError):
-            if directory:
+            if digest is None:
                 os.rmdir(name, dir_fd=parent)
-            else:
+                return
+            descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+            try:
+                with os.fdopen(os.dup(descriptor), "rb") as handle:
+                    content = handle.read()
+            finally:
+                os.close(descriptor)
+            if _sha256(content) == digest:
                 os.unlink(name, dir_fd=parent)
     finally:
         for item in reversed(opened):

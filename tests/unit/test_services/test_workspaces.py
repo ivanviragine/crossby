@@ -518,3 +518,27 @@ def test_a_write_that_fails_part_way_removes_the_file_it_created(
     with pytest.raises(OSError, match="file too large"):
         provision(_spec(tmp_path, path=folder))
     assert not folder.exists()
+
+
+@pytest.mark.skipif(os.unlink not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_rollback_never_touches_a_folder_put_in_place_of_this_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    folder = tmp_path / "p"
+    moved = tmp_path / "moved"
+
+    def swap_then_fail(target: Any) -> None:
+        folder.rename(moved)
+        folder.mkdir()
+        (folder / "AGENTS.md").write_text("someone else's instructions")
+        raise WorkspaceDriftError("swapped", changed=("AGENTS.md",))
+
+    monkeypatch.setattr(workspaces, "verify", swap_then_fail)
+    with pytest.raises(WorkspaceDriftError):
+        provision(_spec(tmp_path, path=folder))
+    # The replacement keeps its own file; what was written is rolled back
+    # through the descriptor it was written through.
+    assert (folder / "AGENTS.md").read_text() == "someone else's instructions"
+    assert not any(path.is_file() for path in moved.rglob("*"))
