@@ -692,3 +692,29 @@ def test_a_read_error_puts_the_entry_back(tmp_path: Path, monkeypatch: pytest.Mo
         cleanup(workspace)
     assert (workspace.path / "AGENTS.md").read_text() == PERSONA
     assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_unreadable_file_is_drift_and_never_loses_the_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = tmp_path / "record.json"
+    _codex_cli(monkeypatch, record)
+    workspace = provision(_spec(tmp_path))
+    real_run = AbstractAITool.get(AIToolID.CODEX).run_headless_session
+
+    def run_then_lock(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+        result = real_run(request, *args, **kwargs)
+        (workspace.path / "AGENTS.md").chmod(0)
+        return result
+
+    codex = type(AbstractAITool.get(AIToolID.CODEX))
+    monkeypatch.setattr(codex, "run_headless_session", run_then_lock)
+    try:
+        result = ask(AskRequest(backend=CliBackend(tool="codex"), prompt="q", workspace=workspace))
+        assert result.succeeded and result.text == "OK"
+        assert result.workspace_unchanged is False
+        with pytest.raises(WorkspaceDriftError, match=r"AGENTS\.md"):
+            verify_workspace(workspace)
+    finally:
+        (workspace.path / "AGENTS.md").chmod(0o644)

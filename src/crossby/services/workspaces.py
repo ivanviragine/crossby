@@ -243,7 +243,8 @@ def _inventory(
     """
     found: dict[str, str] = {}
     other: list[str] = []
-    for current, dirs, names in os.walk(root, followlinks=False):
+    unlisted: list[OSError] = []
+    for current, dirs, names in os.walk(root, followlinks=False, onerror=unlisted.append):
         for entry in dirs:
             relative = Path(current, entry).relative_to(root).as_posix()
             if Path(current, entry).is_symlink() or (
@@ -253,10 +254,21 @@ def _inventory(
         for entry in names:
             full = Path(current, entry)
             relative = full.relative_to(root).as_posix()
-            if full.is_symlink() or not stat.S_ISREG(full.lstat().st_mode):
+            try:
+                if full.is_symlink() or not stat.S_ISREG(full.lstat().st_mode):
+                    other.append(relative)
+                    continue
+                found[relative] = _sha256(full.read_bytes())
+            except OSError:
+                # Unreadable or gone mid-scan: never the provisioned file.
                 other.append(relative)
-                continue
-            found[relative] = _sha256(full.read_bytes())
+    for error in unlisted:
+        # A folder that cannot be listed cannot be shown to match.
+        name = error.filename if isinstance(error.filename, str) else str(root)
+        try:
+            other.append(Path(name).relative_to(root).as_posix())
+        except ValueError:
+            other.append(".")
     return found, other
 
 
@@ -627,10 +639,10 @@ def _cleanup_by_path(workspace: OwnedWorkspace) -> None:  # pragma: no cover - W
 
 
 def workspace_unchanged(workspace: OwnedWorkspace) -> bool:
-    """Whether the folder still holds exactly its manifest."""
+    """Whether the folder still holds exactly its manifest; never raises."""
     try:
         verify(workspace)
-    except WorkspaceDriftError:
+    except (WorkspaceDriftError, OSError):
         return False
     return True
 
