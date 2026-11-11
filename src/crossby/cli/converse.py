@@ -10,7 +10,7 @@ import json
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from crossby.models.ai import AIToolID, EffortLevel, RestrictionChannel
     from crossby.services.converse import ConversationResult, ConverseTurn, Participant
-    from crossby.services.journal import Journal
+    from crossby.services.journal import ConversationEvent, Journal
 
 
 def ask(
@@ -330,9 +330,16 @@ def converse(
     allowed = (prior.rounds if prior is not None else 0) + max_rounds
     waiting = _TurnWait()
 
+    tools_shown = False
+
     def on_turn_start(number: int, speaker: Participant) -> None:
+        nonlocal tools_shown
         if quiet:
             return
+        if not tools_shown:
+            # Both sides were checked before the first turn of this run.
+            tools_shown = True
+            _show_tools(journal.events)
         if console.err.is_terminal:
             # The line updates with the elapsed time and is replaced by the turn.
             waiting.start(f"[{number}] {speaker.label} is writing…")
@@ -365,14 +372,16 @@ def converse(
         if not quiet:
             _show_start(asker, responder, folders[engine.Role.RESPONDER], project_root)
             if prior is not None:
-                _stderr(
-                    f"[dim]      continuing after {len(prior.turns)} messages "
-                    f"({prior.stop_reason.value})[/]"
-                )
+                _stderr(f"[dim]      {_escape(_continuing(prior))}[/]")
+            more = " more" if prior is not None else ""
+            questions = "question" if max_rounds == 1 else "questions"
             _stderr(
-                f"[dim]      limits: up to {max_rounds} messages, {_duration(timeout)} in all[/]"
+                f"[dim]      limits: up to {max_rounds}{more} {questions}, "
+                f"{_duration(timeout)} in all, {_duration(turn_timeout)} per turn[/]"
             )
             _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
+            if journal.path is not None:
+                _stderr(f"[dim]      events:     {_escape(str(journal.path))}[/]")
         result = engine.run_conversation(
             goal_text,
             (asker, responder),
@@ -429,6 +438,16 @@ def converse(
         # In a terminal stdout and stderr share the screen, where the final
         # answer was just shown as the last message: print it only once.
         answer_shown=not quiet and sys.stdout.isatty() and console.err.is_terminal,
+        # A saved journal of a consultation without its answer can go on. A
+        # final answer committed before Ctrl-C reads as answered to --continue.
+        continue_dir=(
+            out_dir
+            if not result.answered
+            and not any(turn.is_final_answer for turn in result.turns)
+            and journal.store_error is None
+            and journal.path is not None
+            else None
+        ),
     )
     if exit_code:
         raise typer.Exit(exit_code)
@@ -587,6 +606,35 @@ def _show_turn(turn: ConverseTurn, *, heading: bool = False) -> None:
     footer = turn_footer(turn) if heading else f"{title} · {turn_footer(turn)}"
     _stderr(f"[dim]      {_escape(footer)}[/]")
     sys.stderr.flush()
+
+
+def _continuing(prior: ConversationResult) -> str:
+    """``continuing after 3 messages; it had stopped on the time limit``."""
+    from crossby.services.converse import StopReason
+
+    count = len(prior.turns)
+    why = {
+        StopReason.ROUND_LIMIT: "it had reached its question limit",
+        StopReason.TIMEOUT: "it had stopped on the time limit",
+        StopReason.INTERRUPTED: "it had been interrupted",
+        StopReason.FAILED: "a session had failed",
+    }.get(prior.stop_reason, f"it had stopped ({prior.stop_reason.value})")
+    return f"continuing after {count} message{'' if count == 1 else 's'}; {why}"
+
+
+def _show_tools(events: Sequence[ConversationEvent]) -> None:
+    """``tools: claude 2.1.317 · codex 0.166.0``, from this run's checks."""
+    from crossby.cli.panel_view import version_number
+    from crossby.services.journal import EventType
+
+    versions: dict[str, str | None] = {}
+    for event in events:
+        if event.type is EventType.PARTICIPANT_READY:
+            tool = str(event.data.get("tool"))
+            versions.setdefault(tool, version_number(event.data.get("version")))
+    if versions:
+        tools = " · ".join(name + (f" {v}" if v else "") for name, v in versions.items())
+        _stderr(f"[dim]      tools: {_escape(tools)}[/]")
 
 
 def _duration(seconds: float) -> str:
@@ -759,6 +807,7 @@ def _report(
     summary_error: str | None,
     as_json: bool,
     answer_shown: bool = False,
+    continue_dir: Path | None = None,
 ) -> None:
     from crossby.services.converse import describe_stop
 
@@ -781,6 +830,7 @@ def _report(
                 "summary_path": str(summary_path) if summary_path else None,
                 "summary": summary_body,
                 "summary_error": summary_error,
+                "continuable": continue_dir is not None,
             }
         )
         return
@@ -804,6 +854,10 @@ def _report(
     _stderr(f"[dim]      transcript: {_escape(str(transcript_path))}[/]")
     if summary_path is not None:
         _stderr(f"[dim]      summary:    {_escape(str(summary_path))}[/]")
+    if continue_dir is not None:
+        import shlex
+
+        _hint(f"continue it with: crossby converse --continue {shlex.quote(str(continue_dir))}")
 
 
 def _stderr(markup: str) -> None:
@@ -813,7 +867,8 @@ def _stderr(markup: str) -> None:
 
 def _hint(message: str) -> None:
     """A hint on stderr: stdout carries only the answer, so it can be piped."""
-    console.err.print(f"[hint]    {console.ARROW} {_escape(message)}[/]")
+    # soft_wrap keeps a command or path on one line, so it can be copied.
+    console.err.print(f"[hint]    {console.ARROW} {_escape(message)}[/]", soft_wrap=True)
 
 
 def _escape(text: str) -> str:
