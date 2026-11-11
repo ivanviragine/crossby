@@ -7,12 +7,13 @@ and reserves stdout for the lead's final answer (or ``--json``).
 from __future__ import annotations
 
 import dataclasses
+import queue
 import sys
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import typer
 
@@ -244,27 +245,85 @@ def _terminal_reply(request: Any) -> Any:
         _TERMINAL.release()
 
 
-def _readline(request: Any) -> str | None:
-    """One line of stdin, or ``None`` at end of input or once the request expired.
+class _StdinLines:
+    """stdin, read a whole line at a time by one thread of its own.
 
-    A real terminal or pipe is polled, so an expired request stops waiting;
-    a stream without a descriptor (such as a test's) is read directly.
+    A seat waits on the queue, not on the stream, so it can stop the moment
+    its request expires. Nothing is ever hidden from it: every line the
+    stream buffered is already in the queue, unlike text left in
+    ``sys.stdin``'s buffer behind a readiness check of its descriptor. A
+    blocking read on a thread works the same on every platform. Lines go to
+    seats in order, so piped replies are taken as given; at a terminal, lines
+    typed before a prompt appeared are dropped when it does, since no one
+    could have meant them for it. The reader is a daemon and never holds up exit.
     """
-    import select
 
-    try:
-        descriptor = sys.stdin.fileno()
-    except (AttributeError, OSError, ValueError):
-        descriptor = None
-    if descriptor is not None:
+    def __init__(self, stream: IO[str]) -> None:
+        self.stream = stream
+        self.interactive = _isatty(stream)
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._closed = threading.Event()
+        threading.Thread(target=self._pump, daemon=True, name="crossby-stdin").start()
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                line = self.stream.readline()
+                if line:
+                    self._lines.put(line)
+                    continue
+                # End of input. At a terminal it ends one reply (Ctrl-D) and
+                # the next prompt can read again; anywhere else it is final.
+                self._lines.put(None)
+                if not self.interactive:
+                    break
+        except (OSError, ValueError):
+            pass
+        self._closed.set()
+
+    def drop_typed_ahead(self) -> None:
+        if not self.interactive:
+            return
         while True:
-            if request.expired.is_set():
-                return None
-            ready, _, _ = select.select([descriptor], [], [], 0.2)
-            if ready:
-                break
-    line = sys.stdin.readline()
-    return line if line else None
+            try:
+                self._lines.get_nowait()
+            except queue.Empty:
+                return
+
+    def next(self, expired: threading.Event) -> str | None:
+        """The next line, or ``None`` at end of input or once ``expired`` is set."""
+        while not expired.is_set():
+            try:
+                return self._lines.get(timeout=0.1)
+            except queue.Empty:
+                if self._closed.is_set() and self._lines.empty():
+                    return None
+        return None
+
+
+def _isatty(stream: IO[str]) -> bool:
+    try:
+        return stream.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+_STDIN: dict[str, _StdinLines] = {}
+_STDIN_LOCK = threading.Lock()
+
+
+def _stdin_lines() -> _StdinLines:
+    """The reader of the current ``sys.stdin``, started on first use."""
+    with _STDIN_LOCK:
+        reader = _STDIN.get("current")
+        if reader is None or reader.stream is not sys.stdin:
+            reader = _STDIN["current"] = _StdinLines(sys.stdin)
+        return reader
+
+
+def _readline(request: Any) -> str | None:
+    """One line of stdin, or ``None`` at end of input or once the request expired."""
+    return _stdin_lines().next(request.expired)
 
 
 def _read_terminal_reply(request: Any) -> Any:
@@ -276,6 +335,7 @@ def _read_terminal_reply(request: Any) -> Any:
     from crossby.services.panel import HumanReply
 
     who = "lead" if request.kind == "lead" else f"@{request.participant}"
+    _stdin_lines().drop_typed_ahead()
     if request.message:
         _stderr(f"[step]▸[/] [bold]{who}[/], your turn. You received:")
         _stderr(_escape(request.message))

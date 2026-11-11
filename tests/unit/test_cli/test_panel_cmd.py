@@ -280,3 +280,127 @@ def test_an_expired_seat_is_never_prompted_and_frees_the_terminal(
     assert reached == ["r1"]
     assert panel_cli._TERMINAL.acquire(timeout=1)
     panel_cli._TERMINAL.release()
+
+
+class _Terminal:
+    """A terminal-like stdin: lines arrive when a test types them; Ctrl-D is ``""``."""
+
+    def __init__(self) -> None:
+        import queue
+
+        self.typed: queue.Queue[str] = queue.Queue()
+
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self) -> str:
+        return self.typed.get()
+
+
+def _seat(request_id: str, participant: str = "dana") -> Any:
+    from crossby.services.panel import InputRequest
+
+    return InputRequest(request_id, participant, "member", 2, "Q?")
+
+
+def test_a_pipe_left_open_still_delivers_every_buffered_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import threading as threads
+
+    from crossby.cli import panel as panel_cli
+    from crossby.services.panel import HumanReply
+
+    read_end, write_end = os.pipe()
+    stream = os.fdopen(read_end, "r")
+    monkeypatch.setattr("sys.stdin", stream)
+    os.write(write_end, b"answer\n.\nnext seat\n.\n")  # both replies at once; never closed
+    seats = [_seat("r1"), _seat("r2", "lee")]
+    # A reader that missed buffered lines would wait out these deadlines instead.
+    deadlines = [threads.Timer(5, seat.expired.set) for seat in seats]
+    for deadline in deadlines:
+        deadline.start()
+    try:
+        first, second = (panel_cli._read_terminal_reply(seat) for seat in seats)
+    finally:
+        for deadline in deadlines:
+            deadline.cancel()
+        os.close(write_end)
+    assert first == HumanReply("answer")
+    assert second == HumanReply("next seat")
+
+
+def test_an_expired_seat_stops_waiting_and_piped_lines_go_to_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from crossby.cli import panel as panel_cli
+    from crossby.services.panel import HumanReply
+
+    read_end, write_end = os.pipe()
+    monkeypatch.setattr("sys.stdin", os.fdopen(read_end, "r"))
+    expired = _seat("r1")
+    expired.expired.set()
+    try:
+        assert panel_cli._read_terminal_reply(expired) is None
+        os.write(write_end, b"for lee\n.\n")
+        assert panel_cli._read_terminal_reply(_seat("r2", "lee")) == HumanReply("for lee")
+    finally:
+        os.close(write_end)
+
+
+def test_at_a_terminal_lines_typed_before_the_prompt_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading as threads
+
+    from crossby.cli import panel as panel_cli
+    from crossby.services.panel import HumanReply
+
+    terminal = _Terminal()
+    monkeypatch.setattr("sys.stdin", terminal)
+    reader = panel_cli._stdin_lines()
+    terminal.typed.put("typed while the agents worked\n")
+    for _ in range(50):  # until the reader has queued it
+        if not reader._lines.empty():
+            break
+        threads.Event().wait(0.02)
+    replies: list[Any] = []
+    seat = threads.Thread(
+        target=lambda: replies.append(panel_cli._read_terminal_reply(_seat("r1")))
+    )
+    seat.start()
+    threads.Event().wait(0.2)
+    for line in ("meant for the prompt\n", ".\n"):
+        terminal.typed.put(line)
+    seat.join(5)
+    assert replies == [HumanReply("meant for the prompt")]
+
+
+def test_at_a_terminal_ctrl_d_ends_one_reply_and_the_next_seat_still_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crossby.cli import panel as panel_cli
+    from crossby.services.panel import HumanReply
+
+    terminal = _Terminal()
+    monkeypatch.setattr("sys.stdin", terminal)
+    replies: list[Any] = []
+
+    def answer(request: Any, *typed: str) -> None:
+        import threading as threads
+
+        seat = threads.Thread(
+            target=lambda: replies.append(panel_cli._read_terminal_reply(request))
+        )
+        seat.start()
+        threads.Event().wait(0.2)
+        for line in typed:
+            terminal.typed.put(line)
+        seat.join(5)
+
+    answer(_seat("r1"), "first\n", "")
+    answer(_seat("r2", "lee"), "second\n", ".\n")
+    assert replies == [HumanReply("first"), HumanReply("second")]
