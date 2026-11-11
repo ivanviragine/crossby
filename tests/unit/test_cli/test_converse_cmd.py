@@ -634,6 +634,8 @@ def test_ask_refuses_an_unmet_requirement_before_starting(
     result = _invoke(tmp_path, "ask", "cursor", "q", "--require-blocked", "hooks")
     assert result.exit_code == 1
     assert "hooks (not_enforced)" in result.stderr
+    assert "Run without that --require-blocked" in result.stderr
+    assert result.stdout == ""
     assert fake.calls[0][1].require_blocked == frozenset({RestrictionChannel.HOOKS})
 
 
@@ -670,3 +672,33 @@ def test_ask_refuses_to_nest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert result.exit_code == 1
     assert "Nested consultations are disabled" in result.stderr
     assert fake.calls == []
+
+
+def test_ask_failure_shows_what_to_do(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from crossby.models.ai import HeadlessEvent, HeadlessEventKind, HeadlessFailureReason
+    from crossby.models.ai import HeadlessSessionResult as Result
+
+    status = HeadlessTerminalStatus.FAILED
+    failed = Result(
+        tool=AIToolID.CODEX,
+        version="0.166.0",
+        status=status,
+        events=(
+            HeadlessEvent(sequence=1, kind=HeadlessEventKind.TERMINAL, terminal_status=status),
+        ),
+        duration_seconds=1.0,
+        failure_reason=HeadlessFailureReason.NOT_SIGNED_IN,
+    )
+
+    class Fixed(FakeRunner):
+        def run(self, tool: AIToolID, request: Any, cancel_event: threading.Event) -> Any:
+            self.calls.append((tool, request))
+            return failed
+
+    _use_ask_runner(monkeypatch, Fixed([]))
+    result = _invoke(tmp_path, "ask", "codex", "q")
+    assert result.exit_code == 1
+    assert "failed: not signed in" in result.stderr
+    assert "codex login" in result.stderr
+    # stdout carries only an answer, so it can be piped.
+    assert result.stdout == ""

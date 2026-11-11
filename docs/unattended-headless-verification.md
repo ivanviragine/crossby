@@ -9,7 +9,7 @@ and is enforced as the runtime floor.
 | Claude Code | 2.1.263 | `claude --print` with each `--output-format`, `--json-schema`, `--permission-prompts none` |
 | Codex CLI | 0.154.0 | `codex exec --json --output-schema <file> -` |
 | Cursor | 2026.11.05-86047df | `agent --print --output-format json\|stream-json --trust`, prompt piped on stdin |
-| GitHub Copilot CLI | 1.0.105 | `copilot --help`; `copilot -s --no-ask-user`, prompt piped on stdin |
+| GitHub Copilot CLI | 1.0.105 | `copilot --help`; `copilot -s --no-ask-user --output-format json`, prompt piped on stdin |
 | OpenCode | 1.18.31 | `opencode run --format json` |
 | Antigravity CLI | 1.5.4 | `agy --print= --input-format stream-json --output-format stream-json --json-schema --print-timeout` |
 
@@ -335,14 +335,70 @@ run refused its goal ("I can't help extract hidden instructions") and put
 `NEXT: DONE` inside a sentence, so it ran to the round limit; with a goal that
 did not ask for instructions it answered in two rounds.
 
+## Copilot's JSONL stream
+
+Verified 2026-11-10 on 1.0.105 (run from Copilot's kept package) and 1.0.109.
+Unattended Copilot sessions run `copilot -s --no-ask-user … --output-format
+json` and read its JSONL events; callers still get the final answer as text.
+
+- `session.start` names the session (`data.sessionId`) and the `result` event
+  closes the stream with `sessionId`, `exitCode` and
+  `usage.premiumRequests`. With `--session-id <uuid>` both report that ID, so
+  a run that reports another session is invalid output. A resumed run recalled
+  a number from its first turn on both builds.
+- The answer is the `assistant.message` with `phase: "final_answer"`.
+  Messages that only request tools have empty `content`; without the marker,
+  the last message with content and no tool requests is the answer.
+- `assistant.message` carries the model that wrote it (`auto` resolves to,
+  for example, `mai-code-1.1-flash` or `gpt-6-luna`), reported as the
+  observed model.
+- A refused tool call is a `tool.execution_complete` with `success: false`
+  and `error.code: "denied"` ("Permission to run this tool was denied due to
+  the following rules: `write`"); crossby reports their count as a denial.
+- `premiumRequests` is the session's running total: a resumed second turn
+  reported 2. It is the usage of one invocation only for a fresh session,
+  which every `ask` is. Copilot reports no token counts.
+- The stream echoes the prompt (`user.message`) and system text
+  (`instruction.update`); no event content ever leaves the adapter.
+- An unknown model is a `session.error` event ('Execution failed: Model
+  "no-such-model-xyz" is not available.') followed by `result` with exit code
+  1.
+
+## Failure reasons
+
+Verified 2026-11-10 on macOS. A failed, invalid or timed-out session carries
+`failure_reason` when the tool said why in a way crossby recognizes:
+`not_signed_in`, `model_unavailable`, `rate_limited`, `action_denied` or
+`untrusted_folder`. Adapters hand the runtime native stderr, error envelopes
+and streamed error frames as private evidence
+(`HeadlessRuntimeContext.note_failure_evidence`); `ai_tools/failure_reasons.py`
+classifies them once, at completion, and only the reason leaves the adapter.
+A recognized refusal with no answer is `failed` rather than
+`invalid_output`, even when the tool emitted no events. An unrecognized
+failure has no reason.
+
+Each case below ran through crossby's adapters. Signing out was simulated
+without touching the real login, with an empty config directory or an
+invalid key in the probe's own environment:
+
+| Case | Claude Code | Codex CLI | Cursor | Copilot | OpenCode | Antigravity CLI |
+| --- | --- | --- | --- | --- | --- | --- |
+| Signed out | "Not logged in · Please run /login" (empty `CLAUDE_CONFIG_DIR`); "Invalid API key" with `api_error_status` 401 | "unexpected status 401 Unauthorized" after 5 retries, 17 s (empty `CODEX_HOME`) | "The provided API key is invalid." (`CURSOR_API_KEY`) | not reproduced: an invalid `COPILOT_GITHUB_TOKEN` and an empty `COPILOT_HOME` both still used the stored login | "UnknownError … Unexpected server error": not recognized | "authentication required. Run 'agy' to log in" (empty `HOME`) |
+| Unknown model | "issue with the selected model" with `api_error_status` 404 | "model is not supported when using Codex with a ChatGPT account" | "Cannot use this model: …" | `session.error`: 'Model "…" is not available' | "UnknownError": not recognized | "invalid model selection" |
+| Other | | outside a git repository without read-only: "Not inside a trusted directory", before any event | | | an auto-rejected permission ("external_directory … auto-rejecting"), then exit 0 without a stop event | an empty response after a denied action |
+
+Rate limits were not reproduced. An HTTP 429 (Claude Code's
+`api_error_status`) is `rate_limited`, as is Codex's "unexpected status 429",
+inferred from the same template as its captured 401. Codex's 401 frames stream
+while it retries, so a session that times out during those retries still
+reports `not_signed_in`.
+
+Claude Code's result envelope also carries `total_cost_usd` and `modelUsage`.
+The cost is passed through as `reported_cost_usd`, exactly as reported (crossby
+keeps no prices), and the `modelUsage` keys are the observed models.
+
 ## Not verified live
 
-- **GitHub Copilot CLI stdout envelope.** The account available for probing is
-  blocked by an org policy ("Access denied by policy settings"), so only
-  `--help` flag contracts and the failure path (exit 1, diagnostics on stderr,
-  empty stdout) were observed. Copilot therefore declares **text only**; its
-  1.0.83 `--output-format json` (JSONL) flag exists but its event schema is
-  unverified and is deliberately not advertised.
 - **Codex success-path event names.** The account hit its usage limit
   mid-verification, so `turn.completed` and `item.completed` with
   `item.type == "agent_message"` come from Codex's documented exec JSONL schema

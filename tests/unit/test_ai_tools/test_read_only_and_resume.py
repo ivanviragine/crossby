@@ -29,11 +29,13 @@ from crossby.utils.versioning import BinaryVersion, parse_semver
 from tests.unit.test_ai_tools.test_headless_adapters import (
     AGY_RESULT,
     CODEX_EVENTS,
+    COPILOT_SESSION,
     CURSOR_RESULT,
     OPENCODE_EVENTS,
     _adapter,
     _agy_result,
     _command,
+    _copilot_events,
     _fake_cli,
     _request,
 )
@@ -328,12 +330,20 @@ def test_copilot_rejects_bad_resume_ids_and_read_only_command_policies(tmp_path:
 def test_copilot_reports_the_session_it_pinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter = _at_verified_build(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout="OK\n"))
+    adapter = _at_verified_build(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=_copilot_events()))
     fresh = adapter.run_headless_session(_request(tmp_path))
     assert fresh.status is HeadlessTerminalStatus.SUCCEEDED
-    assert fresh.session_id is not None and len(fresh.session_id) == 36
+    assert fresh.session_id == COPILOT_SESSION
+    adapter = _at_verified_build(
+        monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=_copilot_events(session=UUID))
+    )
     resumed = adapter.run_headless_session(_request(tmp_path, resume_id=UUID))
+    assert resumed.status is HeadlessTerminalStatus.SUCCEEDED
     assert resumed.session_id == UUID
+    # A resumed run must report the session it was given.
+    adapter = _at_verified_build(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=_copilot_events()))
+    other = adapter.run_headless_session(_request(tmp_path, resume_id=UUID))
+    assert other.status is HeadlessTerminalStatus.INVALID_OUTPUT
 
 
 # ---------------------------------------------------------------------------

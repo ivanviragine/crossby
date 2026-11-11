@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import stat
@@ -39,6 +40,7 @@ from crossby.models.ai import (
     HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    ModelBreakdown,
     PlanArtifactLocation,
     PlanArtifactSource,
     PlanCommandPolicySupport,
@@ -486,7 +488,6 @@ class ClaudeAdapter(AbstractAITool):
             parse_json_object,
             recognized_frame_kind,
             run_managed_command,
-            usage_from,
         )
 
         streaming = request.native_output is HeadlessNativeOutput.JSONL
@@ -609,6 +610,12 @@ class ClaudeAdapter(AbstractAITool):
                 *warnings,
                 "Claude Code reported a native error result.",
             )
+            # On an error result ``result`` holds Claude Code's error wording
+            # ("Not logged in · Please run /login"), never an answer.
+            context.note_failure_evidence(
+                non_blank_text(envelope.get("result")),
+                http_status=envelope.get("api_error_status"),
+            )
         return complete_session(
             context,
             request,
@@ -624,13 +631,7 @@ class ClaudeAdapter(AbstractAITool):
             native_status=non_blank_text(envelope.get("terminal_reason"))
             or non_blank_text(envelope.get("subtype")),
             session_id=session_id,
-            usage=usage_from(
-                envelope.get("usage"),
-                input_tokens="input_tokens",
-                output_tokens="output_tokens",
-                cached="cache_read_input_tokens",
-                session_id=session_id,
-            ),
+            usage=_reported_usage(envelope, session_id),
             warnings=warnings,
         )
 
@@ -1241,3 +1242,35 @@ class ClaudeAdapter(AbstractAITool):
                 args += [f"Agent({name})" for name in sorted(agents_disable)]
 
         return SceneLaunchArgs(args=tuple(args))
+
+
+def _reported_usage(envelope: dict[str, Any], session_id: str | None) -> TokenUsage | None:
+    """Tokens, the reported cost and the models used, from one result envelope.
+
+    ``total_cost_usd`` is Claude Code's own figure, passed through unchanged;
+    ``modelUsage`` is keyed by the models that served the turn.
+    """
+    from crossby.ai_tools.headless_cli import usage_from
+
+    usage = usage_from(
+        envelope.get("usage"),
+        input_tokens="input_tokens",
+        output_tokens="output_tokens",
+        cached="cache_read_input_tokens",
+        session_id=session_id,
+    )
+    cost = envelope.get("total_cost_usd")
+    models = envelope.get("modelUsage")
+    names = (
+        [name for name in models if isinstance(name, str) and name.strip()]
+        if isinstance(models, dict)
+        else []
+    )
+    if usage is None:
+        return None
+    updates: dict[str, Any] = {}
+    if isinstance(cost, int | float) and not isinstance(cost, bool) and math.isfinite(cost):
+        updates["reported_cost_usd"] = float(cost)
+    if names:
+        updates["model_breakdown"] = [ModelBreakdown(model=name) for name in names]
+    return usage.model_copy(update=updates) if updates else usage

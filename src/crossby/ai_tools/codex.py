@@ -103,6 +103,19 @@ _CODEX_MESSAGE_LIMIT = 8 * 1024 * 1024
 _CODEX_NOTIFICATION_BYTES_LIMIT = 8 * 1024 * 1024
 
 
+def _codex_failure_text(frame: dict[str, Any]) -> str | None:
+    """The wording of a Codex ``error`` or ``turn.failed`` frame, as failure evidence."""
+    kind = frame.get("type")
+    if kind == "error":
+        message = frame.get("message")
+    elif kind == "turn.failed":
+        error = frame.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+    else:
+        return None
+    return message if isinstance(message, str) else None
+
+
 def _codex_frame_kind(frame: dict[str, Any]) -> str | None:
     """Describe one ``codex exec --json`` frame without exposing its content."""
     from crossby.ai_tools.headless_cli import non_blank_text, recognized_frame_kind
@@ -634,6 +647,7 @@ class CodexAdapter(AbstractAITool):
                     provenance_of=lambda frame: {
                         "thread_id": non_blank_text(frame.get("thread_id"))
                     },
+                    failure_text_of=_codex_failure_text,
                 ),
             )
         finally:

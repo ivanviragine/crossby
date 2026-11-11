@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from collections.abc import Mapping
@@ -117,6 +118,9 @@ def _read_only_config_content(adapter: AbstractAITool, request: HeadlessSessionR
         _READ_ONLY_AGENT: _READ_ONLY_AGENT_CONFIG,
     }
     return json.dumps(config, separators=(",", ":"))
+
+
+_AUTO_REJECTED = re.compile(r"permission requested: ([a-z_]{1,40}) .*?auto-rejecting")
 
 
 class OpenCodeAdapter(AbstractAITool):
@@ -435,6 +439,12 @@ class OpenCodeAdapter(AbstractAITool):
             ),
         )
         warnings = capture_failure_warnings(output)
+        # `opencode run` auto-rejects any permission that would ask (verified on
+        # 1.19.5: "permission requested: external_directory (…);
+        # auto-rejecting") and then exits without its terminal stop event.
+        # Name each rejected permission; its path or command stays private.
+        for permission in dict.fromkeys(_AUTO_REJECTED.findall(output.stderr)):
+            context.add_denial(f"OpenCode auto-rejected a {permission} permission request")
         if output.overflowed or output.undecodable:
             return context.complete(
                 HeadlessTerminalStatus.INVALID_OUTPUT,

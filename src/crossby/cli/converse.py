@@ -108,7 +108,7 @@ def ask(
             result = run_ask(request)
     except RequirementNotMetError as exc:
         console.error(str(exc))
-        console.hint(
+        _hint(
             "Run without that --require-blocked, or ask a tool that blocks it "
             "(see `crossby ask --json` for each channel's state)."
         )
@@ -134,7 +134,12 @@ def ask(
         print(text)
     if not result.succeeded:
         if not as_json:
+            from crossby.services.ask import failure_hint
+
             console.error(result.error or f"{tool_id.value} did not answer.")
+            hint = failure_hint(tool_id, result.failure_reason)
+            if hint is not None:
+                _hint(hint)
         raise typer.Exit(1)
 
 
@@ -655,6 +660,11 @@ def _report(
 def _stderr(markup: str) -> None:
     # soft_wrap keeps long paths on one line so they can be copied.
     console.err.print(markup, soft_wrap=True)
+
+
+def _hint(message: str) -> None:
+    """A hint on stderr: stdout carries only the answer, so it can be piped."""
+    console.err.print(f"[hint]    {console.ARROW} {_escape(message)}[/]")
 
 
 def _escape(text: str) -> str:

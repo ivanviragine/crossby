@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from crossby.models.ai import (
     AIToolID,
     EffortLevel,
+    HeadlessFailureReason,
     HeadlessInteractionMode,
     HeadlessNativeTransport,
     HeadlessSessionPreflight,
@@ -170,6 +171,9 @@ class UsageReport(_Frozen):
     cached_tokens: int | None = None
     total_tokens: int | None = None
     premium_requests: int | None = None
+    # Cost in US dollars exactly as the tool reported it (Claude Code does);
+    # crossby keeps no prices and never estimates one.
+    reported_cost_usd: float | None = None
     scope: Literal["invocation"] = "invocation"
     complete: bool | None = None
     source: str
@@ -207,6 +211,9 @@ class AskResult(_Frozen):
     provenance: CliProvenance
     denials: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    # Why a failed, invalid or timed-out ask failed, when the tool said so in
+    # a recognized way; ``None`` means unrecognized, not "no reason".
+    failure_reason: HeadlessFailureReason | None = None
     # "prompt": the question was sent exactly as given; "prompt_envelope":
     # it was sent inside the instructions envelope of ``envelope_version``.
     delivery: Literal["prompt", "prompt_envelope"]
@@ -457,6 +464,7 @@ def _usage(tool: AIToolID, usage: TokenUsage | None) -> UsageReport | None:
         usage.cached_tokens,
         usage.total_tokens,
         usage.premium_requests,
+        usage.reported_cost_usd,
     )
     if all(value is None for value in fields):
         return None
@@ -466,6 +474,7 @@ def _usage(tool: AIToolID, usage: TokenUsage | None) -> UsageReport | None:
         cached_tokens=usage.cached_tokens,
         total_tokens=usage.total_tokens,
         premium_requests=usage.premium_requests,
+        reported_cost_usd=usage.reported_cost_usd,
         source=f"{tool.value} result",
     )
 
@@ -478,9 +487,59 @@ def _output(result: HeadlessSessionResult) -> TextOutput | JsonOutput | None:
     return None
 
 
-def _status_text(result: HeadlessSessionResult) -> str:
+FAILURE_PHRASES: dict[HeadlessFailureReason, str] = {
+    HeadlessFailureReason.NOT_SIGNED_IN: "not signed in",
+    HeadlessFailureReason.MODEL_UNAVAILABLE: "the model is not available",
+    HeadlessFailureReason.RATE_LIMITED: "a usage or rate limit was reached",
+    HeadlessFailureReason.ACTION_DENIED: "it ended the turn after denying an action",
+    HeadlessFailureReason.UNTRUSTED_FOLDER: "it refused to run in this folder",
+}
+
+
+_SIGN_IN: dict[AIToolID, str] = {
+    AIToolID.CLAUDE: "Sign in with `claude` and /login, or set a valid ANTHROPIC_API_KEY.",
+    AIToolID.CODEX: "Sign in with `codex login`.",
+    AIToolID.CURSOR: "Sign in with `agent login`, or set a valid CURSOR_API_KEY.",
+    AIToolID.COPILOT: "Sign in with `copilot` and /login, or set a valid COPILOT_GITHUB_TOKEN.",
+    AIToolID.OPENCODE: "Sign in with `opencode auth login`.",
+    AIToolID.ANTIGRAVITY_CLI: "Sign in by running `agy` once.",
+}
+
+
+def failure_hint(tool: AIToolID, reason: HeadlessFailureReason | None) -> str | None:
+    """What a person can do about a recognized failure, for the CLI to show."""
+    if reason is HeadlessFailureReason.NOT_SIGNED_IN:
+        return _SIGN_IN.get(tool)
+    if reason is HeadlessFailureReason.MODEL_UNAVAILABLE:
+        return "Pick a model this account can use with --model, or omit it for the default."
+    if reason is HeadlessFailureReason.RATE_LIMITED:
+        return "Wait for the limit to reset, or ask another tool."
+    if reason is HeadlessFailureReason.ACTION_DENIED:
+        return (
+            "The agent tried something its read-only profile denies (see the denials) and "
+            "gave no answer; ask for one it can give by reading."
+        )
+    if reason is HeadlessFailureReason.UNTRUSTED_FOLDER:
+        return "Run it in a git repository or a folder the tool trusts."
+    return None
+
+
+def describe_session_status(result: HeadlessSessionResult) -> str:
+    """``failed``, plus the recognized reason and the tool's own status.
+
+    For example ``failed: not signed in (native: api_error)``. The reason is a
+    fixed phrase and the native status a short validated token, never native
+    output, so both are safe to show.
+    """
+    reason = (
+        f": {FAILURE_PHRASES[result.failure_reason]}" if result.failure_reason is not None else ""
+    )
     native = f" (native: {result.native_status})" if result.native_status else ""
-    return f"{result.status.value}{native}"
+    return f"{result.status.value}{reason}{native}"
+
+
+def _status_text(result: HeadlessSessionResult) -> str:
+    return describe_session_status(result)
 
 
 def _delivery(request: AskRequest) -> dict[str, Any]:
@@ -514,6 +573,7 @@ def _result_from_session(
         provenance=_provenance(request, result),
         denials=result.denials,
         warnings=result.warnings,
+        failure_reason=result.failure_reason,
         **_delivery(request),
     )
 

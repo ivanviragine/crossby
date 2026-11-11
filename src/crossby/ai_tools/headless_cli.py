@@ -411,6 +411,10 @@ def run_managed_command(
         except UnicodeDecodeError:
             undecodable = True
             decoded[name] = buffer.decode("utf-8", errors="replace")
+    # Native stderr can say why a session failed (a missing login, an unknown
+    # model). It stays private: the runtime only classifies it into a fixed
+    # reason, and callers still see the fixed withheld-diagnostics warning.
+    context.note_failure_evidence(decoded["stderr"])
     return HeadlessCommandOutput(
         returncode=returncode,
         stdout=decoded["stdout"],
@@ -426,13 +430,16 @@ def frame_streamer(
     kind_of: Callable[[dict[str, Any]], str | None],
     provenance_of: Callable[[dict[str, Any]], dict[str, str | None]],
     progress: BoundedProgress | None = None,
+    failure_text_of: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> StdoutLineHandler:
     """Turn live native JSONL frames into provenance and bounded progress.
 
     Native frames echo prompt and response text, so their data only determines
     whether to emit a content-free progress event. Provenance is recorded as
     soon as the transport emits it, which is what a timed-out session keeps in
-    its safe partial result.
+    its safe partial result. ``failure_text_of`` picks a native error frame's
+    wording, kept privately as failure evidence, so a session that times out
+    while the tool retries a refused login can still say why.
     """
     progress = progress or BoundedProgress(context)
 
@@ -457,6 +464,8 @@ def frame_streamer(
             kind = kind_of(frame)
             if kind:
                 progress.note()
+            if failure_text_of is not None:
+                context.note_failure_evidence(failure_text_of(frame))
 
     return consume
 

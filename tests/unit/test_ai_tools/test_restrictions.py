@@ -36,9 +36,11 @@ from tests.unit.test_ai_tools.test_headless_adapters import (
     AGY_RESULT,
     CLAUDE_RESULT,
     CODEX_EVENTS,
+    COPILOT_SESSION,
     CURSOR_RESULT,
     OPENCODE_EVENTS,
     _agy_result,
+    _copilot_events,
     _jsonl,
     _request,
 )
@@ -112,7 +114,7 @@ SUCCESS: dict[AIToolID, str] = {
     AIToolID.CLAUDE: json.dumps({**CLAUDE_RESULT, "structured_output": None, "result": "OK"}),
     AIToolID.CODEX: _jsonl(CODEX_EVENTS),
     AIToolID.CURSOR: json.dumps(CURSOR_RESULT),
-    AIToolID.COPILOT: "OK\n",
+    AIToolID.COPILOT: _copilot_events(),
     AIToolID.OPENCODE: _jsonl(OPENCODE_EVENTS),
     AIToolID.ANTIGRAVITY_CLI: _agy_result(
         {**AGY_RESULT, "response": "OK\n", "structured_output": None, "json_schema": None}
@@ -163,6 +165,10 @@ def _at_build(
         from crossby.ai_tools import claude as claude_module
 
         monkeypatch.setattr(claude_module, "_new_session_id", lambda: CLAUDE_RESULT["session_id"])
+    if tool is AIToolID.COPILOT:
+        from crossby.ai_tools import copilot as copilot_module
+
+        monkeypatch.setattr(copilot_module, "_new_session_id", lambda: COPILOT_SESSION)
     return adapter
 
 
