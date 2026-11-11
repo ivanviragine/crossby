@@ -269,3 +269,21 @@ def test_appending_repairs_an_unfinished_last_line(tmp_path: Path, complete: boo
     events = read_journal(path)
     assert len(events) == kept + 1
     assert events[-1].type is T.CONVERSATION_CONTINUED
+
+
+def test_a_committed_final_answer_is_answered_even_without_its_end(tmp_path: Path) -> None:
+    journal = _journal(tmp_path)
+    _run(FakeRunner(["q\nNEXT: ASK", "a", "done\nNEXT: DONE"]), tmp_path, journal)
+    journal.close()
+    # The run died after committing the answer, before recording its end.
+    events = [event for event in journal.events if event.type is not T.CONVERSATION_FINISHED]
+    prior = result_from_journal(events)
+    assert prior.answered
+    assert prior.final_answer == "done"
+    with pytest.raises(ConverseError, match="already has its final answer"):
+        _run(FakeRunner([]), tmp_path, _journal(tmp_path), resume=prior)
+    # Even a result that claims otherwise is never continued.
+    claimed = prior
+    claimed.stop_reason = StopReason.INTERRUPTED
+    with pytest.raises(ConverseError, match="already has its final answer"):
+        _run(FakeRunner([]), tmp_path, _journal(tmp_path), resume=claimed)

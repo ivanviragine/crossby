@@ -482,7 +482,9 @@ def run_conversation(
     asker, responder = participants
     if asker.role is not Role.ASKER or responder.role is not Role.RESPONDER:
         raise ConverseError("Participants must be (asker, responder).")
-    if resume is not None and resume.answered:
+    if resume is not None and (
+        resume.answered or (resume.turns and resume.turns[-1].is_final_answer)
+    ):
         raise ConverseError("That consultation already has its final answer.")
 
     active_runner: TurnRunner = runner or HeadlessTurnRunner()
@@ -888,6 +890,10 @@ def result_from_journal(events: Sequence[ConversationEvent]) -> ConversationResu
             for role_name, session in (event.data.get("sessions") or {}).items():
                 if session:
                     sessions[Role(role_name)] = session
+    if turns and turns[-1].is_final_answer and stop_reason is not StopReason.ANSWERED:
+        # The final answer was committed but the run ended (a crash or Ctrl-C)
+        # before recording its outcome: it is answered, never continuable.
+        stop_reason, error = StopReason.ANSWERED, None
     return ConversationResult(
         goal=str(data["goal"]),
         asker=sides[Role.ASKER],
