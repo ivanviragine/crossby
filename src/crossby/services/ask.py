@@ -34,6 +34,7 @@ from pydantic import (
 from crossby.models.ai import (
     AIToolID,
     EffortLevel,
+    HeadlessEvent,
     HeadlessFailureReason,
     HeadlessInteractionMode,
     HeadlessNativeTransport,
@@ -427,13 +428,18 @@ class AdapterRunner:
 
 
 def run_cancellable(
-    tool: AIToolID, request: HeadlessSessionRequest, cancel: threading.Event | None = None
+    tool: AIToolID,
+    request: HeadlessSessionRequest,
+    cancel: threading.Event | None = None,
+    *,
+    event_handler: Callable[[HeadlessEvent], None] | None = None,
 ) -> HeadlessSessionResult:
     """Run one managed session in a worker so Ctrl-C tears it down cleanly.
 
     ``KeyboardInterrupt`` only reaches the main thread. Waiting here and
     setting the session's cancel event on interrupt lets the managed runtime
     stop the native process group before the interrupt propagates.
+    ``event_handler`` receives the runtime's bounded, content-free events.
     """
     adapter = _adapter(tool)
     stop = cancel if cancel is not None else threading.Event()
@@ -441,7 +447,11 @@ def run_cancellable(
 
     def work() -> None:
         try:
-            box.put(adapter.run_headless_session(request, cancel_event=stop))
+            box.put(
+                adapter.run_headless_session(
+                    request, event_handler=event_handler, cancel_event=stop
+                )
+            )
         except BaseException as exc:
             box.put(exc)
 
