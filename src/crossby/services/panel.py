@@ -90,6 +90,14 @@ PANEL_NOTICE = (
     "with `NEXT: DONE` when the reply is your final answer. You can send at most "
     "{max_rounds} messages."
 )
+# Sent at the start of an agent member's first message, so it knows which
+# @id is its own when one message addresses several members.
+MEMBER_NOTICE_VERSION = 1
+MEMBER_NOTICE = (
+    "You are @{id}{name} on a panel whose members are {roster}. The lead's messages may "
+    "address several members by @id: answer what is asked of @{id}, or of everyone, and "
+    "leave other members' questions to them. Your reply goes back to the lead as written."
+)
 FINAL_NUDGE = (
     "You have used all {max_rounds} messages. Write your final answer now and end with the "
     "line `NEXT: DONE`."
@@ -517,6 +525,14 @@ def combine_replies(
     return "\n\n".join(parts)
 
 
+def render_member_notice(spec: PanelSpec, member: Member) -> str:
+    """The notice an agent member's first message starts with."""
+    ids = [f"@{item.id}" for item in spec.members]
+    roster = ids[0] if len(ids) == 1 else ", ".join(ids[:-1]) + f" and {ids[-1]}"
+    name = f" ({member.name})" if member.name else ""
+    return MEMBER_NOTICE.format(id=member.id, name=name, roster=roster)
+
+
 def member_message(seat: _Seat, body: str, *, shared: bool) -> str:
     """What a member receives: the lead's message, plus missed replies if shared."""
     if not shared or not seat.pending:
@@ -824,8 +840,11 @@ def run_panel(
             return member.id, (reply.text.strip() if reply else None), failure, seconds, None
         assert isinstance(member.backend, CliBackend)
         folder, minimum = member_folder(member)
-        if seat.session_id is None and isinstance(member.workspace, ProjectWorkspace):
-            message = render_envelope(message, member.workspace.instructions)
+        if seat.session_id is None:
+            # A new session learns which @id is its own before the first question.
+            message = f"{render_member_notice(spec, member)}\n\n{message}"
+            if isinstance(member.workspace, ProjectWorkspace):
+                message = render_envelope(message, member.workspace.instructions)
         try:
             built = request(
                 message,
@@ -994,6 +1013,7 @@ def run_panel(
         kind="panel",
         visibility=spec.visibility,
         notice_version=PANEL_NOTICE_VERSION,
+        member_notice_version=MEMBER_NOTICE_VERSION,
         participants=[
             {"participant": "lead", "tool": spec.lead.tool_name, "read_only": False},
             *[
@@ -1058,7 +1078,36 @@ def run_panel(
         return finish(stop.reason, stop.error)
     except KeyboardInterrupt:
         cancel.set()
-        return finish(StopReason.INTERRUPTED, f"interrupted after {len(turns)} messages")
+        return finish(StopReason.INTERRUPTED)
+
+
+def describe_panel_stop(result: PanelResult) -> str:
+    """How the panel ended, in one sentence, for people and ``--json``'s ``outcome``."""
+
+    def sent(none: str) -> str:
+        count = result.dispatches
+        if count == 0:
+            return none
+        return f"after {count} message{'' if count == 1 else 's'} to the members"
+
+    reason = result.stop_reason
+    if reason is StopReason.ANSWERED:
+        when = " at the message limit" if result.answered_at_limit else ""
+        asked = sent("without asking the members")
+        return f"answered: the lead gave its final answer {asked}{when}"
+    if reason is StopReason.ROUND_LIMIT:
+        allowed = result.spec.max_rounds
+        return (
+            f"message limit reached ({allowed} message{'' if allowed == 1 else 's'}) "
+            "and the lead gave no final answer"
+        )
+    detail = f": {result.error}" if result.error else ""
+    before = "before the lead asked the members"
+    if reason is StopReason.TIMEOUT:
+        return f"stopped on the time limit {sent(before)}{detail}"
+    if reason is StopReason.INTERRUPTED:
+        return f"interrupted by the user {sent(before)}"
+    return f"failed {sent(before)}{detail}"
 
 
 def render_panel_transcript(result: PanelResult) -> str:
@@ -1081,7 +1130,7 @@ def render_panel_transcript(result: PanelResult) -> str:
         f"- Started: {result.started_at.isoformat(timespec='seconds')}",
         f"- Finished: {result.finished_at.isoformat(timespec='seconds')}",
         f"- Messages allowed: {spec.max_rounds}",
-        f"- Outcome: {result.stop_reason.value}" + (f": {result.error}" if result.error else ""),
+        f"- Outcome: {describe_panel_stop(result)}",
         "",
         "## Goal (sent only to the lead)",
         "",
@@ -1107,6 +1156,8 @@ def render_panel_transcript(result: PanelResult) -> str:
 __all__ = [
     "FINAL_NUDGE",
     "MAX_MEMBERS",
+    "MEMBER_NOTICE",
+    "MEMBER_NOTICE_VERSION",
     "PANEL_NOTICE",
     "PANEL_NOTICE_VERSION",
     "Dispatch",
@@ -1122,8 +1173,10 @@ __all__ = [
     "PanelTurn",
     "ProtocolError",
     "combine_replies",
+    "describe_panel_stop",
     "member_message",
     "parse_dispatch",
+    "render_member_notice",
     "render_notice",
     "render_panel_transcript",
     "run_panel",

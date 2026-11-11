@@ -29,12 +29,19 @@ from crossby.services.panel import (
     PanelSpec,
     ProtocolError,
     parse_dispatch,
+    render_member_notice,
     render_notice,
     render_panel_transcript,
     run_panel,
 )
 
 IDS = ["cto", "founder", "buyer"]
+
+
+def _first(spec: PanelSpec, member_id: str, body: str) -> str:
+    """What an agent member's first message reads: its notice, then the lead's text."""
+    member = next(item for item in spec.members if item.id == member_id)
+    return f"{render_member_notice(spec, member)}\n\n{body}"
 
 
 @pytest.fixture(autouse=True)
@@ -188,13 +195,15 @@ def test_a_private_panel_relays_addressed_messages_in_roster_order(tmp_path: Pat
             "buyer": [],
         }
     )
-    result = run_panel(_spec(tmp_path), runner=runner)
+    spec = _spec(tmp_path)
+    result = run_panel(spec, runner=runner)
 
     assert result.answered
     assert result.final_answer == "Verdict: no."
     assert [turn.sender for turn in result.turns] == ["lead", "cto", "founder", "lead"]
-    # Members get the lead's message exactly, read-only; the buyer is not asked.
-    assert [r.prompt for r in runner.requests["cto"]] == ["Price?"]
+    # Members get the lead's message exactly, after their notice, read-only;
+    # the buyer is not asked.
+    assert [r.prompt for r in runner.requests["cto"]] == [_first(spec, "cto", "Price?")]
     assert all(r.read_only for r in runner.requests["cto"] + runner.requests["founder"])
     assert runner.requests["buyer"] == []
     lead_second = runner.requests["lead"][1]
@@ -323,9 +332,11 @@ def test_instructions_and_requirements_reach_members_only(tmp_path: Path) -> Non
             "buyer": [],
         }
     )
-    run_panel(spec.model_copy(update={"members": members}), runner=runner)
+    with_members = spec.model_copy(update={"members": members})
+    run_panel(with_members, runner=runner)
     cto = runner.requests["cto"][0]
-    assert cto.prompt == "<instructions>\nYou are a CTO.\n</instructions>\n\nQ"
+    notice = _first(with_members, "cto", "Q")
+    assert cto.prompt == f"<instructions>\nYou are a CTO.\n</instructions>\n\n{notice}"
     assert cto.require_blocked == frozenset({RestrictionChannel.FILE_EDITS})
     assert runner.requests["lead"][0].require_blocked == frozenset()
 
@@ -717,7 +728,7 @@ def test_a_person_can_lead_with_typed_actions(tmp_path: Path) -> None:
     assert result.answered
     assert result.final_answer == "Thanks, that settles it."
     # Members get the person's text exactly; the lead sees their replies next.
-    assert runner.requests["cto"][0].prompt == "What would you pay?"
+    assert runner.requests["cto"][0].prompt == _first(spec, "cto", "What would you pay?")
     assert seen == [None, "@cto:\n30\n\n@founder:\n10"]
     assert len(runner.preflights) == 3  # members only
 
@@ -817,3 +828,44 @@ def test_a_silent_human_lead_ends_the_panel_by_whichever_limit_ran_out(
     result = run_panel(spec, runner=runner, inputs=HumanInput(silent), clock=lambda: clock[0])
     assert result.stop_reason is reason
     assert result.exit_code == exit_code
+
+
+def test_a_member_learns_its_own_id_once_per_session(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {
+            "lead": [
+                "@cto: price? @founder: market?\nNEXT: ASK @all",
+                "More?\nNEXT: ASK @cto",
+                "ok\nNEXT: DONE",
+            ],
+            "cto": ["$20", "No."],
+            "founder": ["Big."],
+            "buyer": ["?"],
+        }
+    )
+    spec = _spec(tmp_path)
+    run_panel(spec, runner=runner)
+    first, second = (request.prompt for request in runner.requests["cto"])
+    assert first.startswith(
+        "You are @cto (CTO) on a panel whose members are @cto, @founder and @buyer."
+    )
+    assert "answer what is asked of @cto" in first
+    assert second == "More?"  # the resumed session already knows
+    # A person's seat is never sent the notice: their prompt names them.
+    human = _with_human_member(tmp_path)
+    seen: list[str | None] = []
+
+    def respond(request: InputRequest) -> HumanReply:
+        seen.append(request.message)
+        return HumanReply("Teal.")
+
+    runner = PanelRunner(
+        {
+            "lead": ["Color?\nNEXT: ASK @dana", "x\nNEXT: DONE"],
+            "cto": [],
+            "founder": [],
+            "buyer": [],
+        }
+    )
+    run_panel(human, runner=runner, inputs=HumanInput(respond))
+    assert seen == ["Color?"]

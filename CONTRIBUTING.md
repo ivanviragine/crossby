@@ -596,7 +596,18 @@ own sessions; the lead keeps its folder's normal policy. `parse_dispatch` reads
 only the lead's last non-blank line and never routes on member text. Replies
 are committed and combined in roster order, whatever order they finished in.
 The notice wording (`PANEL_NOTICE`, version `PANEL_NOTICE_VERSION`) is
-documented in the README; change both together.
+documented in the README; change both together. The same holds for the notice an
+agent member's first message starts with (`MEMBER_NOTICE`,
+`MEMBER_NOTICE_VERSION`); a member is never told its @id any other way.
+
+`crossby panel`'s terminal output lives in `cli/panel_view.py`: `PanelView` is
+an event sink, so everything it shows comes from journal events, never from the
+engine directly. It runs on the journal's dispatcher thread; the live line's
+`__rich__` reads only the current `_Activity` (replaced whole, never mutated)
+and never takes the view's lock, because stopping the live display joins rich's
+refresh thread. A human seat takes `PanelView.hold()` while the person types, so
+nothing is drawn over their input, and waits for `wait_announced` before
+prompting, so the messages it answers are already on screen.
 
 #### The public API (`crossby.api`)
 
