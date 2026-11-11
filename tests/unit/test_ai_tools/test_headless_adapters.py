@@ -50,6 +50,7 @@ from crossby.models.ai import (
     AIToolID,
     EffortLevel,
     HeadlessEventKind,
+    HeadlessFailureReason,
     HeadlessInteractionMode,
     HeadlessNativeOutput,
     HeadlessPromptTransport,
@@ -193,6 +194,76 @@ OPENCODE_EVENTS = (
     },
 )
 
+# Recorded on 1.0.109 (and the same frames on 1.0.105) with
+# ``--output-format json``, reduced to the frames the adapter reads plus the
+# prompt echo it must keep private.
+COPILOT_SESSION = "f3efa8dd-8d2e-4688-913b-90a34e98d90c"
+
+
+def _copilot_events(
+    *,
+    session: str = COPILOT_SESSION,
+    answer: str | None = "OK",
+    exit_code: int = 0,
+    premium: int = 1,
+    denied: int = 0,
+    error: str | None = None,
+) -> str:
+    """Copilot's JSONL wire for one prompt-mode run."""
+    frames: list[dict[str, Any]] = [
+        {"type": "session.start", "data": {"sessionId": session, "copilotVersion": "1.0.109"}},
+        {"type": "user.message", "data": {"content": PROMPT, "transformedContent": PROMPT}},
+        {"type": "assistant.turn_start", "data": {"turnId": "0"}},
+    ]
+    for index in range(denied):
+        frames += [
+            {
+                "type": "assistant.message",
+                "data": {
+                    "model": "gpt-6-luna",
+                    "content": "",
+                    "toolRequests": [{"name": "apply_patch", "arguments": PROMPT}],
+                },
+            },
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": f"call_{index}",
+                    "success": False,
+                    "error": {
+                        "message": "Permission to run this tool was denied due to the following "
+                        "rules: `write`",
+                        "code": "denied",
+                    },
+                },
+            },
+        ]
+    if error is not None:
+        frames.append({"type": "session.error", "data": {"errorType": "query", "message": error}})
+    if answer is not None:
+        frames.append(
+            {
+                "type": "assistant.message",
+                "data": {
+                    "phase": "final_answer",
+                    "model": "gpt-6-luna",
+                    "content": answer,
+                    "toolRequests": [],
+                },
+            }
+        )
+    frames += [
+        {"type": "assistant.turn_end", "data": {"turnId": "0"}},
+        {
+            "type": "result",
+            "sessionId": session,
+            "exitCode": exit_code,
+            "usage": {"premiumRequests": premium, "totalApiDurationMs": 1614},
+        },
+    ]
+    return "".join(f"{json.dumps(frame)}\n" for frame in frames)
+
+
 AGY_CONVERSATION = "3b1adb15-893a-40e5-8a48-77ba6946f5f5"
 AGY_RESULT: dict[str, Any] = {
     "conversation_id": AGY_CONVERSATION,
@@ -332,6 +403,11 @@ def _adapter(monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]) -
         from crossby.ai_tools import claude as claude_module
 
         monkeypatch.setattr(claude_module, "_new_session_id", lambda: CLAUDE_RESULT["session_id"])
+    if tool is AIToolID.COPILOT:
+        # Likewise for the --session-id crossby pins on every new Copilot session.
+        from crossby.ai_tools import copilot as copilot_module
+
+        monkeypatch.setattr(copilot_module, "_new_session_id", lambda: COPILOT_SESSION)
     return adapter
 
 
@@ -1258,16 +1334,104 @@ def test_cursor_stream_json_hides_the_echoed_user_frame(
     _assert_prompt_is_private(result)
 
 
-def test_copilot_text_response_is_normalized(
+def test_copilot_jsonl_answer_session_and_usage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout="OK\n"))
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=_copilot_events()))
 
     result = adapter.run_headless_session(_request(tmp_path))
 
     assert result.status is HeadlessTerminalStatus.SUCCEEDED
     assert result.final_text == "OK"
+    assert result.session_id == COPILOT_SESSION
+    assert result.usage is not None
+    assert result.usage.premium_requests == 1
+    assert [item.model for item in result.usage.model_breakdown] == ["gpt-6-luna"]
+    assert result.usage.input_tokens is None  # Copilot reports no token counts
     assert any("--allow-all-tools" in warning for warning in result.warnings)
+    # The user.message frame echoes the prompt.
+    _assert_prompt_is_private(result)
+
+
+def test_copilot_counts_the_tool_calls_it_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _copilot_events(answer="I couldn't write the file.", denied=2)
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events))
+
+    result = adapter.run_headless_session(_request(tmp_path, read_only=True))
+
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    # Tool-request messages have no content: the answer is the final one.
+    assert result.final_text == "I couldn't write the file."
+    assert result.denials == ("GitHub Copilot CLI denied 2 tool call(s) under its rules",)
+    _assert_prompt_is_private(result)
+
+
+def test_an_empty_marked_final_answer_is_never_replaced_by_commentary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commentary = json.dumps(
+        {
+            "type": "assistant.message",
+            "data": {"model": "gpt-6-luna", "content": "I will inspect the repository."},
+        }
+    )
+    events = _copilot_events(answer="   ")
+    turn = '{"type": "assistant.turn_start"'
+    events = events.replace(turn, f"{commentary}\n{turn}", 1)
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert result.final_text is None
+
+
+def test_copilot_answer_without_the_final_answer_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = _copilot_events().replace('"phase": "final_answer", ', "")
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events))
+
+    assert adapter.run_headless_session(_request(tmp_path)).final_text == "OK"
+
+
+@pytest.mark.parametrize(
+    ("events", "warning"),
+    [
+        (
+            _copilot_events(session="0c1e8b2a-6f4d-4a3b-9c2d-1e5f7a9b3c4d"),
+            "reported a different session",
+        ),
+        (_copilot_events() + _copilot_events(), "emitted events after its result"),
+        (_copilot_events().rsplit("\n", 2)[0] + "\n", "ended without its result event"),
+        ("not json\n", "malformed JSONL"),
+    ],
+)
+def test_copilot_rejects_an_inconsistent_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: str, warning: str
+) -> None:
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.INVALID_OUTPUT
+    assert any(warning in item for item in result.warnings)
+
+
+def test_copilot_native_failure_is_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _copilot_events(
+        answer=None, exit_code=1, premium=0, error='Execution failed: Model "x" is not available.'
+    )
+    adapter = _adapter(monkeypatch, AIToolID.COPILOT, _fake_cli(stdout=events, exit_code=1))
+
+    result = adapter.run_headless_session(_request(tmp_path))
+
+    assert result.status is HeadlessTerminalStatus.FAILED
+    assert result.native_status == "exit_1"
+    assert result.failure_reason is HeadlessFailureReason.MODEL_UNAVAILABLE
+    assert all("not available" not in warning for warning in result.warnings)
 
 
 def test_copilot_policy_failure_withholds_native_diagnostics(
@@ -2389,6 +2553,9 @@ def test_cursor_headless_argv_trusts_the_workspace_without_forcing_edits(
 
 def test_copilot_headless_argv_removes_the_question_tool(tmp_path: Path) -> None:
     command = _command(AIToolID.COPILOT, _request(tmp_path))
+
+    # The run reads Copilot's JSONL events, not its plain text.
+    assert command[command.index("--output-format") + 1] == "json"
 
     # Prompt mode reads the piped prompt: no --prompt argument at all.
     assert command[0] == "copilot"

@@ -538,6 +538,20 @@ OpenCode's session config always wins. Never mutate `os.environ` to reach a
 child: concurrent sessions in one process would see and undo each other's
 values (`ask`/`converse` pass `CROSSBY_CONVERSE_DEPTH` this way).
 
+#### Failure reasons
+
+`HeadlessSessionResult.failure_reason` says why a failed, invalid or timed-out
+session failed, when the tool said so recognizably. Adapters never expose
+native error text; they hand it to `context.note_failure_evidence()` (text, an
+HTTP status, or a reason detected structurally), and `run_managed_command`
+already notes every run's stderr. `frame_streamer(failure_text_of=...)` notes
+streamed error frames live, so a timeout during retries keeps the reason. The
+runtime classifies once in `complete()` with `ai_tools/failure_reasons.py`,
+and a recognized refusal with no output becomes `FAILED` rather than
+`INVALID_OUTPUT`. Add a pattern only with a live capture recorded in
+`docs/unattended-headless-verification.md#failure-reasons` (mark an inferred
+one as such), and match each tool's wording only against that tool.
+
 #### The public API (`crossby.api`)
 
 `src/crossby/api.py` is the only supported library surface besides the

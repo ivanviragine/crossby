@@ -24,6 +24,7 @@ from crossby.models.ai import (
     HeadlessTerminalStatus,
     HookOutputDialect,
     HookStopDialect,
+    ModelBreakdown,
     PlanArtifactLocation,
     PlanCommandPolicySupport,
     PlanLaunchApprovalMode,
@@ -92,9 +93,9 @@ class CopilotAdapter(AbstractAITool):
                 transport=HeadlessNativeTransport.HEADLESS_CLI,
                 # Prompt mode reads a piped prompt when --prompt is omitted.
                 prompt_transport=HeadlessPromptTransport.STDIN,
-                # 1.0.83 advertises --output-format json (JSONL), but its event
-                # schema is not verified, so the managed transport stays on the
-                # documented text response rather than guessing a shape.
+                # The run reads Copilot's JSONL stream (--output-format json,
+                # verified on 1.0.105 and 1.0.109) for its final answer, session,
+                # usage and denials; callers get the final answer as text.
                 native_outputs=(HeadlessNativeOutput.TEXT,),
                 interaction_modes=(
                     (HeadlessInteractionMode.UNATTENDED, HeadlessInteractionMode.BROKERED)
@@ -379,7 +380,7 @@ class CopilotAdapter(AbstractAITool):
         """
         command = [
             "copilot",
-            # -s keeps stdout to the agent response alone, and --no-ask-user
+            # -s keeps stdout to the agent's output alone, and --no-ask-user
             # removes the ask_user tool so the agent cannot stop on a question
             # nobody can answer.
             "-s",
@@ -387,6 +388,10 @@ class CopilotAdapter(AbstractAITool):
             "--no-color",
             "--log-level",
             "none",
+            # JSONL events: the final answer, the session, premium requests,
+            # the model used and every denied tool call (1.0.105 and 1.0.109).
+            "--output-format",
+            "json",
         ]
         pinned = request.resume_id or session_id
         if pinned is not None:
@@ -412,7 +417,7 @@ class CopilotAdapter(AbstractAITool):
         version: str,
         context: HeadlessRuntimeContext,
     ) -> HeadlessSessionResult:
-        """Run one unattended Copilot prompt turn and normalize its text response."""
+        """Run one unattended Copilot prompt turn and normalize its JSONL events."""
         if request.interaction_mode is HeadlessInteractionMode.BROKERED:
             from crossby.ai_tools.copilot_sdk import run_session
 
@@ -420,16 +425,27 @@ class CopilotAdapter(AbstractAITool):
         from crossby.ai_tools.headless_cli import (
             capture_failure_warnings,
             complete_session,
+            frame_streamer,
+            parse_json_lines,
+            recognized_frame_kind,
             run_managed_command,
         )
 
-        session_id = request.resume_id or str(uuid.uuid4())
+        session_id = request.resume_id or _new_session_id()
         output = run_managed_command(
             context,
             argv=self._headless_command(request, session_id=session_id),
             cwd=request.working_dir,
             extra_env={"NO_COLOR": "1"},
             stdin_text=request.prompt,
+            on_stdout_lines=frame_streamer(
+                context,
+                kind_of=lambda frame: recognized_frame_kind(
+                    frame, field="type", recognized=_COPILOT_STREAM_EVENT_KINDS
+                ),
+                provenance_of=lambda frame: {"session_id": _copilot_session(frame)},
+                failure_text_of=_copilot_failure_text,
+            ),
         )
         warnings = capture_failure_warnings(output)
         # --allow-all-tools is deliberately never emitted, so any tool call
@@ -446,17 +462,67 @@ class CopilotAdapter(AbstractAITool):
                 exit_code=output.returncode,
                 warnings=warnings,
             )
+        frames = parse_json_lines(output.stdout)
+        if frames is None:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "GitHub Copilot CLI emitted malformed JSONL events."),
+            )
+        results = [frame for frame in frames if frame.get("type") == "result"]
+        if not results:
+            # A refusal before the session starts (an org policy, a bad login)
+            # is reported on stderr with a failing exit and no events.
+            return context.complete(
+                HeadlessTerminalStatus.FAILED
+                if output.returncode != 0
+                else HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "GitHub Copilot CLI ended without its result event."),
+            )
+        if len(results) > 1 or frames[-1] is not results[0]:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(*warnings, "GitHub Copilot CLI emitted events after its result."),
+            )
+        result = results[0]
+        reported = _copilot_session(result)
+        if reported != session_id:
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                warnings=(
+                    *warnings,
+                    "GitHub Copilot CLI reported a different session than the one crossby pinned.",
+                ),
+            )
+        native_exit = result.get("exitCode")
+        if not isinstance(native_exit, int) or isinstance(native_exit, bool):
+            return context.complete(
+                HeadlessTerminalStatus.INVALID_OUTPUT,
+                exit_code=output.returncode,
+                session_id=session_id,
+                warnings=(*warnings, "GitHub Copilot CLI's result omitted its exit code."),
+            )
+        denied = sum(1 for frame in frames if _copilot_denied(frame))
+        if denied:
+            # Native entries name the tool and its arguments; keep the count.
+            context.add_denial(f"GitHub Copilot CLI denied {denied} tool call(s) under its rules")
+        answer, models = _copilot_answer(frames)
         return complete_session(
             context,
             request,
             status=(
                 HeadlessTerminalStatus.SUCCEEDED
-                if output.returncode == 0
+                if native_exit == 0 and output.returncode == 0
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,
-            response_text=output.stdout.strip() or None,
+            response_text=answer,
+            native_status=None if native_exit == 0 else f"exit_{native_exit}",
             session_id=session_id,
+            usage=_copilot_usage(result, models, session_id),
             warnings=warnings,
         )
 
@@ -512,4 +578,118 @@ def _allow_entry_excluded(entry: str, excluded_servers: set[str]) -> bool:
     return any(
         entry == server or entry.startswith(f"{server}__") or entry.startswith(f"{server}(")
         for server in excluded_servers
+    )
+
+
+# Copilot JSONL event types recorded live on 1.0.105 and 1.0.109. Only these
+# refresh the idle deadline; their content never leaves the adapter (the
+# ``user.message`` event echoes the prompt).
+_COPILOT_STREAM_EVENT_KINDS = frozenset(
+    {
+        "session.start",
+        "session.model_change",
+        "session.auto_mode_resolved",
+        "user.message",
+        "assistant.turn_start",
+        "assistant.message_start",
+        "assistant.message_delta",
+        "assistant.reasoning",
+        "assistant.reasoning_delta",
+        "assistant.tool_call_delta",
+        "assistant.message",
+        "assistant.turn_end",
+        "assistant.idle",
+        "model.call_start",
+        "model.call_finished",
+        "model.call_final_result",
+        "tool.execution_start",
+        "tool.execution_complete",
+        "session.usage_checkpoint",
+        "session.error",
+        "result",
+    }
+)
+
+
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _copilot_session(frame: dict[str, Any]) -> str | None:
+    """The session a frame names: top-level on ``result``, nested on ``session.start``."""
+    value = frame.get("sessionId")
+    if value is None and frame.get("type") == "session.start":
+        data = frame.get("data")
+        value = data.get("sessionId") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _copilot_failure_text(frame: dict[str, Any]) -> str | None:
+    """A ``session.error`` event's wording, as failure evidence."""
+    if frame.get("type") != "session.error":
+        return None
+    data = frame.get("data")
+    message = data.get("message") if isinstance(data, dict) else None
+    return message if isinstance(message, str) else None
+
+
+def _copilot_denied(frame: dict[str, Any]) -> bool:
+    """A tool call Copilot refused under its rules (``error.code == "denied"``)."""
+    if frame.get("type") != "tool.execution_complete":
+        return False
+    data = frame.get("data")
+    if not isinstance(data, dict) or data.get("success") is not False:
+        return False
+    error = data.get("error")
+    return isinstance(error, dict) and error.get("code") == "denied"
+
+
+def _copilot_answer(frames: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
+    """The final answer's text, and the models that wrote any assistant message.
+
+    Copilot marks the answer ``phase: "final_answer"``, and a marked answer is
+    authoritative even when empty: an earlier message is never put in its
+    place. Messages that only request tools have empty content. Only when no
+    message is marked is the last one with content and no tool requests the
+    answer.
+    """
+    marked = False
+    answer: str | None = None
+    fallback: str | None = None
+    models: list[str] = []
+    for frame in frames:
+        if frame.get("type") != "assistant.message":
+            continue
+        data = frame.get("data")
+        if not isinstance(data, dict):
+            continue
+        model = data.get("model")
+        if isinstance(model, str) and model.strip() and model not in models:
+            models.append(model)
+        content = data.get("content")
+        text = content.strip() if isinstance(content, str) and content.strip() else None
+        if data.get("phase") == "final_answer":
+            marked = True
+            answer = text
+        elif text is not None and not data.get("toolRequests"):
+            fallback = text
+    return (answer if marked else fallback), models
+
+
+def _copilot_usage(result: dict[str, Any], models: list[str], session_id: str) -> TokenUsage | None:
+    """Premium requests from the result event, and the models used.
+
+    ``premiumRequests`` is the session's running total (a resumed second turn
+    reported 2 on 1.0.105 and 1.0.109), so it is one invocation's usage only
+    for a fresh session. Copilot reports no token counts in its JSONL stream.
+    """
+    usage = result.get("usage")
+    raw = usage.get("premiumRequests") if isinstance(usage, dict) else None
+    premium = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    if premium is None and not models:
+        return None
+    return TokenUsage(
+        premium_requests=premium,
+        model_breakdown=[ModelBreakdown(model=name) for name in models],
+        session_id=session_id,
     )

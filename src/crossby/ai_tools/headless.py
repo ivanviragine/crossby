@@ -15,11 +15,13 @@ from typing import Any, cast
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from crossby.ai_tools.failure_reasons import classify_failure
 from crossby.models.ai import (
     AIToolID,
     HeadlessCapability,
     HeadlessEvent,
     HeadlessEventKind,
+    HeadlessFailureReason,
     HeadlessInteractionMode,
     HeadlessNativeOutput,
     HeadlessSessionRequest,
@@ -42,6 +44,16 @@ _MAX_EVENT_MESSAGE_BYTES = 64 * 1024
 _MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 _MAX_FINAL_PAYLOAD_BYTES = 8 * 1024 * 1024
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
+_MAX_FAILURE_EVIDENCE_BYTES = 64 * 1024
+# Outcomes that can carry a recognized failure reason. A cancellation is the
+# caller's own doing, and a success has nothing to explain.
+_CLASSIFIED_STATUSES = frozenset(
+    {
+        HeadlessTerminalStatus.FAILED,
+        HeadlessTerminalStatus.INVALID_OUTPUT,
+        HeadlessTerminalStatus.TIMED_OUT,
+    }
+)
 _MAX_PROVENANCE_ID_BYTES = 512
 _MAX_NATIVE_STATUS_BYTES = 512
 _CALLBACK_POLL_SECONDS = 0.05
@@ -283,6 +295,14 @@ class HeadlessRuntimeContext:
         self._events: list[HeadlessEvent] = []
         self._warnings: list[str] = []
         self._denials: list[str] = []
+        # Private native failure evidence, classified into a fixed reason at
+        # completion and never copied into a result, event or exception.
+        self._failure_texts: list[str] = []
+        self._failure_text_bytes = 0
+        self._failure_http_statuses: list[int] = []
+        self._failure_reasons: list[HeadlessFailureReason] = []
+        self._evidence_lock = threading.Lock()
+        self._failure_reason: HeadlessFailureReason | None = None
         self._last_progress = time.monotonic()
         self._cleanup_hooks = HeadlessCleanupHooks()
         self._cleanup_started = False
@@ -787,6 +807,50 @@ class HeadlessRuntimeContext:
     def add_warning(self, warning: str) -> None:
         self._warnings.append(_bounded_diagnostic(_redact_prompt(warning, self.request.prompt)))
 
+    def note_failure_evidence(
+        self,
+        text: str | None = None,
+        *,
+        http_status: Any = None,
+        reason: HeadlessFailureReason | None = None,
+    ) -> None:
+        """Keep native failure evidence privately, to say why a session failed.
+
+        ``text`` is native error wording (stderr, an error envelope), kept
+        bounded and only matched against the tool's recognized patterns at
+        completion: it never reaches a result, event, warning or exception.
+        ``http_status`` is a native status code; ``reason`` is a cause the
+        adapter recognized structurally. Safe to call from any thread.
+        """
+        with self._evidence_lock:
+            if isinstance(text, str) and text.strip():
+                encoded = len(text.encode("utf-8", "replace"))
+                if self._failure_text_bytes + encoded <= _MAX_FAILURE_EVIDENCE_BYTES:
+                    self._failure_texts.append(text)
+                    self._failure_text_bytes += encoded
+                elif self._failure_text_bytes < _MAX_FAILURE_EVIDENCE_BYTES:
+                    room = _MAX_FAILURE_EVIDENCE_BYTES - self._failure_text_bytes
+                    self._failure_texts.append(text[-room:])
+                    self._failure_text_bytes = _MAX_FAILURE_EVIDENCE_BYTES
+            if (
+                isinstance(http_status, int)
+                and not isinstance(http_status, bool)
+                and len(self._failure_http_statuses) < 64
+            ):
+                self._failure_http_statuses.append(http_status)
+            if reason is not None and reason not in self._failure_reasons:
+                self._failure_reasons.append(reason)
+
+    def _classify_failure(self) -> HeadlessFailureReason | None:
+        with self._evidence_lock:
+            if not (self._failure_texts or self._failure_http_statuses or self._failure_reasons):
+                # No evidence (every SDK and protocol transport): nothing to do.
+                return None
+            texts = tuple(self._failure_texts)
+            statuses = tuple(self._failure_http_statuses)
+            reasons = tuple(self._failure_reasons)
+        return classify_failure(self.tool_id, texts=texts, http_statuses=statuses, reasons=reasons)
+
     def add_denial(self, denial: str) -> None:
         self._denials.append(_bounded_diagnostic(_redact_prompt(denial, self.request.prompt)))
 
@@ -938,6 +1002,9 @@ class HeadlessRuntimeContext:
                     self.add_warning("The native transport reported failure.")
 
             final_json_present = final_json is not _MISSING_FINAL_JSON
+            # Whether the adapter produced any answer at all, before output
+            # normalization: an answer that fails validation is not a refusal.
+            output_absent = final_text is None and not final_json_present
             if status is HeadlessTerminalStatus.SUCCEEDED:
                 try:
                     final_text, final_json, final_json_present = self._normalize_output(
@@ -964,6 +1031,21 @@ class HeadlessRuntimeContext:
                 final_text = None
                 final_json = _MISSING_FINAL_JSON
                 final_json_present = False
+
+            # Classify once the final status is known. A recognized refusal (a
+            # missing login, an unknown model) that left no answer is a failure,
+            # not malformed output; an answer that failed validation keeps
+            # INVALID_OUTPUT and gets no reason.
+            self._failure_reason = None
+            if status in {HeadlessTerminalStatus.FAILED, HeadlessTerminalStatus.TIMED_OUT} or (
+                status is HeadlessTerminalStatus.INVALID_OUTPUT and output_absent
+            ):
+                self._failure_reason = self._classify_failure()
+                if (
+                    self._failure_reason is not None
+                    and status is HeadlessTerminalStatus.INVALID_OUTPUT
+                ):
+                    status = HeadlessTerminalStatus.FAILED
 
             # Replace any malformed/conflicting native terminal evidence with one
             # normalized terminal event.  Raw frames are never retained.
@@ -1134,6 +1216,7 @@ class HeadlessRuntimeContext:
             duration_seconds=max(0.0, time.monotonic() - self.started_at),
             denials=tuple(self._denials),
             warnings=tuple(self._warnings),
+            failure_reason=self._failure_reason if status in _CLASSIFIED_STATUSES else None,
             **self._provenance,
         )
 

@@ -537,3 +537,23 @@ def test_cancelling_one_parallel_ask_leaves_the_others(
         thread.join(30)
     assert results[1].status is AskStatus.CANCELLED
     assert results[0].succeeded and results[2].succeeded
+
+
+def test_a_recognized_failure_reason_and_reported_cost_reach_the_result(tmp_path: Path) -> None:
+    from crossby.api import FailureReason
+
+    runner = ScriptedRunner(
+        _session(
+            HeadlessTerminalStatus.FAILED,
+            native_status="api_error",
+            failure_reason=FailureReason.NOT_SIGNED_IN,
+            usage=TokenUsage(input_tokens=0, output_tokens=0, reported_cost_usd=0.0),
+        )
+    )
+    result = ask_service.run_ask(_claude_ask(tmp_path), runner=runner)
+    assert result.failure_reason is FailureReason.NOT_SIGNED_IN
+    assert result.error == (
+        "claude session ended with status failed: not signed in (native: api_error)"
+    )
+    assert result.usage is not None and result.usage.reported_cost_usd == 0.0
+    assert AskResult.model_validate_json(result.model_dump_json()) == result

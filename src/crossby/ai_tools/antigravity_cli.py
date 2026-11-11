@@ -24,6 +24,7 @@ from crossby.models.ai import (
     EffortLevel,
     HeadlessCapability,
     HeadlessEventKind,
+    HeadlessFailureReason,
     HeadlessInteractionMode,
     HeadlessModeCapability,
     HeadlessNativeOutput,
@@ -527,6 +528,9 @@ class AntigravityCLIAdapter(AbstractAITool):
                 warnings=(*warnings, "Antigravity CLI did not emit its final result envelope."),
             )
 
+        # An error envelope ("authentication failed or timed out", "invalid
+        # model selection …") names no conversation, so keep its wording first.
+        context.note_failure_evidence(non_blank_text(envelope.get("error")))
         conversation_id = _agy_conversation_id(envelope) or conversation_id
         if conversation_id is None:
             return context.complete(
@@ -586,17 +590,28 @@ class AntigravityCLIAdapter(AbstractAITool):
                 *warnings,
                 f"Antigravity CLI ended with native status {native_status or 'unknown'!r}.",
             )
+        # Stripped as the plain-text wire was; agy ends ``response`` with a newline.
+        response_text = (non_blank_text(envelope.get("response")) or "").strip() or None
+        # When agy denies an action it ends the turn with an empty response
+        # (verified on 1.5.1 and 1.5.4): that is a refusal, not an answer.
+        silenced = (
+            isinstance(denied, list)
+            and bool(denied)
+            and response_text is None
+            and envelope.get("structured_output") is None
+        )
+        if silenced:
+            context.note_failure_evidence(reason=HeadlessFailureReason.ACTION_DENIED)
         return complete_session(
             context,
             request,
             status=(
                 HeadlessTerminalStatus.SUCCEEDED
-                if _agy_success(envelope) and output.returncode == 0
+                if _agy_success(envelope) and output.returncode == 0 and not silenced
                 else HeadlessTerminalStatus.FAILED
             ),
             exit_code=output.returncode,
-            # Stripped as the plain-text wire was; agy ends ``response`` with a newline.
-            response_text=(non_blank_text(envelope.get("response")) or "").strip() or None,
+            response_text=response_text,
             native_object=envelope,
             structured_output=envelope.get("structured_output", MISSING),
             native_status=native_status,

@@ -349,13 +349,14 @@ def _read_only(participant: Participant) -> bool:
 
 
 def _status(result: HeadlessSessionResult) -> str:
-    """``failed``, or ``failed (native: api_error)`` when the tool reported its own status.
+    """``failed``, plus the recognized reason and the tool's own status.
 
-    The native status is a short token the adapter already validated, never
-    native output, so it is safe to show.
+    For example ``failed: not signed in (native: api_error)``; see
+    :func:`crossby.services.ask.describe_session_status`.
     """
-    native = f" (native: {result.native_status})" if result.native_status else ""
-    return f"{result.status.value}{native}"
+    from crossby.services.ask import describe_session_status
+
+    return describe_session_status(result)
 
 
 def _session_handle(result: HeadlessSessionResult) -> str | None:

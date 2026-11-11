@@ -267,6 +267,27 @@ class HeadlessTerminalStatus(StrEnum):
     INVALID_OUTPUT = "invalid_output"
 
 
+class HeadlessFailureReason(StrEnum):
+    """Why a session failed, when the tool said so in a way crossby recognizes.
+
+    Each reason is matched on native wording or status codes observed live
+    (see ``docs/unattended-headless-verification.md#failure-reasons``); the
+    native text itself is never exposed. ``None`` on a result means the cause
+    was not recognized, never that there was none.
+    """
+
+    NOT_SIGNED_IN = "not_signed_in"
+    """Missing, expired or invalid credentials."""
+    MODEL_UNAVAILABLE = "model_unavailable"
+    """The requested model does not exist or the account cannot use it."""
+    RATE_LIMITED = "rate_limited"
+    """A usage or rate limit was reached."""
+    ACTION_DENIED = "action_denied"
+    """The tool ended the turn without an answer after denying an action."""
+    UNTRUSTED_FOLDER = "untrusted_folder"
+    """The tool refused to run in this folder."""
+
+
 class HeadlessPreflightCheck(StrEnum):
     """Request facts established before a managed transport starts."""
 
@@ -1313,6 +1334,8 @@ class HeadlessSessionResult(BaseModel):
     duration_seconds: float = Field(ge=0)
     denials: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    # Why a failed, invalid or timed-out session failed, when recognized.
+    failure_reason: HeadlessFailureReason | None = None
     is_partial: bool = False
 
     @model_validator(mode="before")
@@ -1401,6 +1424,11 @@ class HeadlessSessionResult(BaseModel):
                 raise ValueError("safe partial results use failed status until reconciled")
         elif terminal is None:
             raise ValueError("a terminal headless result requires exactly one terminal event")
+        if self.failure_reason is not None and self.status in {
+            HeadlessTerminalStatus.SUCCEEDED,
+            HeadlessTerminalStatus.CANCELLED,
+        }:
+            raise ValueError("only a failed, invalid or timed-out result has a failure reason")
         if self.status is HeadlessTerminalStatus.SUCCEEDED:
             if self.exit_code not in (None, 0):
                 raise ValueError("a successful headless result cannot have a failing exit code")
@@ -1676,6 +1704,9 @@ class TokenUsage(BaseModel):
     output_tokens: int | None = None
     cached_tokens: int | None = None
     premium_requests: int | None = None
+    # Cost in US dollars exactly as the tool itself reported it (Claude Code's
+    # ``total_cost_usd``); crossby keeps no prices and never computes one.
+    reported_cost_usd: float | None = None
     model_breakdown: list[ModelBreakdown] = []
     raw_transcript_path: Path | None = None
     session_id: str | None = None  # full resume command or session ID as printed by the tool

@@ -42,6 +42,9 @@ from crossby.models.ai import (
     RestrictionChannel,
     RestrictionState,
 )
+from crossby.models.ai import (
+    HeadlessFailureReason as FailureReason,
+)
 from crossby.services.ask import (
     ENVELOPE_VERSION,
     SCHEMA_VERSION,
@@ -79,6 +82,7 @@ __all__ = [
     "CliBackend",
     "CliProvenance",
     "EffortLevel",
+    "FailureReason",
     "JsonOutput",
     "NestedAskError",
     "Output",
