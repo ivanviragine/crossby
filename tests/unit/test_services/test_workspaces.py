@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -641,4 +642,53 @@ def test_a_directory_put_in_a_files_place_is_never_moved_away(
     with pytest.raises(WorkspaceDriftError):
         cleanup(workspace)
     assert (agents / "theirs.md").read_text() == "unrelated"
+    assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]
+
+
+@pytest.mark.skipif(os.rename not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_a_fifo_swapped_in_never_hangs_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    agents = workspace.path / "AGENTS.md"
+    real_rename = os.rename
+
+    def swap_in_fifo(src: Any, dst: Any, **kwargs: Any) -> None:
+        if src == "AGENTS.md":
+            agents.unlink()
+            os.mkfifo(agents)
+        real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(workspaces.os, "rename", swap_in_fifo)
+    with pytest.raises(WorkspaceDriftError):
+        cleanup(workspace)
+    assert stat.S_ISFIFO(agents.lstat().st_mode)
+
+
+@pytest.mark.skipif(os.rename not in os.supports_dir_fd, reason="needs dir_fd support")
+def test_a_read_error_puts_the_entry_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from crossby.services import workspaces
+
+    workspace = provision(_spec(tmp_path))
+    real_fdopen = os.fdopen
+
+    class Broken:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> Broken:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.handle.close()
+
+        def read(self) -> bytes:
+            raise OSError("I/O error")
+
+    monkeypatch.setattr(workspaces.os, "fdopen", lambda fd, mode: Broken(real_fdopen(fd, mode)))
+    with pytest.raises(WorkspaceDriftError):
+        cleanup(workspace)
+    assert (workspace.path / "AGENTS.md").read_text() == PERSONA
     assert not [p for p in workspace.path.iterdir() if p.name.startswith(".crossby-removing")]

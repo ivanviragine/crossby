@@ -532,21 +532,25 @@ def _unlink_if_unchanged(parent: int, name: str, digest: str) -> bool:
         os.rename(name, private, src_dir_fd=parent, dst_dir_fd=parent)
     except OSError:
         return False
-    matches = False
     try:
-        descriptor = os.open(private, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
-    except OSError:
-        descriptor = None
-    if descriptor is not None:
+        # Non-blocking, so a FIFO swapped in before the rename cannot hang the
+        # open; its type is checked before anything is read.
+        flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(private, flags, dir_fd=parent)
         try:
-            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                matches = False
+            else:
                 with os.fdopen(os.dup(descriptor), "rb") as handle:
                     matches = _sha256(handle.read()) == digest
         finally:
             os.close(descriptor)
-    if matches:
-        os.unlink(private, dir_fd=parent)
-        return True
+        if matches:
+            os.unlink(private, dir_fd=parent)
+            return True
+    except OSError:
+        pass
+    # Every unsuccessful removal puts the entry back.
     _restore(parent, private, name)
     return False
 
