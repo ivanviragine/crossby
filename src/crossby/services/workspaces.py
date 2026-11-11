@@ -136,6 +136,9 @@ def _material_path(name: str) -> PurePosixPath:
         not name
         or "\\" in name
         or "\x00" in name
+        # A colon makes a Windows drive path ("C:/x", "C:x") that escapes the
+        # folder when joined, or names an NTFS alternate stream.
+        or ":" in name
         or path.is_absolute()
         or any(part in {"", ".", ".."} for part in name.split("/"))
     ):
@@ -267,8 +270,15 @@ def _write_new(path: Path, data: bytes) -> None:
         if exc.errno == errno.EEXIST:
             raise WorkspaceConflictError(f"{path} appeared while provisioning.") from None
         raise
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
+    # The file is ours once created: a failed write or close removes it, so a
+    # rollback never leaves a partial file without a manifest entry.
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
 
 
 def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:

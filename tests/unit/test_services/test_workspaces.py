@@ -175,6 +175,9 @@ def test_a_link_or_file_is_never_a_persona_folder(tmp_path: Path) -> None:
         "../escape.md",
         "a/../b.md",
         "a\\b.md",
+        "C:/outside.md",
+        "C:outside.md",
+        "notes/x.md:stream",
         "",
     ],
 )
@@ -463,3 +466,31 @@ def test_cleanup_never_follows_a_folder_replaced_after_verification(
     with pytest.raises(WorkspaceDriftError, match="changed during cleanup"):
         cleanup(workspace)
     assert (outside / "interview-1.md").read_text() == "Budget is fixed for the year.\n"
+
+
+def test_a_write_that_fails_part_way_removes_the_file_it_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.services import workspaces
+
+    real_fdopen = os.fdopen
+
+    class Failing:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> Failing:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self.handle.close()
+
+        def write(self, data: bytes) -> int:
+            self.handle.write(data[:10])
+            raise OSError("file too large")
+
+    monkeypatch.setattr(workspaces.os, "fdopen", lambda fd, mode: Failing(real_fdopen(fd, mode)))
+    folder = tmp_path / "p"
+    with pytest.raises(OSError, match="file too large"):
+        provision(_spec(tmp_path, path=folder))
+    assert not folder.exists()
