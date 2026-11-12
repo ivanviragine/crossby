@@ -374,6 +374,63 @@ def test_the_session_is_fresh_unattended_and_read_only(tmp_path: Path) -> None:
     assert request.environment == {DEPTH_ENV: "1"}
 
 
+def _granted(tmp_path: Path, tool: str) -> tuple[Path, ...]:
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    runner = ScriptedRunner(_session(HeadlessTerminalStatus.SUCCEEDED, final_text="A"))
+    request = AskRequest(
+        backend=CliBackend(tool=tool),
+        prompt="q",
+        workspace=ProjectWorkspace(path=_folder(tmp_path, f"seat-{tool}")),
+        readable_dirs=(project,),
+    )
+    ask_service.run_ask(request, runner=runner)
+    (session,) = runner.requests
+    assert session.read_only
+    return session.trusted_dirs
+
+
+def test_readable_dirs_are_granted_only_where_the_tool_needs_it(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    # Claude Code and Copilot deny reads outside the folder they run in.
+    assert _granted(tmp_path, "claude") == (project,)
+    assert _granted(tmp_path, "copilot") == (project,)
+    # These read any path under their read-only profile, so nothing is passed.
+    for tool in ("codex", "cursor", "antigravity-cli"):
+        assert _granted(tmp_path, tool) == ()
+    # OpenCode has neither a grant nor verified outside reads.
+    with pytest.raises(AskUnsupportedError, match="readable_dirs cannot be honored"):
+        _granted(tmp_path, "opencode")
+
+
+def test_readable_dirs_are_checked_before_the_agent_starts(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="absolute paths"):
+        _claude_ask(tmp_path, readable_dirs=(Path("relative"),))
+    with pytest.raises(ValidationError, match="asks to block"):
+        _claude_ask(
+            tmp_path,
+            readable_dirs=(tmp_path,),
+            require_blocked=frozenset({RestrictionChannel.READS_OUTSIDE_WORKSPACE}),
+        )
+    runner = ScriptedRunner(_session(HeadlessTerminalStatus.SUCCEEDED, final_text="A"))
+    with pytest.raises(AskRequestError, match="not an existing folder"):
+        ask_service.run_ask(
+            _claude_ask(tmp_path, readable_dirs=(tmp_path / "missing",)), runner=runner
+        )
+    assert runner.requests == []
+
+
+def test_a_readable_dir_reaches_claudes_command_line_without_a_write_tool(tmp_path: Path) -> None:
+    project = _folder(tmp_path, "project")
+    adapter = AbstractAITool.get(AIToolID.CLAUDE)
+    session = ask_service.session_request(
+        _claude_ask(tmp_path, readable_dirs=(project,)), timeout_seconds=30.0, environment={}
+    )
+    command = adapter._headless_command(session)  # type: ignore[attr-defined]
+    assert command[command.index("--add-dir") + 1] == str(project)
+    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,Skill"
+
+
 def test_json_null_is_present_output(tmp_path: Path) -> None:
     runner = ScriptedRunner(
         _session(HeadlessTerminalStatus.SUCCEEDED, final_json=None, final_json_present=True)
