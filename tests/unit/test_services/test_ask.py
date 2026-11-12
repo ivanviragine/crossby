@@ -431,6 +431,48 @@ def test_a_readable_dir_reaches_claudes_command_line_without_a_write_tool(tmp_pa
     assert command[command.index("--tools") + 1] == "Read,Grep,Glob,Skill"
 
 
+def _states(
+    tool: str, tmp_path: Path, **updates: Any
+) -> tuple[HeadlessSessionRequest, dict[str, str]]:
+    request = AskRequest(
+        backend=CliBackend(tool=tool),
+        prompt="q",
+        workspace=ProjectWorkspace(path=tmp_path),
+        **updates,
+    )
+    session = ask_service.session_request(request, timeout_seconds=30.0, environment={})
+    adapter = AbstractAITool.get(AIToolID(tool))
+    _, floor, _ = ask_service._verified_versions(AIToolID(tool))
+    found = adapter.headless_restrictions(session, floor)
+    return session, {item.channel.value: item.state.value for item in found}
+
+
+def test_search_commands_are_opt_in_and_reported_as_not_write_proof(tmp_path: Path) -> None:
+    adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+
+    session, states = _states("antigravity-cli", tmp_path)
+    command = adapter._headless_command(session, print_timeout_seconds=30)  # type: ignore[attr-defined]
+    assert command[command.index("--settings") + 1] == '{"permissions":{"allow":[]}}'
+    assert (states["shell_commands"], states["shell_writes"]) == ("enforced", "enforced")
+
+    session, states = _states("antigravity-cli", tmp_path, allow_search_commands=True)
+    command = adapter._headless_command(session, print_timeout_seconds=30)  # type: ignore[attr-defined]
+    allowed = json.loads(command[command.index("--settings") + 1])["permissions"]["allow"]
+    assert "command(grep)" in allowed and "command(git grep)" in allowed
+    assert not any("rm" in rule or "sed" in rule or "tee" in rule for rule in allowed)
+    assert "plan" in command  # still asked not to edit
+    # An allow rule matches a command's start, so a write can ride along: say so. A
+    # caller that requires shell writes blocked is then refused like any unmet channel.
+    assert (states["shell_commands"], states["shell_writes"]) == ("not_enforced", "not_enforced")
+    assert states["file_edits"] == "enforced"
+
+    # Tools with search tools of their own ignore the option.
+    for tool in ("claude", "codex"):
+        _, plain = _states(tool, tmp_path)
+        _, asked = _states(tool, tmp_path, allow_search_commands=True)
+        assert plain == asked
+
+
 def test_json_null_is_present_output(tmp_path: Path) -> None:
     runner = ScriptedRunner(
         _session(HeadlessTerminalStatus.SUCCEEDED, final_json=None, final_json_present=True)

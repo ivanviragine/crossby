@@ -153,6 +153,11 @@ class AbstractAITool(ABC):
     HEADLESS_READ_ONLY_RESTRICTIONS: ClassVar[
         Mapping[RestrictionChannel, tuple[RestrictionState, str]]
     ] = {}
+    # What ``search_commands`` changes in that profile, verified live; empty
+    # when the tool ignores the option. Applied over the declaration above.
+    HEADLESS_SEARCH_COMMANDS_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {}
     # Where the tool reads a persona folder's own instructions and skills,
     # verified live in a plain folder; ``None`` when not verified.
     OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = None
@@ -697,6 +702,8 @@ class AbstractAITool(ABC):
             and self.headless_read_only_supported(version, mode)
         ):
             declared = self.HEADLESS_READ_ONLY_RESTRICTIONS
+            if request.search_commands:
+                declared = {**declared, **self.HEADLESS_SEARCH_COMMANDS_RESTRICTIONS}
             verified_on = (
                 self.HEADLESS_READ_ONLY_VERIFIED_VERSION
                 or self.capabilities().headless.profile_for(mode).verified_version
