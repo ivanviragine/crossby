@@ -275,6 +275,32 @@ read-only deny rules, so its MCP channel is not enforced. Other MCP servers,
 account connectors and the other tools' plugins were not probed, so they stay
 unknown.
 
+## Readable folders
+
+Verified 2026-11-12 on macOS. `AskRequest.readable_dirs` names folders outside
+the working directory that a read-only session may read. Each tool was asked,
+from an empty persona folder, to search a sibling project for a string and
+read one of its files, once without the folders and once with them:
+
+- **Claude Code 2.1.317+.** Without: Grep and Read were both denied ("Path is
+  outside allowed working directories", two permission denials). With
+  `--add-dir`: both succeeded, no denial. The closed `--tools` set still has
+  no write or shell tool, so the folder is readable and not writable.
+- **GitHub Copilot CLI.** Without: both tool calls denied natively. With
+  `--add-dir`: both succeeded, no denial; `--deny-tool write --deny-tool
+  shell` still applies.
+- **Codex CLI.** Reads succeed without a grant (the read-only sandbox
+  restricts writes, not reads), so none is passed. In a writable session the
+  same field would become a writable root; a read-only one never passes it.
+- **Antigravity CLI 1.5.7.** `read_file` on the outside path succeeds without
+  a grant, so none is passed. A shell search (`grep`, `rg`) is denied under
+  the read-only profile like any command, and agy then ends the turn with no
+  answer; asking it to use its file tools avoids that. One run with
+  `--add-dir` hit the session deadline, another finished normally.
+- **Cursor** is declared to read any path (see above) and was not re-probed.
+  **OpenCode** auto-rejects outside reads and has no grant, so an ask with
+  `readable_dirs` is refused before it starts.
+
 ## Prompts on stdin
 
 Verified 2026-11-10 on macOS. No managed prompt travels on argv any more:

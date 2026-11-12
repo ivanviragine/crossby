@@ -133,6 +133,11 @@ class AskRequest(_Frozen):
     channels that must be verified blocked on the installed build; an unmet
     requirement is refused before the agent starts. ``response_schema`` asks
     for structured output that the runtime validates against the schema.
+    ``readable_dirs`` are existing folders outside the workspace the agent may
+    also read, for example the project a persona folder's agent reviews. The
+    session stays read-only, so they are never writable. They are left out for
+    a tool whose read-only profile reads any path anyway, granted on the command
+    line of one that needs it, and refused on a tool with neither.
     """
 
     backend: CliBackend
@@ -144,6 +149,15 @@ class AskRequest(_Frozen):
     # Run even though the folder has hooks the tool would run (a hook can
     # change files); otherwise such an ask is refused with ProjectHooksError.
     allow_project_hooks: bool = False
+    readable_dirs: tuple[Path, ...] = ()
+
+    @field_validator("readable_dirs")
+    @classmethod
+    def _readable_dirs_are_absolute(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
+        for path in value:
+            if not path.is_absolute():
+                raise ValueError(f"readable_dirs takes absolute paths, not {path}")
+        return value
 
     @field_validator("prompt")
     @classmethod
@@ -166,6 +180,12 @@ class AskRequest(_Frozen):
             raise ValueError(
                 f"the persona folder was provisioned for {workspace.tool.value}, not "
                 f"{self.backend.tool.value}"
+            )
+        blocked = RestrictionChannel.READS_OUTSIDE_WORKSPACE in self.require_blocked
+        if self.readable_dirs and blocked:
+            raise ValueError(
+                "readable_dirs grants reads outside the workspace, which require_blocked "
+                "asks to block"
             )
         return self
 
@@ -477,6 +497,28 @@ def _adapter(tool: AIToolID) -> AbstractAITool:
     return AbstractAITool.get(tool)
 
 
+def _read_grants(request: AskRequest) -> tuple[Path, ...]:
+    """The folders to grant on the tool's command line for ``readable_dirs``."""
+    if not request.readable_dirs:
+        return ()
+    for path in request.readable_dirs:
+        if not path.is_dir():
+            raise AskRequestError(f"readable_dirs: {path} is not an existing folder")
+    adapter = _adapter(request.backend.tool)
+    declared = adapter.HEADLESS_READ_ONLY_RESTRICTIONS.get(
+        RestrictionChannel.READS_OUTSIDE_WORKSPACE
+    )
+    if declared is not None and declared[0] is RestrictionState.NOT_ENFORCED:
+        # Verified to read any path under its read-only profile: nothing to grant.
+        return ()
+    if adapter.capabilities().supports_trusted_dirs:
+        return request.readable_dirs
+    raise AskUnsupportedError(
+        f"{request.backend.tool.value} has no verified way to read folders outside its "
+        "workspace in a read-only session, so readable_dirs cannot be honored."
+    )
+
+
 def session_request(
     request: AskRequest, *, timeout_seconds: float, environment: Mapping[str, str]
 ) -> HeadlessSessionRequest:
@@ -490,10 +532,12 @@ def session_request(
     else:
         prompt = render_envelope(request.prompt, workspace.instructions)
         minimum_version = None
+    trusted_dirs = _read_grants(request)
     try:
         return HeadlessSessionRequest(
             prompt=prompt,
             working_dir=workspace.path,
+            trusted_dirs=trusted_dirs,
             model=request.backend.model,
             effort=request.backend.effort,
             interaction_mode=HeadlessInteractionMode.UNATTENDED,
