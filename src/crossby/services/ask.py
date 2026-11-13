@@ -240,6 +240,10 @@ class UsageReport(_Frozen):
     # Cost in US dollars exactly as the tool reported it (Claude Code does);
     # crossby keeps no prices and never estimates one.
     reported_cost_usd: float | None = None
+    # How many times the agent used its tools: tool calls on Codex CLI and
+    # Antigravity CLI, tool rounds on Claude Code (calls made together count
+    # once). Zero means it answered without using any.
+    tool_steps: int | None = None
     scope: Literal["invocation"] = "invocation"
     complete: bool | None = None
     source: str
@@ -602,6 +606,7 @@ def _usage(tool: AIToolID, usage: TokenUsage | None) -> UsageReport | None:
         usage.total_tokens,
         usage.premium_requests,
         usage.reported_cost_usd,
+        usage.tool_steps,
     )
     if all(value is None for value in fields):
         return None
@@ -612,6 +617,7 @@ def _usage(tool: AIToolID, usage: TokenUsage | None) -> UsageReport | None:
         total_tokens=usage.total_tokens,
         premium_requests=usage.premium_requests,
         reported_cost_usd=usage.reported_cost_usd,
+        tool_steps=usage.tool_steps,
         source=f"{tool.value} result",
     )
 

@@ -548,6 +548,15 @@ def usage_from(
     return usage
 
 
+def with_tool_steps(usage: TokenUsage | None, steps: int | None) -> TokenUsage | None:
+    """``usage`` carrying how many times the agent used its tools, when known."""
+    if steps is None:
+        return usage
+    if usage is None:
+        return TokenUsage(tool_steps=steps)
+    return usage.model_copy(update={"tool_steps": steps})
+
+
 def non_blank_text(value: Any) -> str | None:
     """Return native text only when it is a usable non-blank string."""
     return value if isinstance(value, str) and value.strip() else None
