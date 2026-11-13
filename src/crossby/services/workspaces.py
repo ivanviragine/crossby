@@ -315,7 +315,8 @@ def planned_files(spec: OwnedWorkspaceSpec) -> dict[str, bytes]:
     if servers:
         if layout.mcp is None:
             raise WorkspaceError(
-                f"{spec.tool.value} has no verified way to take MCP servers for one session."
+                f"{spec.tool.value} has no verified way to take MCP servers for one "
+                "unattended session."
             )
         if layout.mcp == "file" and layout.mcp_config is not None:
             from crossby.sync.mcp import _to_antigravity_cli_entry

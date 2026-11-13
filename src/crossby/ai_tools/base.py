@@ -895,9 +895,16 @@ class AbstractAITool(ABC):
                 capability=capability,
             )
         layout = self.OWNED_WORKSPACE_LAYOUT
-        if request.mcp_servers and (layout is None or layout.mcp is None):
+        if request.mcp_servers and (
+            layout is None
+            or layout.mcp is None
+            # Only the unattended command line passes them on; a brokered
+            # transport would start without them and still say they run.
+            or request.interaction_mode is not HeadlessInteractionMode.UNATTENDED
+        ):
             raise HeadlessUnsupportedError(
-                f"{caps.display_name} has no verified way to take MCP servers for one session.",
+                f"{caps.display_name} has no verified way to take MCP servers for one "
+                f"{request.interaction_mode.value} session.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

@@ -1077,6 +1077,31 @@ def test_antigravity_text_output_applies_the_envelope_checks(
     assert result.final_text is None
 
 
+def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    servers = {"docs": {"command": "npx", "args": ["-y", "docs-server"]}}
+
+    # A tool with no verified way to take them at all.
+    cursor = _adapter(monkeypatch, AIToolID.CURSOR, _fake_cli(stdout="{}"))
+    with pytest.raises(HeadlessUnsupportedError, match="MCP servers for one unattended session"):
+        cursor.run_headless_session(_request(tmp_path, mcp_servers=servers))
+
+    # Codex CLI takes them on its command line, which only the unattended mode builds:
+    # a brokered session would start without them and still report them as running.
+    codex = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+    with pytest.raises(HeadlessUnsupportedError, match="MCP servers for one brokered session"):
+        codex.run_headless_session(
+            _request(
+                tmp_path, mcp_servers=servers, interaction_mode=HeadlessInteractionMode.BROKERED
+            ),
+            interaction_handler=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+    assert codex.run_headless_session(_request(tmp_path, mcp_servers=servers)).status is (
+        HeadlessTerminalStatus.SUCCEEDED
+    )
+
+
 def test_tool_steps_are_counted_as_each_tool_reports_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
