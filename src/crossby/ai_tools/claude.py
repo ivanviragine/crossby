@@ -149,7 +149,10 @@ class ClaudeAdapter(AbstractAITool):
     # A persona folder's instructions and skills; verified live in a plain
     # folder (docs/unattended-headless-verification.md#persona-folders).
     OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
-        instructions="CLAUDE.md", skills=".claude/skills", verified_version="2.1.317"
+        instructions="CLAUDE.md",
+        skills=".claude/skills",
+        verified_version="2.1.317",
+        mcp="command_line",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -458,6 +461,21 @@ class ClaudeAdapter(AbstractAITool):
             # folder's CLAUDE.md and skills still load. Unlike --setting-sources
             # or --restricted, it keeps the folder's own setup.
             command.extend(("--tools", _READ_ONLY_TOOLS, "--settings", _READ_ONLY_SETTINGS))
+        if request.mcp_servers:
+            # Verified on 2.1.322: without the allow rule a call to the server's
+            # tool is denied under --permission-prompts none; with it the call runs.
+            # No --strict-mcp-config: the user's own servers still load.
+            from crossby.models.config import MCPServerConfig
+            from crossby.sync.mcp import _to_json_entry
+
+            servers = {
+                name: _to_json_entry(MCPServerConfig(**entry))
+                for name, entry in request.mcp_servers.items()
+            }
+            command.extend(
+                ("--mcp-config", json.dumps({"mcpServers": servers}, separators=(",", ":")))
+            )
+            command.extend(("--allowedTools", *(f"mcp__{name}" for name in servers)))
         if request.command_policy is not None:
             command.extend(
                 self.allowed_commands_args(list(request.command_policy.allowed_commands))

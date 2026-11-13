@@ -7,6 +7,7 @@ The `__init_subclass__` hook auto-registers each concrete adapter.
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import queue
@@ -131,6 +132,15 @@ def _headless_posix_exec_limit() -> int:
         # by the managed transport's existing argument guard.
         return 131_072
     return limit if isinstance(limit, int) and limit > 0 else 131_072
+
+
+def _declared_mcp_servers(path: Path) -> set[str]:
+    """Names of the MCP servers a native JSON config file defines; empty if unreadable."""
+    try:
+        declared = json.loads(path.read_text(encoding="utf-8")).get("mcpServers")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return set(declared) if isinstance(declared, dict) else set()
 
 
 class AbstractAITool(ABC):
@@ -682,6 +692,14 @@ class AbstractAITool(ABC):
             version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION or profile.verified_version
         )
 
+    def _ambient_mcp_servers(self, working_dir: Path) -> set[str]:
+        """Names of the tool's own MCP servers a session server must not reuse.
+
+        Empty unless the tool merges a session server into a configured one of
+        the same name field by field instead of replacing it.
+        """
+        return set()
+
     def headless_restrictions(
         self, request: HeadlessSessionRequest, version: str | None
     ) -> tuple[Restriction, ...]:
@@ -708,6 +726,15 @@ class AbstractAITool(ABC):
                 self.HEADLESS_READ_ONLY_VERIFIED_VERSION
                 or self.capabilities().headless.profile_for(mode).verified_version
             )
+        if request.mcp_servers:
+            # Whatever the profile says about the user's own servers, these run.
+            declared = {
+                **declared,
+                RestrictionChannel.MCP_TOOLS: (
+                    RestrictionState.NOT_ENFORCED,
+                    "the session's own MCP servers are pre-approved",
+                ),
+            }
         restrictions: list[Restriction] = []
         for channel in RestrictionChannel:
             if channel in declared:
@@ -885,6 +912,42 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        layout = self.OWNED_WORKSPACE_LAYOUT
+        if request.mcp_servers and (
+            layout is None
+            or layout.mcp is None
+            # Only the unattended command line passes them on; a brokered
+            # transport would start without them and still say they run.
+            or request.interaction_mode is not HeadlessInteractionMode.UNATTENDED
+        ):
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} has no verified way to take MCP servers for one "
+                f"{request.interaction_mode.value} session.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        clashes = sorted(self._ambient_mcp_servers(working_dir) & set(request.mcp_servers))
+        if clashes:
+            raise HeadlessRequestError(
+                f"{caps.display_name} already has an MCP server named {', '.join(clashes)} in "
+                "its own configuration, and would mix that one's settings into this one. "
+                "Give the session's server another name.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        if request.mcp_servers and layout is not None and layout.mcp == "file":
+            # The tool reads them from a file in the folder, which only a persona
+            # folder's provisioning writes; without it they would not load.
+            declared = _declared_mcp_servers(working_dir / str(layout.mcp_config))
+            missing = sorted(set(request.mcp_servers) - declared)
+            if missing:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} reads MCP servers from {layout.mcp_config} in its "
+                    f"folder, which does not define {', '.join(missing)}. Provision a persona "
+                    "folder with them.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
         if request.effort is not None and (
             not caps.supports_effort or request.effort not in caps.supported_efforts
         ):
