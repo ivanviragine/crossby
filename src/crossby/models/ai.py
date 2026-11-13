@@ -7,7 +7,7 @@ import math
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -362,6 +362,11 @@ class OwnedWorkspaceLayout(BaseModel):
     instructions: str
     skills: str
     verified_version: str
+    # How the tool takes a persona's MCP servers for one session, verified live:
+    # on its command line, from the ``mcp_config`` file inside the folder, or
+    # (``None``) in no verified way.
+    mcp: Literal["command_line", "file"] | None = None
+    mcp_config: str | None = None
 
 
 class Restriction(BaseModel):
@@ -769,6 +774,10 @@ class HeadlessSessionRequest(BaseModel):
     # shell channels as not enforced (see HEADLESS_SEARCH_COMMANDS_RESTRICTIONS).
     # Tools with search tools of their own ignore it.
     search_commands: bool = False
+    # MCP servers for this session only, by name, each a dumped
+    # ``MCPServerConfig``. They are added to the servers the tool already has,
+    # and their tools are pre-approved: nobody is there to approve a call.
+    mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # Channels that must be verified blocked for this build and profile. The
     # runtime resolves them after its version probe and refuses to start the
     # session when any is not enforced; unknown counts as not enforced.

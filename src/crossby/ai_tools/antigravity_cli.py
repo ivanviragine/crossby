@@ -176,7 +176,11 @@ class AntigravityCLIAdapter(AbstractAITool):
     # A persona folder's instructions and skills; verified live in a plain
     # folder (docs/unattended-headless-verification.md#persona-folders).
     OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
-        instructions="AGENTS.md", skills=".agents/skills", verified_version="1.5.5"
+        instructions="AGENTS.md",
+        skills=".agents/skills",
+        verified_version="1.5.5",
+        mcp="file",
+        mcp_config=".agents/mcp_config.json",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -481,6 +485,13 @@ class AntigravityCLIAdapter(AbstractAITool):
             # command. Plan mode keeps the agent from attempting edits, because
             # agy ends a turn with no answer when it denies an action.
             settings = _SEARCH_COMMANDS_SETTINGS if request.search_commands else _READ_ONLY_SETTINGS
+            if request.mcp_servers:
+                # Verified on 1.5.7: agy loads the folder's .agents/mcp_config.json,
+                # and a call is denied (ending the turn) unless "mcp(<server>/*)" is
+                # allowed; "mcp(<server>)" and "mcp(<server>/)" do not match.
+                allow = json.loads(settings)["permissions"]["allow"]
+                allow += [f"mcp({name}/*)" for name in request.mcp_servers]
+                settings = json.dumps({"permissions": {"allow": allow}}, separators=(",", ":"))
             command.extend(("--mode", "plan", "--settings", settings))
         return command
 

@@ -55,6 +55,7 @@ from crossby.models.ai import (
 from crossby.models.ai import (
     HeadlessFailureReason as FailureReason,
 )
+from crossby.models.config import MCPServerConfig
 from crossby.services.ask import (
     ENVELOPE_VERSION,
     SCHEMA_VERSION,
@@ -128,6 +129,7 @@ __all__ = [
     "InputRequest",
     "JsonOutput",
     "Lead",
+    "MCPServerConfig",
     "Member",
     "NestedAskError",
     "Output",

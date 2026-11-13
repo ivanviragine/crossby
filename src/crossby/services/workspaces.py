@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -34,8 +35,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from crossby.models.ai import AIToolID, OwnedWorkspaceLayout
+from crossby.models.config import MCPServerConfig
 
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+# Also a Claude tool prefix, a TOML bare key and an Antigravity allow rule.
+_MCP_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 # Whether writes and removals can be anchored to directory descriptors (every
 # POSIX platform; not Windows). Fixed at import, so it cannot change mid-run.
 _ANCHORED = {os.open, os.mkdir, os.unlink, os.rmdir, os.rename, os.link} <= os.supports_dir_fd
@@ -96,6 +100,22 @@ class OwnedWorkspaceSpec(_Frozen):
     instructions: str | None = None
     skills: tuple[Path, ...] = ()
     files: dict[str, str] = Field(default_factory=dict)
+    # MCP servers this persona's agent gets for each ask, by name, on top of
+    # the ones the tool already has. Their tools are pre-approved.
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _mcp_servers_are_named_plainly(
+        cls, value: dict[str, MCPServerConfig]
+    ) -> dict[str, MCPServerConfig]:
+        for name in value:
+            if not _MCP_NAME.fullmatch(name):
+                raise ValueError(
+                    f"MCP server name {name!r} must be lowercase letters, digits, hyphens "
+                    "and underscores"
+                )
+        return value
 
     @field_validator("instructions")
     @classmethod
@@ -121,6 +141,8 @@ class OwnedWorkspace(_Frozen):
     # Relative POSIX path of every file written, to its SHA-256.
     manifest: dict[str, str]
     layout: OwnedWorkspaceLayout
+    # The persona's MCP servers, passed to the tool on every ask in this folder.
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
 def layout_for(tool: AIToolID) -> OwnedWorkspaceLayout:
@@ -215,6 +237,51 @@ def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
     return name, files
 
 
+_REFERENCE = re.compile(r"\$\{[^}]*\}")
+_BEARER_REFERENCE = re.compile(r"(?:Bearer )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPServerConfig:
+    """``server`` as ``tool`` can take it for one session, ``${VAR}`` references included.
+
+    Claude Code expands any reference itself. Codex CLI can forward a variable
+    under its own name (``KEY = "${KEY}"``) and a header that is one reference;
+    Antigravity CLI expands nothing, but its servers inherit the environment,
+    so a same-name entry is simply left out. Any other reference would reach
+    the server as the literal text, so it is refused.
+    """
+    if tool is AIToolID.CLAUDE:
+        return server
+    same_name = {key for key, value in server.env.items() if value == f"${{{key}}}"}
+    literal = [
+        *(value for key, value in server.env.items() if key not in same_name),
+        *server.args,
+        *(
+            value
+            for value in server.headers.values()
+            if tool is not AIToolID.CODEX or not _BEARER_REFERENCE.fullmatch(value)
+        ),
+    ]
+    if any(_REFERENCE.search(value) for value in literal):
+        raise WorkspaceError(
+            f"MCP server {name!r} uses a ${{VAR}} reference that {tool.value} would pass on "
+            'as text. Only an environment entry under its own name (KEY: "${KEY}") is '
+            "forwarded there."
+        )
+    if tool is AIToolID.ANTIGRAVITY_CLI and same_name:
+        kept = {key: value for key, value in server.env.items() if key not in same_name}
+        return server.model_copy(update={"env": kept})
+    return server
+
+
+def _enabled_servers(spec: OwnedWorkspaceSpec) -> dict[str, MCPServerConfig]:
+    return {
+        name: _session_server(spec.tool, name, server)
+        for name, server in sorted(spec.mcp_servers.items())
+        if server.enabled
+    }
+
+
 def planned_files(spec: OwnedWorkspaceSpec) -> dict[str, bytes]:
     """Every file :func:`provision` writes for ``spec``, by relative path."""
     layout = layout_for(spec.tool)
@@ -229,6 +296,18 @@ def planned_files(spec: OwnedWorkspaceSpec) -> dict[str, bytes]:
         seen.add(name)
         for relative, data in files.items():
             planned[f"{layout.skills}/{name}/{relative}"] = data
+    servers = _enabled_servers(spec)
+    if servers:
+        if layout.mcp is None:
+            raise WorkspaceError(
+                f"{spec.tool.value} has no verified way to take MCP servers for one session."
+            )
+        if layout.mcp == "file" and layout.mcp_config is not None:
+            from crossby.sync.mcp import _to_antigravity_cli_entry
+
+            entries = {name: _to_antigravity_cli_entry(server) for name, server in servers.items()}
+            text = json.dumps({"mcpServers": entries}, indent=2, sort_keys=True) + "\n"
+            planned[layout.mcp_config] = text.encode("utf-8")
     for relative, text in spec.files.items():
         key = _material_path(relative).as_posix()
         if key in planned:
@@ -336,7 +415,13 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
     planned = planned_files(spec)
     manifest = {relative: _sha256(data) for relative, data in sorted(planned.items())}
     root = _folder(spec.path)
-    workspace = OwnedWorkspace(path=root, tool=spec.tool, manifest=manifest, layout=layout)
+    workspace = OwnedWorkspace(
+        path=root,
+        tool=spec.tool,
+        manifest=manifest,
+        layout=layout,
+        mcp_servers=_enabled_servers(spec),
+    )
     if root.exists():
         if not root.is_dir():
             raise WorkspaceConflictError(f"{root} is not a folder.")

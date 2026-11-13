@@ -708,6 +708,15 @@ class AbstractAITool(ABC):
                 self.HEADLESS_READ_ONLY_VERIFIED_VERSION
                 or self.capabilities().headless.profile_for(mode).verified_version
             )
+        if request.mcp_servers:
+            # Whatever the profile says about the user's own servers, these run.
+            declared = {
+                **declared,
+                RestrictionChannel.MCP_TOOLS: (
+                    RestrictionState.NOT_ENFORCED,
+                    "the session's own MCP servers are pre-approved",
+                ),
+            }
         restrictions: list[Restriction] = []
         for channel in RestrictionChannel:
             if channel in declared:
@@ -882,6 +891,13 @@ class AbstractAITool(ABC):
         if trusted_dirs and not caps.supports_trusted_dirs:
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} cannot preserve trusted_dirs for managed sessions.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        layout = self.OWNED_WORKSPACE_LAYOUT
+        if request.mcp_servers and (layout is None or layout.mcp is None):
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} has no verified way to take MCP servers for one session.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

@@ -86,6 +86,25 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
+
+
+def _inline_toml(value: Any) -> str:
+    """``value`` as one TOML value on one line, for a ``-c key=value`` override."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, str):
+        # A JSON string is a valid TOML basic string.
+        return json.dumps(value)
+    if isinstance(value, dict):
+        items = (f"{json.dumps(str(key))} = {_inline_toml(item)}" for key, item in value.items())
+        return "{" + ", ".join(items) + "}"
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_inline_toml(item) for item in value) + "]"
+    raise ValueError(f"{type(value).__name__} has no TOML form")
+
+
 # ``item.completed`` items that are not a use of a tool (0.167.2: a shell command is
 # ``command_execution``; edits, MCP calls and web searches have their own types).
 _CODEX_NON_TOOL_ITEMS = frozenset({"agent_message", "reasoning", "todo_list", "error"})
@@ -204,7 +223,10 @@ class CodexAdapter(AbstractAITool):
     # A persona folder's instructions and skills; verified live in a plain
     # folder (docs/unattended-headless-verification.md#persona-folders).
     OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = OwnedWorkspaceLayout(
-        instructions="AGENTS.md", skills=".agents/skills", verified_version="0.166.0"
+        instructions="AGENTS.md",
+        skills=".agents/skills",
+        verified_version="0.166.0",
+        mcp="command_line",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -560,6 +582,17 @@ class CodexAdapter(AbstractAITool):
         if not resuming:
             command.extend(("--color", "never", "--sandbox", sandbox_mode))
         command.extend(("-c", f'sandbox_mode="{sandbox_mode}"'))
+        for name, entry in request.mcp_servers.items():
+            # Verified on 0.167.2: under approval_policy="never" a call to the
+            # server's tool fails ("requires approval") unless the server's own
+            # default_tools_approval_mode is "approve".
+            from crossby.models.config import MCPServerConfig
+            from crossby.sync.mcp import _to_toml_entry
+
+            table = _to_toml_entry(MCPServerConfig(**entry))
+            table["default_tools_approval_mode"] = "approve"
+            for key, value in table.items():
+                command.extend(("-c", f"mcp_servers.{name}.{key}={_inline_toml(value)}"))
         if request.read_only:
             # Verified on 0.166.0: ambient approval settings (for example
             # ``approvals_reviewer = "auto_review"``) approved an escalated

@@ -22,6 +22,7 @@ from crossby.ai_tools.headless import HeadlessUnsupportedError
 from crossby.api import (
     AskRequest,
     CliBackend,
+    MCPServerConfig,
     OwnedWorkspaceSpec,
     WorkspaceChangedError,
     WorkspaceConflictError,
@@ -761,3 +762,117 @@ def test_a_skill_that_cannot_be_read_completely_is_refused(tmp_path: Path) -> No
         assert not (tmp_path / "personas").exists()
     finally:
         references.chmod(0o755)
+
+
+# --- MCP servers ---------------------------------------------------------------
+
+DOCS = MCPServerConfig(
+    command="npx", args=["-y", "docs-server"], env={"DOCS_TOKEN": "${DOCS_TOKEN}", "MODE": "ro"}
+)
+SEARCH = MCPServerConfig(url="https://mcp.example.com/search", transport="http")
+
+
+def _session(tool: AIToolID, tmp_path: Path, **servers: MCPServerConfig) -> HeadlessSessionRequest:
+    from crossby.services import ask as ask_service
+
+    spec = OwnedWorkspaceSpec(
+        path=tmp_path / f"seat-{tool.value}", tool=tool, instructions=PERSONA, mcp_servers=servers
+    )
+    request = AskRequest(backend=CliBackend(tool=tool), prompt="q", workspace=provision(spec))
+    return ask_service.session_request(request, timeout_seconds=30.0, environment={})
+
+
+def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> None:
+    # Claude Code: on the command line, each server pre-approved by name.
+    session = _session(AIToolID.CLAUDE, tmp_path, docs=DOCS, search=SEARCH)
+    command = AbstractAITool.get(AIToolID.CLAUDE)._headless_command(session)  # type: ignore[attr-defined]
+    given = json.loads(command[command.index("--mcp-config") + 1])["mcpServers"]
+    assert given["docs"] == {
+        "command": "npx",
+        "args": ["-y", "docs-server"],
+        "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "MODE": "ro"},
+    }
+    assert given["search"] == {"url": "https://mcp.example.com/search", "type": "http"}
+    allowed = command.index("--allowedTools")
+    assert command[allowed + 1 : allowed + 3] == ["mcp__docs", "mcp__search"]
+    assert "--strict-mcp-config" not in command  # the user's own servers still load
+    assert not (tmp_path / "seat-claude" / ".mcp.json").exists()
+
+    # Codex CLI: config overrides, with the approval mode a never-ask session needs.
+    session = _session(AIToolID.CODEX, tmp_path, docs=DOCS)
+    command = AbstractAITool.get(AIToolID.CODEX)._headless_command(session, schema_path=None)  # type: ignore[attr-defined]
+    overrides = [command[i + 1] for i, item in enumerate(command) if item == "-c"]
+    assert 'mcp_servers.docs.command="npx"' in overrides
+    assert 'mcp_servers.docs.args=["-y", "docs-server"]' in overrides
+    # A variable under its own name is forwarded from the environment, never written out.
+    assert 'mcp_servers.docs.env_vars=["DOCS_TOKEN"]' in overrides
+    assert 'mcp_servers.docs.env={"MODE" = "ro"}' in overrides
+    assert 'mcp_servers.docs.default_tools_approval_mode="approve"' in overrides
+
+    # Antigravity CLI: a file in the folder, in the manifest, plus an allow rule.
+    session = _session(AIToolID.ANTIGRAVITY_CLI, tmp_path, docs=DOCS)
+    folder = tmp_path / "seat-antigravity-cli"
+    written = json.loads((folder / ".agents" / "mcp_config.json").read_text())
+    # agy expands no reference, but its servers inherit the environment: the entry is left out.
+    assert written == {
+        "mcpServers": {
+            "docs": {"command": "npx", "args": ["-y", "docs-server"], "env": {"MODE": "ro"}}
+        }
+    }
+    adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+    command = adapter._headless_command(session, print_timeout_seconds=30)  # type: ignore[attr-defined]
+    allow = json.loads(command[command.index("--settings") + 1])["permissions"]["allow"]
+    assert allow == ["mcp(docs/*)"]
+
+    # Whatever the tool, the ask says its MCP tools are not blocked.
+    for tool in (AIToolID.CLAUDE, AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI):
+        session = _session(tool, tmp_path / "again", docs=DOCS)
+        states = AbstractAITool.get(tool).headless_restrictions(session, None)
+        [mcp] = [item for item in states if item.channel.value == "mcp_tools"]
+        assert mcp.state.value == "not_enforced"
+
+
+def test_mcp_servers_are_refused_where_they_cannot_be_given(tmp_path: Path) -> None:
+    for tool in (AIToolID.CURSOR, AIToolID.COPILOT, AIToolID.OPENCODE):
+        spec = OwnedWorkspaceSpec(path=tmp_path / tool.value, tool=tool, mcp_servers={"docs": DOCS})
+        with pytest.raises(WorkspaceError, match="no verified way to take MCP servers"):
+            provision(spec)
+        assert not (tmp_path / tool.value).exists()
+    with pytest.raises(ValidationError, match="lowercase letters"):
+        OwnedWorkspaceSpec(path=tmp_path / "x", tool=AIToolID.CLAUDE, mcp_servers={"My Docs": DOCS})
+
+    # A reference a tool would pass on as text is refused there; Claude Code expands it.
+    renamed = MCPServerConfig(command="npx", env={"TOKEN": "${DOCS_TOKEN}"})
+    for tool in (AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI):
+        spec = OwnedWorkspaceSpec(
+            path=tmp_path / f"r-{tool.value}", tool=tool, mcp_servers={"d": renamed}
+        )
+        with pytest.raises(WorkspaceError, match="would pass on as text"):
+            provision(spec)
+    provision(
+        OwnedWorkspaceSpec(
+            path=tmp_path / "r-claude", tool=AIToolID.CLAUDE, mcp_servers={"d": renamed}
+        )
+    )
+
+    # A disabled server is not given, and a persona without servers is as before.
+    off = MCPServerConfig(command="npx", enabled=False)
+    workspace = provision(
+        OwnedWorkspaceSpec(
+            path=tmp_path / "off", tool=AIToolID.ANTIGRAVITY_CLI, mcp_servers={"x": off}
+        )
+    )
+    assert workspace.mcp_servers == {} and workspace.manifest == {}
+    plain = _session(AIToolID.CLAUDE, tmp_path / "plain")
+    command = AbstractAITool.get(AIToolID.CLAUDE)._headless_command(plain)  # type: ignore[attr-defined]
+    assert "--mcp-config" not in command and "--allowedTools" not in command
+
+
+def test_a_value_becomes_one_line_of_toml() -> None:
+    from crossby.ai_tools.codex import _inline_toml
+
+    assert _inline_toml('a "b"') == '"a \\"b\\""'
+    assert _inline_toml(["-y", "x"]) == '["-y", "x"]'
+    assert _inline_toml({"K": "v", "n": 2, "on": True}) == '{"K" = "v", "n" = 2, "on" = true}'
+    with pytest.raises(ValueError, match="no TOML form"):
+        _inline_toml(object())

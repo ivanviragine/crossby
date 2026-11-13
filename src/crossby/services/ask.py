@@ -537,9 +537,13 @@ def session_request(
         prompt = request.prompt
         # A persona folder's layout was verified on its own build.
         minimum_version: str | None = workspace.layout.verified_version
+        mcp_servers = {
+            name: server.model_dump(mode="json") for name, server in workspace.mcp_servers.items()
+        }
     else:
         prompt = render_envelope(request.prompt, workspace.instructions)
         minimum_version = None
+        mcp_servers = {}
     trusted_dirs = _read_grants(request)
     try:
         return HeadlessSessionRequest(
@@ -552,6 +556,7 @@ def session_request(
             response_schema=request.response_schema,
             read_only=True,
             search_commands=request.allow_search_commands,
+            mcp_servers=mcp_servers,
             require_blocked=request.require_blocked,
             allow_project_hooks=request.allow_project_hooks,
             minimum_version=minimum_version,

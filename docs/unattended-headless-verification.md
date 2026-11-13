@@ -333,6 +333,38 @@ repository-wide search from an empty persona folder answered in 69 s with both
 matching files and no denial; without it the turn ended as `action_denied`.
 No other adapter changes its profile for the option.
 
+## MCP servers for one session
+
+Verified 2026-11-13 on macOS with a stdio server offering one tool that
+returns a codeword and the value of an environment variable. Each tool ran a
+read-only ask from a persona folder, without the server and with it:
+
+| Tool | How the server is given | What pre-approves its tools | Without | With |
+| --- | --- | --- | --- | --- |
+| Claude Code 2.1.322 | `--mcp-config '{"mcpServers":{…}}'` | `--allowedTools mcp__<name>` | "tool isn't available" | codeword |
+| Codex CLI 0.167.2 | `-c mcp_servers.<name>.<key>=<toml>` | `default_tools_approval_mode="approve"` on the server | "not available" | codeword |
+| Antigravity CLI 1.5.7 | `.agents/mcp_config.json` in the folder | `"mcp(<name>/*)"` in the session's allow list | "not available" | codeword |
+
+Without the pre-approval the server loads and its tool is refused: Claude
+Code denies the call under `--permission-prompts none`, Codex answers "MCP
+tool call requires approval, but approval policy is never" (its `auto` mode
+too), and agy denies the `mcp` action and ends the turn. For agy only
+`mcp(<name>/*)` matched; `mcp(<name>)` and `mcp(<name>/)` did not, and
+`--settings` rejects an `mcpServers` key, which is why the server has to be a
+file in the folder and so needs a persona folder. No `--strict-mcp-config` is
+passed to Claude Code: the user's own servers still load.
+
+Environment references differ. With `env: {PROBE_SECRET: "${PROBE_SECRET}"}`
+and the variable set in the caller's environment, Claude Code expanded it and
+Codex forwarded it (`env_vars`); agy passed the literal text `${PROBE_SECRET}`
+to the server. agy's servers inherit the environment, though: with the entry
+left out the server saw the value. So a same-name entry is forwarded on all
+three (left out of agy's file), and any other reference is refused on Codex
+and agy rather than passed on as text.
+
+Every such ask reports `mcp_tools` as `not_enforced`, and the persona folder
+was unchanged afterwards (`workspace_unchanged`).
+
 ## Tool steps
 
 Verified 2026-11-13 on macOS. `usage.tool_steps` says how many times the agent
