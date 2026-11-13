@@ -763,6 +763,12 @@ class HeadlessSessionRequest(BaseModel):
     # a closed tool set, or native deny rules), or rejects the request: it is
     # never approximated with prompt text.
     read_only: bool = False
+    # Let a read-only session run search and read commands (grep, ls, cat, ...)
+    # on a tool that has no other way to search. That tool's allow rules cannot
+    # tell a search from a command that also writes, so the session reports its
+    # shell channels as not enforced (see HEADLESS_SEARCH_COMMANDS_RESTRICTIONS).
+    # Tools with search tools of their own ignore it.
+    search_commands: bool = False
     # Channels that must be verified blocked for this build and profile. The
     # runtime resolves them after its version probe and refuses to start the
     # session when any is not enforced; unknown counts as not enforced.

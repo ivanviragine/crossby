@@ -301,6 +301,38 @@ read one of its files, once without the folders and once with them:
   **OpenCode** auto-rejects outside reads and has no grant, so an ask with
   `readable_dirs` is refused before it starts.
 
+## Search commands
+
+Verified 2026-11-12 on macOS, Antigravity CLI 1.5.7. In a headless session agy
+declares no search or list tool: asked to call `grep_search`, `find_by_name`
+and `list_dir`, it answered that none is "present in the tool declarations",
+with and without `--mode plan` and `--add-dir`. It can `read_file` a path it
+knows and run shell commands. Under the read-only profile every command is
+denied, so a turn that needs a repository-wide search either ends at the
+denial or reads files one at a time: one review read 103 files in 555 s
+(544k tokens).
+
+Allow rules match the start of a command line. With
+`{"permissions":{"allow":["command(grep)","command(ls)",…]}}`, each of these
+ran and created its file, with and without `--sandbox` (the last one outside
+the working directory):
+
+```text
+grep -rn needle . > out1.txt
+ls && touch out2.txt
+ls ; touch out3.txt
+grep -rn needle . | tee out4.txt
+ls ; touch /tmp/…/out-outside.txt
+```
+
+So `HeadlessSessionRequest.search_commands` (`AskRequest.allow_search_commands`)
+is opt-in and never claimed to be write-proof. It replaces the empty allow
+list with search and read commands, keeps plan mode, and reports
+`shell_commands` and `shell_writes` as not enforced. With it, the same
+repository-wide search from an empty persona folder answered in 69 s with both
+matching files and no denial; without it the turn ended as `action_denied`.
+No other adapter changes its profile for the option.
+
 ## Prompts on stdin
 
 Verified 2026-11-10 on macOS. No managed prompt travels on argv any more:

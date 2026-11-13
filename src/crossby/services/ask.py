@@ -150,6 +150,10 @@ class AskRequest(_Frozen):
     # change files); otherwise such an ask is refused with ProjectHooksError.
     allow_project_hooks: bool = False
     readable_dirs: tuple[Path, ...] = ()
+    # Let a tool with no search tool of its own (Antigravity CLI) run search and
+    # read commands. Its shell channels are then reported as not enforced: an
+    # allowed command can also write. Other tools ignore it.
+    allow_search_commands: bool = False
 
     @field_validator("readable_dirs")
     @classmethod
@@ -543,6 +547,7 @@ def session_request(
             interaction_mode=HeadlessInteractionMode.UNATTENDED,
             response_schema=request.response_schema,
             read_only=True,
+            search_commands=request.allow_search_commands,
             require_blocked=request.require_blocked,
             allow_project_hooks=request.allow_project_hooks,
             minimum_version=minimum_version,

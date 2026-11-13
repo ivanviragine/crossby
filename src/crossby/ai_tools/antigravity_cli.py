@@ -98,6 +98,32 @@ _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
 _AGY_STREAM_EVENT_KINDS = frozenset({"init", "step_update", "result"})
 # Session-only settings (never saved) for a read-only turn: an empty allow list.
 _READ_ONLY_SETTINGS = '{"permissions":{"allow":[]}}'
+# The same, with search and read commands allowed. agy has no search or list
+# tool of its own in a headless session, so without these it can only read
+# files whose paths it already knows. An allow rule matches the start of a
+# command line: ``grep x > out`` and ``ls && touch out`` both ran and wrote
+# under this list (1.5.7), so the session is no longer write-proof.
+_SEARCH_COMMANDS = (
+    "rg",
+    "grep",
+    "ls",
+    "find",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "git grep",
+    "git ls-files",
+    "git log",
+    "git show",
+    "git diff",
+    "git status",
+    "git blame",
+)
+_SEARCH_COMMANDS_SETTINGS = json.dumps(
+    {"permissions": {"allow": [f"command({name})" for name in _SEARCH_COMMANDS]}},
+    separators=(",", ":"),
+)
 
 
 def _stream_input(prompt: str) -> str:
@@ -180,6 +206,21 @@ class AntigravityCLIAdapter(AbstractAITool):
         RestrictionChannel.READS_OUTSIDE_WORKSPACE: (
             RestrictionState.NOT_ENFORCED,
             "the file tools read any path",
+        ),
+    }
+
+    # With search commands allowed, a command line that starts with one runs
+    # whatever else it holds; see _SEARCH_COMMANDS.
+    HEADLESS_SEARCH_COMMANDS_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.SHELL_COMMANDS: (
+            RestrictionState.NOT_ENFORCED,
+            "search and read commands are allowed by name",
+        ),
+        RestrictionChannel.SHELL_WRITES: (
+            RestrictionState.NOT_ENFORCED,
+            "an allowed command's redirect, pipe or chained command can write",
         ),
     }
 
@@ -439,7 +480,8 @@ class AntigravityCLIAdapter(AbstractAITool):
             # command(uv) otherwise let a "read-only" turn write through a
             # command. Plan mode keeps the agent from attempting edits, because
             # agy ends a turn with no answer when it denies an action.
-            command.extend(("--mode", "plan", "--settings", _READ_ONLY_SETTINGS))
+            settings = _SEARCH_COMMANDS_SETTINGS if request.search_commands else _READ_ONLY_SETTINGS
+            command.extend(("--mode", "plan", "--settings", settings))
         return command
 
     def _run_headless_session(
