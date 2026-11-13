@@ -1098,6 +1098,17 @@ def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
         HeadlessTerminalStatus.SUCCEEDED
     )
 
+    # Codex merges a session server into a configured one of the same name, so a clash
+    # is refused; a server under another name is unaffected.
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('[mcp_servers.docs]\ncommand = "old"\nenabled = false\n')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    clashing = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+    with pytest.raises(HeadlessRequestError, match="already has an MCP server named docs"):
+        clashing.run_headless_session(_request(tmp_path, mcp_servers=servers))
+    (home / "config.toml").write_text('[mcp_servers.other]\ncommand = "old"\n')
+
     # Codex CLI takes them on its command line, which only the unattended mode builds:
     # a brokered session would start without them and still report them as running.
     codex = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))

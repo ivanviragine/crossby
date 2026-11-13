@@ -366,6 +366,14 @@ Any other reference is refused on Codex and agy rather than passed on as text.
 Every such ask reports `mcp_tools` as `not_enforced`, and the persona folder
 was unchanged afterwards (`workspace_unchanged`).
 
+Codex merges a `-c mcp_servers.<name>…` override into a server of the same
+name in its own `config.toml`, field by field. With `[mcp_servers.probe]`
+there carrying `enabled = false` and other arguments, neither per-field
+overrides nor a whole-table override (`-c 'mcp_servers.probe={…}'`) loaded
+the session's server. So a session server whose name Codex already uses, in
+`$CODEX_HOME/config.toml` or the folder's `.codex/config.toml`, is refused
+before the session starts.
+
 ## Tool steps
 
 Verified 2026-11-13 on macOS. `usage.tool_steps` says how many times the agent

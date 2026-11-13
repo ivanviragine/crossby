@@ -692,6 +692,14 @@ class AbstractAITool(ABC):
             version, self.HEADLESS_READ_ONLY_VERIFIED_VERSION or profile.verified_version
         )
 
+    def _ambient_mcp_servers(self, working_dir: Path) -> set[str]:
+        """Names of the tool's own MCP servers a session server must not reuse.
+
+        Empty unless the tool merges a session server into a configured one of
+        the same name field by field instead of replacing it.
+        """
+        return set()
+
     def headless_restrictions(
         self, request: HeadlessSessionRequest, version: str | None
     ) -> tuple[Restriction, ...]:
@@ -915,6 +923,15 @@ class AbstractAITool(ABC):
             raise HeadlessUnsupportedError(
                 f"{caps.display_name} has no verified way to take MCP servers for one "
                 f"{request.interaction_mode.value} session.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        clashes = sorted(self._ambient_mcp_servers(working_dir) & set(request.mcp_servers))
+        if clashes:
+            raise HeadlessRequestError(
+                f"{caps.display_name} already has an MCP server named {', '.join(clashes)} in "
+                "its own configuration, and would mix that one's settings into this one. "
+                "Give the session's server another name.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

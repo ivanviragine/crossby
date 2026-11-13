@@ -260,6 +260,26 @@ class CodexAdapter(AbstractAITool):
         ),
     }
 
+    def _ambient_mcp_servers(self, working_dir: Path) -> set[str]:
+        """Codex merges ``-c mcp_servers.<name>…`` into a configured server of that name.
+
+        Verified on 0.167.2 with ``[mcp_servers.probe] enabled = false`` and other
+        arguments in ``config.toml``: per-field overrides and a whole-table
+        override both left the server disabled, so its tool never loaded.
+        """
+        import tomllib
+
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        names: set[str] = set()
+        for path in (home / "config.toml", working_dir / ".codex" / "config.toml"):
+            try:
+                servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers")
+            except (OSError, ValueError):
+                continue
+            if isinstance(servers, dict):
+                names.update(servers)
+        return names
+
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
             tool_id=AIToolID.CODEX,
