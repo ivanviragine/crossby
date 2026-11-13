@@ -359,8 +359,9 @@ and the variable set in the caller's environment, Claude Code expanded it and
 Codex forwarded it (`env_vars`); agy passed the literal text `${PROBE_SECRET}`
 to the server. agy's servers inherit the environment, though: with the entry
 left out the server saw the value. So a same-name entry is forwarded on all
-three (left out of agy's file), and any other reference is refused on Codex
-and agy rather than passed on as text.
+three (left out of agy's file). Codex also forwards a header that is one
+reference, and `Authorization: Bearer ${VAR}`, as `crossby sync` writes them.
+Any other reference is refused on Codex and agy rather than passed on as text.
 
 Every such ask reports `mcp_tools` as `not_enforced`, and the persona folder
 was unchanged afterwards (`workspace_unchanged`).

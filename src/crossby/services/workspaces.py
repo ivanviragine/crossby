@@ -238,7 +238,19 @@ def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
 
 
 _REFERENCE = re.compile(r"\$\{[^}]*\}")
-_BEARER_REFERENCE = re.compile(r"(?:Bearer )?\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+_WHOLE_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+_BEARER_REFERENCE = re.compile(r"Bearer\s+\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _codex_forwards(header: str, value: str) -> bool:
+    """Whether Codex CLI can take this header's reference from the environment.
+
+    As ``rewrite_headers_for_codex`` does: any header that is one reference, and
+    ``Authorization: Bearer ${VAR}``. A default (``${VAR:-x}``) is not forwarded.
+    """
+    if _WHOLE_REFERENCE.fullmatch(value):
+        return True
+    return header.lower() == "authorization" and _BEARER_REFERENCE.fullmatch(value) is not None
 
 
 def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPServerConfig:
@@ -258,15 +270,16 @@ def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPSe
         *server.args,
         *(
             value
-            for value in server.headers.values()
-            if tool is not AIToolID.CODEX or not _BEARER_REFERENCE.fullmatch(value)
+            for header, value in server.headers.items()
+            if tool is not AIToolID.CODEX or not _codex_forwards(header, value)
         ),
     ]
     if any(_REFERENCE.search(value) for value in literal):
         raise WorkspaceError(
             f"MCP server {name!r} uses a ${{VAR}} reference that {tool.value} would pass on "
-            'as text. Only an environment entry under its own name (KEY: "${KEY}") is '
-            "forwarded there."
+            'as text. An environment entry under its own name (KEY: "${KEY}") is forwarded '
+            "there; Codex CLI also forwards a header that is one reference, and "
+            "`Authorization: Bearer ${VAR}`."
         )
     if tool is AIToolID.ANTIGRAVITY_CLI and same_name:
         kept = {key: value for key, value in server.env.items() if key not in same_name}

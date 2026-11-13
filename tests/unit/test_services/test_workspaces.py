@@ -855,6 +855,18 @@ def test_mcp_servers_are_refused_where_they_cannot_be_given(tmp_path: Path) -> N
         )
     )
 
+    # Codex forwards a header that is one reference, and a bearer token only on
+    # Authorization; anywhere else the reference would arrive as text.
+    def remote(**headers: str) -> OwnedWorkspaceSpec:
+        server = MCPServerConfig(url="https://mcp.example.com", transport="http", headers=headers)
+        folder = tmp_path / f"h-{len(list(tmp_path.iterdir()))}"
+        return OwnedWorkspaceSpec(path=folder, tool=AIToolID.CODEX, mcp_servers={"d": server})
+
+    provision(remote(Authorization="Bearer ${TOKEN}", **{"X-Org": "${ORG}", "X-Plain": "v1"}))
+    for bad in ({"X-Api-Token": "Bearer ${TOKEN}"}, {"Authorization": "Bearer ${TOKEN:-none}"}):
+        with pytest.raises(WorkspaceError, match="would pass on as text"):
+            provision(remote(**bad))
+
     # A disabled server is not given, and a persona without servers is as before.
     off = MCPServerConfig(command="npx", enabled=False)
     workspace = provision(
@@ -876,3 +888,11 @@ def test_a_value_becomes_one_line_of_toml() -> None:
     assert _inline_toml({"K": "v", "n": 2, "on": True}) == '{"K" = "v", "n" = 2, "on" = true}'
     with pytest.raises(ValueError, match="no TOML form"):
         _inline_toml(object())
+    # Every string a path or argument can hold must parse back as the same TOML value.
+    import tomllib
+
+    for text in ("/Users/me/😀 docs/ünï", 'tab\tquote"back\\slash', "del\x7fbell\x07", "{😀}"):
+        line = f"v = {_inline_toml({text: [text]})}"
+        assert tomllib.loads(line) == {"v": {text: [text]}}
+    with pytest.raises(ValueError, match="lone surrogate"):
+        _inline_toml("\ud83d")

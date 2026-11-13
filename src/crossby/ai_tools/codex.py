@@ -95,10 +95,17 @@ def _inline_toml(value: Any) -> str:
     if isinstance(value, int | float):
         return repr(value)
     if isinstance(value, str):
-        # A JSON string is a valid TOML basic string.
-        return json.dumps(value)
+        # A JSON string is a valid TOML basic string once characters outside
+        # the BMP are kept as they are: JSON would escape them as surrogate
+        # pairs, which TOML rejects. DEL is the one control character JSON
+        # leaves bare and TOML does not allow.
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("a lone surrogate has no TOML form") from None
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(value, dict):
-        items = (f"{json.dumps(str(key))} = {_inline_toml(item)}" for key, item in value.items())
+        items = (f"{_inline_toml(str(key))} = {_inline_toml(item)}" for key, item in value.items())
         return "{" + ", ".join(items) + "}"
     if isinstance(value, list | tuple):
         return "[" + ", ".join(_inline_toml(item) for item in value) + "]"
