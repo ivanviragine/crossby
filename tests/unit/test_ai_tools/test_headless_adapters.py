@@ -1087,6 +1087,17 @@ def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
     with pytest.raises(HeadlessUnsupportedError, match="MCP servers for one unattended session"):
         cursor.run_headless_session(_request(tmp_path, mcp_servers=servers))
 
+    # Antigravity CLI reads them from a file in its folder: without that file (which a
+    # persona folder's provisioning writes) the session would start without them.
+    agy = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_jsonl(AGY_STREAM)))
+    with pytest.raises(HeadlessRequestError, match="does not define docs"):
+        agy.run_headless_session(_request(tmp_path, mcp_servers=servers))
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": servers}))
+    assert agy.run_headless_session(_request(tmp_path, mcp_servers=servers)).status is (
+        HeadlessTerminalStatus.SUCCEEDED
+    )
+
     # Codex CLI takes them on its command line, which only the unattended mode builds:
     # a brokered session would start without them and still report them as running.
     codex = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))

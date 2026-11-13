@@ -7,6 +7,7 @@ The `__init_subclass__` hook auto-registers each concrete adapter.
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import queue
@@ -131,6 +132,15 @@ def _headless_posix_exec_limit() -> int:
         # by the managed transport's existing argument guard.
         return 131_072
     return limit if isinstance(limit, int) and limit > 0 else 131_072
+
+
+def _declared_mcp_servers(path: Path) -> set[str]:
+    """Names of the MCP servers a native JSON config file defines; empty if unreadable."""
+    try:
+        declared = json.loads(path.read_text(encoding="utf-8")).get("mcpServers")
+    except (OSError, ValueError, AttributeError):
+        return set()
+    return set(declared) if isinstance(declared, dict) else set()
 
 
 class AbstractAITool(ABC):
@@ -908,6 +918,19 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
+        if request.mcp_servers and layout is not None and layout.mcp == "file":
+            # The tool reads them from a file in the folder, which only a persona
+            # folder's provisioning writes; without it they would not load.
+            declared = _declared_mcp_servers(working_dir / str(layout.mcp_config))
+            missing = sorted(set(request.mcp_servers) - declared)
+            if missing:
+                raise HeadlessRequestError(
+                    f"{caps.display_name} reads MCP servers from {layout.mcp_config} in its "
+                    f"folder, which does not define {', '.join(missing)}. Provision a persona "
+                    "folder with them.",
+                    tool_id=self.TOOL_ID,
+                    capability=capability,
+                )
         if request.effort is not None and (
             not caps.supports_effort or request.effort not in caps.supported_efforts
         ):
