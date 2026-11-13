@@ -867,6 +867,16 @@ def test_mcp_servers_are_refused_where_they_cannot_be_given(tmp_path: Path) -> N
         with pytest.raises(WorkspaceError, match="would pass on as text"):
             provision(remote(**bad))
 
+    # The same goes for a reference in the command or the address itself.
+    for odd in (
+        MCPServerConfig(command="${MCP_BIN}"),
+        MCPServerConfig(url="https://${DOCS_HOST}/mcp", transport="http"),
+    ):
+        for tool in (AIToolID.CODEX, AIToolID.ANTIGRAVITY_CLI):
+            folder = tmp_path / f"o-{len(list(tmp_path.iterdir()))}"
+            with pytest.raises(WorkspaceError, match="would pass on as text"):
+                provision(OwnedWorkspaceSpec(path=folder, tool=tool, mcp_servers={"d": odd}))
+
     # A disabled server is not given, and a persona without servers is as before.
     off = MCPServerConfig(command="npx", enabled=False)
     workspace = provision(

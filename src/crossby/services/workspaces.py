@@ -268,6 +268,8 @@ def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPSe
     literal = [
         *(value for key, value in server.env.items() if key not in same_name),
         *server.args,
+        server.command or "",
+        server.url or "",
         *(
             value
             for header, value in server.headers.items()
