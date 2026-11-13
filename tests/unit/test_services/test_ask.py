@@ -162,6 +162,8 @@ def test_an_ask_answers_with_its_evidence(tmp_path: Path, monkeypatch: pytest.Mo
     assert result.usage is not None
     assert (result.usage.input_tokens, result.usage.output_tokens) == (9810, 1)
     assert result.usage.complete is None
+    # It answered without using a tool, which is not the same as not saying.
+    assert result.usage.tool_steps == 0
     # Every channel, resolved for the read-only profile on that build.
     assert [item.channel for item in result.restrictions] == list(RestrictionChannel)
     assert result.restriction(RestrictionChannel.HOOKS).state is RestrictionState.ENFORCED

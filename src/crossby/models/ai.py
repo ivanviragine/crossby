@@ -1746,6 +1746,11 @@ class TokenUsage(BaseModel):
     # Cost in US dollars exactly as the tool itself reported it (Claude Code's
     # ``total_cost_usd``); crossby keeps no prices and never computes one.
     reported_cost_usd: float | None = None
+    # How many times the agent used its tools in this invocation, as the tool
+    # itself reported: tool calls on Codex CLI and Antigravity CLI, tool rounds
+    # on Claude Code (calls made together count once). Zero means it answered
+    # without using any; ``None`` means the tool does not say.
+    tool_steps: int | None = None
     model_breakdown: list[ModelBreakdown] = []
     raw_transcript_path: Path | None = None
     session_id: str | None = None  # full resume command or session ID as printed by the tool

@@ -1272,9 +1272,17 @@ def _reported_usage(envelope: dict[str, Any], session_id: str | None) -> TokenUs
         if isinstance(models, dict)
         else []
     )
+    # ``num_turns`` counts the model's turns: one per tool round, plus the answer
+    # (verified on 2.1.322: 1 with no tool call, 3 after a Read and a Grep).
+    turns = envelope.get("num_turns")
+    steps = (
+        turns - 1 if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 1 else None
+    )
     if usage is None:
-        return None
+        return TokenUsage(session_id=session_id, tool_steps=steps) if steps is not None else None
     updates: dict[str, Any] = {}
+    if steps is not None:
+        updates["tool_steps"] = steps
     if isinstance(cost, int | float) and not isinstance(cost, bool) and math.isfinite(cost):
         updates["reported_cost_usd"] = float(cost)
     if names:

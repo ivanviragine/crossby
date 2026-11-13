@@ -503,6 +503,7 @@ class AntigravityCLIAdapter(AbstractAITool):
             recognized_frame_kind,
             run_managed_command,
             usage_from,
+            with_tool_steps,
         )
 
         output = run_managed_command(
@@ -547,7 +548,16 @@ class AntigravityCLIAdapter(AbstractAITool):
         # Progress and provenance were already emitted live by the streamer,
         # which never copies agy's streamed response text deltas.
         saw_result = False
+        # Every tool step that finished, by its index: a step is reported more than once.
+        tool_steps: set[Any] = set()
         for frame in frames:
+            step = frame.get("step_update")
+            if (
+                isinstance(step, dict)
+                and step.get("step_type") == "tool"
+                and step.get("state") in {"DONE", "ERROR"}
+            ):
+                tool_steps.add(step.get("step_index"))
             observed_conversation_id = _agy_conversation_id(frame)
             context.validate_provenance(conversation_id=observed_conversation_id)
             conversation_id = conversation_id or observed_conversation_id
@@ -664,13 +674,16 @@ class AntigravityCLIAdapter(AbstractAITool):
             structured_output=envelope.get("structured_output", MISSING),
             native_status=native_status,
             conversation_id=conversation_id,
-            usage=usage_from(
-                envelope.get("usage"),
-                total="total_tokens",
-                input_tokens="input_tokens",
-                output_tokens="output_tokens",
-                cached="cache_read_tokens",
-                session_id=conversation_id,
+            usage=with_tool_steps(
+                usage_from(
+                    envelope.get("usage"),
+                    total="total_tokens",
+                    input_tokens="input_tokens",
+                    output_tokens="output_tokens",
+                    cached="cache_read_tokens",
+                    session_id=conversation_id,
+                ),
+                len(tool_steps),
             ),
             warnings=warnings,
         )

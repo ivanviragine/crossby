@@ -1077,6 +1077,64 @@ def test_antigravity_text_output_applies_the_envelope_checks(
     assert result.final_text is None
 
 
+def test_tool_steps_are_counted_as_each_tool_reports_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def steps(tool: AIToolID, stdout: str) -> int | None:
+        adapter = _adapter(monkeypatch, tool, _fake_cli(stdout=stdout))
+        result = adapter.run_headless_session(_request(tmp_path))
+        assert result.status is HeadlessTerminalStatus.SUCCEEDED
+        return result.usage.tool_steps if result.usage is not None else None
+
+    # Claude Code: one model turn per tool round, plus the answer.
+    assert steps(AIToolID.CLAUDE, json.dumps({**CLAUDE_RESULT, "num_turns": 1})) == 0
+    assert steps(AIToolID.CLAUDE, json.dumps({**CLAUDE_RESULT, "num_turns": 4})) == 3
+    without = {key: value for key, value in CLAUDE_RESULT.items() if key != "num_turns"}
+    assert steps(AIToolID.CLAUDE, json.dumps(without)) is None
+
+    # Codex CLI: every completed item that is not a message, reasoning or a to-do list.
+    assert steps(AIToolID.CODEX, _jsonl(CODEX_EVENTS)) == 0
+    command = {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "cat a",
+        "status": "completed",
+    }
+    started = {"type": "item.started", "item": {**command, "status": "in_progress"}}
+    ran = (
+        *CODEX_EVENTS[:2],
+        {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "…"}},
+        started,
+        {"type": "item.completed", "item": command},
+        {"type": "item.completed", "item": {**command, "id": "item_2", "type": "mcp_tool_call"}},
+        *CODEX_EVENTS[2:],
+    )
+    assert steps(AIToolID.CODEX, _jsonl(ran)) == 2
+
+    # Antigravity CLI: each tool step once, however many updates it sent.
+    assert steps(AIToolID.ANTIGRAVITY_CLI, _jsonl(AGY_STREAM)) == 0
+
+    def tool(index: int, state: str) -> dict[str, Any]:
+        update = {
+            "conversation_id": AGY_CONVERSATION,
+            "step_index": index,
+            "state": state,
+            "step_type": "tool",
+            "tool_name": "read_file",
+        }
+        return {"event": "step_update", "step_update": update}
+
+    used = (
+        *AGY_STREAM[:-1],
+        tool(2, "ACTIVE"),
+        tool(2, "DONE"),
+        tool(3, "ACTIVE"),
+        tool(3, "ERROR"),
+        AGY_STREAM[-1],
+    )
+    assert steps(AIToolID.ANTIGRAVITY_CLI, _jsonl(used)) == 2
+
+
 def test_codex_turn_events_are_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     delivered = tmp_path / "stdin.txt"
     adapter = _adapter(

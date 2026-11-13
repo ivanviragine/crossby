@@ -86,6 +86,9 @@ _CODEX_EFFORT_MAP: dict[EffortLevel, str] = {
     EffortLevel.XHIGH: "xhigh",
     EffortLevel.MAX: "xhigh",
 }
+# ``item.completed`` items that are not a use of a tool (0.167.2: a shell command is
+# ``command_execution``; edits, MCP calls and web searches have their own types).
+_CODEX_NON_TOOL_ITEMS = frozenset({"agent_message", "reasoning", "todo_list", "error"})
 _CODEX_STREAM_EVENT_KINDS = frozenset(
     {"thread.started", "turn.started", "item.completed", "turn.completed", "turn.failed", "error"}
 )
@@ -622,6 +625,7 @@ class CodexAdapter(AbstractAITool):
             parse_json_lines,
             run_managed_command,
             usage_from,
+            with_tool_steps,
         )
 
         schema_root: str | None = None
@@ -684,6 +688,7 @@ class CodexAdapter(AbstractAITool):
         terminal_events: list[str] = []
         native_errors = 0
         usage_values: Any = None
+        tool_steps = 0
         saw_terminal_event = False
         for frame in frames:
             observed_thread_id = non_blank_text(frame.get("thread_id"))
@@ -713,6 +718,8 @@ class CodexAdapter(AbstractAITool):
                     answer_items.append(item)
                 elif item_type not in {None, "reasoning"}:
                     answer_items = []
+                    if item_type not in _CODEX_NON_TOOL_ITEMS:
+                        tool_steps += 1
             elif kind == "turn.completed":
                 terminal_events.append(kind)
                 usage_values = frame.get("usage")
@@ -800,11 +807,15 @@ class CodexAdapter(AbstractAITool):
             structured_output=structured,
             native_status=terminal,
             thread_id=thread_id,
-            usage=usage_from(
-                usage_values,
-                input_tokens="input_tokens",
-                output_tokens="output_tokens",
-                cached="cached_input_tokens",
+            usage=with_tool_steps(
+                usage_from(
+                    usage_values,
+                    input_tokens="input_tokens",
+                    output_tokens="output_tokens",
+                    cached="cached_input_tokens",
+                ),
+                # Only a completed turn has seen every item.
+                tool_steps if terminal == "turn.completed" else None,
             ),
             warnings=warnings,
         )

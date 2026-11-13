@@ -333,6 +333,26 @@ repository-wide search from an empty persona folder answered in 69 s with both
 matching files and no denial; without it the turn ended as `action_denied`.
 No other adapter changes its profile for the option.
 
+## Tool steps
+
+Verified 2026-11-13 on macOS. `usage.tool_steps` says how many times the agent
+used its tools in one invocation, so a caller can tell an answer given without
+looking from one that read the folder. It is counted from what each tool
+reports, and is `None` where the tool does not say:
+
+- **Claude Code 2.1.322.** The result envelope has no tool list, only
+  `num_turns`: 1 for an answer with no tool call, 3 after a Read and a Grep.
+  `tool_steps` is `num_turns - 1`, the number of tool rounds; calls made
+  together in one round count once.
+- **Codex CLI 0.167.2.** `codex exec --json` emits one `item.completed` per
+  item. Each is counted unless it is an `agent_message`, `reasoning`,
+  `todo_list` or `error` (a shell command is a `command_execution`). Only a
+  completed turn is counted.
+- **Antigravity CLI 1.5.7.** The stream has a `step_update` with
+  `step_type: "tool"` per tool call, repeated as its state changes; each step
+  index is counted once when it reaches `DONE` or `ERROR`.
+- **Cursor, Copilot, OpenCode.** Not read from their output: `None`.
+
 ## Prompts on stdin
 
 Verified 2026-11-10 on macOS. No managed prompt travels on argv any more:
