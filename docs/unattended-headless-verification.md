@@ -341,7 +341,7 @@ read-only ask from a persona folder, without the server and with it:
 
 | Tool | How the server is given | What pre-approves its tools | Without | With |
 | --- | --- | --- | --- | --- |
-| Claude Code 2.1.322 | `--mcp-config '{"mcpServers":{…}}'` | `--allowedTools mcp__<name>` | "tool isn't available" | codeword |
+| Claude Code 2.1.322 | `--mcp-config <file>` holding `{"mcpServers":{…}}` | `--allowedTools mcp__<name>` | "tool isn't available" | codeword |
 | Codex CLI 0.167.2 | `-c mcp_servers.<name>.<key>=<toml>` | `default_tools_approval_mode="approve"` on the server | "not available" | codeword |
 | Antigravity CLI 1.5.7 | `.agents/mcp_config.json` in the folder | `"mcp(<name>/*)"` in the session's allow list | "not available" | codeword |
 
@@ -370,9 +370,43 @@ Codex merges a `-c mcp_servers.<name>…` override into a server of the same
 name in its own `config.toml`, field by field. With `[mcp_servers.probe]`
 there carrying `enabled = false` and other arguments, neither per-field
 overrides nor a whole-table override (`-c 'mcp_servers.probe={…}'`) loaded
-the session's server. So a session server whose name Codex already uses, in
-`$CODEX_HOME/config.toml` or the folder's `.codex/config.toml`, is refused
-before the session starts.
+the session's server. So a session server whose name Codex already uses is
+refused before the session starts. Every place Codex may read is checked:
+`/etc/codex/config.toml`, `$CODEX_HOME/config.toml`, and a
+`.codex/config.toml` in the folder or any folder above it.
+
+Claude Code replaces rather than merges. With a project `.mcp.json` server
+named `probe` (enabled through `enableAllProjectMcpServers`) answering
+"ambient" and a session server of the same name answering "session", the
+tool call returned "session"; without the session server it returned
+"ambient". A user-scope server of the same name was not tried.
+
+Where the definitions travel matters for a literal credential in them:
+
+- **Claude Code** reads them from a file crossby writes for the session in a
+  new owner-only temporary folder (mode 0600 in 0700) and deletes afterwards.
+  Nothing of the definition is on the command line.
+- **Antigravity CLI** reads the persona folder's `.agents/mcp_config.json`,
+  written with mode 0600.
+- **Codex CLI** has no file to take them from other than its own
+  configuration, so they stay `-c` overrides: a literal `env` value or header
+  is part of the command line, which other local accounts can read while the
+  session runs. A `KEY: "${KEY}"` entry or a forwarded header is not: only
+  the variable's name is passed.
+
+A session with MCP servers is refused when:
+
+- the tool is older than the build above (the persona-folder floor is lower);
+- a `${VAR}` the servers take from the environment is not set, since the
+  server would otherwise start without it and the ask would still succeed;
+- Antigravity's file does not define a server exactly as asked, since its
+  tools are approved by name whatever the file says the name runs;
+- an Antigravity session is not read-only: the allow rule rides on the
+  read-only settings, and without it the server loads and every call is
+  denied.
+
+`panel` passes a persona member's servers on its first and resumed turns and
+on the check before the panel starts, the same way `ask` does.
 
 ## Tool steps
 

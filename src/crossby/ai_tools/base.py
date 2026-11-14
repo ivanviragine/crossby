@@ -11,7 +11,9 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -134,13 +136,63 @@ def _headless_posix_exec_limit() -> int:
     return limit if isinstance(limit, int) and limit > 0 else 131_072
 
 
-def _declared_mcp_servers(path: Path) -> set[str]:
-    """Names of the MCP servers a native JSON config file defines; empty if unreadable."""
+_MAX_CONFIG_BYTES = 8 * 1024 * 1024
+_SESSION_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def read_config_text(path: Path) -> str | None:
+    """A configuration file's text, or ``None`` when it is not a readable regular file.
+
+    Opened non-blocking with the type checked on the descriptor, so a FIFO in
+    a configuration file's place cannot hang a preflight that has no timeout
+    of its own yet.
+    """
     try:
-        declared = json.loads(path.read_text(encoding="utf-8")).get("mcpServers")
-    except (OSError, ValueError, AttributeError):
-        return set()
-    return set(declared) if isinstance(declared, dict) else set()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_CONFIG_BYTES:
+            return None
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            return handle.read(_MAX_CONFIG_BYTES + 1).decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _declared_mcp_servers(path: Path) -> dict[str, Any]:
+    """The MCP servers a native JSON config file defines, by name; empty if unreadable."""
+    text = read_config_text(path)
+    if text is None:
+        return {}
+    try:
+        declared = json.loads(text).get("mcpServers")
+    except (ValueError, AttributeError):
+        return {}
+    return dict(declared) if isinstance(declared, dict) else {}
+
+
+def _unset_references(
+    servers: Mapping[str, Mapping[str, Any]], environment: Mapping[str, str]
+) -> list[str]:
+    """Variables the servers take from the environment (``${VAR}``) that are not set there."""
+    missing: set[str] = set()
+    for entry in servers.values():
+        texts = [
+            str(entry.get("command") or ""),
+            str(entry.get("url") or ""),
+            *(str(item) for item in entry.get("args") or ()),
+            *(str(item) for item in (entry.get("env") or {}).values()),
+            *(str(item) for item in (entry.get("headers") or {}).values()),
+        ]
+        for text in texts:
+            missing.update(
+                name for name in _SESSION_REFERENCE.findall(text) if name not in environment
+            )
+    return sorted(missing)
 
 
 class AbstractAITool(ABC):
@@ -700,6 +752,13 @@ class AbstractAITool(ABC):
         """
         return set()
 
+    def _session_mcp_file_entry(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        """One session MCP server as the tool's own configuration file states it."""
+        from crossby.models.config import MCPServerConfig
+        from crossby.sync.mcp import _to_json_entry
+
+        return _to_json_entry(MCPServerConfig(**entry))
+
     def headless_restrictions(
         self, request: HeadlessSessionRequest, version: str | None
     ) -> tuple[Restriction, ...]:
@@ -926,7 +985,34 @@ class AbstractAITool(ABC):
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )
-        clashes = sorted(self._ambient_mcp_servers(working_dir) & set(request.mcp_servers))
+        if (
+            request.mcp_servers
+            and layout is not None
+            and layout.mcp == "file"
+            and not request.read_only
+        ):
+            # Verified only under the read-only settings, which carry the
+            # approval rule; a writable session would load the server and
+            # then deny every call to it.
+            raise HeadlessUnsupportedError(
+                f"{caps.display_name} has no verified way to pre-approve MCP servers in "
+                "a session that is not read-only.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        unset = _unset_references(request.mcp_servers, {**os.environ, **request.environment})
+        if unset:
+            raise HeadlessRequestError(
+                f"This session's MCP servers take {', '.join(unset)} from the environment, "
+                "where it is not set, so they would start without it.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        clashes = sorted(
+            self._ambient_mcp_servers(working_dir) & set(request.mcp_servers)
+            if request.mcp_servers
+            else ()
+        )
         if clashes:
             raise HeadlessRequestError(
                 f"{caps.display_name} already has an MCP server named {', '.join(clashes)} in "
@@ -938,13 +1024,19 @@ class AbstractAITool(ABC):
         if request.mcp_servers and layout is not None and layout.mcp == "file":
             # The tool reads them from a file in the folder, which only a persona
             # folder's provisioning writes; without it they would not load.
+            # Each must also be the server asked for: its tools are approved by
+            # name, whatever the file says that name runs.
             declared = _declared_mcp_servers(working_dir / str(layout.mcp_config))
-            missing = sorted(set(request.mcp_servers) - declared)
+            missing = sorted(
+                name
+                for name, entry in request.mcp_servers.items()
+                if declared.get(name) != self._session_mcp_file_entry(entry)
+            )
             if missing:
                 raise HeadlessRequestError(
                     f"{caps.display_name} reads MCP servers from {layout.mcp_config} in its "
-                    f"folder, which does not define {', '.join(missing)}. Provision a persona "
-                    "folder with them.",
+                    f"folder, which does not define {', '.join(missing)} as asked. Provision "
+                    "a persona folder with them.",
                     tool_id=self.TOOL_ID,
                     capability=capability,
                 )
@@ -1049,6 +1141,19 @@ class AbstractAITool(ABC):
             raise HeadlessUnsupportedError(
                 f"Read-only {name} sessions were verified on {verified}; the installed "
                 f"build is {detected.text}. Upgrade {name} to run it read-only.",
+                tool_id=self.TOOL_ID,
+                capability=capability,
+            )
+        layout = self.OWNED_WORKSPACE_LAYOUT
+        if (
+            request.mcp_servers
+            and layout is not None
+            and not _build_at_least(detected.text, layout.mcp_verified_version)
+        ):
+            raise HeadlessUnsupportedError(
+                f"MCP servers for one {name} session were verified on "
+                f"{layout.mcp_verified_version}; the installed build is {detected.text}. "
+                f"Upgrade {name} to use them.",
                 tool_id=self.TOOL_ID,
                 capability=capability,
             )

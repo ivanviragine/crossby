@@ -34,12 +34,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from crossby.models.ai import AIToolID, OwnedWorkspaceLayout
+from crossby.models.ai import MCP_SERVER_NAME, AIToolID, OwnedWorkspaceLayout
 from crossby.models.config import MCPServerConfig
 
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # Also a Claude tool prefix, a TOML bare key and an Antigravity allow rule.
-_MCP_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 # Whether writes and removals can be anchored to directory descriptors (every
 # POSIX platform; not Windows). Fixed at import, so it cannot change mid-run.
 _ANCHORED = {os.open, os.mkdir, os.unlink, os.rmdir, os.rename, os.link} <= os.supports_dir_fd
@@ -110,7 +109,7 @@ class OwnedWorkspaceSpec(_Frozen):
         cls, value: dict[str, MCPServerConfig]
     ) -> dict[str, MCPServerConfig]:
         for name in value:
-            if not _MCP_NAME.fullmatch(name):
+            if not MCP_SERVER_NAME.fullmatch(name):
                 raise ValueError(
                     f"MCP server name {name!r} must be lowercase letters, digits, hyphens "
                     "and underscores"
@@ -143,6 +142,10 @@ class OwnedWorkspace(_Frozen):
     layout: OwnedWorkspaceLayout
     # The persona's MCP servers, passed to the tool on every ask in this folder.
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+    def session_mcp_servers(self) -> dict[str, dict[str, object]]:
+        """The persona's MCP servers as a headless session request takes them."""
+        return {name: server.model_dump(mode="json") for name, server in self.mcp_servers.items()}
 
 
 def layout_for(tool: AIToolID) -> OwnedWorkspaceLayout:
@@ -238,19 +241,22 @@ def _skill_files(source: Path) -> tuple[str, dict[str, bytes]]:
 
 
 _REFERENCE = re.compile(r"\$\{[^}]*\}")
-_WHOLE_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
-_BEARER_REFERENCE = re.compile(r"Bearer\s+\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
-def _codex_forwards(header: str, value: str) -> bool:
-    """Whether Codex CLI can take this header's reference from the environment.
+def _codex_literal_headers(headers: Mapping[str, str]) -> list[str]:
+    """The header values Codex CLI would send as written.
 
-    As ``rewrite_headers_for_codex`` does: any header that is one reference, and
-    ``Authorization: Bearer ${VAR}``. A default (``${VAR:-x}``) is not forwarded.
+    The rest it takes from the environment, by the same rules its command line
+    is built with: a header that is one reference, and ``Authorization: Bearer
+    ${VAR}``. A default (``${VAR:-x}``) is not forwarded, so it counts as written.
     """
-    if _WHOLE_REFERENCE.fullmatch(value):
-        return True
-    return header.lower() == "authorization" and _BEARER_REFERENCE.fullmatch(value) is not None
+    from crossby.sync.mcp_transports import rewrite_headers_for_codex
+
+    rewrite = rewrite_headers_for_codex(headers)
+    return [
+        *rewrite.http_headers.values(),
+        *(headers[name] for name in rewrite.dropped_default_fallbacks),
+    ]
 
 
 def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPServerConfig:
@@ -271,9 +277,9 @@ def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPSe
         server.command or "",
         server.url or "",
         *(
-            value
-            for header, value in server.headers.items()
-            if tool is not AIToolID.CODEX or not _codex_forwards(header, value)
+            _codex_literal_headers(server.headers)
+            if tool is AIToolID.CODEX
+            else server.headers.values()
         ),
     ]
     if any(_REFERENCE.search(value) for value in literal):
@@ -401,10 +407,15 @@ def _folder(path: Path) -> Path:
     return path.resolve()
 
 
-def _write_new(path: Path, data: bytes) -> None:
+def _file_mode(relative: str, private: frozenset[str]) -> int:
+    """Owner-only for a file that can hold a credential, such as MCP settings."""
+    return 0o600 if relative in private else 0o644
+
+
+def _write_new(path: Path, data: bytes, mode: int = 0o644) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags, 0o644)
+        descriptor = os.open(path, flags, mode)
     except OSError as exc:
         if exc.errno == errno.EEXIST:
             raise WorkspaceConflictError(f"{path} appeared while provisioning.") from None
@@ -454,6 +465,7 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
         root.mkdir(parents=True)
         created_root = True
     written: list[str] = []
+    private = frozenset({layout.mcp_config} if layout.mcp_config is not None else ())
     # One descriptor for the folder through writing, verification and any
     # rollback, so a folder renamed or replaced mid-way is never mistaken for
     # this one.
@@ -461,12 +473,12 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
     try:
         try:
             if root_fd is not None:
-                _write_anchored(root_fd, root, planned, written)
+                _write_anchored(root_fd, root, planned, written, private)
             else:  # pragma: no cover - platforms without dir_fd support (Windows)
                 for relative, data in planned.items():
                     target = root / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _write_new(target, data)
+                    _write_new(target, data, _file_mode(relative, private))
                     written.append(relative)
             # The folder must hold exactly what was written, nothing redirected.
             verify(workspace)
@@ -481,7 +493,11 @@ def provision(spec: OwnedWorkspaceSpec) -> OwnedWorkspace:
 
 
 def _write_anchored(
-    root_fd: int, root: Path, planned: Mapping[str, bytes], written: list[str]
+    root_fd: int,
+    root: Path,
+    planned: Mapping[str, bytes],
+    written: list[str],
+    private: frozenset[str] = frozenset(),
 ) -> None:
     """Write every planned file relative to directory descriptors, never following links.
 
@@ -502,7 +518,7 @@ def _write_anchored(
             name = parts[-1]
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             try:
-                descriptor = os.open(name, flags, 0o644, dir_fd=current)
+                descriptor = os.open(name, flags, _file_mode(relative, private), dir_fd=current)
             except FileExistsError:
                 raise WorkspaceConflictError(
                     f"{root / relative} appeared while provisioning."

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -637,6 +637,7 @@ def run_panel(
         resume_id: str | None,
         read_only: bool,
         minimum_version: str | None = None,
+        mcp_servers: Mapping[str, dict[str, object]] | None = None,
     ) -> HeadlessSessionRequest:
         left = remaining()
         if left < MIN_TURN_SECONDS:
@@ -652,6 +653,7 @@ def run_panel(
             timeout_seconds=min(spec.turn_timeout_seconds, left),
             resume_id=resume_id,
             read_only=read_only,
+            mcp_servers=dict(mcp_servers or {}),
             require_blocked=spec.require_blocked if read_only else frozenset(),
             allow_project_hooks=spec.allow_project_hooks,
             minimum_version=minimum_version,
@@ -664,6 +666,12 @@ def run_panel(
         if isinstance(workspace, OwnedWorkspace):
             return workspace.path, workspace.layout.verified_version
         return workspace.path, None
+
+    def member_servers(member: Member) -> dict[str, dict[str, object]]:
+        """A persona member's own MCP servers, on every turn as in an ask."""
+        if isinstance(member.workspace, OwnedWorkspace):
+            return member.workspace.session_mcp_servers()
+        return {}
 
     def ask_human(
         participant: str, kind: Literal["lead", "member"], number: int, message: str | None
@@ -863,6 +871,7 @@ def run_panel(
                 resume_id=seat.session_id,
                 read_only=True,
                 minimum_version=minimum,
+                mcp_servers=member_servers(member),
             )
         except _StopError as stop:
             # Queued past the deadline: this attempt fails, and the members
@@ -894,14 +903,18 @@ def run_panel(
                         f"@{member.id}'s persona folder changed since it was provisioned: "
                         f"{', '.join(exc.changed[:5])}; provision it again",
                     ) from None
-        checks: list[tuple[str, CliBackend, Path, bool, str | None]] = []
+        checks: list[
+            tuple[str, CliBackend, Path, bool, str | None, dict[str, dict[str, object]]]
+        ] = []
         if isinstance(spec.lead.backend, CliBackend) and spec.lead.folder is not None:
-            checks.append(("lead", spec.lead.backend, spec.lead.folder, False, None))
+            checks.append(("lead", spec.lead.backend, spec.lead.folder, False, None, {}))
         for member in spec.members:
             if isinstance(member.backend, CliBackend):
                 folder, minimum = member_folder(member)
-                checks.append((member.id, member.backend, folder, True, minimum))
-        for participant, backend, folder, read_only, minimum in checks:
+                checks.append(
+                    (member.id, member.backend, folder, True, minimum, member_servers(member))
+                )
+        for participant, backend, folder, read_only, minimum, servers in checks:
             probe = request(
                 "preflight",
                 backend,
@@ -909,6 +922,7 @@ def run_panel(
                 resume_id=PREFLIGHT_RESUME_ID,
                 read_only=read_only,
                 minimum_version=minimum,
+                mcp_servers=servers,
             )
             try:
                 report = active.preflight(backend.tool, probe)

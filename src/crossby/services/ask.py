@@ -537,9 +537,7 @@ def session_request(
         prompt = request.prompt
         # A persona folder's layout was verified on its own build.
         minimum_version: str | None = workspace.layout.verified_version
-        mcp_servers = {
-            name: server.model_dump(mode="json") for name, server in workspace.mcp_servers.items()
-        }
+        mcp_servers = workspace.session_mcp_servers()
     else:
         prompt = render_envelope(request.prompt, workspace.instructions)
         minimum_version = None
