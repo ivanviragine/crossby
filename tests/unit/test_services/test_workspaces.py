@@ -810,12 +810,36 @@ def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> N
     session = _session(AIToolID.CODEX, tmp_path, docs=DOCS)
     command = AbstractAITool.get(AIToolID.CODEX)._headless_command(session, schema_path=None)  # type: ignore[attr-defined]
     overrides = [command[i + 1] for i, item in enumerate(command) if item == "-c"]
-    assert 'mcp_servers.docs.command="npx"' in overrides
-    assert 'mcp_servers.docs.args=["-y", "docs-server"]' in overrides
-    # A variable under its own name is forwarded from the environment, never written out.
-    assert 'mcp_servers.docs.env_vars=["DOCS_TOKEN"]' in overrides
-    assert 'mcp_servers.docs.env={"MODE" = "ro"}' in overrides
+    codex = AbstractAITool.get(AIToolID.CODEX)
+    # A variable under its own name is forwarded from the environment. A value
+    # written out is never on the command line, which any local account can
+    # read: it is held in a variable of the Codex process, and `sh` gives it
+    # back to the server under the name the server expects.
+    assert 'mcp_servers.docs.command="/bin/sh"' in overrides
+    assert (
+        'mcp_servers.docs.args=["-c", "MODE=\\"${CROSSBY_MCP_SECRET_1}\\"; export MODE; '
+        'exec \\"$@\\"", "sh", "npx", "-y", "docs-server"]'
+    ) in overrides
+    assert 'mcp_servers.docs.env_vars=["DOCS_TOKEN", "CROSSBY_MCP_SECRET_1"]' in overrides
+    assert not any(item.startswith("mcp_servers.docs.env=") for item in overrides)
     assert 'mcp_servers.docs.default_tools_approval_mode="approve"' in overrides
+    assert codex._session_mcp(session)[1] == {"CROSSBY_MCP_SECRET_1": "ro"}  # type: ignore[attr-defined]
+
+    # The same for a remote server's headers: only a variable's name is passed.
+    keyed = MCPServerConfig(
+        url="https://mcp.example.com",
+        transport="http",
+        headers={"X-Api-Key": "k3y", "X-Org": "${ORG}", "Authorization": "Bearer ${TOKEN}"},
+    )
+    session = _session(AIToolID.CODEX, tmp_path / "remote", api=keyed)
+    arguments, variables = codex._session_mcp(session)  # type: ignore[attr-defined]
+    assert variables == {"CROSSBY_MCP_SECRET_1": "k3y"}
+    assert "k3y" not in " ".join(arguments)
+    assert (
+        'mcp_servers.api.env_http_headers={"X-Org" = "ORG", "X-Api-Key" = "CROSSBY_MCP_SECRET_1"}'
+    ) in arguments
+    assert 'mcp_servers.api.bearer_token_env_var="TOKEN"' in arguments
+    assert not any(item.startswith("mcp_servers.api.http_headers") for item in arguments)
 
     # Antigravity CLI: a file in the folder, in the manifest, plus an allow rule.
     session = _session(AIToolID.ANTIGRAVITY_CLI, tmp_path, docs=DOCS)
