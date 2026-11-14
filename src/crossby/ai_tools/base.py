@@ -794,13 +794,21 @@ class AbstractAITool(ABC):
                     "the session's own MCP servers are pre-approved",
                 ),
             }
+        layout = self.OWNED_WORKSPACE_LAYOUT
+        mcp_verified_on = layout.mcp_verified_version if layout is not None else None
         restrictions: list[Restriction] = []
         for channel in RestrictionChannel:
             if channel in declared:
                 state, mechanism = declared[channel]
+                # The session's own servers were verified on their own build,
+                # whatever profile the session runs under.
+                own_servers = bool(request.mcp_servers) and channel is RestrictionChannel.MCP_TOOLS
                 restrictions.append(
                     Restriction(
-                        channel=channel, state=state, mechanism=mechanism, verified_on=verified_on
+                        channel=channel,
+                        state=state,
+                        mechanism=mechanism,
+                        verified_on=mcp_verified_on if own_servers else verified_on,
                     )
                 )
             else:

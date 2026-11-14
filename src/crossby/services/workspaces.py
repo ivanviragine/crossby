@@ -290,6 +290,14 @@ def _session_server(tool: AIToolID, name: str, server: MCPServerConfig) -> MCPSe
             "`Authorization: Bearer ${VAR}`."
         )
     if tool is AIToolID.ANTIGRAVITY_CLI and same_name:
+        # Left out of the file, so nothing later can tell the server expected
+        # them: say so now if one is not there to inherit.
+        unset = sorted(key for key in same_name if key not in os.environ)
+        if unset:
+            raise WorkspaceError(
+                f"MCP server {name!r} takes {', '.join(unset)} from the environment, where "
+                "it is not set, so the server would start without it."
+            )
         kept = {key: value for key, value in server.env.items() if key not in same_name}
         return server.model_copy(update={"env": kept})
     return server
