@@ -379,7 +379,8 @@ Claude Code replaces rather than merges. With a project `.mcp.json` server
 named `probe` (enabled through `enableAllProjectMcpServers`) answering
 "ambient" and a session server of the same name answering "session", the
 tool call returned "session"; without the session server it returned
-"ambient". A user-scope server of the same name was not tried.
+"ambient". A user-scope server of the same name (`claude mcp add --scope
+user`) is replaced the same way: "ambient-user" alone, "session" with both.
 
 Where the definitions travel matters for a literal credential in them:
 
@@ -389,10 +390,19 @@ Where the definitions travel matters for a literal credential in them:
 - **Antigravity CLI** reads the persona folder's `.agents/mcp_config.json`,
   written with mode 0600.
 - **Codex CLI** has no file to take them from other than its own
-  configuration, so they stay `-c` overrides: a literal `env` value or header
-  is part of the command line, which other local accounts can read while the
-  session runs. A `KEY: "${KEY}"` entry or a forwarded header is not: only
-  the variable's name is passed.
+  configuration, so they stay `-c` overrides, but a value written out in
+  `headers` or `env` is not among them. crossby puts it in a
+  `CROSSBY_MCP_SECRET_<n>` variable of the Codex process, whose environment
+  only its owner can read, and the override names that variable. A header is
+  read from it through `env_http_headers`. A stdio server's variable is
+  forwarded with `env_vars`, which keeps a variable's name, so the server is
+  started as `/bin/sh -c 'exec env KEY="${CROSSBY_MCP_SECRET_1}" "$@"' sh
+  <command> <args…>`. Verified on 0.167.2 with `ps` running throughout: a
+  stdio server got an `env` value containing a space, `$` and `"` intact,
+  and an HTTP server got literal `X-Api-Key` and `Authorization` headers,
+  with none of the values on the command line. The server's command, `args`
+  and URL still are. Without a POSIX `sh` (Windows) a stdio server's `env`
+  values stay on the command line.
 
 A session with MCP servers is refused when:
 

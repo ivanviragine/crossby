@@ -114,6 +114,8 @@ def _inline_toml(value: Any) -> str:
 
 # ``item.completed`` items that are not a use of a tool (0.167.2: a shell command is
 # ``command_execution``; edits, MCP calls and web searches have their own types).
+# A variable name `sh` can assign without quoting.
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CODEX_NON_TOOL_ITEMS = frozenset({"agent_message", "reasoning", "todo_list", "error"})
 _CODEX_STREAM_EVENT_KINDS = frozenset(
     {"thread.started", "turn.started", "item.completed", "turn.completed", "turn.failed", "error"}
@@ -293,6 +295,69 @@ class CodexAdapter(AbstractAITool):
             if isinstance(servers, dict):
                 names.update(servers)
         return names
+
+    def _session_mcp(self, request: HeadlessSessionRequest) -> tuple[list[str], dict[str, str]]:
+        """The ``-c`` overrides for the session's MCP servers, and the variables they read.
+
+        Codex has no file to take a session's servers from, and a command line
+        can be read by any local account. So a value written out in a server's
+        headers or environment never goes there: it is put in a ``CROSSBY_*``
+        variable of the Codex process, whose environment only its owner can
+        read, and the override names that variable.
+
+        A header is taken from it through ``env_http_headers``. A stdio
+        server's variable is forwarded with ``env_vars``, which keeps a
+        variable's name, so the server is started through ``sh``, which gives
+        it back the name the server expects. Without a POSIX ``sh`` (Windows)
+        a stdio server's values stay on the command line.
+        """
+        from crossby.models.config import MCPServerConfig
+        from crossby.sync.mcp import _to_toml_entry
+
+        arguments: list[str] = []
+        variables: dict[str, str] = {}
+
+        def held(value: str) -> str:
+            name = f"CROSSBY_MCP_SECRET_{len(variables) + 1}"
+            variables[name] = value
+            return name
+
+        for name, entry in request.mcp_servers.items():
+            table = _to_toml_entry(MCPServerConfig(**entry))
+            literal_headers = table.pop("http_headers", None)
+            if literal_headers:
+                table["env_http_headers"] = {
+                    **table.get("env_http_headers", {}),
+                    **{header: held(value) for header, value in literal_headers.items()},
+                }
+            literal_env = table.get("env")
+            if (
+                literal_env
+                and "command" in table
+                and os.name == "posix"
+                and all(_SHELL_NAME.fullmatch(key) for key in literal_env)
+            ):
+                del table["env"]
+                renamed = {key: held(value) for key, value in literal_env.items()}
+                script = "exec env " + " ".join(
+                    f'{key}="${{{variable}}}"' for key, variable in renamed.items()
+                )
+                table["args"] = [
+                    "-c",
+                    f'{script} "$@"',
+                    "sh",
+                    table["command"],
+                    *table.get("args", ()),
+                ]
+                table["command"] = "/bin/sh"
+                table["env_vars"] = [*table.get("env_vars", ()), *renamed.values()]
+            # Verified on 0.167.2: under approval_policy="never" a call to the
+            # server's tool fails ("requires approval") unless the server's own
+            # default_tools_approval_mode is "approve".
+            table["default_tools_approval_mode"] = "approve"
+            for key, value in table.items():
+                arguments.extend(("-c", f"mcp_servers.{name}.{key}={_inline_toml(value)}"))
+        return arguments, variables
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(
@@ -623,17 +688,7 @@ class CodexAdapter(AbstractAITool):
         if not resuming:
             command.extend(("--color", "never", "--sandbox", sandbox_mode))
         command.extend(("-c", f'sandbox_mode="{sandbox_mode}"'))
-        for name, entry in request.mcp_servers.items():
-            # Verified on 0.167.2: under approval_policy="never" a call to the
-            # server's tool fails ("requires approval") unless the server's own
-            # default_tools_approval_mode is "approve".
-            from crossby.models.config import MCPServerConfig
-            from crossby.sync.mcp import _to_toml_entry
-
-            table = _to_toml_entry(MCPServerConfig(**entry))
-            table["default_tools_approval_mode"] = "approve"
-            for key, value in table.items():
-                command.extend(("-c", f"mcp_servers.{name}.{key}={_inline_toml(value)}"))
+        command.extend(self._session_mcp(request)[0])
         if request.read_only:
             # Verified on 0.166.0: ambient approval settings (for example
             # ``approvals_reviewer = "auto_review"``) approved an escalated
@@ -723,7 +778,7 @@ class CodexAdapter(AbstractAITool):
                     cancel_event=context.cancel_event,
                 ),
                 cwd=request.working_dir,
-                extra_env={"NO_COLOR": "1"},
+                extra_env={"NO_COLOR": "1", **self._session_mcp(request)[1]},
                 stdin_text=request.prompt,
                 on_stdout_lines=frame_streamer(
                     context,
