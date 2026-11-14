@@ -782,7 +782,10 @@ def _session(tool: AIToolID, tmp_path: Path, **servers: MCPServerConfig) -> Head
     return ask_service.session_request(request, timeout_seconds=30.0, environment={})
 
 
-def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> None:
+def test_a_personas_mcp_servers_reach_each_tool_its_own_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCS_TOKEN", "from-the-environment")
     # Claude Code: on the command line, each server pre-approved by name.
     session = _session(AIToolID.CLAUDE, tmp_path, docs=DOCS, search=SEARCH)
     claude = AbstractAITool.get(AIToolID.CLAUDE)
@@ -865,6 +868,24 @@ def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> N
         states = AbstractAITool.get(tool).headless_restrictions(session, None)
         [mcp] = [item for item in states if item.channel.value == "mcp_tools"]
         assert mcp.state.value == "not_enforced"
+        # Stated with the build the servers were verified on, not the profile's.
+        layout = AbstractAITool.get(tool).OWNED_WORKSPACE_LAYOUT
+        assert layout is not None and mcp.verified_on == layout.mcp_verified_version
+
+
+def test_a_variable_antigravity_must_inherit_has_to_be_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its entry is left out of the file, so only provisioning can notice it is missing.
+    monkeypatch.delenv("DOCS_TOKEN", raising=False)
+    spec = OwnedWorkspaceSpec(
+        path=tmp_path / "seat", tool=AIToolID.ANTIGRAVITY_CLI, mcp_servers={"docs": DOCS}
+    )
+    with pytest.raises(WorkspaceError, match="takes DOCS_TOKEN from the environment"):
+        provision(spec)
+    assert not (tmp_path / "seat").exists()
+    monkeypatch.setenv("DOCS_TOKEN", "t")
+    assert provision(spec).mcp_servers["docs"].env == {"MODE": "ro"}
 
 
 def test_mcp_servers_are_refused_where_they_cannot_be_given(tmp_path: Path) -> None:
