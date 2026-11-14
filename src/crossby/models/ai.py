@@ -19,6 +19,9 @@ _HEADLESS_DIAGNOSTIC_LIMIT = 16 * 1024
 _HEADLESS_ENVIRONMENT_ENTRIES = 64
 _HEADLESS_ENVIRONMENT_BYTES = 32 * 1024
 _ENVIRONMENT_NAME = re.compile(r"CROSSBY_[A-Z0-9_]+")
+# A session MCP server's name: it becomes part of a configuration path and of
+# an approval rule, so nothing but these characters may appear in it.
+MCP_SERVER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 
 class EffortLevel(StrEnum):
@@ -367,6 +370,9 @@ class OwnedWorkspaceLayout(BaseModel):
     # (``None``) in no verified way.
     mcp: Literal["command_line", "file"] | None = None
     mcp_config: str | None = None
+    # The oldest build session MCP servers were verified on, when that is
+    # newer than ``verified_version``.
+    mcp_verified_version: str | None = None
 
 
 class Restriction(BaseModel):
@@ -807,6 +813,27 @@ class HeadlessSessionRequest(BaseModel):
     def _prompt_is_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("a headless session requires a non-blank prompt")
+        return value
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _mcp_servers_are_well_formed(
+        cls, value: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        # A name becomes part of a configuration path and of an approval rule,
+        # so it is checked here too, not only where a persona folder is made.
+        from crossby.models.config import MCPServerConfig
+
+        for name, entry in value.items():
+            if not MCP_SERVER_NAME.fullmatch(name):
+                raise ValueError(
+                    f"MCP server name {name!r} must be lowercase letters, digits, hyphens "
+                    "and underscores"
+                )
+            try:
+                MCPServerConfig(**entry)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"MCP server {name!r} is not a valid definition: {exc}") from None
         return value
 
     @field_validator("minimum_version")

@@ -181,6 +181,7 @@ class AntigravityCLIAdapter(AbstractAITool):
         verified_version="1.5.5",
         mcp="file",
         mcp_config=".agents/mcp_config.json",
+        mcp_verified_version="1.5.7",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -227,6 +228,12 @@ class AntigravityCLIAdapter(AbstractAITool):
             "an allowed command's redirect, pipe or chained command can write",
         ),
     }
+
+    def _session_mcp_file_entry(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        from crossby.models.config import MCPServerConfig
+        from crossby.sync.mcp import _to_antigravity_cli_entry
+
+        return _to_antigravity_cli_entry(MCPServerConfig(**entry))
 
     def capabilities(self) -> AIToolCapabilities:
         return AIToolCapabilities(

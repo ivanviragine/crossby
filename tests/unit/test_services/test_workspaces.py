@@ -785,8 +785,16 @@ def _session(tool: AIToolID, tmp_path: Path, **servers: MCPServerConfig) -> Head
 def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> None:
     # Claude Code: on the command line, each server pre-approved by name.
     session = _session(AIToolID.CLAUDE, tmp_path, docs=DOCS, search=SEARCH)
-    command = AbstractAITool.get(AIToolID.CLAUDE)._headless_command(session)  # type: ignore[attr-defined]
-    given = json.loads(command[command.index("--mcp-config") + 1])["mcpServers"]
+    claude = AbstractAITool.get(AIToolID.CLAUDE)
+    settings = tmp_path / "claude-mcp.json"
+    command = claude._headless_command(session, mcp_config=settings)  # type: ignore[attr-defined]
+    # The definitions go in a file, never on the command line, where a
+    # credential in them would be readable by any local account.
+    assert command[command.index("--mcp-config") + 1] == str(settings)
+    assert "docs-server" not in " ".join(command)
+    with pytest.raises(ValueError, match="needs their configuration file"):
+        claude._headless_command(session)  # type: ignore[attr-defined]
+    given = json.loads(claude._session_mcp_config(session))["mcpServers"]  # type: ignore[attr-defined]
     assert given["docs"] == {
         "command": "npx",
         "args": ["-y", "docs-server"],
@@ -819,6 +827,9 @@ def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> N
             "docs": {"command": "npx", "args": ["-y", "docs-server"], "env": {"MODE": "ro"}}
         }
     }
+    # It can hold a credential, so only the owner may read it; the rest is as before.
+    assert stat.S_IMODE((folder / ".agents" / "mcp_config.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((folder / "AGENTS.md").stat().st_mode) == 0o644
     adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
     command = adapter._headless_command(session, print_timeout_seconds=30)  # type: ignore[attr-defined]
     allow = json.loads(command[command.index("--settings") + 1])["permissions"]["allow"]

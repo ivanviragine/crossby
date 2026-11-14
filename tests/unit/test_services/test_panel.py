@@ -451,6 +451,45 @@ def test_a_drifted_persona_folder_stops_the_panel_before_anyone_starts(tmp_path:
     assert all(not calls for calls in runner.requests.values())
 
 
+def test_a_persona_members_mcp_servers_go_with_every_one_of_its_turns(tmp_path: Path) -> None:
+    from crossby.models.config import MCPServerConfig
+    from crossby.services.workspaces import OwnedWorkspaceSpec, provision
+
+    owned = provision(
+        OwnedWorkspaceSpec(
+            path=tmp_path / "persona",
+            tool="codex",
+            instructions="You are a CTO.",
+            mcp_servers={"docs": MCPServerConfig(command="npx", args=["-y", "docs-server"])},
+        )
+    )
+    spec = _spec(tmp_path)
+    members = (spec.members[0].model_copy(update={"workspace": owned}), *spec.members[1:])
+    runner = PanelRunner(
+        {
+            "lead": ["One?\nNEXT: ASK @cto @founder", "Two?\nNEXT: ASK @cto", "Done.\nNEXT: DONE"],
+            "persona": ["A.", "B."],
+            "founder": ["C."],
+            "buyer": [],
+            "cto": [],
+        }
+    )
+    result = run_panel(spec.model_copy(update={"members": members}), runner=runner)
+
+    assert result.answered
+    # The first turn and the resumed one both carry them, as an ask does.
+    first, resumed = runner.requests["persona"]
+    assert resumed.resume_id == "persona-session"
+    for request in (first, resumed):
+        assert request.mcp_servers["docs"]["command"] == "npx"
+    # So does the check before anyone starts, which is what refuses a tool or
+    # a build that cannot take them.
+    [probe] = [item for item in runner.preflights if item.working_dir == owned.path]
+    assert set(probe.mcp_servers) == {"docs"}
+    # Nobody else gets them: not the lead, not a member in a plain folder.
+    assert all(not r.mcp_servers for r in runner.requests["lead"] + runner.requests["founder"])
+
+
 def test_replies_survive_a_member_queued_past_the_deadline(tmp_path: Path) -> None:
     from crossby.services import panel as panel_service
 

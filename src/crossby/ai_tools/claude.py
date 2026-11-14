@@ -116,6 +116,8 @@ def _open_or_create_posix_directories(parent_fd: int, components: tuple[str, ...
 
 
 _PLACEHOLDER_SESSION_ID = "00000000-0000-4000-8000-000000000000"
+# Stands in for the private MCP settings file when only the command is sized.
+_PLACEHOLDER_MCP_CONFIG = Path("/tmp/crossby-claude-mcp-00000000/mcp.json")
 # A read-only session gets only these built-in tools: reading, searching and
 # the project's skills. ``--tools`` is a closed set, so the write and shell
 # tools are absent rather than denied, whatever the ambient allow rules say.
@@ -153,6 +155,7 @@ class ClaudeAdapter(AbstractAITool):
         skills=".claude/skills",
         verified_version="2.1.317",
         mcp="command_line",
+        mcp_verified_version="2.1.322",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -409,10 +412,30 @@ class ClaudeAdapter(AbstractAITool):
 
             return sdk_command(request)
         # The real run adds ``--session-id <uuid>``; size the argv the same way.
+        if request.mcp_servers:
+            return self._headless_command(
+                request, session_id=_PLACEHOLDER_SESSION_ID, mcp_config=_PLACEHOLDER_MCP_CONFIG
+            )
         return self._headless_command(request, session_id=_PLACEHOLDER_SESSION_ID)
 
+    @staticmethod
+    def _session_mcp_config(request: HeadlessSessionRequest) -> str:
+        """The session's MCP servers as the JSON file ``--mcp-config`` reads."""
+        from crossby.models.config import MCPServerConfig
+        from crossby.sync.mcp import _to_json_entry
+
+        servers = {
+            name: _to_json_entry(MCPServerConfig(**entry))
+            for name, entry in request.mcp_servers.items()
+        }
+        return json.dumps({"mcpServers": servers}, separators=(",", ":"))
+
     def _headless_command(
-        self, request: HeadlessSessionRequest, *, session_id: str | None = None
+        self,
+        request: HeadlessSessionRequest,
+        *,
+        session_id: str | None = None,
+        mcp_config: Path | None = None,
     ) -> list[str]:
         """Build the exact unattended ``claude --print`` invocation.
 
@@ -464,18 +487,14 @@ class ClaudeAdapter(AbstractAITool):
         if request.mcp_servers:
             # Verified on 2.1.322: without the allow rule a call to the server's
             # tool is denied under --permission-prompts none; with it the call runs.
-            # No --strict-mcp-config: the user's own servers still load.
-            from crossby.models.config import MCPServerConfig
-            from crossby.sync.mcp import _to_json_entry
-
-            servers = {
-                name: _to_json_entry(MCPServerConfig(**entry))
-                for name, entry in request.mcp_servers.items()
-            }
-            command.extend(
-                ("--mcp-config", json.dumps({"mcpServers": servers}, separators=(",", ":")))
-            )
-            command.extend(("--allowedTools", *(f"mcp__{name}" for name in servers)))
+            # No --strict-mcp-config: the user's own servers still load, and a
+            # project server of the same name is replaced by this one. The
+            # definitions go in a private file, never on the command line,
+            # where any local account could read a credential in them.
+            if mcp_config is None:
+                raise ValueError("a session with MCP servers needs their configuration file")
+            command.extend(("--mcp-config", str(mcp_config)))
+            command.extend(("--allowedTools", *(f"mcp__{name}" for name in request.mcp_servers)))
         if request.command_policy is not None:
             command.extend(
                 self.allowed_commands_args(list(request.command_policy.allowed_commands))
@@ -516,26 +535,45 @@ class ClaudeAdapter(AbstractAITool):
 
         streaming = request.native_output is HeadlessNativeOutput.JSONL
         expected_session = request.resume_id or _new_session_id()
-        output = run_managed_command(
-            context,
-            argv=self._headless_command(request, session_id=expected_session),
-            cwd=request.working_dir,
-            extra_env={"NO_COLOR": "1"},
-            stdin_text=request.prompt,
-            on_stdout_lines=(
-                frame_streamer(
-                    context,
-                    kind_of=lambda frame: recognized_frame_kind(
-                        frame, field="type", recognized=_CLAUDE_STREAM_EVENT_KINDS
-                    ),
-                    provenance_of=lambda frame: {
-                        "session_id": non_blank_text(frame.get("session_id"))
-                    },
+        mcp_root: str | None = None
+        try:
+            if request.mcp_servers:
+                import tempfile
+
+                # mkdtemp makes the folder owner-only, and so is the file in it.
+                mcp_root = tempfile.mkdtemp(prefix="crossby-claude-mcp-")
+                mcp_config = Path(mcp_root) / "mcp.json"
+                descriptor = os.open(mcp_config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(self._session_mcp_config(request))
+                argv = self._headless_command(
+                    request, session_id=expected_session, mcp_config=mcp_config
                 )
-                if streaming
-                else None
-            ),
-        )
+            else:
+                argv = self._headless_command(request, session_id=expected_session)
+            output = run_managed_command(
+                context,
+                argv=argv,
+                cwd=request.working_dir,
+                extra_env={"NO_COLOR": "1"},
+                stdin_text=request.prompt,
+                on_stdout_lines=(
+                    frame_streamer(
+                        context,
+                        kind_of=lambda frame: recognized_frame_kind(
+                            frame, field="type", recognized=_CLAUDE_STREAM_EVENT_KINDS
+                        ),
+                        provenance_of=lambda frame: {
+                            "session_id": non_blank_text(frame.get("session_id"))
+                        },
+                    )
+                    if streaming
+                    else None
+                ),
+            )
+        finally:
+            if mcp_root is not None:
+                shutil.rmtree(mcp_root, ignore_errors=True)
         warnings = capture_failure_warnings(output)
         if output.overflowed or output.undecodable:
             return context.complete(

@@ -234,6 +234,7 @@ class CodexAdapter(AbstractAITool):
         skills=".agents/skills",
         verified_version="0.166.0",
         mcp="command_line",
+        mcp_verified_version="0.167.2",
     )
     # Verified live on the read-only floor; see
     # docs/unattended-headless-verification.md#what-read-only-blocks.
@@ -269,12 +270,25 @@ class CodexAdapter(AbstractAITool):
         """
         import tomllib
 
-        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        from crossby.ai_tools.base import read_config_text
+        from crossby.scenes.launch import codex_home
+
+        # Every layer Codex may read: the system and user files, and a
+        # ``.codex/config.toml`` in the folder or any folder above it. A file
+        # Codex cannot parse stops Codex itself, so it is skipped here.
+        layers = [
+            Path("/etc/codex/config.toml"),
+            codex_home() / "config.toml",
+            *(folder / ".codex" / "config.toml" for folder in (working_dir, *working_dir.parents)),
+        ]
         names: set[str] = set()
-        for path in (home / "config.toml", working_dir / ".codex" / "config.toml"):
+        for path in layers:
+            text = read_config_text(path)
+            if text is None:
+                continue
             try:
-                servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers")
-            except (OSError, ValueError):
+                servers = tomllib.loads(text).get("mcp_servers")
+            except ValueError:
                 continue
             if isinstance(servers, dict):
                 names.update(servers)

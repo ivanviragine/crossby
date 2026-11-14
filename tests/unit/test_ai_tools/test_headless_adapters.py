@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -1077,6 +1078,114 @@ def test_antigravity_text_output_applies_the_envelope_checks(
     assert result.final_text is None
 
 
+def _on_build(monkeypatch: pytest.MonkeyPatch, adapter: AbstractAITool, version: str) -> None:
+    normalized = parse_semver(version)
+    assert normalized is not None
+    monkeypatch.setattr(
+        type(adapter),
+        "_detect_headless_version",
+        lambda self, **_kwargs: BinaryVersion(normalized, version),
+    )
+
+
+def _mcp_adapter(
+    monkeypatch: pytest.MonkeyPatch, tool: AIToolID, argv: list[str]
+) -> AbstractAITool:
+    """An adapter on the oldest build its session MCP servers were verified on."""
+    adapter = _adapter(monkeypatch, tool, argv)
+    layout = adapter.OWNED_WORKSPACE_LAYOUT
+    assert layout is not None and layout.mcp_verified_version is not None
+    _on_build(monkeypatch, adapter, layout.mcp_verified_version)
+    return adapter
+
+
+def test_session_mcp_servers_need_the_build_they_were_verified_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    servers = {"docs": {"command": "npx", "args": ["-y", "docs-server"]}}
+    codex = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))
+    _on_build(monkeypatch, codex, "0.167.1")
+    with pytest.raises(HeadlessUnsupportedError, match=r"were verified on 0\.167\.2"):
+        codex.run_headless_session(_request(tmp_path, mcp_servers=servers))
+    # A session without servers is held to its own floor only.
+    assert codex.run_headless_session(_request(tmp_path)).status is (
+        HeadlessTerminalStatus.SUCCEEDED
+    )
+
+
+def test_session_mcp_servers_are_checked_before_anything_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex-home"))
+    codex = _mcp_adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+
+    # A name becomes a configuration path and an approval rule: nothing odd gets there.
+    for name in ("Docs", "a.b", "x/*) command(rm", ""):
+        with pytest.raises(ValueError, match="lowercase letters"):
+            _request(tmp_path, mcp_servers={name: {"command": "npx"}})
+    with pytest.raises(ValueError, match="not a valid definition"):
+        _request(tmp_path, mcp_servers={"docs": {"command": "npx", "url": "https://x"}})
+
+    # A variable the server takes from the environment must be set there.
+    monkeypatch.delenv("DOCS_TOKEN", raising=False)
+    forwarding = {"docs": {"command": "npx", "env": {"DOCS_TOKEN": "${DOCS_TOKEN}"}}}
+    with pytest.raises(HeadlessRequestError, match="take DOCS_TOKEN from the environment"):
+        codex.run_headless_session(_request(tmp_path, mcp_servers=forwarding))
+    monkeypatch.setenv("DOCS_TOKEN", "secret")
+    assert codex.run_headless_session(_request(tmp_path, mcp_servers=forwarding)).status is (
+        HeadlessTerminalStatus.SUCCEEDED
+    )
+
+    # A same-name server in a folder above the session's is found too, and a
+    # FIFO in a configuration file's place is skipped instead of read forever.
+    servers = {"docs": {"command": "npx"}}
+    nested = tmp_path / "repo" / "packages" / "app"
+    nested.mkdir(parents=True)
+    (tmp_path / "repo" / ".codex").mkdir()
+    (tmp_path / "repo" / ".codex" / "config.toml").write_text('[mcp_servers.docs]\nurl = "x"\n')
+    with pytest.raises(HeadlessRequestError, match="already has an MCP server named docs"):
+        codex.run_headless_session(_request(nested, mcp_servers=servers))
+    (tmp_path / "repo" / ".codex" / "config.toml").unlink()
+    os.mkfifo(tmp_path / "repo" / ".codex" / "config.toml")
+    assert codex.run_headless_session(_request(nested, mcp_servers=servers)).status is (
+        HeadlessTerminalStatus.SUCCEEDED
+    )
+
+
+def test_claude_reads_session_mcp_servers_from_a_private_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    servers = {"docs": {"command": "npx", "env": {"TOKEN": "literal-secret"}}}
+    claude = _mcp_adapter(monkeypatch, AIToolID.CLAUDE, _fake_cli(stdout=json.dumps(CLAUDE_RESULT)))
+    seen: list[tuple[Path, int, int, str]] = []
+    argv = _fake_cli(stdout=json.dumps(CLAUDE_RESULT))
+
+    def command(self: object, request: object, **kwargs: Any) -> list[str]:
+        path = kwargs.get("mcp_config")
+        if isinstance(path, Path) and path.is_file():
+            seen.append(
+                (
+                    path,
+                    stat.S_IMODE(path.stat().st_mode),
+                    stat.S_IMODE(path.parent.stat().st_mode),
+                    path.read_text(),
+                )
+            )
+        return list(argv)
+
+    monkeypatch.setattr(type(claude), "_headless_command", command)
+    result = claude.run_headless_session(
+        _request(tmp_path, mcp_servers=servers, native_output=HeadlessNativeOutput.JSON)
+    )
+    assert result.status is HeadlessTerminalStatus.SUCCEEDED
+    [(path, file_mode, folder_mode, text)] = seen
+    assert (file_mode, folder_mode) == (0o600, 0o700)
+    assert json.loads(text) == {"mcpServers": servers}
+    # Gone with the session.
+    assert not path.parent.exists()
+
+
 def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1089,14 +1198,23 @@ def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
 
     # Antigravity CLI reads them from a file in its folder: without that file (which a
     # persona folder's provisioning writes) the session would start without them.
-    agy = _adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_jsonl(AGY_STREAM)))
+    agy = _mcp_adapter(monkeypatch, AIToolID.ANTIGRAVITY_CLI, _fake_cli(stdout=_jsonl(AGY_STREAM)))
     with pytest.raises(HeadlessRequestError, match="does not define docs"):
-        agy.run_headless_session(_request(tmp_path, mcp_servers=servers))
+        agy.run_headless_session(_request(tmp_path, mcp_servers=servers, read_only=True))
     (tmp_path / ".agents").mkdir()
+    # Its tools are approved by name, so the file must say what was asked for.
+    other = {"docs": {"command": "sh", "args": ["-c", "something-else"]}}
+    (tmp_path / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": other}))
+    with pytest.raises(HeadlessRequestError, match="does not define docs as asked"):
+        agy.run_headless_session(_request(tmp_path, mcp_servers=servers, read_only=True))
     (tmp_path / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": servers}))
-    assert agy.run_headless_session(_request(tmp_path, mcp_servers=servers)).status is (
-        HeadlessTerminalStatus.SUCCEEDED
-    )
+    assert agy.run_headless_session(
+        _request(tmp_path, mcp_servers=servers, read_only=True)
+    ).status is (HeadlessTerminalStatus.SUCCEEDED)
+    # The approval rule rides on the read-only settings: a writable session would
+    # load the server and deny every call to it.
+    with pytest.raises(HeadlessUnsupportedError, match="not read-only"):
+        agy.run_headless_session(_request(tmp_path, mcp_servers=servers))
 
     # Codex merges a session server into a configured one of the same name, so a clash
     # is refused; a server under another name is unaffected.
@@ -1104,14 +1222,14 @@ def test_session_mcp_servers_are_refused_where_they_would_be_ignored(
     home.mkdir()
     (home / "config.toml").write_text('[mcp_servers.docs]\ncommand = "old"\nenabled = false\n')
     monkeypatch.setenv("CODEX_HOME", str(home))
-    clashing = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+    clashing = _mcp_adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
     with pytest.raises(HeadlessRequestError, match="already has an MCP server named docs"):
         clashing.run_headless_session(_request(tmp_path, mcp_servers=servers))
     (home / "config.toml").write_text('[mcp_servers.other]\ncommand = "old"\n')
 
     # Codex CLI takes them on its command line, which only the unattended mode builds:
     # a brokered session would start without them and still report them as running.
-    codex = _adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
+    codex = _mcp_adapter(monkeypatch, AIToolID.CODEX, _fake_cli(stdout=_jsonl(CODEX_EVENTS)))
     with pytest.raises(HeadlessUnsupportedError, match="MCP servers for one brokered session"):
         codex.run_headless_session(
             _request(
