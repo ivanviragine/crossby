@@ -396,8 +396,10 @@ Where the definitions travel matters for a literal credential in them:
   only its owner can read, and the override names that variable. A header is
   read from it through `env_http_headers`. A stdio server's variable is
   forwarded with `env_vars`, which keeps a variable's name, so the server is
-  started as `/bin/sh -c 'exec env KEY="${CROSSBY_MCP_SECRET_1}" "$@"' sh
-  <command> <args…>`. Verified on 0.167.2 with `ps` running throughout: a
+  started as `/bin/sh -c 'KEY="${CROSSBY_MCP_SECRET_1}"; export KEY; exec
+  "$@"' sh <command> <args…>`. The shell assigns the value itself, so it is
+  never an argument of any program (through `env KEY=value` it would be, for
+  a moment). Verified on 0.167.2 with `ps` running throughout: a
   stdio server got an `env` value containing a space, `$` and `"` intact,
   and an HTTP server got literal `X-Api-Key` and `Authorization` headers,
   with none of the values on the command line. The server's command, `args`

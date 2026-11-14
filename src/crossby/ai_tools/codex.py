@@ -307,8 +307,8 @@ class CodexAdapter(AbstractAITool):
 
         A header is taken from it through ``env_http_headers``. A stdio
         server's variable is forwarded with ``env_vars``, which keeps a
-        variable's name, so the server is started through ``sh``, which gives
-        it back the name the server expects. Without a POSIX ``sh`` (Windows)
+        variable's name, so the server is started through ``sh``, which
+        exports it under the name the server expects. Without a POSIX ``sh`` (Windows)
         a stdio server's values stay on the command line.
         """
         from crossby.models.config import MCPServerConfig
@@ -339,12 +339,14 @@ class CodexAdapter(AbstractAITool):
             ):
                 del table["env"]
                 renamed = {key: held(value) for key, value in literal_env.items()}
-                script = "exec env " + " ".join(
-                    f'{key}="${{{variable}}}"' for key, variable in renamed.items()
+                # Assigned and exported by the shell itself: handed to an external
+                # program such as `env`, the values would be that program's arguments.
+                script = "".join(
+                    f'{key}="${{{variable}}}"; export {key}; ' for key, variable in renamed.items()
                 )
                 table["args"] = [
                     "-c",
-                    f'{script} "$@"',
+                    f'{script}exec "$@"',
                     "sh",
                     table["command"],
                     *table.get("args", ()),

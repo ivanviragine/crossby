@@ -817,8 +817,8 @@ def test_a_personas_mcp_servers_reach_each_tool_its_own_way(tmp_path: Path) -> N
     # back to the server under the name the server expects.
     assert 'mcp_servers.docs.command="/bin/sh"' in overrides
     assert (
-        'mcp_servers.docs.args=["-c", "exec env MODE=\\"${CROSSBY_MCP_SECRET_1}\\" \\"$@\\"", '
-        '"sh", "npx", "-y", "docs-server"]'
+        'mcp_servers.docs.args=["-c", "MODE=\\"${CROSSBY_MCP_SECRET_1}\\"; export MODE; '
+        'exec \\"$@\\"", "sh", "npx", "-y", "docs-server"]'
     ) in overrides
     assert 'mcp_servers.docs.env_vars=["DOCS_TOKEN", "CROSSBY_MCP_SECRET_1"]' in overrides
     assert not any(item.startswith("mcp_servers.docs.env=") for item in overrides)
