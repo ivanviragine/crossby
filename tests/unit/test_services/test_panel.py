@@ -1200,3 +1200,71 @@ def test_cancel_while_a_person_leads_ends_the_panel_interrupted(tmp_path: Path) 
 
     assert result.stop_reason is StopReason.INTERRUPTED
     assert result.error == "the panel was cancelled"
+
+
+def test_a_reply_seen_while_continuing_is_not_sent_again(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec, path = _stopped_mid_dispatch(tmp_path, visibility="shared")
+    cancel = threading.Event()
+
+    class CancelOnLead(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            if request.working_dir.name == "lead":
+                cancel.set()
+                return _failed(tool)
+            return super().run(tool, request, cancel_event, on_event)
+
+    runner = CancelOnLead({"lead": [], "cto": [], "founder": ["F."], "buyer": []})
+    journal, events = Journal.reopen(path)
+    stopped = run_panel(
+        spec,
+        runner=runner,
+        journal=journal,
+        resume=result_from_journal(spec, events),
+        cancel=cancel,
+    )
+    journal.close()
+    assert stopped.stop_reason is StopReason.INTERRUPTED
+
+    # The founder saw the CTO's reply while the panel continued; it is not owed again.
+    read = result_from_journal(spec, read_journal(path))
+    assert read.unseen == stopped.unseen
+    assert read.unseen["founder"] == ()
+    assert read.unseen["cto"] == (("founder", "F."),)
+    assert read.unseen["buyer"] == (("cto", "CTO says."), ("founder", "F."))
+
+
+def test_a_failure_on_a_held_back_message_keeps_its_message_number(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    run_panel(
+        spec,
+        runner=PanelRunner(
+            {
+                "lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto @founder"],
+                "cto": ["A1"],
+                "founder": [],
+                "buyer": [],
+            }
+        ),
+        journal=journal,
+    )
+    journal.close()
+
+    runner = PanelRunner(
+        {"lead": ["Done.\nNEXT: DONE"], "cto": [None], "founder": ["F2"], "buyer": []}
+    )
+    result, _events = _continue(spec, path, runner)
+
+    assert [(n, who) for n, who, _why in result.member_failures] == [(2, "cto")]
+    assert result_from_journal(spec, read_journal(path)).member_failures == result.member_failures

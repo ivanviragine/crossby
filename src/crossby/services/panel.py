@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -477,6 +477,9 @@ class PanelResult:
     # The highest turn number used, failed attempts included: a continued
     # panel numbers its turns after it.
     last_turn: int = 0
+    # In a shared panel: the other members' replies each member has not been
+    # sent yet, as ``(member id, text)``; a continued panel sends them first.
+    unseen: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
     # Set by crossby.api.panel: why the events file is missing or incomplete,
     # and each on_event sink that raised and was dropped.
     journal_error: str | None = None
@@ -618,12 +621,15 @@ def _check_roster(spec: PanelSpec, journaled: PanelSpec | Sequence[Mapping[str, 
 
 
 def _missed_replies(
-    turns: Sequence[PanelTurn], member_ids: Sequence[str]
-) -> dict[str, list[tuple[str, str]]]:
+    turns: Sequence[PanelTurn], member_ids: Sequence[str], breaks: Collection[int] = ()
+) -> dict[str, tuple[tuple[str, str], ...]]:
     """Each member's unseen replies in a shared panel, replayed from its committed turns.
 
-    As in a live panel: a member that answers a message has seen everything
-    sent before it, and every reply then reaches the other members.
+    As in a live panel: the replies to one message are delivered together, a
+    member that answers has seen everything sent before it, and every reply
+    then reaches the other members. ``breaks`` are the indexes in ``turns``
+    where a continuation began: replies on either side of one were delivered
+    apart, even when they answer the same message.
     """
     pending: dict[str, list[tuple[str, str]]] = {member_id: [] for member_id in member_ids}
     group: list[PanelTurn] = []
@@ -637,13 +643,13 @@ def _missed_replies(
                     pending[other].append((turn.sender, turn.text))
         group.clear()
 
-    for turn in turns:
-        if turn.sender == "lead":
+    for index, turn in enumerate(turns):
+        if turn.sender == "lead" or index in breaks:
             flush()
-        elif turn.sender in pending:
+        if turn.sender != "lead" and turn.sender in pending:
             group.append(turn)
     flush()
-    return pending
+    return {member_id: tuple(items) for member_id, items in pending.items()}
 
 
 def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) -> PanelResult:
@@ -663,6 +669,9 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
     turns: list[PanelTurn] = []
     failures: list[tuple[int, str, str]] = []
     dispatches = 0
+    # The lead's messages that name members, sent or held back at the limit.
+    asked = 0
+    breaks: set[int] = set()
     last_turn = 0
     stop_reason = StopReason.INTERRUPTED
     error: str | None = "the panel ended without recording its outcome"
@@ -680,6 +689,9 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
         if event.type is EventType.CONVERSATION_CONTINUED:
             stop_reason = StopReason.INTERRUPTED
             error = "the panel ended without recording its outcome"
+            breaks.add(len(turns))
+            # A continued panel first sends a message held back at the limit.
+            dispatches = max(dispatches, asked)
         elif event.type is EventType.MESSAGE_COMMITTED:
             turn = PanelTurn(
                 number=int(data["turn"]),
@@ -693,6 +705,7 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
             turns.append(turn)
             if turn.sender == "lead" and not turn.done:
                 dispatches += 1
+                asked += 1
         elif event.type is EventType.TURN_FINISHED:
             participant = str(data.get("participant"))
             status = data.get("status")
@@ -740,6 +753,11 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
         answered_at_limit=answered_at_limit,
         dispatches=dispatches,
         last_turn=last_turn,
+        unseen=(
+            _missed_replies(turns, [m.id for m in spec.members], breaks)
+            if spec.visibility == "shared"
+            else {}
+        ),
     )
 
 
@@ -801,8 +819,9 @@ def run_panel(
         for member_id, seat in seats.items():
             seat.session_id = resume.sessions.get(member_id)
         if shared:
-            for member_id, missed in _missed_replies(turns, member_ids).items():
-                seats[member_id].pending.extend(missed)
+            for member_id, missed in resume.unseen.items():
+                if member_id in seats:
+                    seats[member_id].pending.extend(missed)
 
     def claim() -> int:
         """The next turn number: every lead turn and member attempt gets one."""
@@ -833,6 +852,7 @@ def run_panel(
             answered_at_limit=answered_at_limit[0],
             dispatches=sent[0],
             last_turn=next_turn[0] - 1,
+            unseen={key: tuple(seat.pending) for key, seat in seats.items()} if shared else {},
         )
         emit(
             EventType.CONVERSATION_FINISHED,
