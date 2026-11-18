@@ -481,6 +481,9 @@ class PanelResult:
     # In a shared panel: the other members' replies each member has not been
     # sent yet, as ``(member id, text)``; a continued panel sends them first.
     unseen: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    # The lead's last message was committed at the message limit and never sent;
+    # a continued panel sends it first, if any messages are added.
+    held_back: bool = False
     # Set by crossby.api.panel: why the events file is missing or incomplete,
     # and each on_event sink that raised and was dropped.
     journal_error: str | None = None
@@ -670,8 +673,7 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
     turns: list[PanelTurn] = []
     failures: list[tuple[int, str, str]] = []
     dispatches = 0
-    # The lead's messages that name members, sent or held back at the limit.
-    asked = 0
+    held = False
     breaks: set[int] = set()
     last_turn = 0
     stop_reason = StopReason.INTERRUPTED
@@ -691,8 +693,10 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
             stop_reason = StopReason.INTERRUPTED
             error = "the panel ended without recording its outcome"
             breaks.add(len(turns))
-            # A continued panel first sends a message held back at the limit.
-            dispatches = max(dispatches, asked)
+            # A continuation that adds messages first sends one held back at the limit.
+            if held and int(data.get("added_rounds") or 0) > 0:
+                dispatches += 1
+                held = False
         elif event.type is EventType.MESSAGE_COMMITTED:
             turn = PanelTurn(
                 number=int(data["turn"]),
@@ -707,7 +711,6 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
             turns.append(turn)
             if turn.sender == "lead" and not turn.done:
                 dispatches += 1
-                asked += 1
         elif event.type is EventType.TURN_FINISHED:
             participant = str(data.get("participant"))
             status = data.get("status")
@@ -740,6 +743,11 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
             rounds = data.get("rounds")
             if isinstance(rounds, int):
                 dispatches = rounds
+            if "held_back" in data:
+                held = bool(data["held_back"])
+            elif stop_reason is StopReason.ROUND_LIMIT:
+                # A journal from before `held_back` was recorded.
+                held = bool(turns) and turns[-1].sender == "lead" and not turns[-1].done
     if turns and turns[-1].done and stop_reason is not StopReason.ANSWERED:
         # The final answer was committed but the run ended before recording it.
         stop_reason, error = StopReason.ANSWERED, None
@@ -755,6 +763,7 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
         answered_at_limit=answered_at_limit,
         dispatches=dispatches,
         last_turn=last_turn,
+        held_back=held and stop_reason is not StopReason.ANSWERED,
         unseen=(
             _missed_replies(turns, [m.id for m in spec.members], breaks)
             if spec.visibility == "shared"
@@ -821,6 +830,8 @@ def run_panel(
     added = spec.max_rounds if added_rounds is None else added_rounds
     cap = sent[0] + added
     next_turn = [(resume.last_turn if resume is not None else 0) + 1]
+    # Whether the lead's last message is committed but unsent, held back at the limit.
+    held = [resume.held_back if resume is not None else False]
     if resume is not None:
         lead_session[0] = resume.sessions.get("lead")
         for member_id, seat in seats.items():
@@ -847,6 +858,11 @@ def run_panel(
         return {"lead": lead_session[0], **{key: seat.session_id for key, seat in seats.items()}}
 
     def finish(reason: StopReason, error: str | None = None) -> PanelResult:
+        if reason is StopReason.ROUND_LIMIT and turns:
+            last = turns[-1]
+            held[0] = held[0] or (last.sender == "lead" and not last.done)
+        if reason is StopReason.ANSWERED:
+            held[0] = False
         result = PanelResult(
             spec=spec,
             started_at=started_at,
@@ -860,6 +876,7 @@ def run_panel(
             dispatches=sent[0],
             last_turn=next_turn[0] - 1,
             unseen={key: tuple(seat.pending) for key, seat in seats.items()} if shared else {},
+            held_back=held[0],
         )
         emit(
             EventType.CONVERSATION_FINISHED,
@@ -867,6 +884,7 @@ def run_panel(
             error=error,
             answered_at_limit=answered_at_limit[0],
             rounds=result.dispatches,
+            held_back=held[0],
             sessions=result.sessions,
             finished_at=result.finished_at.isoformat(),
         )
@@ -1373,12 +1391,13 @@ def run_panel(
             for turn in turns
             if turn.number > last.number and turn.sender != "lead"
         }
-        if sent[0] < sum(1 for turn in turns if turn.sender == "lead" and not turn.done):
+        if held[0]:
             # Committed at the message limit, so never sent: it is sent now, as one
             # of the messages added; with none added, the lead is asked to finish.
             if sent[0] >= cap:
                 return FINAL_NUDGE.format(max_rounds=cap)
             sent[0] += 1
+            held[0] = False
         return fan_out(last.text, last.recipients, sent[0], answered=replies)
 
     try:

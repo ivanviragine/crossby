@@ -1470,3 +1470,45 @@ def test_failures_found_outside_a_session_survive_reading_the_journal(tmp_path: 
     assert "reported no session to resume" in reasons["cto"]
     assert "time limit" in reasons["founder"]
     assert result_from_journal(spec, journal.events).member_failures == live.member_failures
+
+
+def test_a_held_back_message_is_tracked_across_several_continuations(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    path = tmp_path / "events.jsonl"
+
+    def go(script: dict[str, list[str | None]], added: int | None = None) -> Any:
+        runner = PanelRunner({"cto": [], "founder": [], "buyer": [], **script})
+        if not path.exists():
+            journal = Journal("p", path=path)
+            result = run_panel(spec, runner=runner, journal=journal)
+        else:
+            journal, events = Journal.reopen(path)
+            prior = result_from_journal(spec, events)
+            result = run_panel(
+                spec, runner=runner, journal=journal, resume=prior, added_rounds=added
+            )
+        journal.close()
+        return result, runner
+
+    first, _ = go({"lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto"], "cto": ["A1"]})
+    assert first.stop_reason is StopReason.ROUND_LIMIT and first.held_back
+
+    # Nothing added: the lead is told to finish, asks again instead, and that is held back.
+    again, runner = go({"lead": ["Q3\nNEXT: ASK @cto"]}, added=0)
+    assert runner.requests["cto"] == [] and again.held_back
+
+    # One added: only the replacement goes out; then the lead fails.
+    failed, runner = go({"lead": [None], "cto": ["A3"]}, added=1)
+    assert [r.prompt for r in runner.requests["cto"]] == ["Q3"]
+    assert failed.stop_reason is StopReason.FAILED and not failed.held_back
+    read = result_from_journal(spec, read_journal(path))
+    assert (read.dispatches, read.held_back) == (2, False)
+
+    # Continuing again sends nothing more: the CTO already answered Q3, and the lead
+    # is not told to finish early.
+    done, runner = go({"lead": ["Done.\nNEXT: DONE"]}, added=1)
+    assert runner.requests["cto"] == []
+    assert runner.requests["lead"][0].prompt == "@cto:\nA3"
+    assert done.answered and done.dispatches == 2
