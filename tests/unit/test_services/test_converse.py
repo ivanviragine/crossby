@@ -932,3 +932,46 @@ def test_render_summary_and_conversation_dir(tmp_path: Path) -> None:
     assert converse.conversation_dir(tmp_path, result.started_at) == (
         tmp_path / ".crossby" / "conversations" / "20261031T120000000000"
     )
+
+
+def test_the_api_reads_a_consultation_from_its_journal(tmp_path: Path) -> None:
+    from crossby import api
+    from crossby.services.journal import Journal
+
+    runner = FakeRunner(["Is it sound?\nNEXT: ASK", "Mostly.", "It is.\nNEXT: DONE"])
+    path = tmp_path / "events.jsonl"
+    journal = Journal("c", path=path)
+    converse.run_conversation(
+        GOAL,
+        converse.make_participants(AIToolID.CLAUDE, AIToolID.CODEX, responder_model="gpt-6"),
+        working_dir=tmp_path,
+        runner=runner,
+        journal=journal,
+    )
+    journal.close()
+
+    read = api.read_conversation(path)
+    assert read.goal == GOAL and read.answered
+    assert read.responder == api.ConverseParticipant(
+        tool=AIToolID.CODEX, role=api.ConverseRole.RESPONDER, model="gpt-6"
+    )
+    assert [(turn.role.value, turn.text) for turn in read.turns] == [
+        ("asker", "Is it sound?"),
+        ("responder", "Mostly."),
+        ("asker", "It is."),
+    ]
+
+
+def test_a_panel_journal_is_not_read_as_a_consultation(tmp_path: Path) -> None:
+    from crossby import api
+    from crossby.services.journal import EventType, Journal
+
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    journal.emit(EventType.CONVERSATION_STARTED, goal="g", kind="panel", participants=[])
+    journal.close()
+
+    with pytest.raises(api.ConverseError, match="holds a panel"):
+        api.read_conversation(path)
+    with pytest.raises(api.ConverseError, match="Cannot read"):
+        api.read_conversation(tmp_path / "missing.jsonl")
