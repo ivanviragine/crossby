@@ -702,6 +702,16 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
                 sessions[participant] = str(session)
             if participant != "lead" and failed and status != "cancelled":
                 failures.append((dispatches, participant, str(failed)))
+        elif event.type is EventType.INPUT_RESOLVED:
+            # A person's seat has no session: its missed reply is recorded here.
+            participant = str(data.get("participant"))
+            status = data.get("status")
+            if participant != "lead" and status not in {"answered", "cancelled"}:
+                reason = data.get("error") or {
+                    "timed_out": "no reply in time",
+                    "empty": "the reply was empty",
+                }.get(str(status), str(status))
+                failures.append((dispatches, participant, str(reason)))
         elif event.type is EventType.CONVERSATION_FINISHED:
             stop_reason = StopReason(data["stop_reason"])
             error = data.get("error")
@@ -905,12 +915,6 @@ def run_panel(
         reply, status = human_inputs._await(request, left, cancel)
         if reply is not None and not reply.text.strip():
             reply, status = None, "empty"
-        emit(
-            EventType.INPUT_RESOLVED,
-            request_id=request_id,
-            participant=participant,
-            status=status,
-        )
         failure = (
             None
             if reply is not None
@@ -919,6 +923,14 @@ def run_panel(
                 "cancelled": "the reply was cancelled",
                 "empty": "the reply was empty",
             }.get(status, status)
+        )
+        emit(
+            EventType.INPUT_RESOLVED,
+            request_id=request_id,
+            participant=participant,
+            status=status,
+            # Why there is no reply, as the lead is told: a continued panel keeps it.
+            error=failure,
         )
         return reply, failure, clock() - begun
 
@@ -1001,6 +1013,8 @@ def run_panel(
     def human_lead_turn(message: str | None, number: int) -> tuple[str, Dispatch, float]:
         reply, failure, seconds = ask_human("lead", "lead", number, message)
         if reply is None:
+            if cancel.is_set():
+                raise _StopError(StopReason.INTERRUPTED, CANCELLED)
             if remaining() <= 0:
                 # The panel's time ran out, not the person's own reply window.
                 raise _StopError(

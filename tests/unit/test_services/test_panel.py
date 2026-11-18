@@ -1171,3 +1171,32 @@ def test_a_message_held_back_at_the_limit_is_sent_when_the_panel_continues(
     assert [r.prompt for r in runner.requests["cto"]] == ["Q2"]
     assert runner.requests["lead"][0].prompt == f"@cto:\nA2\n\n{FINAL_NUDGE.format(max_rounds=2)}"
     assert result.answered and result.dispatches == 2
+
+
+def test_a_persons_missed_reply_survives_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @all", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _with_human_member(tmp_path).model_copy(update={"human_timeout_seconds": 0.3})
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, inputs=HumanInput(), journal=journal)
+
+    read = result_from_journal(spec, journal.events)
+    assert read.member_failures == live.member_failures == [(1, "dana", "no reply within 0.3s")]
+
+
+def test_cancel_while_a_person_leads_ends_the_panel_interrupted(tmp_path: Path) -> None:
+    from crossby.services.panel import HumanBackend
+
+    spec = _spec(tmp_path).model_copy(update={"lead": Lead(backend=HumanBackend())})
+    cancel = threading.Event()
+    inputs = HumanInput()
+    runner = PanelRunner({"cto": [], "founder": [], "buyer": []})
+    threading.Timer(0.2, cancel.set).start()
+
+    result = run_panel(spec, runner=runner, inputs=inputs, cancel=cancel)
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert result.error == "the panel was cancelled"

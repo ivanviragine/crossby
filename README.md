@@ -533,7 +533,7 @@ How a consultation runs:
 | `turn.progress` | `turn`, `kind` (`tool_started`, `tool_completed`, `assistant_message`, or `progress` at most once a second), `elapsed_seconds`; never content |
 | `turn.finished` | `turn`, `role`, `tool`, `status`, `duration_seconds`, `session_id`, `usage`, `denials`, `failure_reason`, `error` (failed turns too) |
 | `message.committed` | `turn`, `role`, `tool`, `text` as relayed, `next` (`ASK`, `DONE`, `MISSING` or none), `duration_seconds`, `denials`, `usage` |
-| `input.requested` / `input.resolved` | panels only: a human seat's `request_id`, `participant`, `kind` (`lead` or `member`), `turn` and `message`; then its `status` |
+| `input.requested` / `input.resolved` | panels only: a human seat's `request_id`, `participant`, `kind` (`lead` or `member`), `turn` and `message`; then its `status`, with `error` saying why when there is no reply |
 | `conversation.continued` | `previous_stop_reason`, `max_rounds` (the new total), `added_rounds`, timeouts |
 | `conversation.finished` | `stop_reason`, `error`, `answered_at_limit`, `rounds`, `sessions`, `finished_at` |
 
