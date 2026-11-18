@@ -1375,3 +1375,37 @@ def test_with_no_rounds_added_a_message_held_back_at_the_limit_is_not_sent(tmp_p
     assert result.answered and result.dispatches == 1
     with pytest.raises(PanelError, match="for continuing a panel"):
         run_panel(spec, runner=runner, added_rounds=1)
+
+
+def test_a_person_queued_behind_a_stopped_turn_is_never_asked(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    asked: list[str] = []
+
+    class CancelOnCto(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            if request.working_dir.name == "cto":
+                cancel.set()
+                return _failed(tool)
+            return super().run(tool, request, cancel_event, on_event)
+
+    def respond(request: InputRequest) -> HumanReply:
+        asked.append(request.participant)
+        return HumanReply("Too late.")
+
+    spec = _with_human_member(tmp_path).model_copy(update={"concurrency": 1})
+    runner = CancelOnCto({"lead": ["Q\nNEXT: ASK @all"], "cto": [], "founder": [], "buyer": []})
+    journal = Journal("p")
+    result = run_panel(
+        spec, runner=runner, inputs=HumanInput(respond), journal=journal, cancel=cancel
+    )
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert asked == []
+    assert all(event.type is not EventType.INPUT_REQUESTED for event in journal.events)
+    assert [turn.sender for turn in result.turns] == ["lead"]

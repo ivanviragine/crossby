@@ -923,6 +923,9 @@ def run_panel(
         participant: str, kind: Literal["lead", "member"], number: int, message: str | None
     ) -> tuple[HumanReply | None, str | None, float]:
         """One human turn: ``(reply, failure, seconds)``."""
+        if cancel.is_set():
+            # Queued behind a turn that was stopped: the person is never asked.
+            return None, "the reply was cancelled", 0.0
         request_id = f"{journal.run_id if journal is not None else 'panel'}-{number}-{participant}"
         request = InputRequest(request_id, participant, kind, number, message)
         # Open before announcing: a UI may submit as soon as it sees the event.
