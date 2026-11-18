@@ -979,9 +979,18 @@ def run_panel(
         return handle
 
     def run_one(
-        participant: str, number: int, built: HeadlessSessionRequest, tool: Any
+        participant: str,
+        number: int,
+        built: HeadlessSessionRequest,
+        tool: Any,
+        *,
+        needs_session: bool = False,
     ) -> tuple[HeadlessSessionResult | None, str | None, float]:
-        """Run one session; ``(result, failure, seconds)``. Never raises a session error."""
+        """Run one session; ``(result, failure, seconds)``. Never raises a session error.
+
+        ``needs_session``: a seat's first turn, whose session its later turns resume;
+        one that reports none fails, and its ``turn.finished`` says so.
+        """
         emit(
             EventType.TURN_STARTED,
             turn=number,
@@ -1014,6 +1023,8 @@ def run_panel(
         elif not text:
             failure = "the session returned no text"
         session = result.session_id or result.thread_id or result.conversation_id
+        if failure is None and needs_session and session is None:
+            failure = f"{tool.value} reported no session to resume"
         emit(
             EventType.TURN_FINISHED,
             turn=number,
@@ -1132,17 +1143,28 @@ def run_panel(
                 mcp_servers=member_servers(member),
             )
         except _StopError as stop:
-            # Queued past the deadline: this attempt fails, and the members
-            # who already answered keep their replies.
+            # Queued past the deadline, or stopped: this attempt never starts, and
+            # the members who already answered keep their replies. Journaled, so a
+            # panel read back keeps the failure.
+            emit(
+                EventType.TURN_FINISHED,
+                turn=number,
+                participant=member.id,
+                status="cancelled" if stop.reason is StopReason.INTERRUPTED else "failed",
+                error=stop.error,
+                duration_seconds=0.0,
+            )
             return member.id, None, stop.error, 0.0, None
-        result, failure, seconds = run_one(member.id, number, built, member.backend.tool)
+        result, failure, seconds = run_one(
+            member.id,
+            number,
+            built,
+            member.backend.tool,
+            needs_session=seat.session_id is None,
+        )
         text = (result.final_text or "").strip() if result is not None else None
         if failure is None and result is not None and seat.session_id is None:
-            handle = result.session_id or result.thread_id or result.conversation_id
-            if handle is None:
-                failure = f"{member.backend.tool.value} reported no session to resume"
-            else:
-                seat.session_id = handle
+            seat.session_id = result.session_id or result.thread_id or result.conversation_id
         if failure is None:
             with lock:
                 seat.pending.clear()

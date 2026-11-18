@@ -531,7 +531,7 @@ How a consultation runs:
 | `participant.ready` | the side's facts plus the detected `version` and each channel's `restrictions` state |
 | `turn.started` | `turn`, `role`, `tool`, `resumed`, `session_id` |
 | `turn.progress` | `turn`, `kind` (`tool_started`, `tool_completed`, `assistant_message`, or `progress` at most once a second), `elapsed_seconds`; never content |
-| `turn.finished` | `turn`, `role`, `tool`, `status`, `duration_seconds`, `session_id`, `usage`, `denials`, `failure_reason`, `error` (failed turns too) |
+| `turn.finished` | `turn`, `role`, `tool`, `status`, `duration_seconds`, `session_id`, `usage`, `denials`, `failure_reason`, `error` (failed turns too, and in a panel a member's turn that could not start: `failed` past the time limit, `cancelled` when stopped) |
 | `message.committed` | `turn`, `role`, `tool`, `text` as relayed, `next` (`ASK`, `DONE`, `MISSING` or none), `duration_seconds`, `denials`, `usage` |
 | `input.requested` / `input.resolved` | panels only: a human seat's `request_id`, `participant`, `kind` (`lead` or `member`), `turn` and `message`; then its `status`, with `error` saying why when there is no reply |
 | `conversation.continued` | `previous_stop_reason`, `max_rounds` (the new total), `added_rounds`, timeouts |

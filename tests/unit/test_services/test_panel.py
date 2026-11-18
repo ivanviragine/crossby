@@ -1437,3 +1437,36 @@ def test_a_turns_usage_survives_reading_the_journal(tmp_path: Path) -> None:
     read = result_from_journal(spec, journal.events)
     assert [turn.usage for turn in read.turns] == [turn.usage for turn in live.turns]
     assert read.turns[1].usage == TokenUsage(input_tokens=11, output_tokens=7, tool_steps=3)
+
+
+def test_failures_found_outside_a_session_survive_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    now = [0.0]
+
+    class Slow(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            result = super().run(tool, request, cancel_event, on_event)
+            if request.working_dir.name == "cto":
+                now[0] += 200  # the CTO's turn uses up the panel's time,
+                return result.model_copy(update={"session_id": None})  # and gives no session
+            return result
+
+    runner = Slow(
+        {"lead": ["Q\nNEXT: ASK @cto @founder"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _spec(tmp_path, concurrency=1, timeout_seconds=100)
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, journal=journal, clock=lambda: now[0])
+
+    reasons = {who: why for _n, who, why in live.member_failures}
+    assert set(reasons) == {"cto", "founder"}
+    assert "reported no session to resume" in reasons["cto"]
+    assert "time limit" in reasons["founder"]
+    assert result_from_journal(spec, journal.events).member_failures == live.member_failures
