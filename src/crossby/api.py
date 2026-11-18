@@ -276,12 +276,14 @@ def continue_panel(
     on_event: EventSink | None = None,
     inputs: HumanInput | None = None,
     cancel: threading.Event | None = None,
+    added_rounds: int | None = None,
 ) -> PanelResult:
     """Continue a panel that stopped without a final answer, from its journal.
 
     ``spec`` is the panel as first run: the same seats, each with the same
     tool, model and effort, or :class:`PanelError` is raised; its limits apply
-    afresh, so the lead may send up to ``spec.max_rounds`` more messages.
+    afresh, and the lead may send up to ``added_rounds`` more messages (by
+    default ``spec.max_rounds``; 0 lets it only give its final answer).
     Every seat resumes its own session, members that had not answered the
     lead's last message are asked it again, and the events are appended to
     ``events_path``, which no other process may be writing. The result holds
@@ -298,7 +300,14 @@ def continue_panel(
         raise PanelError(str(exc)) from None
     try:
         prior = result_from_journal(spec, events)
-        result = run_panel(spec, journal=journal, inputs=inputs, cancel=cancel, resume=prior)
+        result = run_panel(
+            spec,
+            journal=journal,
+            inputs=inputs,
+            cancel=cancel,
+            resume=prior,
+            added_rounds=added_rounds,
+        )
     finally:
         journal.close()
     return _with_journal(result, journal)

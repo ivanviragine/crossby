@@ -770,6 +770,7 @@ def run_panel(
     clock: Callable[[], float] = monotonic,
     cancel: threading.Event | None = None,
     resume: PanelResult | None = None,
+    added_rounds: int | None = None,
 ) -> PanelResult:
     """Run a panel until the lead gives its final answer, or a limit stops it.
 
@@ -782,7 +783,8 @@ def run_panel(
     ``resume`` continues a panel that stopped without a final answer (see
     :func:`result_from_journal`): every seat resumes its own session, members
     that had not answered the lead's last message are asked again, and the
-    lead may send up to ``spec.max_rounds`` more messages.
+    lead may send up to ``added_rounds`` more messages (by default
+    ``spec.max_rounds``); with 0 it may only give its final answer.
     """
     from crossby.ai_tools.headless import HeadlessSessionError
     from crossby.services.journal import EventType
@@ -791,6 +793,8 @@ def run_panel(
     has_human = spec.lead.human or any(member.human for member in spec.members)
     if has_human and inputs is None:
         raise PanelError("A panel with a human seat needs a HumanInput.")
+    if added_rounds is not None and (resume is None or added_rounds < 0):
+        raise PanelError("added_rounds is for continuing a panel, and cannot be negative.")
     if resume is not None:
         if resume.answered or (resume.turns and resume.turns[-1].done):
             raise PanelError("That panel already has its final answer.")
@@ -812,7 +816,8 @@ def run_panel(
     answered_at_limit = [False]
     sent = [resume.dispatches if resume is not None else 0]
     # Messages the lead may send in all: those already sent plus this run's.
-    cap = sent[0] + spec.max_rounds
+    added = spec.max_rounds if added_rounds is None else added_rounds
+    cap = sent[0] + added
     next_turn = [(resume.last_turn if resume is not None else 0) + 1]
     if resume is not None:
         lead_session[0] = resume.sessions.get("lead")
@@ -1276,9 +1281,11 @@ def run_panel(
                         for other in seats.values():
                             if other.member.id != member_id:
                                 other.pending.append((member_id, text))
-            elif not stopped:
-                # A member stopped by ``cancel`` did not fail: it is asked again
-                # when the panel continues.
+            elif stopped and (result is None or result.status is HeadlessTerminalStatus.CANCELLED):
+                # Stopped by ``cancel``, or never started: not a failure. It is
+                # asked again when the panel continues.
+                pass
+            else:
                 failures.append((dispatch, member_id, failure or "no answer"))
             replies.append((member_id, text, failure))
         # Every completed reply is committed above before either propagates.
@@ -1319,7 +1326,7 @@ def run_panel(
             kind="panel",
             previous_stop_reason=resume.stop_reason.value,
             max_rounds=cap,
-            added_rounds=spec.max_rounds,
+            added_rounds=added,
             timeout_seconds=spec.timeout_seconds,
             turn_timeout_seconds=spec.turn_timeout_seconds,
         )
@@ -1339,7 +1346,10 @@ def run_panel(
             if turn.number > last.number and turn.sender != "lead"
         }
         if sent[0] < sum(1 for turn in turns if turn.sender == "lead" and not turn.done):
-            # Committed at the message limit, so never sent: it is sent now.
+            # Committed at the message limit, so never sent: it is sent now, as one
+            # of the messages added; with none added, the lead is asked to finish.
+            if sent[0] >= cap:
+                return FINAL_NUDGE.format(max_rounds=cap)
             sent[0] += 1
         return fan_out(last.text, last.recipients, sent[0], answered=replies)
 
@@ -1348,8 +1358,9 @@ def run_panel(
         first = not any(turn.sender == "lead" for turn in turns)
         message = owed() if resume is not None else render_notice(spec)
         dispatches = sent[0]
-        if not first and dispatches == cap:
-            message = f"{message}\n\n{FINAL_NUDGE.format(max_rounds=cap)}"
+        nudge = FINAL_NUDGE.format(max_rounds=cap)
+        if not first and dispatches == cap and not message.endswith(nudge):
+            message = f"{message}\n\n{nudge}"
         while True:
             if cancel.is_set():
                 raise _StopError(StopReason.INTERRUPTED, CANCELLED)
