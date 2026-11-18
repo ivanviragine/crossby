@@ -446,6 +446,7 @@ def _usage_data(usage: TokenUsage | None) -> dict[str, Any] | None:
             "total_tokens",
             "premium_requests",
             "reported_cost_usd",
+            "tool_steps",
         },
         exclude_none=True,
     )

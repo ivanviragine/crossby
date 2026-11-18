@@ -1409,3 +1409,31 @@ def test_a_person_queued_behind_a_stopped_turn_is_never_asked(tmp_path: Path) ->
     assert asked == []
     assert all(event.type is not EventType.INPUT_REQUESTED for event in journal.events)
     assert [turn.sender for turn in result.turns] == ["lead"]
+
+
+def test_a_turns_usage_survives_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.models.ai import TokenUsage
+    from crossby.services.panel import result_from_journal
+
+    class Counting(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            result = super().run(tool, request, cancel_event, on_event)
+            used = TokenUsage(input_tokens=11, output_tokens=7, tool_steps=3)
+            return result.model_copy(update={"usage": used})
+
+    runner = Counting(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _spec(tmp_path)
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, journal=journal)
+
+    read = result_from_journal(spec, journal.events)
+    assert [turn.usage for turn in read.turns] == [turn.usage for turn in live.turns]
+    assert read.turns[1].usage == TokenUsage(input_tokens=11, output_tokens=7, tool_steps=3)

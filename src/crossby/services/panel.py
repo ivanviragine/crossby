@@ -63,6 +63,7 @@ from crossby.services.converse import (
     HeadlessTurnRunner,
     StopReason,
     TurnRunner,
+    _usage_data,
     check_depth,
     child_environment,
 )
@@ -701,6 +702,7 @@ def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) ->
                 done=bool(data.get("done")),
                 duration_seconds=float(data.get("duration_seconds") or 0.0),
                 denials=tuple(data.get("denials") or ()),
+                usage=TokenUsage.model_validate(data["usage"]) if data.get("usage") else None,
             )
             turns.append(turn)
             if turn.sender == "lead" and not turn.done:
@@ -1036,6 +1038,7 @@ def run_panel(
             done=turn.done,
             duration_seconds=round(turn.duration_seconds, 3),
             denials=list(turn.denials),
+            usage=_usage_data(turn.usage),
         )
 
     def human_lead_turn(message: str | None, number: int) -> tuple[str, Dispatch, float]:
