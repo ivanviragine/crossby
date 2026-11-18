@@ -446,6 +446,7 @@ def _usage_data(usage: TokenUsage | None) -> dict[str, Any] | None:
             "total_tokens",
             "premium_requests",
             "reported_cost_usd",
+            "tool_steps",
         },
         exclude_none=True,
     )
@@ -856,6 +857,8 @@ def result_from_journal(events: Sequence[ConversationEvent]) -> ConversationResu
     if started is None:
         raise ConverseError("The journal has no conversation.started event.")
     data = started.data
+    if data.get("kind") == "panel":
+        raise ConverseError("The journal holds a panel, not a consultation.")
     sides: dict[Role, Participant] = {}
     folders: dict[Role, Path] = {}
     for item in data.get("participants", []):

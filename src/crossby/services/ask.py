@@ -829,10 +829,11 @@ def run_preflight(
     request: AskRequest,
     *,
     runner: SessionRunner | None = None,
+    resumed: bool = False,
 ) -> PreflightReport:
     """Check an ask without starting the agent; see :func:`crossby.api.preflight`."""
     from crossby.ai_tools.headless import HeadlessPreflightError, HeadlessRequirementError
-    from crossby.services.converse import child_environment
+    from crossby.services.converse import PREFLIGHT_RESUME_ID, child_environment
 
     active: SessionRunner = runner or AdapterRunner()
     session = session_request(
@@ -841,8 +842,15 @@ def run_preflight(
         environment=child_environment(),
     )
     # Resolve every channel even when some required one is unmet: the report
-    # says what would block the ask instead of raising.
-    probe = session.model_copy(update={"require_blocked": frozenset()})
+    # says what would block the ask instead of raising. A resumed probe is
+    # checked as a panel's later turns run, which refuses a build whose
+    # unattended resume was not verified; only the ID's shape is checked.
+    probe = session.model_copy(
+        update={
+            "require_blocked": frozenset(),
+            "resume_id": PREFLIGHT_RESUME_ID if resumed else session.resume_id,
+        }
+    )
     timeout = min(PREFLIGHT_TIMEOUT_SECONDS, request.timeout_seconds)
     try:
         report = active.preflight(request.backend.tool, probe, timeout)

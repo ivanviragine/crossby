@@ -20,7 +20,7 @@ from crossby.models.ai import (
 )
 from crossby.services.ask import CliBackend, ProjectWorkspace
 from crossby.services.converse import DEPTH_ENV, StopReason
-from crossby.services.journal import EventType, Journal
+from crossby.services.journal import EventType, Journal, read_journal
 from crossby.services.panel import (
     FINAL_NUDGE,
     Dispatch,
@@ -908,3 +908,607 @@ def test_a_member_learns_its_own_id_once_per_session(tmp_path: Path) -> None:
     )
     run_panel(human, runner=runner, inputs=HumanInput(respond))
     assert seen == ["Color?"]
+
+
+# ---------------------------------------------------------------------------
+# A read-only lead, cancel, and continuing a stopped panel
+# ---------------------------------------------------------------------------
+
+
+def test_a_read_only_lead_runs_like_a_member(tmp_path: Path) -> None:
+    spec = _spec(tmp_path, require_blocked=frozenset({RestrictionChannel.FILE_EDITS}))
+    spec = spec.model_copy(update={"lead": spec.lead.model_copy(update={"read_only": True})})
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    journal = Journal("p")
+    run_panel(spec, runner=runner, journal=journal)
+
+    assert all(r.read_only for r in runner.requests["lead"])
+    assert runner.requests["lead"][0].require_blocked == frozenset({RestrictionChannel.FILE_EDITS})
+    lead_probe = next(p for p in runner.preflights if p.working_dir.name == "lead")
+    assert lead_probe.read_only
+    roster = journal.events[0].data["participants"]
+    assert roster[0] == {**roster[0], "participant": "lead", "read_only": True}
+
+
+def test_a_person_leading_cannot_be_read_only() -> None:
+    from crossby.services.panel import HumanBackend
+
+    with pytest.raises(ValueError, match="no session to make read-only"):
+        Lead(backend=HumanBackend(), read_only=True)
+
+
+def test_cancel_before_the_start_runs_nothing(tmp_path: Path) -> None:
+    runner = PanelRunner({"lead": ["Q\nNEXT: ASK @cto"], "cto": [], "founder": [], "buyer": []})
+    cancel = threading.Event()
+    cancel.set()
+    result = run_panel(_spec(tmp_path), runner=runner, cancel=cancel)
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert result.error == "the panel was cancelled"
+    assert runner.requests["lead"] == []
+
+
+class _CancelOnFounder(PanelRunner):
+    """The founder's turn sets the panel's cancel and then ends cancelled."""
+
+    def __init__(self, script: dict[str, list[str | None]], cancel: threading.Event) -> None:
+        super().__init__(script)
+        self.cancel = cancel
+
+    def run(
+        self,
+        tool: AIToolID,
+        request: HeadlessSessionRequest,
+        cancel_event: threading.Event,
+        on_event: Any = None,
+    ) -> HeadlessSessionResult:
+        if request.working_dir.name == "founder" and not self.cancel.is_set():
+            with self.lock:
+                self.requests["founder"].append(request)
+            self.cancel.set()
+            assert cancel_event.is_set()  # the panel's own event is the caller's
+            status = HeadlessTerminalStatus.CANCELLED
+            return HeadlessSessionResult(
+                tool=tool,
+                version="9.9.9",
+                status=status,
+                events=(
+                    HeadlessEvent(
+                        sequence=1, kind=HeadlessEventKind.TERMINAL, terminal_status=status
+                    ),
+                ),
+                duration_seconds=0.1,
+            )
+        return super().run(tool, request, cancel_event, on_event)
+
+
+def _stopped_mid_dispatch(tmp_path: Path, **updates: Any) -> tuple[PanelSpec, Path]:
+    """A panel cancelled while the founder answers; the CTO's reply is in."""
+    spec = _spec(tmp_path, concurrency=1, **updates)
+    cancel = threading.Event()
+    runner = _CancelOnFounder(
+        {
+            "lead": ["Q?\nNEXT: ASK @cto @founder"],
+            "cto": ["CTO says."],
+            "founder": [],
+            "buyer": [],
+        },
+        cancel,
+    )
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    result = run_panel(spec, runner=runner, journal=journal, cancel=cancel)
+    journal.close()
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert [turn.sender for turn in result.turns] == ["lead", "cto"]
+    # Stopped, not failed: the founder is asked again when the panel continues.
+    assert result.member_failures == []
+    return spec, path
+
+
+def _continue(spec: PanelSpec, path: Path, runner: PanelRunner) -> tuple[Any, list[Any]]:
+    from crossby.services.panel import result_from_journal
+
+    journal, events = Journal.reopen(path)
+    prior = result_from_journal(spec, events)
+    result = run_panel(spec, runner=runner, journal=journal, resume=prior)
+    journal.close()
+    return result, journal.events
+
+
+def test_a_cancelled_panel_continues_where_it_stopped(tmp_path: Path) -> None:
+    spec, path = _stopped_mid_dispatch(tmp_path)
+    runner = PanelRunner(
+        {
+            "lead": ["Verdict.\nNEXT: DONE"],
+            "cto": [],
+            "founder": ["Founder says."],
+            "buyer": [],
+        }
+    )
+    result, events = _continue(spec, path, runner)
+
+    assert result.answered
+    assert result.final_answer == "Verdict."
+    # Only the founder is asked again, with the lead's last message, in a new session
+    # (its cancelled turn never gave one); the CTO's reply is not asked for twice.
+    assert runner.requests["cto"] == []
+    assert [r.prompt for r in runner.requests["founder"]] == [_first(spec, "founder", "Q?")]
+    # The lead resumes its session and gets both replies, the earlier one included.
+    lead = runner.requests["lead"][0]
+    assert lead.resume_id == "lead-session"
+    assert lead.prompt == "@cto:\nCTO says.\n\n@founder:\nFounder says."
+    # The whole panel is in the result, numbered on from the turns before.
+    assert [(t.number, t.sender) for t in result.turns] == [
+        (1, "lead"),
+        (2, "cto"),
+        (4, "founder"),
+        (5, "lead"),
+    ]
+    assert events[0].type is EventType.CONVERSATION_CONTINUED
+    assert events[0].data["previous_stop_reason"] == "interrupted"
+
+
+def test_a_continued_panel_may_send_max_rounds_more_messages(tmp_path: Path) -> None:
+    spec, path = _stopped_mid_dispatch(tmp_path, max_rounds=1)
+    runner = PanelRunner(
+        {
+            "lead": ["Again?\nNEXT: ASK @cto", "Last.\nNEXT: ASK @cto"],
+            "cto": ["Once more."],
+            "founder": ["F."],
+            "buyer": [],
+        }
+    )
+    result, _events = _continue(spec, path, runner)
+
+    # One message was sent before; one more is allowed, then the final turn.
+    assert result.stop_reason is StopReason.ROUND_LIMIT
+    assert result.dispatches == 2
+    assert runner.requests["lead"][1].prompt.endswith(FINAL_NUDGE.format(max_rounds=2))
+
+
+def test_a_shared_member_gets_the_replies_it_missed_when_the_panel_continues(
+    tmp_path: Path,
+) -> None:
+    spec, path = _stopped_mid_dispatch(tmp_path, visibility="shared")
+    runner = PanelRunner(
+        {
+            "lead": ["x\nNEXT: DONE"],
+            "cto": [],
+            "founder": ["F."],
+            "buyer": [],
+        }
+    )
+    _continue(spec, path, runner)
+    # The CTO answered before the stop; the founder had not seen that reply.
+    founder = runner.requests["founder"][0].prompt
+    assert founder.endswith("@cto:\nCTO says.\n\n@lead:\nQ?")
+
+
+def test_an_answered_panel_cannot_continue(tmp_path: Path) -> None:
+    from crossby.services.panel import PanelError, result_from_journal
+
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _spec(tmp_path)
+    journal = Journal("p")
+    run_panel(spec, runner=runner, journal=journal)
+    prior = result_from_journal(spec, journal.events)
+
+    assert prior.answered
+    with pytest.raises(PanelError, match="already has its final answer"):
+        run_panel(spec, runner=runner, resume=prior)
+
+
+def test_a_panel_continues_only_with_the_seats_it_started_with(tmp_path: Path) -> None:
+    from crossby.services.panel import PanelError, result_from_journal
+
+    spec, path = _stopped_mid_dispatch(tmp_path)
+    changed = spec.model_copy(
+        update={
+            "members": (
+                spec.members[0].model_copy(update={"backend": CliBackend(tool="claude")}),
+                *spec.members[1:],
+            )
+        }
+    )
+    with pytest.raises(PanelError, match="these differ: @cto"):
+        result_from_journal(changed, read_journal(path))
+
+
+def test_the_api_continues_a_panel_from_its_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby import api
+    from crossby.services import panel as panel_service
+
+    spec, path = _stopped_mid_dispatch(tmp_path)
+    runner = PanelRunner({"lead": ["Done.\nNEXT: DONE"], "cto": [], "founder": ["F."], "buyer": []})
+    monkeypatch.setattr(panel_service, "HeadlessTurnRunner", lambda: runner)
+    seen: list[str] = []
+
+    result = api.continue_panel(spec, path, on_event=lambda event: seen.append(event.type.value))
+
+    assert result.answered
+    assert seen[0] == "conversation.continued"
+    assert api.read_panel(spec, path).final_answer == "Done."
+    with pytest.raises(api.PanelError, match="already has its final answer"):
+        api.continue_panel(spec, path)
+
+
+def test_a_message_held_back_at_the_limit_is_sent_when_the_panel_continues(
+    tmp_path: Path,
+) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    runner = PanelRunner(
+        {
+            "lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto"],
+            "cto": ["A1"],
+            "founder": [],
+            "buyer": [],
+        }
+    )
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    stopped = run_panel(spec, runner=runner, journal=journal)
+    journal.close()
+    assert stopped.stop_reason is StopReason.ROUND_LIMIT
+    assert result_from_journal(spec, read_journal(path)).dispatches == 1
+
+    runner = PanelRunner(
+        {"lead": ["Verdict.\nNEXT: DONE"], "cto": ["A2"], "founder": [], "buyer": []}
+    )
+    result, _events = _continue(spec, path, runner)
+
+    # Q2 was committed at the limit but never sent: it goes now, as the one more
+    # message allowed, so the lead's next turn is its final one.
+    assert [r.prompt for r in runner.requests["cto"]] == ["Q2"]
+    assert runner.requests["lead"][0].prompt == f"@cto:\nA2\n\n{FINAL_NUDGE.format(max_rounds=2)}"
+    assert result.answered and result.dispatches == 2
+
+
+def test_a_persons_missed_reply_survives_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @all", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _with_human_member(tmp_path).model_copy(update={"human_timeout_seconds": 0.3})
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, inputs=HumanInput(), journal=journal)
+
+    read = result_from_journal(spec, journal.events)
+    assert read.member_failures == live.member_failures == [(1, "dana", "no reply within 0.3s")]
+
+
+def test_cancel_while_a_person_leads_ends_the_panel_interrupted(tmp_path: Path) -> None:
+    from crossby.services.panel import HumanBackend
+
+    spec = _spec(tmp_path).model_copy(update={"lead": Lead(backend=HumanBackend())})
+    cancel = threading.Event()
+    inputs = HumanInput()
+    runner = PanelRunner({"cto": [], "founder": [], "buyer": []})
+    threading.Timer(0.2, cancel.set).start()
+
+    result = run_panel(spec, runner=runner, inputs=inputs, cancel=cancel)
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert result.error == "the panel was cancelled"
+
+
+def test_a_reply_seen_while_continuing_is_not_sent_again(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec, path = _stopped_mid_dispatch(tmp_path, visibility="shared")
+    cancel = threading.Event()
+
+    class CancelOnLead(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            if request.working_dir.name == "lead":
+                cancel.set()
+                return _failed(tool)
+            return super().run(tool, request, cancel_event, on_event)
+
+    runner = CancelOnLead({"lead": [], "cto": [], "founder": ["F."], "buyer": []})
+    journal, events = Journal.reopen(path)
+    stopped = run_panel(
+        spec,
+        runner=runner,
+        journal=journal,
+        resume=result_from_journal(spec, events),
+        cancel=cancel,
+    )
+    journal.close()
+    assert stopped.stop_reason is StopReason.INTERRUPTED
+
+    # The founder saw the CTO's reply while the panel continued; it is not owed again.
+    read = result_from_journal(spec, read_journal(path))
+    assert read.unseen == stopped.unseen
+    assert read.unseen["founder"] == ()
+    assert read.unseen["cto"] == (("founder", "F."),)
+    assert read.unseen["buyer"] == (("cto", "CTO says."), ("founder", "F."))
+
+
+def test_a_failure_on_a_held_back_message_keeps_its_message_number(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    run_panel(
+        spec,
+        runner=PanelRunner(
+            {
+                "lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto @founder"],
+                "cto": ["A1"],
+                "founder": [],
+                "buyer": [],
+            }
+        ),
+        journal=journal,
+    )
+    journal.close()
+
+    runner = PanelRunner(
+        {"lead": ["Done.\nNEXT: DONE"], "cto": [None], "founder": ["F2"], "buyer": []}
+    )
+    result, _events = _continue(spec, path, runner)
+
+    assert [(n, who) for n, who, _why in result.member_failures] == [(2, "cto")]
+    assert result_from_journal(spec, read_journal(path)).member_failures == result.member_failures
+
+
+class _FailThenCancel(PanelRunner):
+    """The CTO's turn fails on its own; the founder's runs until the panel is cancelled."""
+
+    def __init__(self, script: dict[str, list[str | None]], cancel: threading.Event) -> None:
+        super().__init__(script)
+        self.cancel = cancel
+
+    def run(
+        self,
+        tool: AIToolID,
+        request: HeadlessSessionRequest,
+        cancel_event: threading.Event,
+        on_event: Any = None,
+    ) -> HeadlessSessionResult:
+        if request.working_dir.name == "founder":
+            with self.lock:
+                self.requests["founder"].append(request)
+            self.cancel.set()
+            status = HeadlessTerminalStatus.CANCELLED
+            return HeadlessSessionResult(
+                tool=tool,
+                version="9.9.9",
+                status=status,
+                events=(
+                    HeadlessEvent(
+                        sequence=1, kind=HeadlessEventKind.TERMINAL, terminal_status=status
+                    ),
+                ),
+                duration_seconds=0.1,
+            )
+        return super().run(tool, request, cancel_event, on_event)
+
+
+def test_a_genuine_failure_is_kept_when_another_member_is_cancelled(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    cancel = threading.Event()
+    runner = _FailThenCancel(
+        {"lead": ["Q\nNEXT: ASK @cto @founder"], "cto": [None], "founder": [], "buyer": []},
+        cancel,
+    )
+    spec = _spec(tmp_path, concurrency=1)
+    journal = Journal("p")
+    result = run_panel(spec, runner=runner, journal=journal, cancel=cancel)
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert [(n, who) for n, who, _why in result.member_failures] == [(1, "cto")]
+    assert result_from_journal(spec, journal.events).member_failures == result.member_failures
+
+
+def test_continuing_with_no_rounds_added_only_lets_the_lead_finish(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec, path = _stopped_mid_dispatch(tmp_path)
+    runner = PanelRunner(
+        {"lead": ["Verdict.\nNEXT: DONE"], "cto": [], "founder": ["F."], "buyer": []}
+    )
+    journal, events = Journal.reopen(path)
+    result = run_panel(
+        spec,
+        runner=runner,
+        journal=journal,
+        resume=result_from_journal(spec, events),
+        added_rounds=0,
+    )
+    journal.close()
+
+    # The founder still answers the message already sent; then the lead must finish.
+    assert [r.prompt for r in runner.requests["founder"]] == [_first(spec, "founder", "Q?")]
+    assert runner.requests["lead"][0].prompt.endswith(FINAL_NUDGE.format(max_rounds=1))
+    assert result.answered and result.dispatches == 1
+    assert journal.events[0].data["added_rounds"] == 0
+
+
+def test_with_no_rounds_added_a_message_held_back_at_the_limit_is_not_sent(tmp_path: Path) -> None:
+    from crossby.services.panel import PanelError, result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    path = tmp_path / "events.jsonl"
+    journal = Journal("p", path=path)
+    run_panel(
+        spec,
+        runner=PanelRunner(
+            {
+                "lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto"],
+                "cto": ["A1"],
+                "founder": [],
+                "buyer": [],
+            }
+        ),
+        journal=journal,
+    )
+    journal.close()
+
+    runner = PanelRunner({"lead": ["Verdict.\nNEXT: DONE"], "cto": [], "founder": [], "buyer": []})
+    journal, events = Journal.reopen(path)
+    prior = result_from_journal(spec, events)
+    result = run_panel(spec, runner=runner, journal=journal, resume=prior, added_rounds=0)
+    journal.close()
+
+    assert runner.requests["cto"] == []
+    assert runner.requests["lead"][0].prompt == FINAL_NUDGE.format(max_rounds=1)
+    assert result.answered and result.dispatches == 1
+    with pytest.raises(PanelError, match="for continuing a panel"):
+        run_panel(spec, runner=runner, added_rounds=1)
+
+
+def test_a_person_queued_behind_a_stopped_turn_is_never_asked(tmp_path: Path) -> None:
+    cancel = threading.Event()
+    asked: list[str] = []
+
+    class CancelOnCto(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            if request.working_dir.name == "cto":
+                cancel.set()
+                return _failed(tool)
+            return super().run(tool, request, cancel_event, on_event)
+
+    def respond(request: InputRequest) -> HumanReply:
+        asked.append(request.participant)
+        return HumanReply("Too late.")
+
+    spec = _with_human_member(tmp_path).model_copy(update={"concurrency": 1})
+    runner = CancelOnCto({"lead": ["Q\nNEXT: ASK @all"], "cto": [], "founder": [], "buyer": []})
+    journal = Journal("p")
+    result = run_panel(
+        spec, runner=runner, inputs=HumanInput(respond), journal=journal, cancel=cancel
+    )
+
+    assert result.stop_reason is StopReason.INTERRUPTED
+    assert asked == []
+    assert all(event.type is not EventType.INPUT_REQUESTED for event in journal.events)
+    assert [turn.sender for turn in result.turns] == ["lead"]
+
+
+def test_a_turns_usage_survives_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.models.ai import TokenUsage
+    from crossby.services.panel import result_from_journal
+
+    class Counting(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            result = super().run(tool, request, cancel_event, on_event)
+            used = TokenUsage(input_tokens=11, output_tokens=7, tool_steps=3)
+            return result.model_copy(update={"usage": used})
+
+    runner = Counting(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _spec(tmp_path)
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, journal=journal)
+
+    read = result_from_journal(spec, journal.events)
+    assert [turn.usage for turn in read.turns] == [turn.usage for turn in live.turns]
+    assert read.turns[1].usage == TokenUsage(input_tokens=11, output_tokens=7, tool_steps=3)
+
+
+def test_failures_found_outside_a_session_survive_reading_the_journal(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    now = [0.0]
+
+    class Slow(PanelRunner):
+        def run(
+            self,
+            tool: AIToolID,
+            request: HeadlessSessionRequest,
+            cancel_event: threading.Event,
+            on_event: Any = None,
+        ) -> HeadlessSessionResult:
+            result = super().run(tool, request, cancel_event, on_event)
+            if request.working_dir.name == "cto":
+                now[0] += 200  # the CTO's turn uses up the panel's time,
+                return result.model_copy(update={"session_id": None})  # and gives no session
+            return result
+
+    runner = Slow(
+        {"lead": ["Q\nNEXT: ASK @cto @founder"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    spec = _spec(tmp_path, concurrency=1, timeout_seconds=100)
+    journal = Journal("p")
+    live = run_panel(spec, runner=runner, journal=journal, clock=lambda: now[0])
+
+    reasons = {who: why for _n, who, why in live.member_failures}
+    assert set(reasons) == {"cto", "founder"}
+    assert "reported no session to resume" in reasons["cto"]
+    assert "time limit" in reasons["founder"]
+    assert result_from_journal(spec, journal.events).member_failures == live.member_failures
+
+
+def test_a_held_back_message_is_tracked_across_several_continuations(tmp_path: Path) -> None:
+    from crossby.services.panel import result_from_journal
+
+    spec = _spec(tmp_path, max_rounds=1)
+    path = tmp_path / "events.jsonl"
+
+    def go(script: dict[str, list[str | None]], added: int | None = None) -> Any:
+        runner = PanelRunner({"cto": [], "founder": [], "buyer": [], **script})
+        if not path.exists():
+            journal = Journal("p", path=path)
+            result = run_panel(spec, runner=runner, journal=journal)
+        else:
+            journal, events = Journal.reopen(path)
+            prior = result_from_journal(spec, events)
+            result = run_panel(
+                spec, runner=runner, journal=journal, resume=prior, added_rounds=added
+            )
+        journal.close()
+        return result, runner
+
+    first, _ = go({"lead": ["Q1\nNEXT: ASK @cto", "Q2\nNEXT: ASK @cto"], "cto": ["A1"]})
+    assert first.stop_reason is StopReason.ROUND_LIMIT and first.held_back
+
+    # Nothing added: the lead is told to finish, asks again instead, and that is held back.
+    again, runner = go({"lead": ["Q3\nNEXT: ASK @cto"]}, added=0)
+    assert runner.requests["cto"] == [] and again.held_back
+
+    # One added: only the replacement goes out; then the lead fails.
+    failed, runner = go({"lead": [None], "cto": ["A3"]}, added=1)
+    assert [r.prompt for r in runner.requests["cto"]] == ["Q3"]
+    assert failed.stop_reason is StopReason.FAILED and not failed.held_back
+    read = result_from_journal(spec, read_journal(path))
+    assert (read.dispatches, read.held_back) == (2, False)
+
+    # Continuing again sends nothing more: the CTO already answered Q3, and the lead
+    # is not told to finish early.
+    done, runner = go({"lead": ["Done.\nNEXT: DONE"]}, added=1)
+    assert runner.requests["cto"] == []
+    assert runner.requests["lead"][0].prompt == "@cto:\nA3"
+    assert done.answered and done.dispatches == 2

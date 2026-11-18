@@ -658,3 +658,39 @@ def test_a_recognized_failure_reason_and_reported_cost_reach_the_result(tmp_path
     )
     assert result.usage is not None and result.usage.reported_cost_usd == 0.0
     assert AskResult.model_validate_json(result.model_dump_json()) == result
+
+
+def test_a_resumed_preflight_checks_the_seat_as_a_later_panel_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crossby.ai_tools.headless import HeadlessUnsupportedError
+    from crossby.services.converse import PREFLIGHT_RESUME_ID
+
+    class Probe:
+        def __init__(self) -> None:
+            self.requests: list[HeadlessSessionRequest] = []
+
+        def preflight(
+            self, tool: AIToolID, request: HeadlessSessionRequest, timeout_seconds: float
+        ) -> HeadlessSessionPreflight:
+            self.requests.append(request)
+            raise HeadlessUnsupportedError(
+                "unattended resume is not verified on this build",
+                tool_id=tool,
+                capability=AbstractAITool.get(tool).capabilities().headless,
+            )
+
+    probe = Probe()
+    folder = _folder(tmp_path)
+    with pytest.raises(AskUnsupportedError, match="resume is not verified"):
+        ask_service.run_preflight(_ask_codex(folder), runner=probe, resumed=True)  # type: ignore[arg-type]
+    with pytest.raises(AskUnsupportedError):
+        ask_service.run_preflight(_ask_codex(folder), runner=probe)  # type: ignore[arg-type]
+    assert [request.resume_id for request in probe.requests] == [PREFLIGHT_RESUME_ID, None]
+    # A build whose resume is verified reports as usual.
+    _codex_cli(monkeypatch, _folder(tmp_path, "records"))
+    assert (
+        preflight(_ask_codex(folder), resumed=True)
+        .restriction(RestrictionChannel.FILE_EDITS)
+        .enforced
+    )

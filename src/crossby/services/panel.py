@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -63,13 +63,14 @@ from crossby.services.converse import (
     HeadlessTurnRunner,
     StopReason,
     TurnRunner,
+    _usage_data,
     check_depth,
     child_environment,
 )
 from crossby.services.workspaces import OwnedWorkspace
 
 if TYPE_CHECKING:
-    from crossby.services.journal import Journal
+    from crossby.services.journal import ConversationEvent, Journal
 
 PANEL_NOTICE_VERSION = 1
 MAX_MEMBERS = 16
@@ -179,14 +180,25 @@ class Member(_Frozen):
 
 
 class Lead(_Frozen):
-    """Who holds the goal: an agent running in ``folder`` with its normal policy, or a person."""
+    """Who holds the goal: an agent running in ``folder``, or a person.
+
+    An agent lead keeps its folder's normal unattended policy, unless
+    ``read_only`` is set: it then runs under its tool's verified read-only
+    profile and must have the panel's ``require_blocked`` channels blocked,
+    like a member, and a tool without such a profile is refused at preflight.
+    """
 
     backend: Backend
     folder: Path | None = None
+    read_only: bool = False
 
     @model_validator(mode="after")
     def _seat_is_coherent(self) -> Lead:
-        if not isinstance(self.backend, HumanBackend) and self.folder is None:
+        if isinstance(self.backend, HumanBackend):
+            if self.read_only:
+                raise ValueError("a person leading a panel runs no session to make read-only")
+            return self
+        if self.folder is None:
             raise ValueError("an agent lead needs a folder")
         return self
 
@@ -463,6 +475,15 @@ class PanelResult:
     answered_at_limit: bool = False
     # Messages the lead actually sent to members.
     dispatches: int = 0
+    # The highest turn number used, failed attempts included: a continued
+    # panel numbers its turns after it.
+    last_turn: int = 0
+    # In a shared panel: the other members' replies each member has not been
+    # sent yet, as ``(member id, text)``; a continued panel sends them first.
+    unseen: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    # The lead's last message was committed at the message limit and never sent;
+    # a continued panel sends it first, if any messages are added.
+    held_back: bool = False
     # Set by crossby.api.panel: why the events file is missing or incomplete,
     # and each on_event sink that raised and was dropped.
     journal_error: str | None = None
@@ -551,6 +572,206 @@ def member_message(seat: _Seat, body: str, *, shared: bool) -> str:
     return f"{seen}\n\n@lead:\n{body}"
 
 
+# The error a panel stopped through ``cancel`` ends with.
+CANCELLED = "the panel was cancelled"
+
+
+def _roster_data(spec: PanelSpec) -> list[dict[str, Any]]:
+    """Every seat as ``conversation.started`` journals it."""
+    return [
+        {
+            "participant": "lead",
+            "tool": spec.lead.tool_name,
+            **_settings(spec.lead.backend),
+            "read_only": spec.lead.read_only,
+        },
+        *[
+            {
+                "participant": member.id,
+                "name": member.name,
+                "tool": member.tool_name,
+                **_settings(member.backend),
+                "read_only": not member.human,
+            }
+            for member in spec.members
+        ],
+    ]
+
+
+def _seats_of(data: Sequence[Mapping[str, Any]]) -> dict[str, tuple[Any, ...]]:
+    """Who sits where, as a continued panel must keep it: tool, model, effort, read-only."""
+    return {
+        str(item.get("participant")): (
+            item.get("tool"),
+            item.get("model"),
+            item.get("effort"),
+            bool(item.get("read_only")),
+        )
+        for item in data
+    }
+
+
+def _check_roster(spec: PanelSpec, journaled: PanelSpec | Sequence[Mapping[str, Any]]) -> None:
+    """Refuse to continue a panel with seats other than the ones it ran with."""
+    before = _seats_of(_roster_data(journaled) if isinstance(journaled, PanelSpec) else journaled)
+    now = _seats_of(_roster_data(spec))
+    if before == now:
+        return
+    changed = sorted(key for key in before.keys() | now.keys() if before.get(key) != now.get(key))
+    raise PanelError(
+        "A panel continues with the seats it started with; these differ: "
+        + ", ".join("lead" if key == "lead" else f"@{key}" for key in changed)
+    )
+
+
+def _missed_replies(
+    turns: Sequence[PanelTurn], member_ids: Sequence[str], breaks: Collection[int] = ()
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Each member's unseen replies in a shared panel, replayed from its committed turns.
+
+    As in a live panel: the replies to one message are delivered together, a
+    member that answers has seen everything sent before it, and every reply
+    then reaches the other members. ``breaks`` are the indexes in ``turns``
+    where a continuation began: replies on either side of one were delivered
+    apart, even when they answer the same message.
+    """
+    pending: dict[str, list[tuple[str, str]]] = {member_id: [] for member_id in member_ids}
+    group: list[PanelTurn] = []
+
+    def flush() -> None:
+        for turn in group:
+            pending[turn.sender].clear()
+        for turn in group:
+            for other in member_ids:
+                if other != turn.sender:
+                    pending[other].append((turn.sender, turn.text))
+        group.clear()
+
+    for index, turn in enumerate(turns):
+        if turn.sender == "lead" or index in breaks:
+            flush()
+        if turn.sender != "lead" and turn.sender in pending:
+            group.append(turn)
+    flush()
+    return {member_id: tuple(items) for member_id, items in pending.items()}
+
+
+def result_from_journal(spec: PanelSpec, events: Sequence[ConversationEvent]) -> PanelResult:
+    """Rebuild a panel's result from its journal, as of its last event.
+
+    ``spec`` is the panel as the caller would run it again: its seats must be
+    the ones the journal names, each with the same tool, model and effort. A
+    panel that never recorded its end is reported as interrupted.
+    """
+    from crossby.services.journal import EventType
+
+    started = next((e for e in events if e.type is EventType.CONVERSATION_STARTED), None)
+    if started is None or started.data.get("kind") != "panel":
+        raise PanelError("The journal holds no panel.")
+    _check_roster(spec, started.data.get("participants") or [])
+    sessions: dict[str, str | None] = {"lead": None, **{m.id: None for m in spec.members}}
+    turns: list[PanelTurn] = []
+    failures: list[tuple[int, str, str]] = []
+    dispatches = 0
+    held = False
+    breaks: set[int] = set()
+    last_turn = 0
+    stop_reason = StopReason.INTERRUPTED
+    error: str | None = "the panel ended without recording its outcome"
+    answered_at_limit = False
+    finished_at = events[-1].ts
+
+    def moment(value: object, fallback: datetime) -> datetime:
+        return datetime.fromisoformat(value) if isinstance(value, str) else fallback
+
+    for event in events:
+        data = event.data
+        number = data.get("turn")
+        if isinstance(number, int):
+            last_turn = max(last_turn, number)
+        if event.type is EventType.CONVERSATION_CONTINUED:
+            stop_reason = StopReason.INTERRUPTED
+            error = "the panel ended without recording its outcome"
+            breaks.add(len(turns))
+            # A continuation that adds messages first sends one held back at the limit.
+            if held and int(data.get("added_rounds") or 0) > 0:
+                dispatches += 1
+                held = False
+        elif event.type is EventType.MESSAGE_COMMITTED:
+            turn = PanelTurn(
+                number=int(data["turn"]),
+                sender=str(data["participant"]),
+                text=str(data["text"]),
+                recipients=tuple(data.get("recipients") or ()),
+                done=bool(data.get("done")),
+                duration_seconds=float(data.get("duration_seconds") or 0.0),
+                denials=tuple(data.get("denials") or ()),
+                usage=TokenUsage.model_validate(data["usage"]) if data.get("usage") else None,
+            )
+            turns.append(turn)
+            if turn.sender == "lead" and not turn.done:
+                dispatches += 1
+        elif event.type is EventType.TURN_FINISHED:
+            participant = str(data.get("participant"))
+            status = data.get("status")
+            failed = data.get("error")
+            session = data.get("session_id")
+            if session and status == "succeeded" and not failed and not sessions.get(participant):
+                sessions[participant] = str(session)
+            if participant != "lead" and failed and status != "cancelled":
+                failures.append((dispatches, participant, str(failed)))
+        elif event.type is EventType.INPUT_RESOLVED:
+            # A person's seat has no session: its missed reply is recorded here.
+            participant = str(data.get("participant"))
+            status = data.get("status")
+            if participant != "lead" and status not in {"answered", "cancelled"}:
+                reason = data.get("error") or {
+                    "timed_out": "no reply in time",
+                    "empty": "the reply was empty",
+                }.get(str(status), str(status))
+                failures.append((dispatches, participant, str(reason)))
+        elif event.type is EventType.CONVERSATION_FINISHED:
+            stop_reason = StopReason(data["stop_reason"])
+            error = data.get("error")
+            answered_at_limit = bool(data.get("answered_at_limit"))
+            finished_at = moment(data.get("finished_at"), event.ts)
+            for key, session in (data.get("sessions") or {}).items():
+                if session:
+                    sessions[str(key)] = str(session)
+            # What was really sent: at the message limit the lead's last message
+            # is committed but never sent.
+            rounds = data.get("rounds")
+            if isinstance(rounds, int):
+                dispatches = rounds
+            if "held_back" in data:
+                held = bool(data["held_back"])
+            elif stop_reason is StopReason.ROUND_LIMIT:
+                # A journal from before `held_back` was recorded.
+                held = bool(turns) and turns[-1].sender == "lead" and not turns[-1].done
+    if turns and turns[-1].done and stop_reason is not StopReason.ANSWERED:
+        # The final answer was committed but the run ended before recording it.
+        stop_reason, error = StopReason.ANSWERED, None
+    return PanelResult(
+        spec=spec,
+        started_at=moment(started.data.get("started_at"), started.ts),
+        finished_at=finished_at,
+        stop_reason=stop_reason,
+        turns=turns,
+        error=error,
+        member_failures=failures,
+        sessions=sessions,
+        answered_at_limit=answered_at_limit,
+        dispatches=dispatches,
+        last_turn=last_turn,
+        held_back=held and stop_reason is not StopReason.ANSWERED,
+        unseen=(
+            _missed_replies(turns, [m.id for m in spec.members], breaks)
+            if spec.visibility == "shared"
+            else {}
+        ),
+    )
+
+
 def run_panel(
     spec: PanelSpec,
     *,
@@ -558,11 +779,23 @@ def run_panel(
     journal: Journal | None = None,
     inputs: HumanInput | None = None,
     clock: Callable[[], float] = monotonic,
+    cancel: threading.Event | None = None,
+    resume: PanelResult | None = None,
+    added_rounds: int | None = None,
 ) -> PanelResult:
     """Run a panel until the lead gives its final answer, or a limit stops it.
 
     Human seats get their replies from ``inputs`` (required when the panel has
     one): each turn emits ``input.requested`` and then ``input.resolved``.
+
+    Setting ``cancel`` stops the running sessions and starts no new one; the
+    panel then ends ``interrupted``, keeping every reply already committed.
+
+    ``resume`` continues a panel that stopped without a final answer (see
+    :func:`result_from_journal`): every seat resumes its own session, members
+    that had not answered the lead's last message are asked again, and the
+    lead may send up to ``added_rounds`` more messages (by default
+    ``spec.max_rounds``); with 0 it may only give its final answer.
     """
     from crossby.ai_tools.headless import HeadlessSessionError
     from crossby.services.journal import EventType
@@ -571,20 +804,42 @@ def run_panel(
     has_human = spec.lead.human or any(member.human for member in spec.members)
     if has_human and inputs is None:
         raise PanelError("A panel with a human seat needs a HumanInput.")
+    if added_rounds is not None and (resume is None or added_rounds < 0):
+        raise PanelError("added_rounds is for continuing a panel, and cannot be negative.")
+    if resume is not None:
+        if resume.answered or (resume.turns and resume.turns[-1].done):
+            raise PanelError("That panel already has its final answer.")
+        _check_roster(spec, resume.spec)
     human_inputs = inputs or HumanInput()
     active: TurnRunner = runner or HeadlessTurnRunner()
-    started_at = datetime.now(tz=UTC)
+    started_at = resume.started_at if resume is not None else datetime.now(tz=UTC)
     deadline = clock() + spec.timeout_seconds
     member_ids = [member.id for member in spec.members]
     seats = {member.id: _Seat(member) for member in spec.members}
     lead_session: list[str | None] = [None]
-    turns: list[PanelTurn] = []
-    failures: list[tuple[int, str, str]] = []
-    cancel = threading.Event()
+    turns: list[PanelTurn] = list(resume.turns) if resume is not None else []
+    failures: list[tuple[int, str, str]] = (
+        list(resume.member_failures) if resume is not None else []
+    )
+    if cancel is None:
+        cancel = threading.Event()
     shared = spec.visibility == "shared"
     answered_at_limit = [False]
-    sent = [0]
-    next_turn = [1]
+    sent = [resume.dispatches if resume is not None else 0]
+    # Messages the lead may send in all: those already sent plus this run's.
+    added = spec.max_rounds if added_rounds is None else added_rounds
+    cap = sent[0] + added
+    next_turn = [(resume.last_turn if resume is not None else 0) + 1]
+    # Whether the lead's last message is committed but unsent, held back at the limit.
+    held = [resume.held_back if resume is not None else False]
+    if resume is not None:
+        lead_session[0] = resume.sessions.get("lead")
+        for member_id, seat in seats.items():
+            seat.session_id = resume.sessions.get(member_id)
+        if shared:
+            for member_id, missed in resume.unseen.items():
+                if member_id in seats:
+                    seats[member_id].pending.extend(missed)
 
     def claim() -> int:
         """The next turn number: every lead turn and member attempt gets one."""
@@ -603,6 +858,11 @@ def run_panel(
         return {"lead": lead_session[0], **{key: seat.session_id for key, seat in seats.items()}}
 
     def finish(reason: StopReason, error: str | None = None) -> PanelResult:
+        if reason is StopReason.ROUND_LIMIT and turns:
+            last = turns[-1]
+            held[0] = held[0] or (last.sender == "lead" and not last.done)
+        if reason is StopReason.ANSWERED:
+            held[0] = False
         result = PanelResult(
             spec=spec,
             started_at=started_at,
@@ -614,6 +874,9 @@ def run_panel(
             sessions=sessions(),
             answered_at_limit=answered_at_limit[0],
             dispatches=sent[0],
+            last_turn=next_turn[0] - 1,
+            unseen={key: tuple(seat.pending) for key, seat in seats.items()} if shared else {},
+            held_back=held[0],
         )
         emit(
             EventType.CONVERSATION_FINISHED,
@@ -621,6 +884,7 @@ def run_panel(
             error=error,
             answered_at_limit=answered_at_limit[0],
             rounds=result.dispatches,
+            held_back=held[0],
             sessions=result.sessions,
             finished_at=result.finished_at.isoformat(),
         )
@@ -639,6 +903,8 @@ def run_panel(
         minimum_version: str | None = None,
         mcp_servers: Mapping[str, dict[str, object]] | None = None,
     ) -> HeadlessSessionRequest:
+        if cancel.is_set():
+            raise _StopError(StopReason.INTERRUPTED, CANCELLED)
         left = remaining()
         if left < MIN_TURN_SECONDS:
             raise _StopError(
@@ -677,6 +943,9 @@ def run_panel(
         participant: str, kind: Literal["lead", "member"], number: int, message: str | None
     ) -> tuple[HumanReply | None, str | None, float]:
         """One human turn: ``(reply, failure, seconds)``."""
+        if cancel.is_set():
+            # Queued behind a turn that was stopped: the person is never asked.
+            return None, "the reply was cancelled", 0.0
         request_id = f"{journal.run_id if journal is not None else 'panel'}-{number}-{participant}"
         request = InputRequest(request_id, participant, kind, number, message)
         # Open before announcing: a UI may submit as soon as it sees the event.
@@ -694,12 +963,6 @@ def run_panel(
         reply, status = human_inputs._await(request, left, cancel)
         if reply is not None and not reply.text.strip():
             reply, status = None, "empty"
-        emit(
-            EventType.INPUT_RESOLVED,
-            request_id=request_id,
-            participant=participant,
-            status=status,
-        )
         failure = (
             None
             if reply is not None
@@ -708,6 +971,14 @@ def run_panel(
                 "cancelled": "the reply was cancelled",
                 "empty": "the reply was empty",
             }.get(status, status)
+        )
+        emit(
+            EventType.INPUT_RESOLVED,
+            request_id=request_id,
+            participant=participant,
+            status=status,
+            # Why there is no reply, as the lead is told: a continued panel keeps it.
+            error=failure,
         )
         return reply, failure, clock() - begun
 
@@ -726,9 +997,18 @@ def run_panel(
         return handle
 
     def run_one(
-        participant: str, number: int, built: HeadlessSessionRequest, tool: Any
+        participant: str,
+        number: int,
+        built: HeadlessSessionRequest,
+        tool: Any,
+        *,
+        needs_session: bool = False,
     ) -> tuple[HeadlessSessionResult | None, str | None, float]:
-        """Run one session; ``(result, failure, seconds)``. Never raises a session error."""
+        """Run one session; ``(result, failure, seconds)``. Never raises a session error.
+
+        ``needs_session``: a seat's first turn, whose session its later turns resume;
+        one that reports none fails, and its ``turn.finished`` says so.
+        """
         emit(
             EventType.TURN_STARTED,
             turn=number,
@@ -761,6 +1041,8 @@ def run_panel(
         elif not text:
             failure = "the session returned no text"
         session = result.session_id or result.thread_id or result.conversation_id
+        if failure is None and needs_session and session is None:
+            failure = f"{tool.value} reported no session to resume"
         emit(
             EventType.TURN_FINISHED,
             turn=number,
@@ -785,11 +1067,14 @@ def run_panel(
             done=turn.done,
             duration_seconds=round(turn.duration_seconds, 3),
             denials=list(turn.denials),
+            usage=_usage_data(turn.usage),
         )
 
     def human_lead_turn(message: str | None, number: int) -> tuple[str, Dispatch, float]:
         reply, failure, seconds = ask_human("lead", "lead", number, message)
         if reply is None:
+            if cancel.is_set():
+                raise _StopError(StopReason.INTERRUPTED, CANCELLED)
             if remaining() <= 0:
                 # The panel's time ran out, not the person's own reply window.
                 raise _StopError(
@@ -826,10 +1111,12 @@ def run_panel(
             spec.lead.backend,
             spec.lead.folder,
             resume_id=lead_session[0],
-            read_only=False,
+            read_only=spec.lead.read_only,
         )
         result, failure, seconds = run_one("lead", number, built, spec.lead.backend.tool)
         if result is None or failure is not None:
+            if cancel.is_set():
+                raise _StopError(StopReason.INTERRUPTED, CANCELLED)
             if remaining() <= 0:
                 raise _StopError(
                     StopReason.TIMEOUT, f"panel time limit reached during turn {number}"
@@ -874,17 +1161,28 @@ def run_panel(
                 mcp_servers=member_servers(member),
             )
         except _StopError as stop:
-            # Queued past the deadline: this attempt fails, and the members
-            # who already answered keep their replies.
+            # Queued past the deadline, or stopped: this attempt never starts, and
+            # the members who already answered keep their replies. Journaled, so a
+            # panel read back keeps the failure.
+            emit(
+                EventType.TURN_FINISHED,
+                turn=number,
+                participant=member.id,
+                status="cancelled" if stop.reason is StopReason.INTERRUPTED else "failed",
+                error=stop.error,
+                duration_seconds=0.0,
+            )
             return member.id, None, stop.error, 0.0, None
-        result, failure, seconds = run_one(member.id, number, built, member.backend.tool)
+        result, failure, seconds = run_one(
+            member.id,
+            number,
+            built,
+            member.backend.tool,
+            needs_session=seat.session_id is None,
+        )
         text = (result.final_text or "").strip() if result is not None else None
         if failure is None and result is not None and seat.session_id is None:
-            handle = result.session_id or result.thread_id or result.conversation_id
-            if handle is None:
-                failure = f"{member.backend.tool.value} reported no session to resume"
-            else:
-                seat.session_id = handle
+            seat.session_id = result.session_id or result.thread_id or result.conversation_id
         if failure is None:
             with lock:
                 seat.pending.clear()
@@ -907,7 +1205,9 @@ def run_panel(
             tuple[str, CliBackend, Path, bool, str | None, dict[str, dict[str, object]]]
         ] = []
         if isinstance(spec.lead.backend, CliBackend) and spec.lead.folder is not None:
-            checks.append(("lead", spec.lead.backend, spec.lead.folder, False, None, {}))
+            checks.append(
+                ("lead", spec.lead.backend, spec.lead.folder, spec.lead.read_only, None, {})
+            )
         for member in spec.members:
             if isinstance(member.backend, CliBackend):
                 folder, minimum = member_folder(member)
@@ -945,10 +1245,22 @@ def run_panel(
                 ),
             )
 
-    def fan_out(body: str, recipients: tuple[str, ...], dispatch: int) -> str:
+    def fan_out(
+        body: str,
+        recipients: tuple[str, ...],
+        dispatch: int,
+        answered: Mapping[str, str] | None = None,
+    ) -> str:
+        """Send ``body`` to ``recipients``; the lead's next message, from all their replies.
+
+        Members in ``answered`` (a continued panel) already replied to this
+        message: they are not asked again, and their replies come back as given.
+        """
+        answered = answered or {}
+        asking = tuple(member_id for member_id in recipients if member_id not in answered)
         # Each member's attempt gets its own turn number, kept when its reply
         # is committed; a failed attempt's number is never reused.
-        numbers = {member_id: claim() for member_id in recipients}
+        numbers = {member_id: claim() for member_id in asking}
         outcomes: dict[str, tuple[str | None, str | None, float, HeadlessSessionResult | None]] = {}
         unexpected: BaseException | None = None
         interrupted = False
@@ -963,10 +1275,10 @@ def run_panel(
                 return
             outcomes[member_id] = (text, failure, seconds, result)
 
-        with ThreadPoolExecutor(max_workers=min(spec.concurrency, len(recipients))) as pool:
+        with ThreadPoolExecutor(max_workers=max(min(spec.concurrency, len(asking)), 1)) as pool:
             futures: dict[Future[Any], str] = {
                 pool.submit(member_turn, seats[member_id], body, numbers[member_id]): member_id
-                for member_id in recipients
+                for member_id in asking
             }
             pending_futures = set(futures)
             try:
@@ -989,7 +1301,12 @@ def run_panel(
                 if member_id not in outcomes and not future.cancelled():
                     collect(future, member_id)
         replies: list[tuple[str, str | None, str | None]] = []
+        # Stopped through ``cancel`` (Ctrl-C notes its failures, as it always has).
+        stopped = cancel.is_set() and not interrupted
         for member_id in recipients:  # roster order
+            if member_id in answered:
+                replies.append((member_id, answered[member_id], None))
+                continue
             text, failure, seconds, result = outcomes.get(
                 member_id, (None, "interrupted before it started", 0.0, None)
             )
@@ -1010,6 +1327,10 @@ def run_panel(
                         for other in seats.values():
                             if other.member.id != member_id:
                                 other.pending.append((member_id, text))
+            elif stopped and (result is None or result.status is HeadlessTerminalStatus.CANCELLED):
+                # Stopped by ``cancel``, or never started: not a failure. It is
+                # asked again when the panel continues.
+                pass
             else:
                 failures.append((dispatch, member_id, failure or "no answer"))
             replies.append((member_id, text, failure))
@@ -1018,6 +1339,8 @@ def run_panel(
             raise KeyboardInterrupt
         if unexpected is not None:
             raise unexpected
+        if stopped:
+            raise _StopError(StopReason.INTERRUPTED, CANCELLED)
         if all(text is None for _member, text, _failure in replies):
             if remaining() < MIN_TURN_SECONDS:
                 # The panel's time ran out, not its members: nothing more can start.
@@ -1031,42 +1354,64 @@ def run_panel(
             )
         return combine_replies(replies)
 
-    emit(
-        EventType.CONVERSATION_STARTED,
-        goal=spec.goal,
-        kind="panel",
-        visibility=spec.visibility,
-        notice_version=PANEL_NOTICE_VERSION,
-        member_notice_version=MEMBER_NOTICE_VERSION,
-        participants=[
-            {
-                "participant": "lead",
-                "tool": spec.lead.tool_name,
-                **_settings(spec.lead.backend),
-                "read_only": False,
-            },
-            *[
-                {
-                    "participant": member.id,
-                    "name": member.name,
-                    "tool": member.tool_name,
-                    **_settings(member.backend),
-                    "read_only": not member.human,
-                }
-                for member in spec.members
-            ],
-        ],
-        max_rounds=spec.max_rounds,
-        started_at=started_at.isoformat(),
-    )
+    if resume is None:
+        emit(
+            EventType.CONVERSATION_STARTED,
+            goal=spec.goal,
+            kind="panel",
+            visibility=spec.visibility,
+            notice_version=PANEL_NOTICE_VERSION,
+            member_notice_version=MEMBER_NOTICE_VERSION,
+            participants=_roster_data(spec),
+            max_rounds=spec.max_rounds,
+            started_at=started_at.isoformat(),
+        )
+    else:
+        emit(
+            EventType.CONVERSATION_CONTINUED,
+            kind="panel",
+            previous_stop_reason=resume.stop_reason.value,
+            max_rounds=cap,
+            added_rounds=added,
+            timeout_seconds=spec.timeout_seconds,
+            turn_timeout_seconds=spec.turn_timeout_seconds,
+        )
+
+    def owed() -> str:
+        """A continued panel's next message for the lead.
+
+        Members that had not answered the lead's last message are asked it
+        again; with no message from the lead yet, it gets its opening.
+        """
+        last = next((turn for turn in reversed(turns) if turn.sender == "lead"), None)
+        if last is None:
+            return render_notice(spec)
+        replies = {
+            turn.sender: turn.text
+            for turn in turns
+            if turn.number > last.number and turn.sender != "lead"
+        }
+        if held[0]:
+            # Committed at the message limit, so never sent: it is sent now, as one
+            # of the messages added; with none added, the lead is asked to finish.
+            if sent[0] >= cap:
+                return FINAL_NUDGE.format(max_rounds=cap)
+            sent[0] += 1
+            held[0] = False
+        return fan_out(last.text, last.recipients, sent[0], answered=replies)
 
     try:
         preflight()
-        message = render_notice(spec)
-        dispatches = 0
-        first = True
+        first = not any(turn.sender == "lead" for turn in turns)
+        message = owed() if resume is not None else render_notice(spec)
+        dispatches = sent[0]
+        nudge = FINAL_NUDGE.format(max_rounds=cap)
+        if not first and dispatches == cap and not message.endswith(nudge):
+            message = f"{message}\n\n{nudge}"
         while True:
-            final = dispatches >= spec.max_rounds
+            if cancel.is_set():
+                raise _StopError(StopReason.INTERRUPTED, CANCELLED)
+            final = dispatches >= cap
             number = claim()
             if spec.lead.human:
                 body, dispatch, seconds = human_lead_turn(None if first else message, number)
@@ -1102,8 +1447,8 @@ def run_panel(
             dispatches += 1
             sent[0] = dispatches
             message = fan_out(body, dispatch.recipients, dispatches)
-            if dispatches == spec.max_rounds:
-                message = f"{message}\n\n{FINAL_NUDGE.format(max_rounds=spec.max_rounds)}"
+            if dispatches == cap:
+                message = f"{message}\n\n{FINAL_NUDGE.format(max_rounds=cap)}"
     except _StopError as stop:
         return finish(stop.reason, stop.error)
     except KeyboardInterrupt:
@@ -1145,7 +1490,12 @@ def render_panel_transcript(result: PanelResult) -> str:
     from crossby.services.converse import _fenced
 
     spec = result.spec
-    lead = "a person" if spec.lead.human else f"{spec.lead.tool_name}, in `{spec.lead.folder}`"
+    lead = (
+        "a person"
+        if spec.lead.human
+        else f"{spec.lead.tool_name}{', read-only' if spec.lead.read_only else ''}, "
+        f"in `{spec.lead.folder}`"
+    )
     lines = ["# Panel", "", f"- Lead: {lead}"]
     for member in spec.members:
         name = f" ({member.name})" if member.name else ""
@@ -1184,6 +1534,7 @@ def render_panel_transcript(result: PanelResult) -> str:
 
 
 __all__ = [
+    "CANCELLED",
     "FINAL_NUDGE",
     "MAX_MEMBERS",
     "MEMBER_NOTICE",
@@ -1209,5 +1560,6 @@ __all__ = [
     "render_member_notice",
     "render_notice",
     "render_panel_transcript",
+    "result_from_journal",
     "run_panel",
 ]
