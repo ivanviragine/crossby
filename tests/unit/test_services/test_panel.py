@@ -1512,3 +1512,63 @@ def test_a_held_back_message_is_tracked_across_several_continuations(tmp_path: P
     assert runner.requests["cto"] == []
     assert runner.requests["lead"][0].prompt == "@cto:\nA3"
     assert done.answered and done.dispatches == 2
+
+
+@pytest.mark.parametrize(
+    ("tool", "granted"),
+    [
+        ("claude", True),  # takes the folders on its command line
+        ("codex", False),  # verified to read any path: nothing to grant
+    ],
+)
+def test_a_member_can_be_granted_folders_to_read(tmp_path: Path, tool: str, granted: bool) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    spec = _spec(tmp_path)
+    members = (
+        spec.members[0].model_copy(
+            update={"backend": CliBackend(tool=tool), "readable_dirs": (project,)}
+        ),
+        *spec.members[1:],
+    )
+    spec = spec.model_copy(update={"members": members})
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    journal = Journal("p")
+    run_panel(spec, runner=runner, journal=journal)
+
+    expected = (project,) if granted else ()
+    assert runner.requests["cto"][0].trusted_dirs == expected
+    probe = next(p for p in runner.preflights if p.working_dir.name == "cto")
+    assert probe.trusted_dirs == expected
+    assert runner.requests["lead"][0].trusted_dirs == ()
+    roster = journal.events[0].data["participants"]
+    assert roster[1]["readable_dirs"] == [str(project)]
+
+
+def test_a_member_whose_tool_cannot_be_granted_folders_fails_before_it_starts(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    spec = _spec(tmp_path)
+    members = (
+        spec.members[0].model_copy(
+            update={"backend": CliBackend(tool="opencode"), "readable_dirs": (project,)}
+        ),
+        *spec.members[1:],
+    )
+    runner = PanelRunner({"lead": [], "cto": [], "founder": [], "buyer": []})
+    result = run_panel(spec.model_copy(update={"members": members}), runner=runner)
+
+    assert result.stop_reason is StopReason.FAILED
+    assert (result.error or "").startswith("@cto: opencode has no verified way to read folders")
+    assert runner.requests["lead"] == []
+
+
+def test_a_person_has_no_folders_to_read(tmp_path: Path) -> None:
+    from crossby.services.panel import HumanBackend
+
+    with pytest.raises(ValueError, match="has no folder"):
+        Member(id="dana", backend=HumanBackend(), readable_dirs=(tmp_path,))
