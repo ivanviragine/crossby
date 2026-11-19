@@ -644,12 +644,14 @@ Every result reports each channel as `enforced`, `not_enforced` or `unknown`, re
 | `shell_commands` | enforced | not enforced (sandboxed) | enforced | enforced | enforced | enforced |
 | `hooks` | enforced | enforced | not enforced | not enforced | not enforced | not enforced |
 | `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
-| `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
+| `reads_outside_workspace` | unknown (enforced when isolated) | not enforced | not enforced | unknown | unknown | not enforced |
 | `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
-| `mcp_tools` | unknown | unknown | unknown | not enforced | unknown | unknown |
+| `mcp_tools` | unknown (enforced when isolated) | unknown | unknown | not enforced | unknown | unknown |
 | `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
 
 So a persona that must not change anything or run hooks (`require_blocked={file_edits, shell_writes, hooks}`) can run on Claude Code and Codex today. An empty persona folder isolates nothing by itself: on most tools the agent can still read elsewhere, reach the web, and use the user's MCP servers and connectors.
+
+**Isolation.** An ask or panel that requires `reads_outside_workspace` blocked runs isolated. On Claude Code 2.1.328 or later that session also gets `permissions.blockReadsOutsideWorkingDirectories`, so Read, Grep and Glob refuse any path outside its folder (and `--add-dir` folders) whatever allow rules say, and `--strict-mcp-config`, so none of the user's MCP servers load (claude.ai's Drive or Gmail, say). It reports `reads_outside_workspace` and `mcp_tools` as enforced. A session given MCP servers of its own reports both not enforced, since a server reads whatever it can reach. Claude Code still loads its own files outside the folder, such as the user's `~/.claude/CLAUDE.md` and skills. Other tools ignore isolation and are refused when it is required ([evidence](docs/unattended-headless-verification.md#isolation)).
 
 ## Launch options
 

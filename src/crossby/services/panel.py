@@ -928,6 +928,8 @@ def run_panel(
             read_only=read_only,
             mcp_servers=dict(mcp_servers or {}),
             trusted_dirs=trusted_dirs,
+            isolated=read_only
+            and RestrictionChannel.READS_OUTSIDE_WORKSPACE in spec.require_blocked,
             require_blocked=spec.require_blocked if read_only else frozenset(),
             allow_project_hooks=spec.allow_project_hooks,
             minimum_version=minimum_version,

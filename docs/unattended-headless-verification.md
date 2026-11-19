@@ -225,9 +225,9 @@ refused before anything is spawned.
 | `shell_commands` | enforced | not enforced | enforced | enforced | enforced | enforced |
 | `hooks` | enforced | enforced | not enforced | not enforced | not enforced | not enforced |
 | `web` | enforced | not enforced | enforced | unknown | not enforced | not enforced |
-| `reads_outside_workspace` | unknown | not enforced | not enforced | unknown | unknown | not enforced |
+| `reads_outside_workspace` | unknown (enforced when isolated) | not enforced | not enforced | unknown | unknown | not enforced |
 | `plugins` | unknown | unknown | unknown | unknown | not enforced | unknown |
-| `mcp_tools` | unknown | unknown | unknown | not enforced | unknown | unknown |
+| `mcp_tools` | unknown (enforced when isolated) | unknown | unknown | not enforced | unknown | unknown |
 | `connectors` | unknown | unknown | unknown | unknown | unknown | unknown |
 
 `enforced` is claimed only where the mechanism is crossby's own profile and
@@ -648,6 +648,24 @@ session anyway: `crossby ask cursor … --allow-project-hooks` in the probe
 project answered, and its `preToolUse` hook wrote the sentinel. User-level
 hooks (for example `~/.cursor/hooks.json`) are not inspected and still run;
 only `require_blocked={hooks}` (Claude Code, Codex CLI) excludes them.
+
+## Isolation
+
+Verified on Claude Code 2.1.328 (macOS), 2026-11-19. A folder held `notes.md`; a
+sibling folder held `secret.txt` with a marker string. Each session ran crossby's
+read-only profile (`--print --permission-prompts none --tools Read,Grep,Glob,Skill`),
+asked to read the secret with Read, search it with Grep and list it with Glob.
+
+| Session | Outside reads | MCP servers |
+| --- | --- | --- |
+| read-only profile, no allow rule | all three denied (they need approval, and nobody can give it) | the user's four claude.ai servers loaded |
+| read-only profile, `Read(//tmp/**)` and `Grep(//tmp/**)` allowed | **read the secret** | loaded |
+| plus `permissions.blockReadsOutsideWorkingDirectories` | all denied, with the allow rule | loaded |
+| plus `--strict-mcp-config` (the isolated profile), through `crossby.api.ask` with `require_blocked={reads_outside_workspace}` and an allow rule in the folder's own settings | all three denied; `notes.md` read; the answer did not contain the marker | none: "I have no `mcp__...` tools" |
+
+So the plain profile's denial rests on the absence of an allow rule, which a
+user's settings can add; the isolated profile does not. Preflight reported
+`reads_outside_workspace` and `mcp_tools` enforced, verified on 2.1.328.
 
 ## Not verified live
 

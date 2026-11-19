@@ -694,3 +694,18 @@ def test_a_resumed_preflight_checks_the_seat_as_a_later_panel_turn(
         .restriction(RestrictionChannel.FILE_EDITS)
         .enforced
     )
+
+
+def test_an_ask_that_must_not_read_outside_its_folder_runs_isolated(tmp_path: Path) -> None:
+    from crossby.services.converse import child_environment
+
+    folder = _folder(tmp_path)
+    plain = ask_service.session_request(
+        _ask_codex(folder), timeout_seconds=30.0, environment=child_environment()
+    )
+    isolated = ask_service.session_request(
+        _ask_codex(folder, require_blocked=frozenset({RestrictionChannel.READS_OUTSIDE_WORKSPACE})),
+        timeout_seconds=30.0,
+        environment=child_environment(),
+    )
+    assert not plain.isolated and isolated.isolated

@@ -126,6 +126,11 @@ _PLACEHOLDER_MCP_CONFIG = Path("/tmp/crossby-claude-mcp-00000000/mcp.json")
 _READ_ONLY_TOOLS = "Read,Grep,Glob,Skill"
 # Hooks run commands outside the tool set, so a read-only session disables them.
 _READ_ONLY_SETTINGS = '{"disableAllHooks":true}'
+# An isolated one also makes the file tools refuse paths outside the working
+# directories (the session's folder and --add-dir), whatever allow rules say.
+_ISOLATED_SETTINGS = (
+    '{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}'
+)
 
 
 def _new_session_id() -> str:
@@ -181,6 +186,23 @@ class ClaudeAdapter(AbstractAITool):
         RestrictionChannel.WEB: (
             RestrictionState.ENFORCED,
             "closed --tools set has no WebFetch or WebSearch tool",
+        ),
+    }
+    # Verified live on 2.1.328 (docs/unattended-headless-verification.md#isolation):
+    # Read, Grep and Glob refused a path outside the folder even with an allow rule
+    # for it, and --strict-mcp-config left none of the user's own servers loaded.
+    HEADLESS_ISOLATED_VERIFIED_VERSION: ClassVar[str | None] = "2.1.328"
+    HEADLESS_ISOLATED_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {
+        RestrictionChannel.READS_OUTSIDE_WORKSPACE: (
+            RestrictionState.ENFORCED,
+            "permissions.blockReadsOutsideWorkingDirectories, and --strict-mcp-config "
+            "loads no MCP server of the user's",
+        ),
+        RestrictionChannel.MCP_TOOLS: (
+            RestrictionState.ENFORCED,
+            "--strict-mcp-config loads no MCP server but the session's own",
         ),
     }
 
@@ -483,7 +505,12 @@ class ClaudeAdapter(AbstractAITool):
             # tool to call (forced write attempts had nothing to call), while the
             # folder's CLAUDE.md and skills still load. Unlike --setting-sources
             # or --restricted, it keeps the folder's own setup.
-            command.extend(("--tools", _READ_ONLY_TOOLS, "--settings", _READ_ONLY_SETTINGS))
+            settings = _ISOLATED_SETTINGS if request.isolated else _READ_ONLY_SETTINGS
+            command.extend(("--tools", _READ_ONLY_TOOLS, "--settings", settings))
+            if request.isolated:
+                # The user's own MCP servers (claude.ai's Drive or Gmail, say) would
+                # otherwise load, and a server reads whatever it can reach.
+                command.append("--strict-mcp-config")
         if request.mcp_servers:
             # Verified on 2.1.322: without the allow rule a call to the server's
             # tool is denied under --permission-prompts none; with it the call runs.
