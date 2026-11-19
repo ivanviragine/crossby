@@ -220,6 +220,13 @@ class AbstractAITool(ABC):
     HEADLESS_SEARCH_COMMANDS_RESTRICTIONS: ClassVar[
         Mapping[RestrictionChannel, tuple[RestrictionState, str]]
     ] = {}
+    # What ``isolated`` changes in that profile, verified live on
+    # HEADLESS_ISOLATED_VERIFIED_VERSION; empty when the tool cannot keep a
+    # session's reads inside its folders. Applied over the declarations above.
+    HEADLESS_ISOLATED_RESTRICTIONS: ClassVar[
+        Mapping[RestrictionChannel, tuple[RestrictionState, str]]
+    ] = {}
+    HEADLESS_ISOLATED_VERIFIED_VERSION: ClassVar[str | None] = None
     # Where the tool reads a persona folder's own instructions and skills,
     # verified live in a plain folder; ``None`` when not verified.
     OWNED_WORKSPACE_LAYOUT: ClassVar[OwnedWorkspaceLayout | None] = None
@@ -771,20 +778,28 @@ class AbstractAITool(ABC):
         ``UNKNOWN``: crossby does not characterize a tool's default policy.
         """
         mode = request.interaction_mode
-        declared: Mapping[RestrictionChannel, tuple[RestrictionState, str]] = {}
+        declared: dict[RestrictionChannel, tuple[RestrictionState, str]] = {}
         verified_on: str | None = None
+        # Channels verified on a later build than the profile's, such as isolation's.
+        isolated_on: dict[RestrictionChannel, str] = {}
         if (
             request.read_only
             and mode is HeadlessInteractionMode.UNATTENDED
             and self.headless_read_only_supported(version, mode)
         ):
-            declared = self.HEADLESS_READ_ONLY_RESTRICTIONS
+            declared = dict(self.HEADLESS_READ_ONLY_RESTRICTIONS)
             if request.search_commands:
                 declared = {**declared, **self.HEADLESS_SEARCH_COMMANDS_RESTRICTIONS}
             verified_on = (
                 self.HEADLESS_READ_ONLY_VERIFIED_VERSION
                 or self.capabilities().headless.profile_for(mode).verified_version
             )
+            isolation = self.HEADLESS_ISOLATED_VERIFIED_VERSION
+            if request.isolated and isolation and _build_at_least(version, isolation):
+                declared = {**declared, **self.HEADLESS_ISOLATED_RESTRICTIONS}
+                isolated_on = {
+                    channel: isolation for channel in self.HEADLESS_ISOLATED_RESTRICTIONS
+                }
         if request.mcp_servers:
             # Whatever the profile says about the user's own servers, these run.
             declared = {
@@ -794,6 +809,14 @@ class AbstractAITool(ABC):
                     "the session's own MCP servers are pre-approved",
                 ),
             }
+            if declared.get(RestrictionChannel.READS_OUTSIDE_WORKSPACE, (None,))[0] is (
+                RestrictionState.ENFORCED
+            ):
+                # A server can read whatever it can reach, so the folder is no wall.
+                declared[RestrictionChannel.READS_OUTSIDE_WORKSPACE] = (
+                    RestrictionState.NOT_ENFORCED,
+                    "the session's own MCP servers can read any path",
+                )
         layout = self.OWNED_WORKSPACE_LAYOUT
         mcp_verified_on = layout.mcp_verified_version if layout is not None else None
         restrictions: list[Restriction] = []
@@ -808,7 +831,11 @@ class AbstractAITool(ABC):
                         channel=channel,
                         state=state,
                         mechanism=mechanism,
-                        verified_on=mcp_verified_on if own_servers else verified_on,
+                        verified_on=(
+                            mcp_verified_on
+                            if own_servers
+                            else isolated_on.get(channel, verified_on)
+                        ),
                     )
                 )
             else:

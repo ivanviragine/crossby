@@ -564,6 +564,7 @@ def session_request(
             response_schema=request.response_schema,
             read_only=True,
             search_commands=request.allow_search_commands,
+            isolated=RestrictionChannel.READS_OUTSIDE_WORKSPACE in request.require_blocked,
             mcp_servers=mcp_servers,
             require_blocked=request.require_blocked,
             allow_project_hooks=request.allow_project_hooks,

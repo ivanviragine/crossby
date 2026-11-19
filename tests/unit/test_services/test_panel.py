@@ -1572,3 +1572,17 @@ def test_a_person_has_no_folders_to_read(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="has no folder"):
         Member(id="dana", backend=HumanBackend(), readable_dirs=(tmp_path,))
+
+
+def test_members_of_a_panel_that_needs_isolation_run_isolated(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        require_blocked=frozenset({RestrictionChannel.READS_OUTSIDE_WORKSPACE}),
+    )
+    runner = PanelRunner(
+        {"lead": ["Q\nNEXT: ASK @cto", "x\nNEXT: DONE"], "cto": ["a"], "founder": [], "buyer": []}
+    )
+    run_panel(spec, runner=runner)
+    assert all(request.isolated for request in runner.requests["cto"])
+    # The lead keeps its folder's policy unless it is read-only.
+    assert not runner.requests["lead"][0].isolated

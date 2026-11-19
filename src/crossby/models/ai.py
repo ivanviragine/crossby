@@ -780,6 +780,11 @@ class HeadlessSessionRequest(BaseModel):
     # shell channels as not enforced (see HEADLESS_SEARCH_COMMANDS_RESTRICTIONS).
     # Tools with search tools of their own ignore it.
     search_commands: bool = False
+    # Keep a read-only session's reads inside its working directory and
+    # ``trusted_dirs``, on a tool verified to (see HEADLESS_ISOLATED_RESTRICTIONS):
+    # set when ``reads_outside_workspace`` must be blocked. Other tools ignore it,
+    # and report that channel as they always do.
+    isolated: bool = False
     # MCP servers for this session only, by name, each a dumped
     # ``MCPServerConfig``. They are added to the servers the tool already has,
     # and their tools are pre-approved: nobody is there to approve a call.

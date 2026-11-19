@@ -397,3 +397,68 @@ def test_a_transport_that_cannot_pass_an_environment_rejects_one(tmp_path: Path)
     )
     with pytest.raises(HeadlessUnsupportedError, match="cannot pass a session environment"):
         adapter.preflight_headless_session(request, interaction_handler=lambda _q: None)  # type: ignore[arg-type,return-value]
+
+
+# ---------------------------------------------------------------------------
+# Isolation: reads kept inside the session's folders
+# ---------------------------------------------------------------------------
+
+
+def test_an_isolated_claude_session_blocks_reads_outside_and_other_mcp_servers(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.test_ai_tools.test_headless_adapters import _command
+
+    adapter = AbstractAITool.get(AIToolID.CLAUDE)
+    isolated = _request(tmp_path, read_only=True, isolated=True)
+
+    command = _command(AIToolID.CLAUDE, isolated)
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings == {
+        "disableAllHooks": True,
+        "permissions": {"blockReadsOutsideWorkingDirectories": True},
+    }
+    assert "--strict-mcp-config" in command
+    plain = _command(AIToolID.CLAUDE, _request(tmp_path, read_only=True))
+    assert "--strict-mcp-config" not in plain
+
+    states = _states(adapter.headless_restrictions(isolated, "2.1.328"))
+    assert states[C.READS_OUTSIDE_WORKSPACE] is E and states[C.MCP_TOOLS] is E
+    by_channel = {item.channel: item for item in adapter.headless_restrictions(isolated, "2.1.328")}
+    assert by_channel[C.READS_OUTSIDE_WORKSPACE].verified_on == "2.1.328"
+    # Below the build it was verified on, it is not claimed.
+    older = _states(adapter.headless_restrictions(isolated, "2.1.327"))
+    assert older[C.READS_OUTSIDE_WORKSPACE] is U
+    # Not isolated: as before, unknown.
+    assert (
+        _states(adapter.headless_restrictions(_request(tmp_path, read_only=True), "2.1.328"))[
+            C.READS_OUTSIDE_WORKSPACE
+        ]
+        is U
+    )
+
+
+def test_a_session_with_its_own_mcp_servers_is_not_isolated(tmp_path: Path) -> None:
+    adapter = AbstractAITool.get(AIToolID.CLAUDE)
+    request = _request(
+        tmp_path,
+        read_only=True,
+        isolated=True,
+        mcp_servers={"docs": {"command": "docs-server"}},
+    )
+    states = _states(adapter.headless_restrictions(request, "2.1.328"))
+    assert states[C.READS_OUTSIDE_WORKSPACE] is N
+    assert states[C.MCP_TOOLS] is N
+
+
+@pytest.mark.parametrize("tool", [t for t in MANAGED if t is not AIToolID.CLAUDE])
+def test_a_tool_that_cannot_isolate_reports_its_reads_as_before(
+    tool: AIToolID, tmp_path: Path
+) -> None:
+    adapter = AbstractAITool.get(tool)
+    floor = _read_only_floor(adapter)
+    isolated = adapter.headless_restrictions(
+        _request(tmp_path, read_only=True, isolated=True), floor
+    )
+    plain = adapter.headless_restrictions(_request(tmp_path, read_only=True), floor)
+    assert _states(isolated) == _states(plain)
