@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
@@ -507,12 +507,22 @@ def _adapter(tool: AIToolID) -> AbstractAITool:
 
 def _read_grants(request: AskRequest) -> tuple[Path, ...]:
     """The folders to grant on the tool's command line for ``readable_dirs``."""
-    if not request.readable_dirs:
+    return read_grants(request.backend.tool, request.readable_dirs)
+
+
+def read_grants(tool: AIToolID, readable_dirs: Sequence[Path]) -> tuple[Path, ...]:
+    """The folders to grant a read-only session of ``tool`` so it can read ``readable_dirs``.
+
+    Nothing for a tool verified to read any path anyway; the folders themselves for
+    one that takes them on its command line; :class:`AskUnsupportedError` otherwise.
+    """
+    readable = tuple(readable_dirs)
+    if not readable:
         return ()
-    for path in request.readable_dirs:
+    for path in readable:
         if not path.is_dir():
             raise AskRequestError(f"readable_dirs: {path} is not an existing folder")
-    adapter = _adapter(request.backend.tool)
+    adapter = _adapter(tool)
     declared = adapter.HEADLESS_READ_ONLY_RESTRICTIONS.get(
         RestrictionChannel.READS_OUTSIDE_WORKSPACE
     )
@@ -520,9 +530,9 @@ def _read_grants(request: AskRequest) -> tuple[Path, ...]:
         # Verified to read any path under its read-only profile: nothing to grant.
         return ()
     if adapter.capabilities().supports_trusted_dirs:
-        return request.readable_dirs
+        return readable
     raise AskUnsupportedError(
-        f"{request.backend.tool.value} has no verified way to read folders outside its "
+        f"{tool.value} has no verified way to read folders outside its "
         "workspace in a read-only session, so readable_dirs cannot be honored."
     )
 

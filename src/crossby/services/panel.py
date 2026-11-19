@@ -135,12 +135,15 @@ class Member(_Frozen):
     """One member: an id the lead addresses, and an agent with its folder, or a person.
 
     An agent member is always read-only; a human member has no folder.
+    ``readable_dirs`` are folders an agent member may also read, as in an ask:
+    a persona folder's member can then read the project it discusses.
     """
 
     id: str
     name: str | None = None
     backend: Backend
     workspace: Workspace | None = None
+    readable_dirs: tuple[Path, ...] = ()
 
     @field_validator("id")
     @classmethod
@@ -155,7 +158,7 @@ class Member(_Frozen):
     @model_validator(mode="after")
     def _seat_is_coherent(self) -> Member:
         if isinstance(self.backend, HumanBackend):
-            if self.workspace is not None:
+            if self.workspace is not None or self.readable_dirs:
                 raise ValueError(f"human member {self.id} has no folder")
             return self
         if self.workspace is None:
@@ -592,6 +595,7 @@ def _roster_data(spec: PanelSpec) -> list[dict[str, Any]]:
                 "tool": member.tool_name,
                 **_settings(member.backend),
                 "read_only": not member.human,
+                "readable_dirs": [str(path) for path in member.readable_dirs],
             }
             for member in spec.members
         ],
@@ -832,6 +836,8 @@ def run_panel(
     next_turn = [(resume.last_turn if resume is not None else 0) + 1]
     # Whether the lead's last message is committed but unsent, held back at the limit.
     held = [resume.held_back if resume is not None else False]
+    # The folders each member's sessions are granted for its ``readable_dirs``.
+    grants: dict[str, tuple[Path, ...]] = {}
     if resume is not None:
         lead_session[0] = resume.sessions.get("lead")
         for member_id, seat in seats.items():
@@ -902,6 +908,7 @@ def run_panel(
         read_only: bool,
         minimum_version: str | None = None,
         mcp_servers: Mapping[str, dict[str, object]] | None = None,
+        trusted_dirs: tuple[Path, ...] = (),
     ) -> HeadlessSessionRequest:
         if cancel.is_set():
             raise _StopError(StopReason.INTERRUPTED, CANCELLED)
@@ -920,6 +927,7 @@ def run_panel(
             resume_id=resume_id,
             read_only=read_only,
             mcp_servers=dict(mcp_servers or {}),
+            trusted_dirs=trusted_dirs,
             require_blocked=spec.require_blocked if read_only else frozenset(),
             allow_project_hooks=spec.allow_project_hooks,
             minimum_version=minimum_version,
@@ -1159,6 +1167,7 @@ def run_panel(
                 read_only=True,
                 minimum_version=minimum,
                 mcp_servers=member_servers(member),
+                trusted_dirs=grants.get(member.id, ()),
             )
         except _StopError as stop:
             # Queued past the deadline, or stopped: this attempt never starts, and
@@ -1201,6 +1210,14 @@ def run_panel(
                         f"@{member.id}'s persona folder changed since it was provisioned: "
                         f"{', '.join(exc.changed[:5])}; provision it again",
                     ) from None
+        from crossby.services.ask import AskError, read_grants
+
+        for member in spec.members:
+            if isinstance(member.backend, CliBackend) and member.readable_dirs:
+                try:
+                    grants[member.id] = read_grants(member.backend.tool, member.readable_dirs)
+                except AskError as exc:
+                    raise _StopError(StopReason.FAILED, f"@{member.id}: {exc}") from None
         checks: list[
             tuple[str, CliBackend, Path, bool, str | None, dict[str, dict[str, object]]]
         ] = []
@@ -1223,6 +1240,7 @@ def run_panel(
                 read_only=read_only,
                 minimum_version=minimum,
                 mcp_servers=servers,
+                trusted_dirs=grants.get(participant, ()) if participant != "lead" else (),
             )
             try:
                 report = active.preflight(backend.tool, probe)
