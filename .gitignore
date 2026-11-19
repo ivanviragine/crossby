@@ -21,7 +21,10 @@ htmlcov/
 KNOWLEDGE.md
 KNOWLEDGE.ratings.yml
 steps.md
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/update-models/
 # wade-managed symlinks (skills sync)
 .cursor/skills
 .gemini/

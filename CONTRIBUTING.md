@@ -49,11 +49,12 @@ uv sync --extra dev
 
 Run `./scripts/check-all.sh` before opening a PR.
 
-To refresh the model catalog, run `uv run python scripts/probe_models.py` with
-network access and signed-in CLIs. Codex discovery combines its local cache
-with published guidance, so an older cache cannot hide a new release. Google's
-retirement parser accepts HTML and Markdoc tables. Keep models that are merely
-not returned, apply provider-confirmed retirements, and preserve the existing
+To refresh the model catalog, follow the [update-models skill](.agents/skills/update-models/SKILL.md)
+and run `uv run python scripts/probe_models.py` with network access and
+signed-in CLIs. Codex discovery combines its local cache with published
+guidance, so an older cache cannot hide a new release. Google's retirement
+parser accepts HTML and Markdoc tables. Keep models that are merely not
+returned, apply provider-confirmed retirements, and preserve the existing
 exclusion of Claude models older than 4.6 (except Haiku 4.5).
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
