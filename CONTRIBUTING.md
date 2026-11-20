@@ -52,10 +52,11 @@ Run `./scripts/check-all.sh` before opening a PR.
 To refresh the model catalog, follow the [update-models skill](.agents/skills/update-models/SKILL.md)
 and run `uv run python scripts/probe_models.py` with network access and
 signed-in CLIs. Codex discovery combines its local cache with published
-guidance, so an older cache cannot hide a new release. Google's retirement
-parser accepts HTML and Markdoc tables. Keep models that are merely not
-returned, apply provider-confirmed retirements, and preserve the existing
-exclusion of Claude models older than 4.6 (except Haiku 4.5).
+guidance, so an older cache cannot hide a new release; Copilot discovery
+combines the CLI command reference with the supported-models per-client matrix.
+Google's retirement parser accepts HTML and Markdoc tables. Keep models that
+are merely not returned, apply provider-confirmed retirements, and preserve the
+existing exclusion of Claude models older than 4.6 (except Haiku 4.5).
 
 `tomli-w` is a base dependency (required for Codex MCP sync), so a plain `uv sync` pulls in everything the test suite needs.
 
@@ -1274,16 +1275,18 @@ unavailable to the authenticated ACP session fail before the first prompt.
 
 Antigravity CLI (`agy`) bakes reasoning effort into the model ID rather than
 emitting a separate `--effort` flag (which it rejects alongside a suffixed
-model). Only the Gemini families encode effort — `gemini-4-argon`,
-`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, and
-`gemini-3.5-flash` accept `low`/`medium`/`high`,
-`gemini-3.1-pro` accepts only
-`low`/`high` (a requested `medium` snaps to the nearest valid tier). `xhigh`/
-`max` normalize to `high`, and a Gemini model launched with no effort gets a
-deterministic default (`medium`, or the nearest tier). Non-Gemini models ignore
-a separately requested effort and keep their exact provider ID. In particular,
-`gpt-oss-120b-medium` is a fixed model ID reported by `agy models`; its
-`-medium` suffix is part of the name, not a reasoning tier Crossby may rewrite.
+model). Effort-expanded families encode per-model tiers — `gemini-4-neon` and
+`gemini-4-hydrogen` accept `low`/`medium`/`high`/`xhigh`; `gemini-4-argon`,
+`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`,
+`claude-opus-5-5`, and `claude-sonnet-5-5` accept `low`/`medium`/`high`; and
+`gemini-3.1-pro` accepts only `low`/`high`. Any unsupported tier snaps to the
+model's nearest valid tier (ties → higher) with a warning, and an
+effort-expanded model launched with no effort gets a deterministic default
+(`medium`, or the nearest tier). Bare models (including `claude-*-4-6` and the
+`gemini-pro-orchestrator-*` IDs) ignore a separately requested effort and keep
+their exact provider ID. In particular, `gpt-oss-120b-medium` is a fixed model
+ID reported by `agy models`; its `-medium` suffix is part of the name, not a
+reasoning tier Crossby may rewrite.
 
 ### Permission & Allowlist Configuration
 

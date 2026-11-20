@@ -30,8 +30,8 @@ def classify_tier_universal(model_id: str) -> ModelTier:
     Used when processing raw model IDs from scraping/probing.
 
     Tier mapping (matches Bash _init_probe_models_for_tool):
-        easy         — haiku, flash, spark, mini, luna
-        complex      — sonnet, terra, or unrecognized mid-tier models
+        easy         — haiku, flash, spark, mini, luna, hydrogen
+        complex      — sonnet, terra, neon, or unrecognized mid-tier models
         very_complex — opus, fable, astra, pro, sol, ultra, argon, carbon, wonder, max,
                        and the documented bare Copilot complex-reasoning ID gpt-5.4
 
@@ -60,9 +60,11 @@ def classify_tier_universal(model_id: str) -> ModelTier:
         for kw in ("opus", "fable", "astra", "pro", "sol", "ultra", "argon", "carbon", "wonder")
     ):
         return ModelTier.POWERFUL
-    if any(_has_component(lower, kw) for kw in ("haiku", "flash", "spark", "mini", "luna")):
+    if any(
+        _has_component(lower, kw) for kw in ("haiku", "flash", "spark", "mini", "luna", "hydrogen")
+    ):
         return ModelTier.FAST
-    if any(_has_component(lower, kw) for kw in ("sonnet", "terra")):
+    if any(_has_component(lower, kw) for kw in ("sonnet", "terra", "neon")):
         return ModelTier.BALANCED
     if _has_component(lower, "max"):
         return ModelTier.POWERFUL

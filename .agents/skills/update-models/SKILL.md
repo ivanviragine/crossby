@@ -17,10 +17,10 @@ For the detailed per-provider probe URLs, ID spelling rules, and test-file map, 
 
 ## 1. Run the Live Probe First
 
-Run the probe with network access and signed-in CLIs (`agent`, `agy`, `copilot`, `codex`, `opencode`):
+Run the probe with network access and signed-in CLIs (`agent`, `agy`, `codex`, `opencode`; pass `< /dev/null` in non-interactive sessions so the AI auto-correct prompt cannot block):
 
 ```bash
-uv run python scripts/probe_models.py
+uv run python scripts/probe_models.py < /dev/null
 ```
 
 Read every section of its output carefully:
@@ -40,8 +40,8 @@ Read every section of its output carefully:
 Provider docs and CLI outputs change frequently. Inspect whether probe drift caused false positives or missed models:
 
 1. **Scrape patterns (`_SCRAPE_PATTERNS`)**: Add new vendor/family prefixes (e.g. `grok|kimi`, `mai-`, `fable`) while keeping trailing guards that reject dated snapshots (`-YYYYMMDD`), `-v<n>`, and doc-slug run-ons.
-2. **Antigravity effort folding (`_ANTIGRAVITY_EFFORT_RE`)**: If `agy models` introduces a new effort-expanded family (`-low`/`-medium`/`-high`), add it so `normalize_antigravity_model_id()` collapses variants to the base ID. Never fold fixed-suffix model IDs (e.g. `gpt-oss-120b-medium`, `claude-opus-4-6-thinking`) or non-`low/medium/high` suffixes.
-3. **Deprecation parsers**: Check HTML anchors, Markdoc table syntax (`parse_gemini_deprecations`), replacement-exclusion rules (`parse_codex_deprecations`, `parse_claude_deprecations`), Copilot display-name slugging (`_copilot_model_slug`), and `models.dev` parsing (`parse_opencode_deprecations`).
+2. **Antigravity effort folding (`_ANTIGRAVITY_EFFORT_RE`)**: If `agy models` introduces a new effort-expanded family (e.g. `-low`/`-medium`/`-high` or `-xhigh`), add it so `normalize_antigravity_model_id()` collapses variants to the base ID. Keep effort sets scoped per family (e.g. `-xhigh` only on `hydrogen|neon`) so newly added effort tiers on narrower families surface as `NEW` instead of being silently swallowed. Never fold fixed-suffix model IDs (e.g. `gpt-oss-120b-medium`, `claude-opus-4-6-thinking`) or bare non-effort IDs (`gemini-pro-orchestrator-*`).
+3. **Deprecation & docs parsers**: Check HTML anchors, Markdoc table syntax (`parse_gemini_deprecations`), replacement-exclusion rules (`parse_codex_deprecations`, `parse_claude_deprecations`), Copilot display-name slugging (`_copilot_model_slug`), Copilot's per-client matrix (`parse_copilot_client_models`, which reads SVG `aria-label="Included"` as well as cell text) and `<retired>-fast` expansion in `probe_deprecations("copilot")`, and `models.dev` parsing (`parse_opencode_deprecations`).
 4. **Catalog exclusions (`_CATALOG_EXCLUSIONS`)**: Add deliberately excluded models still advertised by a CLI (e.g. Cursor's pre-4.6 Claude models) so the probe reports `IGNORED` and exits `0`.
 5. **Key parity**: `_MODEL_PROBES` and `_MODEL_PROBE_SOURCES` must match the non-`_` keys of `models.json` exactly.
 
@@ -55,8 +55,9 @@ Apply updates using each tool's exact accepted spelling and catalog policy:
   - `copilot`: dotted Claude versions (`claude-sonnet-5.5`), bare IDs for other vendors.
   - `codex`: bare IDs (`gpt-6.1-terra`), no effort suffixes.
   - `cursor`: exact `agent --list-models` IDs (full effort/thinking/fast matrix + `auto`), sorted alphabetically.
-  - `antigravity-cli`: **base IDs only** for effort-expanded families (`gemini-4-argon`, `claude-opus-5-5`), plus **verbatim IDs** for fixed-suffix models (`claude-opus-4-6-thinking`, `gpt-oss-120b-medium`).
+  - `antigravity-cli`: **base IDs only** for effort-expanded families (`gemini-4-neon`, `gemini-4-hydrogen`, `gemini-4-argon`, `claude-opus-5-5`), plus **verbatim IDs** for bare/fixed-suffix models (`gemini-pro-orchestrator-neon`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`).
   - `opencode`: exact `provider/model` IDs, sorted alphabetically.
+  - Verify no duplicate IDs in any tool list and strict alphabetical sorting for `cursor` and `opencode`.
 - **Pruning rules**:
   - Remove entries confirmed deprecated/retired by the provider (or shutting down within Google's 180-day horizon), or confirmed dropped by a logged-in CLI **and** absent from official docs.
   - Retain models that are merely `NOT RETURNED`.
@@ -67,9 +68,11 @@ Apply updates using each tool's exact accepted spelling and catalog policy:
 Check how `classify_tier_universal()` classifies every newly added model ID (and its `provider/`-stripped suffix for OpenCode):
 
 - `POWERFUL` (checked 1st): `opus`, `fable`, `astra`, `pro`, `sol`, `ultra`, `argon`, `carbon`, `wonder` (plus exact `gpt-5.4`).
-- `FAST` (checked 2nd): `haiku`, `flash`, `spark`, `mini`, `luna`.
-- `BALANCED` (checked 3rd): `sonnet`, `terra`, or unrecognized fallback.
+- `FAST` (checked 2nd): `haiku`, `flash`, `spark`, `mini`, `luna`, `hydrogen`.
+- `BALANCED` (checked 3rd): `sonnet`, `terra`, `neon`, or unrecognized fallback.
 - `max` (checked last): `POWERFUL` only when no family keyword matches.
+
+When a provider introduces a brand-new codename family (e.g. `hydrogen`, `neon`), check `models.dev/api.json` pricing/metadata and official provider docs before deciding whether it belongs in `FAST`, `BALANCED`, or `POWERFUL`.
 
 **Precedence rules to preserve**:
 - Upgrade/variant markers (`pro`, `sol`, `astra`, …) outrank family markers (`openai/gpt-5.6-luna-pro` -> `POWERFUL`).
@@ -95,8 +98,9 @@ for tool, ids in data.items():
 ## 5. Check Tool Adapters for Effort & Compatibility
 
 1. **Antigravity CLI (`src/crossby/ai_tools/antigravity_cli.py`)**:
-   - If `agy models` lists a new model only with `-low`/`-medium`/`-high` suffixes, add its base ID and exact supported `EffortLevel` tuple to `_ANTIGRAVITY_CLI_EFFORT_TIERS` (verified against `agy models` — e.g. `gemini-3.1-pro` only supports `(LOW, HIGH)`). Without this, `resolve_effort_model()` strips the suffix and launches an invalid bare ID.
-   - If a new `agy models` ID has a fixed suffix that looks like an effort level (like `gpt-oss-120b-medium`), add it to `_ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS` instead.
+   - If `agy models` lists a new model only with effort suffixes (`-low`/`-medium`/`-high`/`-xhigh`), add its base ID and exact supported `EffortLevel` tuple to `_ANTIGRAVITY_CLI_EFFORT_TIERS` (verified against `agy models` — e.g. `gemini-4-neon`/`gemini-4-hydrogen` support `(LOW, MEDIUM, HIGH, XHIGH)`, while `gemini-3.1-pro` only supports `(LOW, HIGH)`). Without this, `resolve_effort_model()` strips the suffix and launches an invalid bare ID.
+   - If `agy models` introduces an effort tier not yet in `AntigravityCLIAdapter.capabilities().supported_efforts`, update `supported_efforts` too (and update `tests/unit/test_ai_tools/test_plan_sessions.py`, which enforces tool-wide and per-model effort rejection).
+   - If a new `agy models` ID has a fixed suffix that looks like an effort level (like `gpt-oss-120b-medium`), add it to `_ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS` instead. Bare non-effort IDs (like `gemini-pro-orchestrator-*`) stay out of `_ANTIGRAVITY_CLI_EFFORT_TIERS` so they launch bare unchanged.
    - Keep `_ANTIGRAVITY_CLI_EFFORT_TIERS` in sync with `_ANTIGRAVITY_EFFORT_RE` in `scripts/probe_models.py`.
 2. **Cursor (`src/crossby/ai_tools/cursor.py`)**:
    - `resolve_effort_model()` derives effort siblings dynamically from `models.json`. Verify any new Cursor naming pattern resolves cleanly and does not break the exhaustive registry check in `tests/unit/test_ai_tools/test_cursor_resolve_effort_model.py`.
@@ -142,7 +146,8 @@ Add/update regression tests for every changed layer (see [providers-and-files.md
      tests/unit/test_sync/test_translation.py \
      tests/unit/test_scripts/test_probe_models.py \
      tests/unit/test_ai_tools/test_antigravity_cli_launch.py \
-     tests/unit/test_ai_tools/test_cursor_resolve_effort_model.py
+     tests/unit/test_ai_tools/test_cursor_resolve_effort_model.py \
+     tests/unit/test_ai_tools/test_plan_sessions.py
    ```
 3. **Run full repo checks**:
    ```bash

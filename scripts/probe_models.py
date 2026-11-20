@@ -95,8 +95,11 @@ _CLAUDE_DATED_ALIAS_RE = re.compile(
 # "foo-1.2-bar") rather than a plain word from the description column.
 _ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[./-][a-z0-9._-]+)+$")
 _ANTIGRAVITY_EFFORT_RE = re.compile(
-    r"^(gemini-\d+(?:\.\d+)*-(?:flash|pro|argon)|claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*)"
-    r"-(?:low|medium|high)$"
+    r"^(?:"
+    r"(gemini-\d+(?:\.\d+)*-(?:hydrogen|neon))-(?:low|medium|high|xhigh)"
+    r"|(gemini-\d+(?:\.\d+)*-(?:flash|pro|argon)|claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*)"
+    r"-(?:low|medium|high)"
+    r")$"
 )
 
 # Per-tool expected CLI flag patterns, keyed by capability name.
@@ -252,6 +255,45 @@ def _copilot_model_slug(name: str) -> str:
     return f"{slug}-fast" if fast else slug
 
 
+def parse_copilot_client_models(text: str) -> set[str]:
+    """Extract Copilot CLI-included model IDs from Copilot's supported-models page.
+
+    Reads the "Supported AI models per client" table and slugs the display name
+    of every row marked ``Included`` in the ``Copilot CLI`` column.
+    """
+    section = _html_section(text, "supported-ai-models-per-client", "</table>")
+    if section is None:
+        return set()
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", section, flags=re.S)
+    if not rows:
+        return set()
+    headers = [
+        _html_to_text(re.sub(r"<sup>.*?</sup>", "", cell, flags=re.S)).strip().lower()
+        for cell in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", rows[0], flags=re.S)
+    ]
+    try:
+        cli_col = headers.index("copilot cli")
+    except ValueError:
+        return set()
+    models: set[str] = set()
+    for row in rows[1:]:
+        cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, flags=re.S)
+        if len(cells) <= cli_col:
+            continue
+        cli_html = cells[cli_col]
+        cli_cell = _html_to_text(cli_html).strip().lower()
+        if not cli_cell:
+            aria = re.search(r'aria-label="([^"]+)"', cli_html)
+            cli_cell = aria.group(1).strip().lower() if aria else ""
+        if cli_cell != "included":
+            continue
+        name = _html_to_text(re.sub(r"<sup>.*?</sup>", "", cells[0], flags=re.S)).strip()
+        slug = _copilot_model_slug(name)
+        if slug:
+            models.add(slug)
+    return models
+
+
 def parse_copilot_retirements(text: str) -> set[str]:
     """Extract retired and scheduled-for-retirement IDs from Copilot's
     supported-models page ("Model retirement history" table)."""
@@ -355,9 +397,14 @@ def probe_deprecations(tool: str) -> set[str]:
         return parse_opencode_deprecations(
             text, probe_deprecations("copilot"), probe_deprecations("antigravity-cli")
         )
+    if tool == "copilot":
+        text = _fetch(_DEPRECATION_URLS["copilot"])
+        if not text:
+            return set()
+        retired = parse_copilot_retirements(text)
+        return retired | {f"{m}-fast" for m in retired if not m.endswith("-fast")}
     parsers: dict[str, Callable[[str], set[str]]] = {
         "claude": parse_claude_deprecations,
-        "copilot": parse_copilot_retirements,
         "codex": parse_codex_deprecations,
     }
     if tool not in parsers:
@@ -434,19 +481,18 @@ def probe_claude() -> set[str]:
 
 
 def probe_copilot() -> set[str]:
-    if shutil.which("copilot"):
-        try:
-            res = subprocess.run(
-                ["copilot", "--model", "x"], capture_output=True, text=True, timeout=15
-            )
-            out = res.stdout + res.stderr
-            matches = re.findall(_SCRAPE_PATTERNS["copilot"], out)
-            models = {re.sub(r"[.,;]+$", "", m) for m in matches if not m.startswith(".")}
-            if models:
-                return models
-        except Exception:
-            pass
-    return _scrape_models("copilot")
+    """Discover Copilot CLI models from GitHub's official Copilot documentation.
+
+    Combines the CLI command reference's ``Supported models`` table with the
+    ``Copilot CLI`` column of the ``Supported AI models per client`` matrix.
+    (Newer Copilot CLI builds launch the interactive TUI on ``--model x``
+    instead of printing valid model choices.)
+    """
+    models = _scrape_models("copilot")
+    client_page = _fetch(_DEPRECATION_URLS["copilot"])
+    if client_page is not None:
+        models |= parse_copilot_client_models(client_page)
+    return models
 
 
 def probe_cursor() -> set[str]:
@@ -476,11 +522,12 @@ def normalize_antigravity_model_id(model: str) -> str:
 
     Other suffixes such as ``claude-opus-4-6-thinking`` and
     ``gpt-oss-120b-medium`` are part of those tools' model names and must stay
-    intact. Suffixes other than low/medium/high are also preserved so a newly
+    intact. Effort suffixes not listed for a family (e.g. ``-minimal``, or
+    ``-xhigh`` on a ``low/medium/high`` family) are also preserved so a newly
     introduced variant is reported rather than silently rewritten.
     """
     match = _ANTIGRAVITY_EFFORT_RE.fullmatch(model)
-    return match.group(1) if match else model
+    return (match.group(1) or match.group(2)) if match else model
 
 
 def parse_antigravity_models(output: str) -> set[str]:
@@ -563,7 +610,7 @@ _MODEL_PROBES: dict[str, Callable[[], set[str]]] = {
 _MODEL_PROBE_SOURCES: dict[str, str] = {
     "claude": "published Claude model documentation",
     "cursor": "agent --list-models",
-    "copilot": "Copilot CLI picker or published CLI reference",
+    "copilot": "published Copilot CLI reference and supported-models client table",
     "antigravity-cli": "agy models",
     "codex": "Codex local model cache or published Codex guidance",
     "opencode": "opencode models",

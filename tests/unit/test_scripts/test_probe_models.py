@@ -239,6 +239,51 @@ def test_copilot_docs_parser_returns_empty_when_headings_missing() -> None:
     assert PROBE_MODULE.parse_documented_models("copilot", "no anchors here") == set()
 
 
+def test_copilot_client_models_parser_reads_copilot_cli_column_only() -> None:
+    page = """
+    <a href="#supported-ai-models-per-client">Supported AI models per client</a>
+    <h2 id="supported-ai-models-per-client">Supported AI models per client</h2>
+    <table>
+    <tr><th>Model</th><th>GitHub.com</th><th>Copilot CLI</th><th>VS Code</th></tr>
+    <tr><th>Gemini 4 Neon</th><td><svg aria-label="Not included"></svg></td>
+        <td><svg class="octicon-check" aria-label="Included"></svg></td><td>Included</td></tr>
+    <tr><th>MAI Code 2 Flash<sup>1</sup></th><td>Included</td>
+        <td>Included</td><td>Included</td></tr>
+    <tr><th>GPT-5.4 nano</th><td><svg aria-label="Not included"></svg></td>
+        <td><svg aria-label="Not included"></svg></td><td>Not included</td></tr>
+    <tr><th>Claude Opus 4.8 (fast mode) (preview)</th><td>Not included</td>
+        <td><svg aria-label="Included"></svg></td><td>Included</td></tr>
+    </table>
+    """
+
+    assert PROBE_MODULE.parse_copilot_client_models(page) == {
+        "gemini-4-neon",
+        "mai-code-2-flash",
+        "claude-opus-4.8-fast",
+    }
+
+
+def test_copilot_client_models_parser_returns_empty_when_section_missing() -> None:
+    assert PROBE_MODULE.parse_copilot_client_models("no table here") == set()
+
+
+def test_probe_copilot_merges_cli_ref_and_client_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_page = """
+    <h2 id="supported-ai-models-per-client">Supported AI models per client</h2>
+    <table>
+    <tr><th>Model</th><th>Copilot CLI</th></tr>
+    <tr><th>Gemini 4 Hydrogen</th><td>Included</td></tr>
+    <tr><th>GPT-6.2 Sol</th><td>Included</td></tr>
+    </table>
+    """
+    monkeypatch.setattr(PROBE_MODULE, "_scrape_models", lambda _tool: {"gpt-6.1-sol"})
+    monkeypatch.setattr(PROBE_MODULE, "_fetch", lambda _url: client_page)
+
+    assert PROBE_MODULE.probe_copilot() == {"gpt-6.1-sol", "gemini-4-hydrogen", "gpt-6.2-sol"}
+
+
 def test_catalog_diff_preserves_exact_provider_spelling() -> None:
     registered = {"google/antigravity-claude-sonnet-4.6"}
     discovered = {"google/antigravity-claude-sonnet-4-6"}
@@ -278,9 +323,17 @@ class TestAntigravityModelParsing:
     ) -> None:
         output = """
         Available models:
+          gemini-4-neon-low          Gemini 4 Neon (Low)
+          gemini-4-neon-medium       Gemini 4 Neon (Medium)
+          gemini-4-neon-high         Gemini 4 Neon (High)
+          gemini-4-neon-xhigh        Gemini 4 Neon (XHigh)
+          gemini-4-hydrogen-low      Gemini 4 Hydrogen (Low)
+          gemini-4-hydrogen-xhigh    Gemini 4 Hydrogen (XHigh)
           gemini-4-argon-low         Gemini 4 Argon (Low)
           gemini-4-argon-medium      Gemini 4 Argon (Medium)
           gemini-4-argon-high        Gemini 4 Argon (High)
+          gemini-pro-orchestrator-neon   Orchestrator (Neon)
+          gemini-pro-orchestrator-g1-pro Orchestrator (Argon)
           gemini-3.8-flash-low       Gemini 3.8 Flash (Low)
           gemini-3.8-flash-medium    Gemini 3.8 Flash (Medium)
           gemini-3.8-flash-high      Gemini 3.8 Flash (High)
@@ -293,7 +346,11 @@ class TestAntigravityModelParsing:
         """
 
         assert PROBE_MODULE.parse_antigravity_models(output) == {
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
             "gemini-4-argon",
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator-g1-pro",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
             "claude-opus-4-6-thinking",
@@ -303,9 +360,22 @@ class TestAntigravityModelParsing:
     @pytest.mark.parametrize(
         ("model", "expected"),
         [
+            ("gemini-4-neon-low", "gemini-4-neon"),
+            ("gemini-4-neon-medium", "gemini-4-neon"),
+            ("gemini-4-neon-high", "gemini-4-neon"),
+            ("gemini-4-neon-xhigh", "gemini-4-neon"),
+            ("gemini-4-hydrogen-low", "gemini-4-hydrogen"),
+            ("gemini-4-hydrogen-medium", "gemini-4-hydrogen"),
+            ("gemini-4-hydrogen-high", "gemini-4-hydrogen"),
+            ("gemini-4-hydrogen-xhigh", "gemini-4-hydrogen"),
             ("gemini-4-argon-low", "gemini-4-argon"),
             ("gemini-4-argon-medium", "gemini-4-argon"),
             ("gemini-4-argon-high", "gemini-4-argon"),
+            # xhigh on a low/medium/high-only family is preserved so newly added
+            # effort tiers are surfaced instead of silently collapsed.
+            ("gemini-4-argon-xhigh", "gemini-4-argon-xhigh"),
+            ("gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-neon"),
+            ("gemini-pro-orchestrator-g1-pro", "gemini-pro-orchestrator-g1-pro"),
             ("gemini-3.8-flash-low", "gemini-3.8-flash"),
             ("gemini-3.8-flash-medium", "gemini-3.8-flash"),
             ("gemini-3.8-flash-high", "gemini-3.8-flash"),
@@ -410,6 +480,22 @@ class TestDeprecationParsing:
             "claude-sonnet-4.6",
             "gpt-5.2-codex",
             "claude-opus-4.6-fast",
+        }
+
+    def test_probe_copilot_deprecations_also_retires_fast_mode_of_retired_base(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        page = """
+        <h2 id="model-retirement-history">Model retirement history</h2>
+        <table>
+        <tr><th>Model name</th><th>Retirement date</th></tr>
+        <tr><th>Claude Opus 4.8</th><td>2026-11-16</td></tr>
+        </table>
+        """
+        monkeypatch.setattr(PROBE_MODULE, "_fetch", lambda _url: page)
+        assert PROBE_MODULE.probe_deprecations("copilot") == {
+            "claude-opus-4.8",
+            "claude-opus-4.8-fast",
         }
 
     def test_codex_deprecated_section_excludes_recommended_replacements(self) -> None:

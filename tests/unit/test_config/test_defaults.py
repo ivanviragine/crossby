@@ -143,6 +143,9 @@ class TestDocumentedFamilyRoles:
             ("gpt-5.6-sol-none", ModelTier.POWERFUL),
             ("claude-fable-5.1-low", ModelTier.POWERFUL),
             ("gemini-4-argon-low", ModelTier.POWERFUL),
+            ("gemini-4-hydrogen-xhigh", ModelTier.FAST),
+            ("gemini-4-neon-xhigh", ModelTier.BALANCED),
+            ("gemini-pro-orchestrator-neon", ModelTier.POWERFUL),
             ("muse-wonder-1.0-low", ModelTier.POWERFUL),
         ],
     )
@@ -168,6 +171,8 @@ class TestDocumentedFamilyRoles:
             ("gpt-5.6-luna-max-fast", ModelTier.FAST),
             ("gpt-5.6-terra-max", ModelTier.BALANCED),
             ("gpt-5.6-terra-max-fast", ModelTier.BALANCED),
+            ("gemini-4-hydrogen-max", ModelTier.FAST),
+            ("gemini-4-neon-max", ModelTier.BALANCED),
             ("claude-sonnet-4.6-max", ModelTier.BALANCED),
             # With no family keyword to outrank it, max still reads as powerful.
             ("some-model-max", ModelTier.POWERFUL),

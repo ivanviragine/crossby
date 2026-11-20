@@ -64,11 +64,14 @@ if TYPE_CHECKING:
 # an already-suffixed model, while a bare Gemini base model *requires* an effort.
 # Only these base families require/encode effort (verified via `agy models` + live
 # probing); every other catalog model launches bare and ignores effort. Per-model
-# tiers differ: gemini-4-argon and the flash families accept low/medium/high,
-# gemini-3.1-pro only low/high. From the Claude 5.5 generation on, agy lists
-# Claude models effort-expanded too (claude-opus-5-5-low/-medium/-high); the
-# older claude-*-4-6 IDs stay bare.
+# tiers differ: gemini-4-neon and gemini-4-hydrogen accept low/medium/high/xhigh,
+# gemini-4-argon and the flash families accept low/medium/high, and gemini-3.1-pro
+# accepts only low/high. From the Claude 5.5 generation on, agy lists Claude models
+# effort-expanded too (claude-opus-5-5-low/-medium/-high); the older claude-*-4-6
+# and orchestrator IDs stay bare.
 _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
+    "gemini-4-neon": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH, EffortLevel.XHIGH),
+    "gemini-4-hydrogen": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH, EffortLevel.XHIGH),
     "gemini-4-argon": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.8-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
     "gemini-3.7-flash": (EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
@@ -84,10 +87,10 @@ _ANTIGRAVITY_CLI_EFFORT_TIERS: dict[str, tuple[EffortLevel, ...]] = {
 # table so a caller-supplied effort remains irrelevant for these fixed IDs.
 _ANTIGRAVITY_CLI_FIXED_SUFFIX_MODELS = frozenset({"gpt-oss-120b-medium"})
 
-# Effort suffixes that may appear on a stored model ID. agy only *emits* the
-# low/medium/high tiers, but a hand-written config could carry an ``-xhigh``/
-# ``-max`` suffix agy rejects; recognizing them lets resolve_effort_model
-# normalize such an ID down to a valid tier instead of passing it through.
+# Effort suffixes that may appear on a stored model ID. ``agy models`` lists
+# low/medium/high (and xhigh for Gemini 4 Neon/Hydrogen), while a hand-written
+# config could also carry an unsupported ``-xhigh``/``-max`` suffix; recognizing
+# them lets resolve_effort_model snap to a valid tier instead of passing through.
 _EFFORT_SUFFIXES: dict[str, EffortLevel] = {
     "-low": EffortLevel.LOW,
     "-medium": EffortLevel.MEDIUM,
@@ -248,8 +251,13 @@ class AntigravityCLIAdapter(AbstractAITool):
             headless_flag="--print",
             supports_headless=True,
             supports_effort=True,
-            # agy --effort accepts only low|medium|high; xhigh/max are rejected.
-            supported_efforts=(EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH),
+            # agy models advertise up to xhigh (Gemini 4 Neon/Hydrogen); no model offers max yet.
+            supported_efforts=(
+                EffortLevel.LOW,
+                EffortLevel.MEDIUM,
+                EffortLevel.HIGH,
+                EffortLevel.XHIGH,
+            ),
             supports_yolo=True,
             supports_resume=True,
             supports_trusted_dirs=True,
@@ -1186,9 +1194,9 @@ class AntigravityCLIAdapter(AbstractAITool):
         - **No effort anywhere**: a deterministic default is baked in so the
           command is valid (``gemini-3.8-flash`` → ``…-medium``, ``gemini-3.1-pro``
           → ``…-high``) rather than the rejected bare base model.
-        - **xhigh/max**: normalized to ``high`` (agy rejects them), with a warning.
-        - **Per-model gap / invalid stored suffix** (``gemini-3.1-pro-medium``):
-          snapped to the nearest valid tier (ties → higher), with a warning.
+        - **Per-model gap / unsupported tier** (``gemini-3.1-pro-medium``,
+          ``gemini-4-argon`` + ``xhigh``, ``gemini-4-neon`` + ``max``): snapped
+          to the nearest valid tier for that model (ties → higher), with a warning.
         """
         if not model:
             # No --model to bake effort into (e.g. effort supplied with no model).
@@ -1212,22 +1220,13 @@ class AntigravityCLIAdapter(AbstractAITool):
                     stacklevel=2,
                 )
                 return base
-            # Bare model (claude-*-4-6, gpt-oss-120b): agy launches it with no effort.
+            # Bare model (claude-*-4-6, gpt-oss-120b, orchestrators): agy launches it bare.
             return model
 
         # A suffix on the model ID wins over a separately supplied effort.
         eff = suffix_effort if suffix_effort is not None else effort
         if eff is None:
             eff = _default_effort(tiers)
-
-        if eff in (EffortLevel.XHIGH, EffortLevel.MAX):
-            warnings.warn(
-                f"Antigravity CLI accepts only low/medium/high effort; "
-                f"normalizing {eff.value!r} to 'high'.",
-                UserWarning,
-                stacklevel=2,
-            )
-            eff = EffortLevel.HIGH
 
         if eff not in tiers:
             snapped = _nearest_tier(eff, tiers)

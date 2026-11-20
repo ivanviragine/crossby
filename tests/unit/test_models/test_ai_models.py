@@ -115,6 +115,7 @@ class TestCapabilities:
             EffortLevel.LOW,
             EffortLevel.MEDIUM,
             EffortLevel.HIGH,
+            EffortLevel.XHIGH,
         )
 
 
@@ -193,6 +194,9 @@ class TestModelCompatibility:
             "gpt-6-luna",
             "gpt-6-sol",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
         ],
     )
     def test_codex_accepts_gpt_5_6(self, model: str) -> None:
@@ -413,9 +417,21 @@ class TestClassifyTierUniversal:
             ("openai/gpt-6.1-sol-ultrafast", ModelTier.POWERFUL),
             ("gpt-6.1-terra", ModelTier.BALANCED),
             ("openai/gpt-6.1-terra-fast", ModelTier.BALANCED),
+            ("gpt-6.2-astra", ModelTier.POWERFUL),
+            ("openai/gpt-6.2-astra-ultrafast", ModelTier.POWERFUL),
+            ("gpt-6.2-sol", ModelTier.POWERFUL),
+            ("openai/gpt-6.2-sol-ultrafast", ModelTier.POWERFUL),
             ("gemini-4-carbon", ModelTier.POWERFUL),
             ("gemini-4-carbon-high", ModelTier.POWERFUL),
             ("google/gemini-4-carbon", ModelTier.POWERFUL),
+            ("gemini-4-hydrogen", ModelTier.FAST),
+            ("gemini-4-hydrogen-xhigh", ModelTier.FAST),
+            ("google/gemini-4-hydrogen", ModelTier.FAST),
+            ("gemini-4-neon", ModelTier.BALANCED),
+            ("gemini-4-neon-xhigh", ModelTier.BALANCED),
+            ("google/gemini-4-neon", ModelTier.BALANCED),
+            ("gemini-pro-orchestrator-neon", ModelTier.POWERFUL),
+            ("gemini-pro-orchestrator-g1-pro", ModelTier.POWERFUL),
         ],
     )
     def test_codex_gpt_6_uses_documented_family_roles(
