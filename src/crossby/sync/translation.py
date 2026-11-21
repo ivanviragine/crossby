@@ -140,6 +140,8 @@ MODEL_FAMILY_MAPPINGS: tuple[ModelFamilyMapping, ...] = (
 # (multiple Claude families collapse to one Codex family), so we pick a
 # sensible default per Codex family and let users override.
 CODEX_TO_CLAUDE_DEFAULTS: dict[str, str] = {
+    "gpt-6.2-astra": "claude-fable-5.2",
+    "gpt-6.2-sol": "claude-opus-5.5",
     "gpt-6-astra": "claude-fable-5.1",
     "gpt-6-sol": "claude-opus-5.5",
     "gpt-6.1-sol": "claude-opus-5.5",

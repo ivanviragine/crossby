@@ -60,6 +60,14 @@ class TestModelRegistry:
             "gemini-4-argon-low",
             "gemini-4-argon-medium",
             "gemini-4-argon-minimal",
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
+            "gemini-4-neon-low",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-high",
+            "gemini-4-neon-xhigh",
             "kimi-k3-high",
             "kimi-k3-low",
             "kimi-k3-max",
@@ -154,13 +162,16 @@ class TestModelRegistry:
             "google/gemini-3.7-flash",
             "google/gemini-3.8-flash",
             "google/gemini-4-argon",
+            "google/gemini-4-hydrogen",
+            "google/gemini-4-neon",
+            "google/gemini-3.1-flash-live-preview",
             "opencode/beam-free",
             "opencode/deepseek-v4.1-flash-free",
-            "opencode/glm-5.3-flash-free",
+            "opencode/hy4-flash-free",
             "opencode/mimo-v2.6-flash-free",
-            "opencode/minimax-m3.1-flash-free",
             "opencode/nemotron-3.5-lightning-free",
             "opencode/nemotron-3.5-super-vl-free",
+            "opencode/tidepool-alpha-free",
             "github-copilot/claude-opus-5.5",
             "github-copilot/gpt-6-astra",
             "openai/gpt-6-astra",
@@ -173,7 +184,12 @@ class TestModelRegistry:
             "openai/gpt-6.1-sol",
             "openai/gpt-6.1-sol-fast",
             "openai/gpt-6.1-sol-ultrafast",
+            "openai/gpt-6.2-astra",
+            "openai/gpt-6.2-astra-ultrafast",
+            "openai/gpt-6.2-sol",
+            "openai/gpt-6.2-sol-ultrafast",
             "openai/gpt-6-astra-ultrafast",
+            "openai/gpt-5.4-flex",
             "openai/gpt-5.4-mini-flex",
             "github-copilot/claude-haiku-5.5",
             "github-copilot/claude-sonnet-5.5",
@@ -194,11 +210,19 @@ class TestModelRegistry:
         codex_5_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-5.6")}
         assert codex_5_6 == {"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"}
 
-    def test_codex_gpt_6_catalog_includes_6_1_sol_and_terra(self) -> None:
-        """GPT-6 ships as Astra, Sol, and Luna — there is no gpt-6-terra —
-        and GPT-6.1 adds Sol and Terra."""
+    def test_codex_gpt_6_catalog_includes_6_1_and_6_2(self) -> None:
+        """GPT-6 ships as Astra, Sol, and Luna; GPT-6.1 adds Sol and Terra;
+        GPT-6.2 adds Astra and Sol."""
         codex_6 = {m for m in get_models_for_tool("codex") if m.startswith("gpt-6")}
-        assert codex_6 == {"gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra"}
+        assert codex_6 == {
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+        }
 
     @pytest.mark.parametrize(
         "model",
@@ -206,20 +230,40 @@ class TestModelRegistry:
             "claude-haiku-5.5",
             "claude-sonnet-5.5",
             "claude-opus-5.5",
+            "claude-fable-5.2",
             "gemini-4-argon",
+            "gemini-4-carbon",
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
             "gpt-6-astra",
             "gpt-6-luna",
             "gpt-6-sol",
             "gpt-6.1-sol",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "mai-code-2",
+            "mai-code-2-flash",
         ],
     )
     def test_copilot_registry_includes_new_generation(self, model: str) -> None:
         assert model in get_models_for_tool("copilot")
 
-    @pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", "gemini-4-argon"])
-    def test_antigravity_registry_includes_claude_5_5_and_argon_bases(self, model: str) -> None:
-        """`agy models` lists these only effort-expanded; the catalog keeps the
-        base, as it does for Gemini, and the adapter bakes the effort back in."""
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gemini-4-argon",
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator-g1-pro",
+        ],
+    )
+    def test_antigravity_registry_includes_claude_5_5_and_gemini_4_bases(self, model: str) -> None:
+        """`agy models` lists effort-expanded families with suffixes; the
+        catalog keeps the base (and orchestrator IDs verbatim), and the adapter
+        bakes the effort back in."""
         assert model in get_models_for_tool("antigravity-cli")
 
     @pytest.mark.parametrize(
@@ -233,12 +277,15 @@ class TestModelRegistry:
             # Retired or scheduled for retirement in Copilot's retirement history.
             ("copilot", "claude-sonnet-4.6"),
             ("copilot", "claude-opus-4.7"),
+            ("copilot", "claude-opus-4.8"),
+            ("copilot", "claude-opus-5"),
             ("copilot", "gemini-3.7-flash"),
             ("copilot", "gpt-4.1"),
             ("copilot", "gpt-5-mini"),
             ("copilot", "gpt-5.4"),
             ("copilot", "gpt-5.4-mini"),
             ("copilot", "gpt-5.5"),
+            ("copilot", "gpt-5.6-terra"),
             ("copilot", "mai-code-1-flash"),
             # Retired on the Claude API.
             ("opencode", "anthropic/claude-3-opus-20240229"),
@@ -255,11 +302,18 @@ class TestModelRegistry:
             # Shut down on the Gemini API.
             ("opencode", "google/gemini-2.0-flash"),
             ("opencode", "google/veo-3.1-generate-preview"),
-            # Marked deprecated by OpenCode Zen.
+            # Marked deprecated by OpenCode Zen or retired on Copilot.
             ("opencode", "opencode/hy3-free"),
             ("opencode", "opencode/exo-free"),
+            ("opencode", "opencode/glm-5.3-flash-free"),
+            ("opencode", "opencode/inkling-2-small-free"),
+            ("opencode", "opencode/minimax-m3.1-flash-free"),
             ("opencode", "opencode/muse-spark-1.3-contributor-free"),
+            ("opencode", "github-copilot/claude-opus-4.8"),
+            ("opencode", "github-copilot/claude-opus-4.8-fast"),
+            ("opencode", "github-copilot/claude-opus-5"),
             ("opencode", "github-copilot/gpt-5.4"),
+            ("opencode", "github-copilot/gpt-5.6-terra"),
             # No longer offered by the tool's own CLI (logged-in probe run), and
             # absent from the provider's docs as well.
             ("codex", "gpt-5.1"),
@@ -301,6 +355,10 @@ class TestRegistryGetModels:
         assert len(models) == len(get_models_for_tool("antigravity-cli"))
         # The catalog mixes bare Gemini IDs (effort is baked in at launch, not
         # stored) with fixed provider IDs whose suffix is part of the name.
+        assert "gemini-4-neon" in model_ids
+        assert "gemini-4-neon-xhigh" not in model_ids
+        assert "gemini-4-hydrogen" in model_ids
+        assert "gemini-4-hydrogen-xhigh" not in model_ids
         assert "gemini-4-argon" in model_ids
         assert "gemini-4-argon-high" not in model_ids
         assert "gemini-3.8-flash" in model_ids

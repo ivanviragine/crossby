@@ -418,11 +418,18 @@ class TestNormalizedContract:
             adapter.run_plan_session(_request(tmp_path, effort=EffortLevel.HIGH))
         run.assert_not_called()
 
-    @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
+    @pytest.mark.parametrize(
+        ("tool_id", "effort"),
+        [
+            (AIToolID.ANTIGRAVITY_CLI, EffortLevel.MAX),
+            (AIToolID.OPENCODE, EffortLevel.XHIGH),
+            (AIToolID.OPENCODE, EffortLevel.MAX),
+        ],
+    )
     def test_unsupported_effort_tier_is_rejected_before_collection(
-        self, effort: EffortLevel, tmp_path: Path
+        self, tool_id: AIToolID, effort: EffortLevel, tmp_path: Path
     ) -> None:
-        adapter = AbstractAITool.get(AIToolID.ANTIGRAVITY_CLI)
+        adapter = AbstractAITool.get(tool_id)
         with (
             patch.object(adapter, "_run_plan_session") as run,
             pytest.raises(PlanSessionUnsupportedError, match=rf"effort='{effort.value}'"),
@@ -436,6 +443,7 @@ class TestNormalizedContract:
             ("claude-sonnet-4-6", EffortLevel.HIGH),
             ("gemini-3.1-pro", EffortLevel.MEDIUM),
             ("gemini-3.8-flash-low", EffortLevel.HIGH),
+            ("gemini-4-argon", EffortLevel.XHIGH),
         ],
     )
     def test_antigravity_rejects_effort_its_model_cannot_encode(

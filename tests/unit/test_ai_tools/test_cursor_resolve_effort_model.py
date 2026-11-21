@@ -107,6 +107,9 @@ class TestCatalogEffortVariants:
             ("gpt-5.2", EffortLevel.LOW, "gpt-5.2-low"),
             # "mini" is part of the family, not an effort.
             ("gpt-5.4-mini-medium", EffortLevel.HIGH, "gpt-5.4-mini-high"),
+            # Gemini 4 Neon and Hydrogen ship low/medium/high/xhigh.
+            ("gemini-4-neon-medium", EffortLevel.XHIGH, "gemini-4-neon-xhigh"),
+            ("gemini-4-hydrogen-high", EffortLevel.LOW, "gemini-4-hydrogen-low"),
         ],
     )
     def test_effort_selects_catalog_sibling(
@@ -211,6 +214,10 @@ class TestCatalogEffortVariants:
             "kimi-k3-low",
             "kimi-k3-high",
             "gemini-3.1-pro",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-xhigh",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-low",
             "composer-2.5",
             "composer-2.5-fast",
         }

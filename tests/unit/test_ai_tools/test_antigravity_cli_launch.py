@@ -32,13 +32,31 @@ class TestAntigravityCLIEffort:
     def test_supports_effort_capability(self) -> None:
         assert AntigravityCLIAdapter().capabilities().supports_effort is True
 
-    def test_supported_efforts_is_low_medium_high(self) -> None:
+    def test_supported_efforts_is_low_medium_high_xhigh(self) -> None:
         caps = AntigravityCLIAdapter().capabilities()
         assert caps.supported_efforts == (
             EffortLevel.LOW,
             EffortLevel.MEDIUM,
             EffortLevel.HIGH,
+            EffortLevel.XHIGH,
         )
+
+    @pytest.mark.parametrize("base", ["gemini-4-neon", "gemini-4-hydrogen"])
+    @pytest.mark.parametrize(
+        "effort", [EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH, EffortLevel.XHIGH]
+    )
+    def test_gemini_4_neon_and_hydrogen_bake_all_four_efforts(
+        self, base: str, effort: EffortLevel
+    ) -> None:
+        cmd = AntigravityCLIAdapter().build_launch_command(model=base, effort=effort)
+        assert _model_of(cmd) == f"{base}-{effort.value}"
+        assert "--effort" not in cmd
+
+    @pytest.mark.parametrize("base", ["gemini-4-neon", "gemini-4-hydrogen"])
+    def test_gemini_4_neon_and_hydrogen_max_snaps_to_xhigh(self, base: str) -> None:
+        with pytest.warns(UserWarning, match="no 'max' effort tier"):
+            resolved = AntigravityCLIAdapter().resolve_effort_model(base, EffortLevel.MAX)
+        assert resolved == f"{base}-xhigh"
 
     @pytest.mark.parametrize("base", ["gemini-4-argon", "gemini-3.8-flash"])
     @pytest.mark.parametrize("effort", [EffortLevel.LOW, EffortLevel.MEDIUM, EffortLevel.HIGH])
@@ -49,7 +67,9 @@ class TestAntigravityCLIEffort:
         assert _model_of(cmd) == f"{base}-{effort.value}"
         assert "--effort" not in cmd
 
-    @pytest.mark.parametrize("base", ["gemini-4-argon", "gemini-3.8-flash"])
+    @pytest.mark.parametrize(
+        "base", ["gemini-4-neon", "gemini-4-hydrogen", "gemini-4-argon", "gemini-3.8-flash"]
+    )
     def test_gemini_current_no_effort_defaults_to_medium(self, base: str) -> None:
         cmd = AntigravityCLIAdapter().build_launch_command(model=base, effort=None)
         assert _model_of(cmd) == f"{base}-medium"
@@ -59,7 +79,7 @@ class TestAntigravityCLIEffort:
     def test_gemini_current_xhigh_and_max_normalize_to_high(
         self, base: str, effort: EffortLevel
     ) -> None:
-        with pytest.warns(UserWarning, match="only low/medium/high"):
+        with pytest.warns(UserWarning, match=f"no '{effort.value}' effort tier"):
             resolved = AntigravityCLIAdapter().resolve_effort_model(base, effort)
         assert resolved == f"{base}-high"
 
@@ -95,7 +115,7 @@ class TestAntigravityCLIEffort:
 
     @pytest.mark.parametrize("effort", [EffortLevel.XHIGH, EffortLevel.MAX])
     def test_xhigh_and_max_normalize_to_high_with_warning(self, effort: EffortLevel) -> None:
-        with pytest.warns(UserWarning, match="only low/medium/high"):
+        with pytest.warns(UserWarning, match=f"no '{effort.value}' effort tier"):
             resolved = AntigravityCLIAdapter().resolve_effort_model("gemini-3.6-flash", effort)
         assert resolved == "gemini-3.6-flash-high"
 
@@ -121,9 +141,9 @@ class TestAntigravityCLIEffort:
         ],
     )
     def test_stored_xhigh_max_suffix_normalizes_to_high(self, model: str, expected: str) -> None:
-        # agy never emits a -xhigh/-max ID; a hand-written one must normalize
+        # Unsupported -xhigh/-max suffixes on models that stop at high must snap
         # down rather than pass through as an invalid command.
-        with pytest.warns(UserWarning, match="only low/medium/high"):
+        with pytest.warns(UserWarning, match="effort tier"):
             resolved = AntigravityCLIAdapter().resolve_effort_model(model, None)
         assert resolved == expected
 
@@ -157,7 +177,7 @@ class TestAntigravityCLIEffort:
         assert resolved == "claude-sonnet-5-5-high"
 
     def test_claude_5_5_xhigh_normalizes_to_high(self) -> None:
-        with pytest.warns(UserWarning, match="only low/medium/high"):
+        with pytest.warns(UserWarning, match="no 'xhigh' effort tier"):
             resolved = AntigravityCLIAdapter().resolve_effort_model(
                 "claude-opus-5-5", EffortLevel.XHIGH
             )
@@ -169,7 +189,13 @@ class TestAntigravityCLIEffort:
 
     @pytest.mark.parametrize(
         "model",
-        ["gpt-oss-120b", "claude-sonnet-4-6", "claude-opus-4-6-thinking"],
+        [
+            "gpt-oss-120b",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator-g1-pro",
+        ],
     )
     def test_bare_models_ignore_effort_and_pass_through(self, model: str) -> None:
         cmd = AntigravityCLIAdapter().build_launch_command(model=model, effort=EffortLevel.HIGH)

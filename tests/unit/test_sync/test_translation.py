@@ -117,6 +117,8 @@ class TestModelTranslation:
     @pytest.mark.parametrize(
         ("codex", "claude"),
         [
+            ("gpt-6.2-astra", "claude-fable-5.2"),
+            ("gpt-6.2-sol", "claude-opus-5.5"),
             ("gpt-6-astra", "claude-fable-5.1"),
             ("gpt-6-sol", "claude-opus-5.5"),
             ("gpt-6.1-sol", "claude-opus-5.5"),
@@ -191,8 +193,10 @@ class TestEffortCodexToClaude:
             # GPT-6: Astra/Sol reverse to Fable/Opus 1:1; Luna reverses the
             # Sonnet bias.
             ("gpt-6-astra", EffortLevel.HIGH, EffortLevel.HIGH),
+            ("gpt-6.2-astra", EffortLevel.HIGH, EffortLevel.HIGH),
             ("gpt-6-sol", EffortLevel.HIGH, EffortLevel.HIGH),
             ("gpt-6.1-sol", EffortLevel.HIGH, EffortLevel.HIGH),
+            ("gpt-6.2-sol", EffortLevel.HIGH, EffortLevel.HIGH),
             ("gpt-6-luna", EffortLevel.HIGH, EffortLevel.MEDIUM),
         ],
     )
