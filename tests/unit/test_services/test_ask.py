@@ -487,6 +487,71 @@ def test_json_null_is_present_output(tmp_path: Path) -> None:
     assert result.text is None
 
 
+_FINDINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"findings": {"type": "array", "items": {"type": "string"}}},
+    "required": ["findings"],
+}
+
+
+@pytest.mark.parametrize(
+    ("tool", "model", "flag"),
+    [
+        ("claude", "opus", "--json-schema"),
+        ("antigravity-cli", "gemini-4-neon", "--json-schema"),
+        ("codex", None, None),
+    ],
+)
+def test_a_schema_reaches_every_tool_that_takes_one(
+    tmp_path: Path, tool: str, model: str | None, flag: str | None
+) -> None:
+    # Claude Code and Antigravity CLI carry structured output only in their JSON
+    # envelope, and refused a schema asked with text output; Codex takes it with text.
+    request = AskRequest(
+        backend=CliBackend(tool=tool, model=model),
+        prompt="q",
+        workspace=ProjectWorkspace(path=tmp_path),
+        response_schema=_FINDINGS_SCHEMA,
+    )
+    session = ask_service.session_request(request, timeout_seconds=30.0, environment={})
+    adapter = AbstractAITool.get(AIToolID(tool))
+    normalized = adapter._validate_headless_request(  # type: ignore[attr-defined]
+        session, interaction_handler=None, require_existing_working_dir=True
+    )
+    adapter._validate_headless_requirements(normalized)  # type: ignore[attr-defined]
+    command = adapter._headless_argv_for_validation(normalized)  # type: ignore[attr-defined]
+    if flag is not None:
+        assert json.loads(command[command.index(flag) + 1]) == _FINDINGS_SCHEMA
+    # Without a schema the answer stays text.
+    plain = ask_service.session_request(
+        request.model_copy(update={"response_schema": None}), timeout_seconds=30.0, environment={}
+    )
+    assert plain.native_output.value == "text"
+
+
+def test_a_schema_answer_comes_back_as_json(tmp_path: Path) -> None:
+    value = {"findings": ["a"]}
+    runner = ScriptedRunner(
+        _session(
+            HeadlessTerminalStatus.SUCCEEDED,
+            tool=AIToolID.ANTIGRAVITY_CLI,
+            version="1.5.14",
+            final_json=value,
+            final_json_present=True,
+        )
+    )
+    request = AskRequest(
+        backend=CliBackend(tool="antigravity-cli", model="gemini-4-neon"),
+        prompt="q",
+        workspace=ProjectWorkspace(path=tmp_path),
+        response_schema=_FINDINGS_SCHEMA,
+    )
+    result = ask_service.run_ask(request, runner=runner)
+    (session,) = runner.requests
+    assert session.native_output.value == "json"
+    assert result.output == JsonOutput(value=value)
+
+
 def test_a_timed_out_ask_keeps_its_usage_and_native_ids(tmp_path: Path) -> None:
     runner = ScriptedRunner(
         _session(

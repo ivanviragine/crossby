@@ -37,6 +37,7 @@ from crossby.models.ai import (
     HeadlessEvent,
     HeadlessFailureReason,
     HeadlessInteractionMode,
+    HeadlessNativeOutput,
     HeadlessNativeTransport,
     HeadlessSessionPreflight,
     HeadlessSessionRequest,
@@ -561,6 +562,7 @@ def session_request(
             model=request.backend.model,
             effort=request.backend.effort,
             interaction_mode=HeadlessInteractionMode.UNATTENDED,
+            native_output=_native_output(request),
             response_schema=request.response_schema,
             read_only=True,
             search_commands=request.allow_search_commands,
@@ -574,6 +576,26 @@ def session_request(
         )
     except ValueError as exc:
         raise AskRequestError(str(exc)) from None
+
+
+def _native_output(request: AskRequest) -> HeadlessNativeOutput:
+    """Text; with a schema, the tool's JSON output where it has one.
+
+    Claude Code and Antigravity CLI carry schema-constrained output only in their JSON
+    result envelope, and refuse a schema with text output. Codex has no JSON output and
+    takes a schema with text.
+    """
+    if request.response_schema is None:
+        return HeadlessNativeOutput.TEXT
+    capability = _adapter(request.backend.tool).capabilities().headless
+    try:
+        outputs = capability.profile_for(HeadlessInteractionMode.UNATTENDED).native_outputs
+    except ValueError:
+        # No managed session at all: refused further on, with its own reason.
+        return HeadlessNativeOutput.TEXT
+    if HeadlessNativeOutput.JSON in outputs:
+        return HeadlessNativeOutput.JSON
+    return HeadlessNativeOutput.TEXT
 
 
 def _verified_versions(tool: AIToolID) -> tuple[str | None, str | None, HeadlessNativeTransport]:
