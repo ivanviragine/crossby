@@ -23,6 +23,7 @@ from crossby.services.converse import DEPTH_ENV, StopReason
 from crossby.services.journal import EventType, Journal, read_journal
 from crossby.services.panel import (
     FINAL_NUDGE,
+    LINE_REPAIR,
     Dispatch,
     Lead,
     Member,
@@ -275,11 +276,91 @@ def test_a_failed_member_is_a_note_and_all_failing_stops_the_panel(tmp_path: Pat
     ]
 
 
-def test_a_protocol_error_sends_nothing(tmp_path: Path) -> None:
-    runner = PanelRunner({"lead": ["Q?\nNEXT: ASK @ceo"], "cto": [], "founder": [], "buyer": []})
+def test_a_protocol_error_twice_sends_nothing(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {"lead": ["Q?\nNEXT: ASK @ceo", "NEXT: ASK @ceo"], "cto": [], "founder": [], "buyer": []}
+    )
     result = run_panel(_spec(tmp_path), runner=runner)
     assert result.stop_reason is StopReason.FAILED
-    assert "no member is named @ceo; nothing was sent" in (result.error or "")
+    assert result.error == (
+        "lead turn 1: no member is named @ceo; asked again in turn 2: no member is named "
+        "@ceo; nothing was sent"
+    )
+    assert all(not runner.requests[name] for name in IDS)
+
+
+def test_a_final_answer_without_its_last_line_is_mended_and_kept_as_written(
+    tmp_path: Path,
+) -> None:
+    from crossby.services.panel import result_from_journal
+
+    report = "# Final report\n\nShip it.\n\n- Questions for the founder"
+    runner = PanelRunner(
+        {
+            "lead": [
+                "Q?\nNEXT: ASK @cto",
+                report,
+                # Only the line is read, though the report is written out again.
+                f"{report}\n\nNEXT: DONE",
+            ],
+            "cto": ["Yes."],
+            "founder": [],
+            "buyer": [],
+        }
+    )
+    spec = _spec(tmp_path)
+    journal = Journal("p")
+    result = run_panel(spec, runner=runner, journal=journal)
+
+    assert result.answered
+    assert result.final_answer == report
+    mend = runner.requests["lead"][2]
+    assert mend.resume_id == "lead-session"
+    assert mend.prompt == LINE_REPAIR.format(
+        problem="the last line is not `NEXT: ASK @id …` or `NEXT: DONE`"
+    )
+    assert result_from_journal(spec, journal.events).final_answer == report
+    events = journal.events
+    lead_turns = [
+        e.data["turn"]
+        for e in events
+        if e.type is EventType.TURN_FINISHED and e.data["participant"] == "lead"
+    ]
+    committed = [e.data for e in events if e.type is EventType.MESSAGE_COMMITTED]
+    assert lead_turns == [1, 3, 4]
+    # The reply is committed under the turn that wrote it.
+    assert (committed[-1]["turn"], committed[-1]["done"]) == (3, True)
+
+
+def test_a_mended_line_sends_the_reply_as_written(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {
+            "lead": [
+                "Price?\nNEXT: ASK @ceo",
+                "Sure, here it is:\nNEXT: ASK @founder",
+                "Verdict.\nNEXT: DONE",
+            ],
+            "cto": [],
+            "founder": ["Fine."],
+            "buyer": [],
+        }
+    )
+    spec = _spec(tmp_path)
+    result = run_panel(spec, runner=runner)
+
+    assert result.answered
+    # The wrong line is dropped and the reply goes to the member the line names.
+    assert [r.prompt for r in runner.requests["founder"]] == [_first(spec, "founder", "Price?")]
+    assert [turn.text for turn in result.turns] == ["Price?", "Fine.", "Verdict."]
+
+
+def test_a_mend_with_no_line_stops_the_panel(tmp_path: Path) -> None:
+    runner = PanelRunner(
+        {"lead": ["Q?", "I meant to ask the CTO."], "cto": [], "founder": [], "buyer": []}
+    )
+    result = run_panel(_spec(tmp_path), runner=runner)
+    assert result.stop_reason is StopReason.FAILED
+    assert "asked again in turn 2: the last line is not" in (result.error or "")
     assert all(not runner.requests[name] for name in IDS)
 
 

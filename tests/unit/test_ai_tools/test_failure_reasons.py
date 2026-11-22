@@ -68,6 +68,10 @@ CODEX_401 = (
 CODEX_UNKNOWN_MODEL = (
     "The 'no-such-model-xyz' model is not supported when using Codex with a ChatGPT account."
 )
+AGY_QUOTA = (
+    "Individual quota reached. Please upgrade your subscription to increase your limits. "
+    "Resets in 47m49s."
+)
 
 
 def _codex_failed(message: str) -> str:
@@ -189,6 +193,31 @@ CASES: list[tuple[str, AIToolID, dict[str, Any], HeadlessFailureReason]] = [
         },
         R.MODEL_UNAVAILABLE,
     ),
+    (
+        # Captured from agy 1.5.14 once the account's Gemini 4 Neon quota ran out.
+        "agy-quota-reached",
+        AIToolID.ANTIGRAVITY_CLI,
+        {
+            "stdout": _agy_result(
+                {
+                    "conversation_id": "1367565f-0174-4269-86e7-6342ad60f59d",
+                    "status": "ERROR",
+                    "response": "",
+                    "error": AGY_QUOTA,
+                    "duration_seconds": 0,
+                    "num_turns": 1,
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    "finished_reason": "error",
+                }
+            ),
+            "stderr": f"error: {AGY_QUOTA}\n"
+            'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): '
+            f'{AGY_QUOTA}","status":"RESOURCE_EXHAUSTED","error_code":429,'
+            '"code_kind":"http","retryable":true}\n',
+            "exit_code": 3,
+        },
+        R.RATE_LIMITED,
+    ),
 ]
 
 
@@ -226,7 +255,12 @@ def test_a_recognized_failure_names_its_reason(
     assert result.status is HeadlessTerminalStatus.FAILED
     assert result.failure_reason is reason
     _assert_evidence_is_private(
-        result, "Not logged in", "Invalid API key", "unexpected status", "Cannot use this model"
+        result,
+        "Not logged in",
+        "Invalid API key",
+        "unexpected status",
+        "Cannot use this model",
+        "Individual quota",
     )
 
 

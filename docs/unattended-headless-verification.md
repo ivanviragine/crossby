@@ -552,9 +552,13 @@ invalid key in the probe's own environment:
 | Unknown model | "issue with the selected model" with `api_error_status` 404 | "model is not supported when using Codex with a ChatGPT account" | "Cannot use this model: …" | `session.error`: 'Model "…" is not available' | "UnknownError": not recognized | "invalid model selection" |
 | Other | | outside a git repository without read-only: "Not inside a trusted directory", before any event | | | an auto-rejected permission ("external_directory … auto-rejecting"), then exit 0 without a stop event | an empty response after a denied action |
 
-Rate limits were not reproduced. An HTTP 429 (Claude Code's
-`api_error_status`) is `rate_limited`, as is Codex's "unexpected status 429",
-inferred from the same template as its captured 401. Codex's 401 frames stream
+A rate limit was reproduced only on Antigravity CLI: on 2026-11-22 (1.5.14),
+once the account's Gemini 4 Neon quota ran out, every session ended within
+seconds with "Individual quota reached. … Resets in …" in its result, and
+"RESOURCE_EXHAUSTED (code 429)" on stderr. That wording is `rate_limited`.
+Elsewhere an HTTP 429 (Claude Code's `api_error_status`) is `rate_limited`, as
+is Codex's "unexpected status 429", inferred from the same template as its
+captured 401. Codex's 401 frames stream
 while it retries, so a session that times out during those retries still
 reports `not_signed_in`.
 
