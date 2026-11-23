@@ -19,7 +19,8 @@ members' replies it has not seen, under their labels: no extra turns run.
 
 crossby adds only protocol text: the lead's opening notice (the goal, the
 roster and the limit; replaceable through ``protocol_notice``, whose grammar
-never changes), the ``@id`` labels, failure notes and the final-turn nudge.
+never changes), the ``@id`` labels, failure notes, the final-turn nudge, and
+one request for the last line when an agent lead's reply lacks a valid one.
 Everything is journaled (see :mod:`crossby.services.journal`).
 """
 
@@ -102,6 +103,13 @@ MEMBER_NOTICE = (
 FINAL_NUDGE = (
     "You have used all {max_rounds} messages. Write your final answer now and end with the "
     "line `NEXT: DONE`."
+)
+# Sent once to an agent lead whose reply's last line was missing or wrong; the
+# reply is then sent as written, by the line it answers with.
+LINE_REPAIR = (
+    "Your last reply was not sent: {problem}. Answer with only the line that ends it: "
+    "`NEXT: ASK @id` (one or more ids, or `@all`) to send it as written, or `NEXT: DONE` "
+    "if it is your final answer."
 )
 
 
@@ -306,6 +314,18 @@ def parse_dispatch(text: str, member_ids: Sequence[str]) -> tuple[str, Dispatch]
         raise ProtocolError("a member is named twice")
     # Roster order, whatever order the lead named them in.
     return body, Dispatch(done=False, recipients=tuple(m for m in member_ids if m in ids))
+
+
+def _last_line(text: str) -> str:
+    return next((line for line in reversed(text.splitlines()) if line.strip()), "")
+
+
+def _body_without_line(text: str) -> str:
+    """A lead reply without its last line, when that line is a (wrong) ``NEXT:`` line."""
+    lines = text.rstrip().splitlines()
+    if lines and _NEXT_LINE.match(lines[-1]):
+        return "\n".join(lines[:-1]).strip()
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1142,6 +1162,31 @@ def run_panel(
             lead_session[0] = handle
         return (result.final_text or "").strip(), seconds, result
 
+    def mend_line(
+        text: str, problem: ProtocolError, number: int
+    ) -> tuple[str, Dispatch, float, HeadlessSessionResult]:
+        """Ask the lead once for the last line its reply lacked; the reply is kept as written.
+
+        Only the line it answers with is read, so a reply written out again is
+        not sent twice; a wrong line again stops the panel.
+        """
+        if cancel.is_set():
+            raise _StopError(StopReason.INTERRUPTED, CANCELLED)
+        retry = claim()
+        answer, seconds, result = lead_turn(LINE_REPAIR.format(problem=problem), retry)
+        line = _last_line(answer)
+        try:
+            if not _NEXT_LINE.match(line):
+                raise ProtocolError("the last line is not `NEXT: ASK @id …` or `NEXT: DONE`")
+            _marker_only, dispatch = parse_dispatch(line, member_ids)
+        except ProtocolError as exc:
+            raise _StopError(
+                StopReason.FAILED,
+                f"lead turn {number}: {problem}; asked again in turn {retry}: {exc}; "
+                "nothing was sent",
+            ) from None
+        return _body_without_line(text), dispatch, seconds, result
+
     def member_turn(
         seat: _Seat, body: str, number: int
     ) -> tuple[str, str | None, str | None, float, HeadlessSessionResult | None]:
@@ -1441,9 +1486,16 @@ def run_panel(
                 try:
                     body, dispatch = parse_dispatch(text, member_ids)
                 except ProtocolError as exc:
-                    raise _StopError(
-                        StopReason.FAILED, f"lead turn {number}: {exc}; nothing was sent"
-                    ) from None
+                    written = result
+                    body, dispatch, more, result = mend_line(text, exc, number)
+                    seconds += more
+                    # The reply came from the first session; the line from the second.
+                    result = result.model_copy(
+                        update={
+                            "usage": written.usage,
+                            "denials": (*written.denials, *result.denials),
+                        }
+                    )
             first = False
             if not body:
                 raise _StopError(StopReason.FAILED, f"lead turn {number} sent only the marker")
@@ -1556,6 +1608,7 @@ def render_panel_transcript(result: PanelResult) -> str:
 __all__ = [
     "CANCELLED",
     "FINAL_NUDGE",
+    "LINE_REPAIR",
     "MAX_MEMBERS",
     "MEMBER_NOTICE",
     "MEMBER_NOTICE_VERSION",

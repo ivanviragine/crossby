@@ -75,6 +75,10 @@ _PATTERNS: dict[AIToolID, tuple[tuple[HeadlessFailureReason, re.Pattern[str]], .
         # "invalid model selection (--model …): model … is not recognized as a
         # known model or custom model in settings".
         (_R.MODEL_UNAVAILABLE, re.compile(r"\binvalid model selection\b")),
+        # "Individual quota reached. Please upgrade your subscription to increase
+        # your limits. Resets in 47m49s." in the result, and on stderr after
+        # "RESOURCE_EXHAUSTED (code 429)" (1.5.14, gemini-4-neon-xhigh).
+        (_R.RATE_LIMITED, re.compile(r"\bIndividual quota reached\b")),
     ),
 }
 
